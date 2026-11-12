@@ -122,7 +122,9 @@ impl IoDriverHandle {
     /// sharing the existing dispatcher, registrations and physical poll gate.
     /// Ordinary clones within that runtime still share the same election.
     pub(crate) fn for_runtime(&self) -> Self {
-        participant(Arc::clone(&self._shared_owner))
+        let mut handle = participant(Arc::clone(&self._shared_owner));
+        handle.service = Some(Arc::new(RuntimeIoService::new()));
+        handle
     }
 }
 
@@ -138,6 +140,7 @@ fn participant(owner: Arc<DriverOwner>) -> IoDriverHandle {
         }),
         capabilities: owner.capabilities,
         is_polling: Arc::new(AtomicBool::new(false)),
+        service: None,
         _shared_owner: owner,
     }
 }
@@ -228,6 +231,7 @@ impl Drop for DriverOwner {
                     wakers.push(waker);
                 }
             }
+            driver.service_tokens.clear();
             driver.interests.clear();
             driver.undispatched.clear();
             (vacant, tokens, wakers)

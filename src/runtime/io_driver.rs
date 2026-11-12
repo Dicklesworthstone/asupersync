@@ -132,6 +132,10 @@ pub struct IoDriver {
     reactor: Arc<dyn Reactor>,
     /// Slab mapping tokens to wakers.
     wakers: TokenSlab,
+    /// Runtime service that admitted each runtime-created registration.
+    /// Manual registrations are absent. Weak identities add no ownership and
+    /// let one participant stop without replacing a peer's stored waker.
+    service_tokens: HashMap<Token, Weak<RuntimeIoService>>,
     /// Interest sets for registered tokens.
     interests: HashMap<Token, Interest>,
     /// Interest armed for each token since its last dispatched event. A
@@ -193,6 +197,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
+            service_tokens: HashMap::new(),
             interests: HashMap::with_capacity(interest_map_capacity(DEFAULT_EVENTS_CAPACITY)),
             undispatched: HashMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
@@ -210,6 +215,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
+            service_tokens: HashMap::new(),
             interests: HashMap::with_capacity(interest_map_capacity(events_capacity)),
             undispatched: HashMap::new(),
             events: Events::with_capacity(events_capacity),
@@ -369,6 +375,7 @@ impl IoDriver {
         if waker.is_some() {
             self.stats.deregistrations += 1;
         }
+        self.service_tokens.remove(&token);
         self.interests.remove(&token);
         self.undispatched.remove(&token);
 
@@ -385,6 +392,7 @@ impl IoDriver {
     /// This is a lower-level method that only removes the waker without
     /// deregistering from the reactor.
     pub fn deregister_waker(&mut self, token: Token) {
+        self.service_tokens.remove(&token);
         let slab_key = SlabToken::from_usize(token.0);
         if self.wakers.remove(slab_key).is_some() {
             self.stats.deregistrations += 1;
@@ -632,9 +640,27 @@ pub struct IoDriverHandle {
     reactor: Arc<dyn Reactor>,
     capabilities: IoReactorCapabilitySnapshot,
     is_polling: Arc<AtomicBool>,
+    // Runtime service lifetime is shorter than handle ownership: retained Cx
+    // values must not keep admitting waits after their workers have stopped.
+    // Standalone/manual handles have no runtime service to revoke.
+    service: Option<Arc<RuntimeIoService>>,
     // Last field: keep retirement ownership until the ordinary handle fields
     // have been released. Registrations remain weak and cannot form a cycle.
     _shared_owner: Arc<shared::DriverOwner>,
+}
+
+struct RuntimeIoService {
+    available: AtomicBool,
+    notified: AtomicBool,
+}
+
+impl RuntimeIoService {
+    fn new() -> Self {
+        Self {
+            available: AtomicBool::new(true),
+            notified: AtomicBool::new(false),
+        }
+    }
 }
 
 struct PollingGuard<'a> {
@@ -692,6 +718,63 @@ impl std::fmt::Debug for IoDriverHandle {
 }
 
 impl IoDriverHandle {
+    /// Whether this participant still has runtime readiness service. Manual
+    /// drivers remain usable independently of any runtime's lifetime.
+    #[inline]
+    pub(crate) fn is_service_available(&self) -> bool {
+        self.service
+            .as_ref()
+            .is_none_or(|service| service.available.load(Ordering::Acquire))
+    }
+
+    /// Close readiness admission without locking or running user callbacks.
+    /// The bounded shutdown caller uses this before its reaper can run.
+    pub(crate) fn revoke_runtime_service(&self) {
+        if let Some(service) = &self.service {
+            service.available.store(false, Ordering::Release);
+        }
+    }
+
+    /// Let already parked operations observe service revocation and rebind.
+    /// Run only on the teardown path, never the bounded shutdown caller.
+    ///
+    /// Keep tokens, interests and the shared dispatcher intact. Only the
+    /// stopped service's registrations are notified; peer and manual wakers
+    /// remain in their slots, including callers that only change interests.
+    /// Moving each stopped waker out avoids invoking clone/drop hooks under
+    /// the driver gate. Registration and replacement check service under this
+    /// same gate, so a racing operation is either refused or included here.
+    pub(crate) fn notify_revoked_service(&self) {
+        let Some(service) = &self.service else {
+            return;
+        };
+        if service.available.load(Ordering::Acquire)
+            || service.notified.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let wakers = {
+            let mut driver = lock_for_mutation(&self.inner, self.reactor.as_ref());
+            if service.notified.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let identity = Arc::downgrade(service);
+            let tokens: Vec<_> = driver
+                .service_tokens
+                .iter()
+                .filter_map(|(&token, owner)| owner.ptr_eq(&identity).then_some(token))
+                .collect();
+            let mut wakers = Vec::with_capacity(tokens.len());
+            for token in tokens {
+                if let Some(waker) = driver.wakers.get_mut(SlabToken::from_usize(token.0)) {
+                    wakers.push(std::mem::replace(waker, Waker::noop().clone()));
+                }
+            }
+            wakers
+        };
+        wake_each(wakers);
+    }
+
     /// Whether this handle's poll election currently has an owner.
     ///
     /// This is a readiness hint, not a reservation. Followers sample it only
@@ -734,7 +817,23 @@ impl IoDriverHandle {
             // prevents another turn from taking its events buffer until this
             // mutation finishes. Do not sample is_polling here.
             let _ = self.reactor.wake();
-            driver.register_detached(source, interest, waker)
+            if self.is_service_available() {
+                let registered = driver.register_detached(source, interest, waker);
+                if let (Ok(token), Some(service)) = (&registered, &self.service) {
+                    driver
+                        .service_tokens
+                        .insert(*token, Arc::downgrade(service));
+                }
+                registered
+            } else {
+                Err((
+                    io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "I/O runtime service has stopped",
+                    ),
+                    Some(waker),
+                ))
+            }
         };
         // A refused waker is dropped only now, outside the driver gate.
         let token = registered.map_err(|(error, _waker)| error)?;
@@ -742,6 +841,7 @@ impl IoDriverHandle {
             token,
             Arc::downgrade(&self.inner),
             Arc::downgrade(&self._shared_owner),
+            self.service.clone(),
             interest,
             self.reactor.clone(),
             !matches!(self.capabilities.backend(), IoReactorBackend::Epoll),
@@ -753,7 +853,14 @@ impl IoDriverHandle {
     pub fn update_waker(&self, token: Token, waker: Waker) -> bool {
         // The guard is released at the end of this statement: the displaced
         // waker drops outside the driver lock.
-        let (updated, _displaced) = self.inner.lock().replace_waker(token, waker);
+        let (updated, _displaced) = {
+            let mut driver = self.inner.lock();
+            if self.is_service_available() {
+                driver.replace_waker(token, waker)
+            } else {
+                (false, waker)
+            }
+        };
         updated
     }
 
@@ -903,6 +1010,7 @@ pub struct IoRegistration {
     // strong count alone therefore cannot distinguish live I/O from retirement
     // callbacks after the token slab has already been emptied (GH#85).
     owner: Weak<shared::DriverOwner>,
+    service: Option<Arc<RuntimeIoService>>,
     reactor: Arc<dyn Reactor>,
     /// Tracks whether this registration has already been successfully deregistered.
     ///
@@ -925,6 +1033,7 @@ impl IoRegistration {
         token: Token,
         driver: Weak<Mutex<IoDriver>>,
         owner: Weak<shared::DriverOwner>,
+        service: Option<Arc<RuntimeIoService>>,
         interest: Interest,
         reactor: Arc<dyn Reactor>,
         interest_change_wakes_reactor: bool,
@@ -934,10 +1043,17 @@ impl IoRegistration {
             interest,
             driver,
             owner,
+            service,
             reactor,
             deregistered: false,
             interest_change_wakes_reactor,
         }
+    }
+
+    fn is_service_available(&self) -> bool {
+        self.service
+            .as_ref()
+            .is_none_or(|service| service.available.load(Ordering::Acquire))
     }
 
     fn wake_polling_reactor(&self) {
@@ -986,6 +1102,10 @@ impl IoRegistration {
     /// Retirement callbacks may run while the driver's allocation still
     /// exists; they must observe the registration as inactive so they can
     /// register their pending operation with another runtime.
+    ///
+    /// This is physical dispatcher ownership, separate from runtime service.
+    /// A stopped participant must still deregister its retained tokens; its
+    /// rearm and waker-update methods refuse further service.
     #[inline]
     #[must_use]
     pub fn is_active(&self) -> bool {
@@ -1002,10 +1122,10 @@ impl IoRegistration {
         };
         {
             let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
-            if !self.is_active() {
+            if !self.is_active() || !self.is_service_available() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotConnected,
-                    "I/O driver has been dropped",
+                    "I/O driver has stopped or been dropped",
                 ));
             }
             self.wake_polling_reactor_for_interest_change();
@@ -1022,7 +1142,7 @@ impl IoRegistration {
             // Retirement and replacement serialize on the same gate. Drop
             // both refused and displaced wakers after releasing that gate.
             let mut guard = driver.lock();
-            if !self.is_active() {
+            if !self.is_active() || !self.is_service_available() {
                 drop(guard);
                 return false;
             }
@@ -1075,10 +1195,10 @@ impl IoRegistration {
             ));
         };
         let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
-        if !self.is_active() {
+        if !self.is_active() || !self.is_service_available() {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "I/O driver has been dropped",
+                "I/O driver has stopped or been dropped",
             ));
         }
         self.wake_polling_reactor_for_interest_change();
@@ -3780,6 +3900,227 @@ mod tests {
         drop(live);
         assert_eq!(successor.waker_count(), 0);
         assert_eq!(reactor.registration_count(), 0);
+    }
+
+    #[test]
+    fn runtime_service_revocation_preserves_shared_and_manual_owners() {
+        let reactor = Arc::new(LabReactor::new());
+        let manual = IoDriverHandle::new(reactor.clone());
+        let stopped = manual.for_runtime();
+        let peer = manual.for_runtime();
+        let (stopped_waker, stopped_wakes) = create_test_waker();
+        let (peer_waker, peer_wakes) = create_test_waker();
+        let (manual_waker, manual_wakes) = create_test_waker();
+        let mut stopped_registration = stopped
+            .register(&TestFdSource, Interest::READABLE, stopped_waker.clone())
+            .unwrap();
+        let mut peer_registration = peer
+            .register(&TestFdSource, Interest::READABLE, peer_waker.clone())
+            .unwrap();
+        let mut manual_registration = manual
+            .register(&TestFdSource, Interest::READABLE, manual_waker.clone())
+            .unwrap();
+        let peer_token = peer_registration.token();
+        let manual_token = manual_registration.token();
+
+        stopped.revoke_runtime_service();
+        assert!(!stopped.clone().is_service_available());
+        assert!(peer.is_service_available());
+        assert!(manual.is_service_available());
+        assert_eq!(stopped_wakes.count.load(Ordering::SeqCst), 0);
+        stopped.notify_revoked_service();
+        stopped.notify_revoked_service();
+        assert_eq!(stopped_wakes.count.load(Ordering::SeqCst), 1);
+        assert_eq!(peer_wakes.count.load(Ordering::SeqCst), 0);
+        assert_eq!(manual_wakes.count.load(Ordering::SeqCst), 0);
+        assert_eq!(manual.waker_count(), 3);
+        assert_eq!(reactor.registration_count(), 3);
+
+        assert_eq!(
+            stopped_registration
+                .rearm(Interest::READABLE, &stopped_waker)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
+        assert_eq!(
+            stopped
+                .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
+        // An interest-only update must keep the original stored waker.
+        // Replacing peer slots with no-op wakers during revocation would
+        // silently break this public manual-driver usage.
+        peer_registration.set_interest(Interest::READABLE).unwrap();
+        manual_registration.set_interest(Interest::READABLE).unwrap();
+        assert_eq!(peer_registration.token(), peer_token);
+        assert_eq!(manual_registration.token(), manual_token);
+        reactor.set_ready(peer_token, Event::readable(peer_token));
+        reactor.set_ready(manual_token, Event::readable(manual_token));
+        manual.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+        assert_eq!(peer_wakes.count.load(Ordering::SeqCst), 1);
+        assert_eq!(manual_wakes.count.load(Ordering::SeqCst), 1);
+
+        // Service refusal must not disable physical token cleanup.
+        drop(stopped_registration);
+        assert_eq!(manual.waker_count(), 2);
+        assert_eq!(reactor.registration_count(), 2);
+        drop(peer_registration);
+        drop(manual_registration);
+        assert!(manual.is_empty());
+        assert!(manual.lock().service_tokens.is_empty());
+        assert_eq!(reactor.registration_count(), 0);
+    }
+
+    #[test]
+    fn runtime_service_revocation_notifies_registration_admitted_during_shutdown() {
+        use std::sync::mpsc;
+
+        struct HeldRegistration {
+            inner: LabReactor,
+            entered: mpsc::Sender<()>,
+            release: StdMutex<mpsc::Receiver<()>>,
+        }
+
+        impl Reactor for HeldRegistration {
+            fn register(
+                &self,
+                source: &dyn Source,
+                token: Token,
+                interest: Interest,
+            ) -> io::Result<()> {
+                self.inner.register(source, token, interest)?;
+                self.entered.send(()).expect("registration observer");
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release admitted registration");
+                Ok(())
+            }
+
+            fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+                self.inner.modify(token, interest)
+            }
+
+            fn deregister(&self, token: Token) -> io::Result<()> {
+                self.inner.deregister(token)
+            }
+
+            fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+                self.inner.poll(events, timeout)
+            }
+
+            fn wake(&self) -> io::Result<()> {
+                self.inner.wake()
+            }
+
+            fn registration_count(&self) -> usize {
+                self.inner.registration_count()
+            }
+        }
+
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let reactor = Arc::new(HeldRegistration {
+            inner: LabReactor::new(),
+            entered,
+            release: StdMutex::new(release_rx),
+        });
+        let driver = IoDriverHandle::new(reactor).for_runtime();
+        let (waker, wakes) = create_test_waker();
+        let registering = driver.clone();
+        let register_thread = std::thread::spawn(move || {
+            registering.register(&TestFdSource, Interest::READABLE, waker)
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("register is inside the driver gate before revocation");
+        driver.revoke_runtime_service();
+        let notifying = driver.clone();
+        let notify_thread = std::thread::spawn(move || notifying.notify_revoked_service());
+        release.send(()).expect("finish admitted registration");
+        let mut registration = register_thread.join().unwrap().unwrap();
+        notify_thread.join().unwrap();
+
+        assert_eq!(wakes.count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            registration
+                .rearm(Interest::READABLE, Waker::noop())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
+        drop(registration);
+        assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn runtime_service_revocation_runs_wake_and_refusal_cleanup_outside_driver_gate() {
+        struct ReentrantWake {
+            driver: IoDriverHandle,
+            wakes: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Wake for ReentrantWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                assert_eq!(self.driver.waker_count(), 1);
+                assert_eq!(
+                    self.driver
+                        .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::NotConnected
+                );
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl Drop for ReentrantWake {
+            fn drop(&mut self) {
+                assert_eq!(self.driver.waker_count(), 1);
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let driver = IoDriverHandle::new(Arc::new(LabReactor::new())).for_runtime();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let make_waker = || {
+            Waker::from(Arc::new(ReentrantWake {
+                driver: driver.clone(),
+                wakes: Arc::clone(&wakes),
+                drops: Arc::clone(&drops),
+            }))
+        };
+        let registration = driver
+            .register(&TestFdSource, Interest::READABLE, make_waker())
+            .unwrap();
+        driver.revoke_runtime_service();
+        driver.notify_revoked_service();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            driver
+                .register(&TestFdSource, Interest::READABLE, make_waker())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert!(!driver.update_waker(registration.token(), make_waker()));
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        assert!(!registration.update_waker(make_waker()));
+        assert_eq!(drops.load(Ordering::SeqCst), 4);
+        drop(registration);
+        assert!(driver.is_empty());
     }
 
     #[test]

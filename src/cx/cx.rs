@@ -1397,12 +1397,17 @@ impl<Caps> Cx<Caps> {
         }
     }
 
-    /// Returns a cloned handle to the I/O driver, if present.
+    /// Returns a cloned handle to the I/O driver while its runtime service is
+    /// available. Retained contexts select fallback readiness after shutdown.
     #[inline]
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
-        self.handles.io_driver.clone()
+        self.handles
+            .io_driver
+            .as_ref()
+            .filter(|driver| driver.is_service_available())
+            .cloned()
     }
 
     /// Borrow the dispatcher for socket-affinity checks without cloning this
@@ -1410,7 +1415,10 @@ impl<Caps> Cx<Caps> {
     #[inline]
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn io_driver_ref(&self) -> Option<&IoDriverHandle> {
-        self.handles.io_driver.as_ref()
+        self.handles
+            .io_driver
+            .as_ref()
+            .filter(|driver| driver.is_service_available())
     }
 
     /// Returns a clone of this context's inherited blocking-pool handle, if present.

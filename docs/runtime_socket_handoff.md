@@ -66,8 +66,9 @@ socket registrations.
 The comparison uses the shared `IoDriver` allocation, not the participant
 reactor allocation. Independently constructed runtimes sharing one supplied
 reactor intentionally share its dispatcher and token namespace. Switching
-between those participants must retain the existing token. Same-dispatcher
-polls borrow the current context's handle for the comparison, avoiding new
+between live participants retains the existing token while its original
+service remains available. Same-dispatcher polls borrow the current context's
+handle for the comparison, avoiding new
 context/driver clones on that path. This is a structural performance safeguard;
 throughput and wake latency have not been benchmarked here.
 
@@ -83,14 +84,34 @@ the driver and registry locks. Existing token generations and per-callback
 panic isolation remain in effect. A retained registration's eventual drop
 cannot deregister a replacement dispatcher's token.
 
-A retained runtime-created `Cx` still owns a strong driver handle. Installing
-that same context on an unrelated executor after runtime shutdown is a remaining
-service-lifetime boundary: the driver can be allocated and report an active
-owner while no runtime services it. This needs runtime service revocation that
-also preserves active participants of a shared dispatcher and manual drivers.
-The native retained-context test keeps the old context alive but polls under
-the destination runtime's fresh context; it does not validate installing a
-stale context on another executor.
+Runtime-created I/O participants now carry a service lifetime separate from
+their strong handle ownership. Stopping a runtime revokes that participant's
+admission; a retained `Cx` then selects the existing fallback readiness path.
+The full teardown/reaper path notifies already parked waiters outside driver
+locks so they can observe revocation. The bounded shutdown caller only publishes
+the revocation flag and never runs those callbacks. A failed reaper start still
+reports incomplete shutdown; it is not a successful teardown receipt.
+
+Registration, rearm and waker replacement check service under the driver gate.
+A registration racing revocation is either refused or included in the teardown
+notification. Tokens and backend interests remain owned until their ordinary
+deregistration: service revocation must not suppress cleanup. Live participants
+sharing the dispatcher and standalone manual drivers retain their service,
+tokens and original stored wakers. Only registrations admitted by the stopped
+participant are notified. Interest-only rearming on a surviving manual driver
+continues to deliver readiness without replacing its waker. A socket retained
+from a stopped participant rejects rearm and takes the existing self-wake and
+fresh-registration path, including when the destination shares its dispatcher.
+
+The added `retained_source_context_rebinds_after_runtime_service_stops` native
+scenario installs the original source `Cx` on a separate event-driven executor,
+both after shutdown and before a witnessed parked read whose owner then stops.
+It covers drop and explicit shutdown in both native runtime flavors, exact
+payloads, socket identity, bidirectional completion and EOF. The earlier native
+test that merely retains the old context while polling under a fresh destination
+context remains intact. These new cases and the deterministic admission-race,
+shared-owner and reentrant-callback tests are uncompiled and unexecuted here;
+the verification commands below still require exact-commit RCH receipts.
 
 ## Concurrent waiters and cancellation
 

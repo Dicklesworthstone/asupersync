@@ -81,10 +81,8 @@ impl RequestWriters {
         self.owners
             .lock()
             .iter()
-            .filter_map(|(&stream, owner)| {
-                (owner.state() != RequestWriterState::Active)
-                    .then(|| (stream, Arc::clone(owner)))
-            })
+            .filter(|(_, owner)| owner.state() != RequestWriterState::Active)
+            .map(|(&stream, owner)| (stream, Arc::clone(owner)))
             .collect()
     }
 

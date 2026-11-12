@@ -6136,6 +6136,10 @@ struct RuntimeInner {
     /// diagnostics and the replay-fingerprint proof lanes.
     sharded_state: Option<Arc<crate::runtime::ShardedState>>,
     scheduler: ThreeLaneScheduler,
+    /// Per-runtime readiness participant, retained separately so stopping
+    /// admission never needs the runtime-state lock. Context clones do not
+    /// extend this participant's service lifetime.
+    io_service: Option<IoDriverHandle>,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     root_region: crate::types::RegionId,
     /// Lock-free spawn intake (Some only in `SpawnAdmissionMode::Mailbox`).
@@ -6620,6 +6624,11 @@ impl RuntimeInner {
     }
 
     fn begin_shutdown(&self) {
+        if let Some(driver) = &self.io_service {
+            // This path runs on the bounded caller: publish revocation only.
+            // Waker callbacks and driver locking belong to the reaper below.
+            driver.revoke_runtime_service();
+        }
         self.scheduler.shutdown();
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
@@ -6640,6 +6649,21 @@ impl RuntimeInner {
         self.begin_shutdown();
         if let Some(pool) = self.blocking_pool.as_ref() {
             pool.shutdown();
+        }
+        self.notify_revoked_io();
+    }
+
+    fn notify_revoked_io(&self) {
+        if let Some(driver) = &self.io_service
+            && let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    driver.notify_revoked_service();
+                }))
+        {
+            // The driver notifies every detached waiter before re-raising a
+            // callback panic. One external waker must not prevent worker and
+            // task teardown; opaque payloads may themselves panic on drop.
+            std::mem::forget(payload);
         }
     }
 
@@ -6722,7 +6746,7 @@ impl RuntimeInner {
                     trace_capacity,
                     config.metrics_provider.clone(),
                 );
-                state.set_io_driver(IoDriverHandle::new(reactor));
+                state.set_io_driver(IoDriverHandle::new(reactor).for_runtime());
                 #[cfg(target_arch = "wasm32")]
                 state.set_timer_driver(TimerDriverHandle::with_browser_clock(Arc::new(
                     crate::time::BrowserMonotonicClock::host_sampled(),
@@ -6819,6 +6843,7 @@ impl RuntimeInner {
             entropy_source,
             terminal_io_reactor_snapshot,
         );
+        let io_service = runtime_state.io_driver_handle();
         let state = Arc::new(crate::sync::ContendedMutex::new(
             "runtime_state",
             runtime_state,
@@ -6977,6 +7002,7 @@ impl RuntimeInner {
                 state,
                 sharded_state,
                 scheduler,
+                io_service,
                 worker_threads: Mutex::new(Vec::new()),
                 root_region,
                 spawn_mailbox,
@@ -7408,10 +7434,14 @@ impl Drop for RuntimeInner {
         // Signal consumers before transferring their join handles. In the
         // worker-owned case the current poll must return before it can join.
         let deadline_monitor_shutdown = self.deadline_monitor_shutdown.take();
+        if let Some(driver) = &self.io_service {
+            driver.revoke_runtime_service();
+        }
         self.scheduler.shutdown();
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
         }
+        self.notify_revoked_io();
         if let Some(pump) = self.browser_pump.get() {
             // Threadless hosts have no worker exit loop to retire pending
             // admissions or parked local futures. Leave other runtimes' local

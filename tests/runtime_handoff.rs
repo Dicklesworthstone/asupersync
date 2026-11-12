@@ -112,7 +112,7 @@ mod lifecycle {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
-    use std::task::Poll;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
@@ -516,6 +516,102 @@ mod lifecycle {
                     drop(retained);
                     #[cfg(feature = "test-internals")]
                     drop(old_driver);
+                }
+            }
+        }
+    }
+
+    struct ExternalWake(mpsc::SyncSender<()>);
+
+    impl Wake for ExternalWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let _ = self.0.try_send(());
+        }
+    }
+
+    /// A deliberately unrelated executor: it neither installs a new Cx nor
+    /// services the retained context's reactor. Every re-poll needs a wake.
+    fn external_block_on<F: Future>(future: F) -> F::Output {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let waker = Waker::from(Arc::new(ExternalWake(sender)));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("parked socket must wake the unrelated executor"),
+            }
+        }
+    }
+
+    #[test]
+    fn retained_source_context_rebinds_after_runtime_service_stops() {
+        let _deadline = Deadline::new("retained Cx readiness after runtime service stops");
+        for source_current in [true, false] {
+            for explicit_shutdown in [false, true] {
+                for parked_before_shutdown in [false, true] {
+                    let source = build(source_current);
+                    let (mut stream, peer) = Peer::connect(&source);
+                    let original = identity(&stream);
+                    let retained = source
+                        .block_on(async { Cx::current().expect("retain source context") });
+                    let stop = |runtime: Runtime| {
+                        if explicit_shutdown {
+                            assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                        } else {
+                            drop(runtime);
+                        }
+                    };
+                    let mut source = Some(source);
+                    if !parked_before_shutdown {
+                        stop(source.take().unwrap());
+                    }
+
+                    // Keep precisely the source's Cx installed. A destination
+                    // runtime's fresh Cx would miss this service-lifetime gap.
+                    let _context = Cx::set_current(Some(retained.clone()));
+                    let mut bytes = vec![0_u8; RESPONSE.len()];
+                    let mut pending_polls = 0;
+                    let mut traffic_released = false;
+                    {
+                        let mut read = std::pin::pin!(stream.read_exact(&mut bytes));
+                        external_block_on(poll_fn(|context| {
+                            let result = read.as_mut().poll(context);
+                            if result.is_pending() {
+                                pending_polls += 1;
+                                if let Some(source) = source.take() {
+                                    // The operation has actually registered
+                                    // its wait before shutdown is triggered.
+                                    stop(source);
+                                } else if !traffic_released {
+                                    assert_eq!(
+                                        pending_polls,
+                                        if parked_before_shutdown { 2 } else { 1 }
+                                    );
+                                    #[cfg(feature = "test-internals")]
+                                    assert!(retained.io_driver_handle().is_none());
+                                    peer.commands
+                                        .send(PeerCommand::Write(RESPONSE.to_vec()))
+                                        .expect("release bytes only after fallback is parked");
+                                    traffic_released = true;
+                                }
+                            }
+                            result
+                        }))
+                        .expect("read under the retained source context");
+                    }
+                    assert!(traffic_released);
+                    assert_eq!(bytes, RESPONSE);
+                    assert_eq!(identity(&stream), original);
+                    external_block_on(finish(&mut stream, &peer.commands));
+                    drop(stream);
+                    peer.join(ACK);
                 }
             }
         }
