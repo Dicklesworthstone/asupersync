@@ -698,7 +698,7 @@ pub struct H3PseudoHeaders {
     pub path: Option<String>,
     /// `:status`.
     pub status: Option<u16>,
-    /// `:protocol` (RFC 8441 extended CONNECT protocol).
+    /// `:protocol` (RFC 9220 extended CONNECT protocol).
     pub protocol: Option<String>,
 }
 
@@ -733,7 +733,12 @@ impl H3RequestHead {
     /// Construct and validate request head with extended CONNECT protocol support.
     ///
     /// When `enable_connect_protocol` is true, CONNECT requests are allowed to
-    /// include :scheme and :path pseudo-headers per RFC 8441.
+    /// include :protocol, :scheme, and :path pseudo-headers per RFC 9220.
+    /// Ordinary CONNECT remains valid when the extension is enabled.
+    ///
+    /// For compatibility, this constructor retains the historical acceptance
+    /// of an extended head without :scheme or :path. Wire decoding and native
+    /// session admission additionally require both fields and a token :protocol.
     pub fn new_with_settings(
         pseudo: H3PseudoHeaders,
         headers: Vec<(String, String)>,
@@ -769,6 +774,51 @@ impl H3RequestHead {
     }
 }
 
+/// Validate a complete request at the wire boundary.
+///
+/// Keep the historical request constructors usable for partially assembled
+/// extended CONNECT heads, while enforcing RFC 9220 before a request is sent
+/// or accepted. The setting is permission, not an instruction to reinterpret
+/// ordinary CONNECT as extended CONNECT.
+pub(crate) fn validate_request_head_with_settings(
+    head: &H3RequestHead,
+    enable_connect_protocol: bool,
+) -> Result<(), H3NativeError> {
+    validate_request_pseudo_headers_with_settings(&head.pseudo, enable_connect_protocol)?;
+    if let Some(protocol) = &head.pseudo.protocol {
+        if head.pseudo.method.as_deref() != Some("CONNECT") {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":protocol is only valid on CONNECT requests",
+            ));
+        }
+        validate_method_token(protocol).map_err(|_| {
+            H3NativeError::InvalidRequestPseudoHeader(
+                "extended CONNECT request :protocol must be a valid HTTP token",
+            )
+        })?;
+        if head.pseudo.scheme.is_none() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "extended CONNECT request missing :scheme",
+            ));
+        }
+        if head.pseudo.path.is_none() {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "extended CONNECT request missing :path",
+            ));
+        }
+    }
+    for (name, value) in &head.headers {
+        validate_header_name(name)?;
+        if name.starts_with(':') {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "pseudo headers must not appear in regular header list",
+            ));
+        }
+        validate_header_value(value)?;
+    }
+    Ok(())
+}
+
 /// HTTP/3 response-head representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3ResponseHead {
@@ -781,22 +831,29 @@ pub struct H3ResponseHead {
 impl H3ResponseHead {
     /// Construct and validate response head.
     pub fn new(status: u16, headers: Vec<(String, String)>) -> Result<Self, H3NativeError> {
-        let pseudo = H3PseudoHeaders {
-            status: Some(status),
-            ..H3PseudoHeaders::default()
-        };
-        validate_response_pseudo_headers(&pseudo)?;
-        for (name, value) in &headers {
-            validate_header_name(name)?;
-            if name.starts_with(':') {
-                return Err(H3NativeError::InvalidResponsePseudoHeader(
-                    "response must not include request pseudo headers",
-                ));
-            }
-            validate_header_value(value)?;
-        }
-        Ok(Self { status, headers })
+        let head = Self { status, headers };
+        validate_response_head(&head)?;
+        Ok(head)
     }
+}
+
+/// Revalidate a response head whose public fields may have been edited.
+pub(crate) fn validate_response_head(head: &H3ResponseHead) -> Result<(), H3NativeError> {
+    let pseudo = H3PseudoHeaders {
+        status: Some(head.status),
+        ..H3PseudoHeaders::default()
+    };
+    validate_response_pseudo_headers(&pseudo)?;
+    for (name, value) in &head.headers {
+        validate_header_name(name)?;
+        if name.starts_with(':') {
+            return Err(H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers",
+            ));
+        }
+        validate_header_value(value)?;
+    }
+    Ok(())
 }
 
 /// Static-only QPACK planning item.
@@ -918,6 +975,12 @@ pub fn qpack_static_plan_for_request(head: &H3RequestHead) -> Vec<QpackFieldPlan
         out.push(QpackFieldPlan::Literal {
             name: ":authority".to_string(),
             value: authority.clone(),
+        });
+    }
+    if let Some(protocol) = &head.pseudo.protocol {
+        out.push(QpackFieldPlan::Literal {
+            name: ":protocol".to_string(),
+            value: protocol.clone(),
         });
     }
     for (name, value) in &head.headers {
@@ -4360,6 +4423,31 @@ pub fn qpack_decode_request_field_section_with_limit(
     qpack_context: Option<&QpackContext>,
     max_field_section_size: Option<u64>,
 ) -> Result<H3RequestHead, H3NativeError> {
+    qpack_decode_request_field_section_with_settings(
+        input,
+        mode,
+        qpack_context,
+        max_field_section_size,
+        false,
+    )
+}
+
+/// Decode a request using the receiver's advertised Extended CONNECT permission.
+///
+/// `enable_connect_protocol` must reflect the local endpoint's advertised
+/// SETTINGS_ENABLE_CONNECT_PROTOCOL, not the peer's setting. When false,
+/// `:protocol` is rejected. When true, RFC 9220 extended CONNECT requires
+/// `:scheme`, `:path`, `:authority`, and a token `:protocol`; ordinary
+/// CONNECT remains valid. The optional decoded field-section limit includes
+/// every pseudo-header, including `:protocol`, with RFC 9114's per-field
+/// overhead. Static and dynamic QPACK use the same HTTP validation.
+pub fn qpack_decode_request_field_section_with_settings(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+    max_field_section_size: Option<u64>,
+    enable_connect_protocol: bool,
+) -> Result<H3RequestHead, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
     let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
@@ -4371,7 +4459,11 @@ pub fn qpack_decode_request_field_section_with_limit(
         }
     }
 
-    header_fields_to_request_head(&fields)
+    if enable_connect_protocol {
+        header_fields_to_request_head_with_settings(&fields, true)
+    } else {
+        header_fields_to_request_head(&fields)
+    }
 }
 
 /// Decode a wire-level response field section into a validated response head.
@@ -4699,6 +4791,13 @@ fn parse_status_code(value: &str) -> Result<u16, H3NativeError> {
 pub(crate) fn header_fields_to_request_head(
     fields: &[(String, String)],
 ) -> Result<H3RequestHead, H3NativeError> {
+    header_fields_to_request_head_with_settings(fields, false)
+}
+
+pub(crate) fn header_fields_to_request_head_with_settings(
+    fields: &[(String, String)],
+    enable_connect_protocol: bool,
+) -> Result<H3RequestHead, H3NativeError> {
     let mut pseudo = H3PseudoHeaders::default();
     let mut headers = Vec::new();
     let mut saw_regular_headers = false;
@@ -4743,6 +4842,14 @@ pub(crate) fn header_fields_to_request_head(
                     }
                     pseudo.path = Some(value.clone());
                 }
+                ":protocol" => {
+                    if pseudo.protocol.is_some() {
+                        return Err(H3NativeError::InvalidRequestPseudoHeader(
+                            "duplicate :protocol",
+                        ));
+                    }
+                    pseudo.protocol = Some(value.clone());
+                }
                 ":status" => {
                     return Err(H3NativeError::InvalidRequestPseudoHeader(
                         "request must not include :status",
@@ -4760,7 +4867,9 @@ pub(crate) fn header_fields_to_request_head(
         }
     }
 
-    H3RequestHead::new(pseudo, headers)
+    let head = H3RequestHead { pseudo, headers };
+    validate_request_head_with_settings(&head, enable_connect_protocol)?;
+    Ok(head)
 }
 
 pub(crate) fn header_fields_to_response_head(
@@ -5922,8 +6031,11 @@ pub fn validate_request_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(), 
 
 /// Validate request pseudo headers with extended CONNECT protocol support.
 ///
-/// When `enable_connect_protocol` is true, CONNECT requests are allowed to
-/// include :scheme and :path pseudo-headers per RFC 8441.
+/// When `enable_connect_protocol` is true, extended CONNECT requests may
+/// include :scheme and :path per RFC 9220. An ordinary CONNECT without
+/// :protocol, :scheme, or :path remains valid. This compatibility validator
+/// permits partially assembled extended heads; wire admission additionally
+/// requires both :scheme and :path and a token :protocol.
 pub fn validate_request_pseudo_headers_with_settings(
     headers: &H3PseudoHeaders,
     enable_connect_protocol: bool,
@@ -5955,8 +6067,12 @@ pub fn validate_request_pseudo_headers_with_settings(
         }
         validate_authority_form(authority)?;
 
-        // RFC 8441 Extended CONNECT Protocol support
-        if enable_connect_protocol {
+        // Enabling the extension does not change ordinary CONNECT semantics.
+        // Preserve the legacy missing-protocol diagnostic for a head that
+        // supplies extended-only fields without selecting a protocol.
+        if enable_connect_protocol
+            && (headers.protocol.is_some() || headers.scheme.is_some() || headers.path.is_some())
+        {
             // Extended CONNECT: allow :scheme/:path, require :protocol
             if let Some(protocol) = &headers.protocol {
                 validate_header_value(protocol)?;

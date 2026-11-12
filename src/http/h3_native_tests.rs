@@ -394,6 +394,221 @@ mod tests {
         );
     }
 
+
+    fn extended_connect_wire_head() -> H3RequestHead {
+        H3RequestHead::new_with_settings(
+            H3PseudoHeaders {
+                method: Some("CONNECT".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("chat.example".to_string()),
+                path: Some("/chat".to_string()),
+                protocol: Some("websocket".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![("sec-websocket-version".to_string(), "13".to_string())],
+            true,
+        )
+        .expect("extended CONNECT head")
+    }
+
+    #[test]
+    fn qpack_extended_connect_roundtrip_preserves_protocol_and_requires_permission() {
+        let head = extended_connect_wire_head();
+        let wire = qpack_encode_request_field_section(&head).expect("encode");
+        let plan = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect("decode plan");
+        let fields = qpack_plan_to_header_fields(&plan, None).expect("resolve fields");
+        assert_eq!(
+            fields.iter().filter(|(name, _)| name == ":protocol").collect::<Vec<_>>(),
+            vec![&(":protocol".to_string(), "websocket".to_string())],
+        );
+        assert_eq!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::StaticOnly, None, None, true,
+            )
+            .expect("advertised extension"),
+            head,
+        );
+        assert!(
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None).is_err(),
+            "the default decoder must not silently authorize Extended CONNECT",
+        );
+        assert!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::StaticOnly, None, None, false,
+            )
+            .is_err(),
+        );
+    }
+
+    #[test]
+    fn ordinary_connect_stays_valid_when_extension_is_enabled() {
+        for enabled in [false, true] {
+            let head = H3RequestHead::new_with_settings(
+                H3PseudoHeaders {
+                    method: Some("CONNECT".to_string()),
+                    authority: Some("upstream.example:443".to_string()),
+                    ..H3PseudoHeaders::default()
+                },
+                Vec::new(),
+                enabled,
+            )
+            .expect("ordinary CONNECT");
+            let wire = qpack_encode_request_field_section(&head).expect("encode");
+            assert_eq!(
+                qpack_decode_request_field_section_with_settings(
+                    &wire, H3QpackMode::StaticOnly, None, None, enabled,
+                )
+                .expect("ordinary CONNECT decode"),
+                head,
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_extended_connect_wire_validation_preserves_legacy_partial_construction() {
+        for missing_scheme in [false, true] {
+            let mut pseudo = extended_connect_wire_head().pseudo;
+            let expected = if missing_scheme {
+                pseudo.scheme = None;
+                "extended CONNECT request missing :scheme"
+            } else {
+                pseudo.path = None;
+                "extended CONNECT request missing :path"
+            };
+            let head = H3RequestHead::new_with_settings(pseudo, Vec::new(), true)
+                .expect("historical partial construction remains available");
+            let wire = qpack_encode_request_field_section(&head).expect("encode");
+            assert_eq!(
+                qpack_decode_request_field_section_with_settings(
+                    &wire, H3QpackMode::StaticOnly, None, None, true,
+                ),
+                Err(H3NativeError::InvalidRequestPseudoHeader(expected)),
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_extended_connect_rejects_invalid_protocol_tokens_and_wrong_method() {
+        for protocol in ["web socket", "web/socket", "web\tsocket", "wéb", ""] {
+            let mut head = extended_connect_wire_head();
+            head.pseudo.protocol = Some(protocol.to_string());
+            let wire = qpack_encode_request_field_section(&head).expect("encode malformed head");
+            assert!(
+                qpack_decode_request_field_section_with_settings(
+                    &wire, H3QpackMode::StaticOnly, None, None, true,
+                )
+                .is_err(),
+                "invalid protocol token {protocol:?}",
+            );
+        }
+        let mut head = extended_connect_wire_head();
+        head.pseudo.method = Some("GET".to_string());
+        let wire = qpack_encode_request_field_section(&head).expect("encode wrong method");
+        assert_eq!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::StaticOnly, None, None, true,
+            ),
+            Err(H3NativeError::InvalidRequestPseudoHeader(
+                ":protocol is only valid on CONNECT requests",
+            )),
+        );
+        for field in [
+            ("Uppercase", "value"),
+            (":method", "GET"),
+            ("x-test", "bad\r\nvalue"),
+        ] {
+            let mut head = extended_connect_wire_head();
+            head.headers.push((field.0.to_string(), field.1.to_string()));
+            assert!(validate_request_head_with_settings(&head, true).is_err());
+        }
+    }
+
+    #[test]
+    fn qpack_extended_connect_rejects_duplicate_or_late_protocol() {
+        let head = extended_connect_wire_head();
+        let mut duplicate = qpack_static_plan_for_request(&head);
+        let protocol_index = duplicate.iter().position(|field| {
+            matches!(field, QpackFieldPlan::Literal { name, .. } if name == ":protocol")
+        }).expect("protocol is retained");
+        duplicate.insert(protocol_index, QpackFieldPlan::Literal {
+            name: ":protocol".to_string(),
+            value: "other-protocol".to_string(),
+        });
+        let mut late = qpack_static_plan_for_request(&head);
+        let protocol = late.remove(protocol_index);
+        late.push(protocol);
+        for (plan, expected) in [
+            (duplicate, "duplicate :protocol"),
+            (late, "request pseudo headers must precede regular headers"),
+        ] {
+            let wire = qpack_encode_field_section(&plan).expect("encode malformed ordering");
+            assert_eq!(
+                qpack_decode_request_field_section_with_settings(
+                    &wire, H3QpackMode::StaticOnly, None, None, true,
+                ),
+                Err(H3NativeError::InvalidRequestPseudoHeader(expected)),
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_extended_connect_counts_protocol_in_field_limit() {
+        let head = extended_connect_wire_head();
+        let fields = qpack_plan_to_header_fields(&qpack_static_plan_for_request(&head), None)
+            .expect("fields");
+        let size: u64 = fields.iter()
+            .map(|(name, value)| (name.len() + value.len() + 32) as u64)
+            .sum();
+        let wire = qpack_encode_request_field_section(&head).expect("encode");
+        assert_eq!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::StaticOnly, None, Some(size), true,
+            )
+            .expect("exact limit"),
+            head,
+        );
+        assert_eq!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::StaticOnly, None, Some(size - 1), true,
+            ),
+            Err(H3NativeError::QpackPolicy(
+                "decoded field section exceeds maximum size limit",
+            )),
+        );
+    }
+
+    #[test]
+    fn qpack_extended_connect_dynamic_reference_uses_same_validation() {
+        let head = extended_connect_wire_head();
+        let mut context = QpackContext::new(512);
+        context.set_dynamic_table_capacity(512).expect("table capacity");
+        let protocol_id = context
+            .insert_dynamic_entry(":protocol".to_string(), "websocket".to_string())
+            .expect("insert protocol");
+        let plan = qpack_static_plan_for_request(&head).into_iter().map(|field| {
+            if matches!(&field, QpackFieldPlan::Literal { name, .. } if name == ":protocol") {
+                QpackFieldPlan::DynamicIndex(protocol_id)
+            } else {
+                field
+            }
+        }).collect::<Vec<_>>();
+        let wire = qpack_encode_field_section_with_context(&plan, Some(&context))
+            .expect("dynamic field section");
+        assert_eq!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::DynamicTableAllowed, Some(&context), None, true,
+            )
+            .expect("dynamic Extended CONNECT"),
+            head,
+        );
+        assert!(
+            qpack_decode_request_field_section_with_settings(
+                &wire, H3QpackMode::DynamicTableAllowed, Some(&context), None, false,
+            )
+            .is_err(),
+        );
+    }
+
     #[test]
     fn request_stream_state_enforces_headers_then_data() {
         let mut st = H3RequestStreamState::new();
