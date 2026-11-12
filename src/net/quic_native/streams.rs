@@ -773,6 +773,41 @@ impl QuicStream {
         })
     }
 
+    /// Stream offset below which the peer has acknowledged every byte queued
+    /// with [`Self::write_bytes`].
+    ///
+    /// This is the lowest offset still waiting for packet assembly or retained
+    /// for retransmission, or [`Self::send_offset`] when neither queue holds
+    /// anything. ACKs arrive in any order: bytes acknowledged above the first
+    /// unacknowledged frame do not advance it. An application that writes
+    /// framed records can release each record once this passes the record's
+    /// end, without waiting for the whole stream to drain.
+    ///
+    /// `None` after a local reset ([`Self::send_reset`]): the reset discards
+    /// both queues, so the remaining bytes were abandoned, not acknowledged.
+    /// A FIN carries no data and its acknowledgement is not reported here.
+    /// Bytes counted with [`Self::write`] have no payload and are never
+    /// retained, so they do not hold the offset back. Linear in the number of
+    /// queued frames.
+    #[must_use]
+    pub fn acknowledged_send_offset(&self) -> Option<u64> {
+        if self.send_reset.is_some() {
+            return None;
+        }
+        let retained = self.sent_stream_frames.keys().next().copied();
+        let queued = self
+            .pending_send_frames
+            .iter()
+            .map(|frame| frame.offset)
+            .min();
+        Some(
+            [retained, queued]
+                .into_iter()
+                .flatten()
+                .fold(self.send_offset, u64::min),
+        )
+    }
+
     /// Pop the next queued STREAM frame, splitting it to `max_data_len`.
     pub fn pop_pending_stream_frame(&mut self, max_data_len: usize) -> Option<StreamFramePayload> {
         let mut frame = self.pending_send_frames.pop_front()?;
