@@ -19,6 +19,7 @@
         target_os = "linux",
         target_os = "android",
         target_os = "macos",
+        target_os = "ios",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "netbsd",

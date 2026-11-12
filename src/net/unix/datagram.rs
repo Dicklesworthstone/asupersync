@@ -30,6 +30,13 @@
 //!   instead of [`send_to`](UnixDatagram::send_to).
 
 use crate::net::udp::{Armed, ReactorRegistration};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 use crate::net::unix::stream::UCred;
 use crate::runtime::reactor::Interest;
 use nix::errno::Errno;

@@ -64,6 +64,7 @@
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -669,6 +670,7 @@ mod kqueue_impl {
 // Re-export on supported platforms
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -679,6 +681,7 @@ pub use kqueue_impl::KqueueReactor;
 // Fallback for unsupported platforms (for documentation purposes)
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -756,6 +759,7 @@ mod unsupported_platform {
 
 #[cfg(not(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -767,6 +771,7 @@ pub use unsupported_platform::KqueueReactor;
     test,
     any(
         target_os = "macos",
+        target_os = "ios",
         target_os = "freebsd",
         target_os = "openbsd",
         target_os = "netbsd",

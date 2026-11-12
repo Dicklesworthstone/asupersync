@@ -126,6 +126,7 @@ pub mod uring;
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -153,6 +154,7 @@ pub use windows::IocpReactor;
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -1118,14 +1120,12 @@ pub trait Reactor: Send + Sync {
     }
 }
 
-#[cfg_attr(target_os = "ios", allow(dead_code))] // iOS builds cfg away the wrapping call site
 struct ObservedReactor {
     inner: Arc<dyn Reactor>,
     snapshot: IoReactorCapabilitySnapshot,
 }
 
 impl ObservedReactor {
-    #[cfg_attr(target_os = "ios", allow(dead_code))]
     fn wrap(inner: Arc<dyn Reactor>, snapshot: IoReactorCapabilitySnapshot) -> Arc<dyn Reactor> {
         Arc::new(Self { inner, snapshot })
     }
@@ -1221,6 +1221,7 @@ pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -1234,6 +1235,7 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
 /// Creates the BSD-family reactor with typed advanced-capability policy.
 #[cfg(any(
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -1295,6 +1297,7 @@ pub fn create_reactor_with_policy(policy: IoUringCapabilityPolicy) -> io::Result
     target_os = "linux",
     target_os = "android",
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
@@ -1312,6 +1315,7 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     target_os = "linux",
     target_os = "android",
     target_os = "macos",
+    target_os = "ios",
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
