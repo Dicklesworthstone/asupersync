@@ -1,5 +1,6 @@
-//! Bounded request-side writes for the established native HTTP/3 adapter.
+//! Bounded owned writes for the established native HTTP/3 adapter.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll, Waker};
@@ -43,6 +44,60 @@ impl RequestWriterWake {
         if let Some(waker) = waker {
             waker.wake_by_ref();
         }
+    }
+}
+
+/// Session clones retain one registry so a surviving driver can reap writers
+/// created by a dropped sibling. No transport or waker callback runs under
+/// this lock; callers receive owned snapshots of the registrations.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RequestWriters {
+    owners: Arc<Mutex<BTreeMap<StreamId, Arc<RequestWriteOwner>>>>,
+}
+
+impl RequestWriters {
+    pub(super) fn len(&self) -> usize {
+        self.owners.lock().len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.owners.lock().is_empty()
+    }
+
+    pub(super) fn contains_key(&self, stream: &StreamId) -> bool {
+        self.owners.lock().contains_key(stream)
+    }
+
+    pub(super) fn get(&self, stream: &StreamId) -> Option<Arc<RequestWriteOwner>> {
+        self.owners.lock().get(stream).cloned()
+    }
+
+    pub(super) fn insert(&self, stream: StreamId, owner: Arc<RequestWriteOwner>) {
+        let previous = self.owners.lock().insert(stream, owner);
+        drop(previous);
+    }
+
+    pub(super) fn retired(&self) -> Vec<(StreamId, Arc<RequestWriteOwner>)> {
+        self.owners
+            .lock()
+            .iter()
+            .filter_map(|(&stream, owner)| {
+                (owner.state() != RequestWriterState::Active)
+                    .then(|| (stream, Arc::clone(owner)))
+            })
+            .collect()
+    }
+
+    pub(super) fn remove(&self, stream: &StreamId, owner: &Arc<RequestWriteOwner>) {
+        let removed = {
+            let mut owners = self.owners.lock();
+            if owners.get(stream).is_some_and(|current| Arc::ptr_eq(current, owner)) {
+                owners.remove(stream)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 }
 
@@ -314,6 +369,137 @@ impl NativeH3RequestWriter {
 impl Drop for NativeH3RequestWriter {
     fn drop(&mut self) {
         self.owner.abandon();
+    }
+}
+
+/// One complete response frame admitted to the QUIC send queue.
+///
+/// These events acknowledge local queuing, not delivery or peer acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeH3ResponseWriteEvent {
+    /// Final response HEADERS, and optionally FIN, were queued.
+    Headers {
+        /// Whether the response direction ended with its HEADERS.
+        end_stream: bool,
+    },
+    /// All fragments of one DATA frame were queued.
+    Data {
+        /// Number of application bytes in this frame.
+        payload_bytes: usize,
+    },
+    /// Trailing HEADERS and FIN were queued.
+    Trailers,
+    /// A FIN-only write was queued.
+    Finished,
+}
+
+/// Owned incremental response on one native HTTP/3 request stream.
+///
+/// Construct this with [`super::NativeH3Session::start_response_body_writer`].
+/// Flush the initial HEADERS, then alternate [`Self::queue_data`] and
+/// [`Self::poll_flush`]. Finish with [`Self::finish`] or ordinary HTTP trailers.
+/// At most one encoded frame is retained; partial writes and flow-control wakes
+/// use the same bounded engine as [`NativeH3RequestWriter`].
+///
+/// Request FIN closes only the receive direction. The response writer remains
+/// usable until its own FIN, peer STOP_SENDING, or cancellation. This allows an
+/// application to exchange CONNECT DATA in both directions before either FIN.
+/// The application owns CONNECT acceptance, tunneled-protocol semantics, and
+/// the prohibition on trailers after a successful CONNECT response.
+///
+/// Dropping an unfinished writer wakes the session and leaves it responsible
+/// for queuing cancellation on its next event poll or writer start. Continue
+/// driving both session and transport to send those controls. [`Self::cancel`]
+/// queues cancellation immediately. No task or executor is detached.
+#[derive(Debug)]
+#[must_use = "an HTTP/3 response must be flushed to FIN or cancelled"]
+pub struct NativeH3ResponseBodyWriter {
+    pub(super) writer: NativeH3RequestWriter,
+}
+
+impl NativeH3ResponseBodyWriter {
+    /// Request stream carrying this response.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.writer.stream_id()
+    }
+
+    /// Maximum application bytes accepted by one `queue_data` call.
+    #[must_use]
+    pub fn max_frame_payload_size(&self) -> usize {
+        self.writer.max_frame_payload_size()
+    }
+
+    /// Whether a frame or FIN still needs to be flushed.
+    #[must_use]
+    pub fn has_pending_write(&self) -> bool {
+        self.writer.has_pending_write()
+    }
+
+    /// Whether this writer successfully queued response FIN.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.writer.is_finished()
+    }
+
+    /// Retain a bounded DATA frame after the preceding frame was flushed.
+    pub fn queue_data(&mut self, data: Bytes) -> Result<(), NativeH3SessionError> {
+        self.writer.queue_data(data)
+    }
+
+    /// Retain ordinary HTTP trailers followed by response FIN.
+    ///
+    /// Applications must not use trailers after accepting a CONNECT tunnel;
+    /// finish that response direction with [`Self::finish`] instead.
+    pub fn queue_trailers(
+        &mut self,
+        fields: &[(String, String)],
+    ) -> Result<(), NativeH3SessionError> {
+        self.writer.queue_trailers(fields)
+    }
+
+    /// Retain response FIN after the last DATA frame was flushed.
+    ///
+    /// Calling this again after successful FIN is harmless.
+    pub fn finish(&mut self) -> Result<(), NativeH3SessionError> {
+        self.writer.finish()
+    }
+
+    /// Queue cancellation in both directions and release retained bytes.
+    ///
+    /// The two transport controls are queued under the bounded cancellation
+    /// mask used by [`NativeH3RequestWriter::cancel`].
+    pub fn cancel(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+    ) -> Result<(), NativeH3SessionError> {
+        self.writer.cancel(cx, connection)
+    }
+
+    /// Poll one complete H3 frame into the transport, retaining its unsent
+    /// suffix across `Pending`. Errors leave cancellation owned by the session.
+    pub fn poll_flush(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<NativeH3ResponseWriteEvent>, NativeH3SessionError>> {
+        self.writer.poll_flush(cx, connection, task_cx).map(|result| {
+            result.map(|event| {
+                event.map(|event| match event {
+                    NativeH3RequestWriteEvent::Headers { end_stream } => {
+                        NativeH3ResponseWriteEvent::Headers { end_stream }
+                    }
+                    NativeH3RequestWriteEvent::Data { payload_bytes } => {
+                        NativeH3ResponseWriteEvent::Data { payload_bytes }
+                    }
+                    NativeH3RequestWriteEvent::Trailers => NativeH3ResponseWriteEvent::Trailers,
+                    NativeH3RequestWriteEvent::Finished => NativeH3ResponseWriteEvent::Finished,
+                })
+            })
+        })
     }
 }
 

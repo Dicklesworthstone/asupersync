@@ -35,9 +35,13 @@ use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
 
 #[path = "h3_request_writer.rs"]
 mod request_writer;
-pub use request_writer::{NativeH3RequestWriteEvent, NativeH3RequestWriter};
+pub use request_writer::{
+    NativeH3RequestWriteEvent, NativeH3RequestWriter, NativeH3ResponseBodyWriter,
+    NativeH3ResponseWriteEvent,
+};
 use request_writer::{
     MAX_REQUEST_WRITERS, RequestWriteOwner, RequestWriterState, RequestWriterWake,
+    RequestWriters,
 };
 
 #[path = "h3_send_qpack.rs"]
@@ -50,6 +54,7 @@ use super::h3_native::{
     QpackBlockedStreamStatus, QpackDecoderInstruction, QpackEncoderInstruction,
     QpackFieldSectionMetadata, QpackInstructionStreamState,
     header_fields_to_request_head_with_settings, validate_request_head_with_settings,
+    validate_response_head,
     header_fields_to_response_head, qpack_decode_decoder_instruction,
     qpack_decode_encoder_instruction, qpack_decode_field_section_with_context,
     qpack_decode_field_section_with_metadata,
@@ -1013,7 +1018,7 @@ pub struct NativeH3Session {
     /// and STOP_SENDING (with the error code) are still to be queued on the
     /// connection.
     rejected_requests: Vec<(StreamId, u64)>,
-    request_writers: BTreeMap<StreamId, Arc<RequestWriteOwner>>,
+    request_writers: RequestWriters,
     request_writer_wake: Arc<RequestWriterWake>,
 }
 
@@ -1066,7 +1071,7 @@ impl NativeH3Session {
             next_local_request_stream_id: 0,
             streaming_receive: None,
             rejected_requests: Vec::new(),
-            request_writers: BTreeMap::new(),
+            request_writers: RequestWriters::default(),
             request_writer_wake: Arc::new(RequestWriterWake::default()),
         }
     }
@@ -1495,21 +1500,14 @@ impl NativeH3Session {
         cx: &Cx,
         connection: &mut QuicConnection,
     ) -> Result<(), NativeH3SessionError> {
-        let retired: Vec<_> = self
-            .request_writers
-            .iter()
-            .filter_map(|(&stream, owner)| {
-                (owner.state() != RequestWriterState::Active).then_some(stream)
-            })
-            .collect();
-        for stream in retired {
-            if self.request_writers[&stream].state() == RequestWriterState::Abandoned {
+        for (stream, owner) in self.request_writers.retired() {
+            if owner.state() == RequestWriterState::Abandoned {
                 // Only the two bounded cleanup controls are masked. A caller
                 // using the cancelled upload's Cx must still release its
                 // protocol ownership before the next checkpoint can fail.
                 cx.masked(|| self.reset_request(cx, connection, stream, H3_REQUEST_CANCELLED))?;
             }
-            self.request_writers.remove(&stream);
+            self.request_writers.remove(&stream, &owner);
         }
         Ok(())
     }
@@ -1539,12 +1537,103 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_response_stream_unowned(stream_id)?;
         self.ensure_peer_response_field_limit(head)?;
         let (field_section, mut qpack_section) = self.prepare_response_head(stream_id, head)?;
         let mut wire = Vec::new();
         H3Frame::Headers(field_section).encode(&mut wire)?;
         write_prepared_head(&mut qpack_section, cx, connection, stream_id, Bytes::from(wire), false)?;
         Ok(())
+    }
+
+    /// Start an owned incremental final response on a received request stream.
+    ///
+    /// Initial request HEADERS must already have been validated by this session.
+    /// The request can remain open, or can have ended with FIN: receive closure
+    /// does not close the response direction. Set `end_stream` to false to
+    /// exchange streaming response DATA, including an accepted CONNECT tunnel.
+    /// Locally stopped or reset requests cannot start a new owned response.
+    ///
+    /// The writer shares bounded admission and drop cancellation with request
+    /// writers, including across clones of this session. An existing active
+    /// writer for this stream is refused before
+    /// QPACK or transport mutation. HEADERS remain owned by the returned writer
+    /// until it is polled; dropping it before FIN schedules stream cancellation.
+    /// Continue driving the session and QUIC transport to send those controls.
+    ///
+    /// Applications own HTTP body policy, CONNECT acceptance, and tunneled
+    /// protocol semantics. In particular, use DATA and FIN, not trailers, after
+    /// accepting CONNECT. This does not enable CONNECT in the Router adapter.
+    pub fn start_response_body_writer(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        head: &H3ResponseHead,
+        end_stream: bool,
+    ) -> Result<NativeH3ResponseBodyWriter, NativeH3SessionError> {
+        self.ensure_ready_for_messages(connection)?;
+        if self.role != H3EndpointRole::Server {
+            return Err(NativeH3SessionError::InvalidState(
+                "only a server session can start response writers",
+            ));
+        }
+        if !is_client_bidi(stream_id) {
+            return Err(NativeH3SessionError::InvalidState(
+                "responses require a client-initiated bidirectional stream",
+            ));
+        }
+        validate_response_head(head)?;
+        if self
+            .request_writers
+            .get(&stream_id)
+            .is_some_and(|owner| owner.state() == RequestWriterState::Active)
+        {
+            return Err(NativeH3SessionError::InvalidState(
+                "an incremental response writer already owns this stream",
+            ));
+        }
+        self.reap_request_writers(cx, connection)?;
+        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        if self.state.request_stream_lacks_initial_headers(stream_id.0)
+            || self.rejected_requests.iter().any(|(id, _)| *id == stream_id)
+        {
+            return Err(NativeH3SessionError::InvalidState(
+                "response writer requires a received request head",
+            ));
+        }
+        let streams = connection.inner().streams();
+        let stream = streams.stream(stream_id).map_err(NativeQuicConnectionError::from)?;
+        if stream.recv_reset.is_some() || stream.receive_stopped_error_code.is_some() {
+            return Err(NativeH3SessionError::InvalidState(
+                "response writer cannot answer a stopped or reset request",
+            ));
+        }
+        // Zero-byte validation checks closure without requiring current credit.
+        // A caller may start a response while waiting for MAX_STREAM_DATA.
+        streams.validate_stream_write(stream_id, 0)
+            .map_err(NativeQuicConnectionError::from)?;
+        let limit = self
+            .config
+            .max_concurrent_request_streams
+            .map_or(MAX_REQUEST_WRITERS, |limit| {
+                usize::try_from(limit).unwrap_or(usize::MAX).min(MAX_REQUEST_WRITERS)
+            });
+        if self.request_writers.len() >= limit {
+            return Err(NativeH3SessionError::InvalidState(
+                "incremental response writer limit reached",
+            ));
+        }
+        let inner = self.start_response_writer(connection, stream_id, head, end_stream)?;
+        let owner = Arc::new(RequestWriteOwner::new(Arc::clone(&self.request_writer_wake)));
+        self.request_writers.insert(stream_id, Arc::clone(&owner));
+        Ok(NativeH3ResponseBodyWriter {
+            writer: NativeH3RequestWriter {
+                inner,
+                owner,
+                write_offset: 0,
+            },
+        })
     }
 
     /// Prepare an incremental final response writer for an existing request.
@@ -1577,6 +1666,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_response_stream_unowned(stream_id)?;
         self.ensure_peer_response_field_limit(head)?;
         let (field_section, qpack_section) = self.prepare_response_head(stream_id, head)?;
         if field_section.len() > self.config.max_frame_payload_size {
@@ -1638,6 +1728,7 @@ impl NativeH3Session {
             ));
         }
 
+        self.ensure_response_stream_unowned(stream_id)?;
         self.ensure_peer_response_field_limit(head)?;
         let (field_section, mut qpack_section) = self.prepare_response_head(stream_id, head)?;
         let mut wire = Vec::new();
@@ -2895,6 +2986,18 @@ impl NativeH3Session {
             fields,
             self.peer_max_field_section_size.load(Ordering::Acquire),
         )
+    }
+
+    fn ensure_response_stream_unowned(
+        &self,
+        stream_id: StreamId,
+    ) -> Result<(), NativeH3SessionError> {
+        if self.request_writers.contains_key(&stream_id) {
+            return Err(NativeH3SessionError::InvalidState(
+                "an incremental response writer already owns this stream",
+            ));
+        }
+        Ok(())
     }
 
     fn ensure_peer_response_field_limit(

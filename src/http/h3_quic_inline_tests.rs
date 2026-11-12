@@ -344,6 +344,204 @@
         }
 
         #[test]
+        fn owned_response_blocks_competing_heads_before_qpack_mutation() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = fixture(&cx, true, 4096);
+            let head = H3ResponseHead::new(200, vec![
+                ("content-type".to_owned(), "application/owned-response+json".to_owned()),
+            ]).unwrap();
+            ready_response(&cx, &mut session, &mut connection, StreamId(0));
+            session.send_response(&cx, &mut connection, StreamId(0), &head, Bytes::new()).unwrap();
+            let _warm = collect_wire(&cx, &mut connection, StreamId(0));
+            let mut peer = receive_insertions(&cx, &mut session, &mut connection, 4096);
+            let mut feedback_offset = 0;
+            feedback(&cx, &mut session, &mut connection, &mut peer,
+                QpackDecoderInstruction::InsertCountIncrement { increment: 1 }, &mut feedback_offset);
+
+            let stream = StreamId(4);
+            ready_response(&cx, &mut session, &mut connection, stream);
+            let writer = session
+                .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                .unwrap();
+            let sender = session.dynamic_send.as_ref().unwrap().clone();
+            assert_eq!(sender.prepared_section_count(), 1);
+            let competing = H3ResponseHead::new(200, vec![
+                ("content-type".to_owned(), "application/competing-response+json".to_owned()),
+            ]).unwrap();
+            let informational = H3ResponseHead::new(103, competing.headers.clone()).unwrap();
+            let snapshot = |connection: &QuicConnection| (
+                connection.inner().streams().stream(stream).unwrap().send_offset,
+                connection.inner().streams().connection_send_remaining(),
+                connection.pending_stream_data_bytes(stream),
+                sender.prepared_section_count(),
+                sender.outstanding_section_count(stream),
+                sender.outstanding_reference_count(),
+                sender.queued_encoder_bytes(),
+                sender.known_received_count(),
+                sender.active_table_capacity(),
+            );
+            let before = snapshot(&connection);
+            for path in 0..4 {
+                let result = match path {
+                    0 => session.start_response_body_writer(
+                        &cx, &mut connection, stream, &competing, false,
+                    ).map(|_| ()),
+                    1 => session.send_response(
+                        &cx, &mut connection, stream, &competing, Bytes::new(),
+                    ),
+                    2 => session.send_informational_response(
+                        &cx, &mut connection, stream, &informational,
+                    ),
+                    _ => session.start_response_writer(
+                        &connection, stream, &competing, false,
+                    ).map(|_| ()),
+                };
+                assert!(matches!(result, Err(NativeH3SessionError::InvalidState(_))),
+                    "competing response path {path}");
+                assert_eq!(snapshot(&connection), before);
+                assert_eq!(session.request_writers.len(), 1);
+            }
+            drop(writer);
+            assert_eq!(sender.prepared_section_count(), 0);
+            let abandoned = snapshot(&connection);
+            assert!(session.send_response(
+                &cx, &mut connection, stream, &competing, Bytes::new(),
+            ).is_err(), "a dropped owner cannot be bypassed before its reset is reaped");
+            assert_eq!(snapshot(&connection), abandoned);
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+            assert!(session.request_writers.is_empty());
+            assert_eq!(sender.outstanding_reference_count(), 0);
+            assert_eq!(connection.inner().streams().stream(stream).unwrap().send_reset,
+                Some((H3_REQUEST_CANCELLED, 0)));
+        }
+
+        #[test]
+        fn abandoned_response_owners_release_only_unexposed_dynamic_references() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = fixture(&cx, true, 4096);
+            let head = H3ResponseHead::new(200, vec![
+                ("content-type".to_owned(), "application/owned-response+json".to_owned()),
+            ]).unwrap();
+            ready_response(&cx, &mut session, &mut connection, StreamId(0));
+            session.send_response(&cx, &mut connection, StreamId(0), &head, Bytes::new()).unwrap();
+            let _warm = collect_wire(&cx, &mut connection, StreamId(0));
+            let mut peer = receive_insertions(&cx, &mut session, &mut connection, 4096);
+            let mut feedback_offset = 0;
+            feedback(&cx, &mut session, &mut connection, &mut peer,
+                QpackDecoderInstruction::InsertCountIncrement { increment: 1 }, &mut feedback_offset);
+            let sender = session.dynamic_send.as_ref().unwrap().clone();
+
+            for (stream, credit) in [(StreamId(4), 0), (StreamId(8), 1)] {
+                ready_response(&cx, &mut session, &mut connection, stream);
+                let mut writer = session
+                    .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                    .unwrap();
+                assert_eq!(sender.prepared_section_count(), 1);
+                connection.inner_mut().set_fresh_stream_send_limit(&cx, stream, credit).unwrap();
+                assert!(writer.poll_flush(
+                    &cx, &mut connection, &mut TaskContext::from_waker(Waker::noop()),
+                ).is_pending());
+                assert_eq!(connection.pending_stream_data_bytes(stream), credit as usize);
+                assert_eq!(sender.prepared_section_count(), usize::from(credit == 0));
+                assert_eq!(sender.outstanding_section_count(stream), credit as usize);
+                drop(writer);
+                assert_eq!(sender.prepared_section_count(), 0);
+                assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+                assert!(!session.request_writers.contains_key(&stream));
+                assert_eq!(session.state.active_request_stream_count(), 0);
+                assert_eq!(connection.pending_stream_data_bytes(stream), 0);
+                assert_eq!(connection.inner().streams().stream(stream).unwrap().send_reset,
+                    Some((H3_REQUEST_CANCELLED, credit)));
+                assert_eq!(sender.outstanding_reference_count(), credit as usize,
+                    "a local reset must preserve references already exposed to QUIC");
+                if credit != 0 {
+                    feedback(&cx, &mut session, &mut connection, &mut peer,
+                        QpackDecoderInstruction::StreamCancellation { stream_id: stream.0 },
+                        &mut feedback_offset);
+                    assert_eq!(sender.outstanding_section_count(stream), 0);
+                    assert_eq!(sender.outstanding_reference_count(), 0);
+                }
+            }
+        }
+        #[test]
+        fn cloned_session_refuses_duplicate_response_and_reaps_dropped_sibling_owner() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::task::Wake;
+
+            #[derive(Default)]
+            struct WakeCount(AtomicUsize);
+
+            impl Wake for WakeCount {
+                fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+                fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            }
+
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = fixture(&cx, true, 4096);
+            let head = H3ResponseHead::new(200, vec![
+                ("content-type".to_owned(), "application/cloned-response+json".to_owned()),
+            ]).unwrap();
+            ready_response(&cx, &mut session, &mut connection, StreamId(0));
+            session.send_response(&cx, &mut connection, StreamId(0), &head, Bytes::new()).unwrap();
+            let _warm = collect_wire(&cx, &mut connection, StreamId(0));
+            let mut peer = receive_insertions(&cx, &mut session, &mut connection, 4096);
+            let mut feedback_offset = 0;
+            feedback(&cx, &mut session, &mut connection, &mut peer,
+                QpackDecoderInstruction::InsertCountIncrement { increment: 1 }, &mut feedback_offset);
+
+            let stream = StreamId(4);
+            receive_request_head(&cx, &mut connection, stream, false);
+            assert!(matches!(
+                next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::RequestHeaders { stream_id, .. } if stream_id == stream
+            ));
+            // Clone before creation, so sharing only owners that existed at
+            // clone time would miss both duplicate prevention and cleanup.
+            let mut sibling = session.clone();
+            let mut writer = sibling
+                .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                .unwrap();
+            let sender = session.dynamic_send.as_ref().unwrap().clone();
+            let credit = connection.inner().streams().connection_send_remaining();
+            assert_eq!(sender.prepared_section_count(), 1);
+            assert_eq!(sender.queued_encoder_bytes(), 0);
+            assert_eq!(session.request_writers.len(), 1);
+            assert!(session
+                .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                .is_err());
+            assert!(session.send_response(
+                &cx, &mut connection, stream, &head, Bytes::new(),
+            ).is_err());
+            assert_eq!(sender.prepared_section_count(), 1);
+            assert_eq!(sender.outstanding_reference_count(), 0);
+            assert_eq!(sender.queued_encoder_bytes(), 0);
+            assert_eq!(connection.pending_stream_data_bytes(stream), 0);
+            assert_eq!(connection.inner().streams().stream(stream).unwrap().send_offset, 0);
+            assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+            connection.inner_mut().set_fresh_stream_send_limit(&cx, stream, 0).unwrap();
+            let counter = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = TaskContext::from_waker(&waker);
+            assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+            assert!(writer.poll_flush(&cx, &mut connection, &mut task).is_pending());
+            counter.0.store(0, Ordering::SeqCst);
+            drop(sibling);
+            drop(writer);
+            assert!(counter.0.load(Ordering::SeqCst) > 0);
+            assert_eq!(sender.prepared_section_count(), 0);
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+            assert!(session.request_writers.is_empty());
+            assert_eq!(session.state.active_request_stream_count(), 0);
+            assert!(!session.incoming.contains_key(&stream));
+            assert_eq!(connection.inner().streams().stream(stream).unwrap().send_reset,
+                Some((H3_REQUEST_CANCELLED, 0)));
+            assert_eq!(connection.inner().streams().stream(stream).unwrap().receive_stopped_error_code,
+                Some(H3_REQUEST_CANCELLED));
+            assert_eq!(sender.outstanding_reference_count(), 0);
+        }
+
+
+        #[test]
         fn abandoned_request_writers_release_only_unexposed_dynamic_references() {
             let cx = Cx::for_testing();
             let (mut session, mut connection) = fixture(&cx, false, 4096);
@@ -3384,6 +3582,610 @@
                         NativeH3Event::Finished { stream_id: successor },
                     );
                     assert_eq!(session.state.active_request_stream_count(), 0);
+                }
+            }
+        }
+
+        fn pump_connect_events(
+            cx: &Cx,
+            from: &mut QuicConnection,
+            to: &mut QuicConnection,
+            receiver: &mut NativeH3Session,
+            tick: &mut u64,
+        ) -> Vec<NativeH3Event> {
+            let mut events = Vec::new();
+            for _ in 0..512 {
+                let moved = crate::net::quic_native::pump_app_data(cx, from, to, 40, *tick)
+                    .expect("deliver native QUIC application data");
+                *tick += 1;
+                while let Some(event) = receiver.next_event(cx, to).unwrap() {
+                    events.push(event);
+                }
+                if moved == 0 {
+                    return events;
+                }
+            }
+            panic!("native QUIC pump did not quiesce");
+        }
+
+        fn flush_connect_request(
+            cx: &Cx,
+            writer: &mut NativeH3RequestWriter,
+            connection: &mut QuicConnection,
+            expected: NativeH3RequestWriteEvent,
+        ) {
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert_eq!(
+                writer.poll_flush(cx, connection, &mut task),
+                Poll::Ready(Ok(Some(expected))),
+            );
+        }
+
+        fn flush_connect_response(
+            cx: &Cx,
+            writer: &mut NativeH3ResponseBodyWriter,
+            connection: &mut QuicConnection,
+            expected: NativeH3ResponseWriteEvent,
+        ) {
+            let mut task = TaskContext::from_waker(Waker::noop());
+            assert_eq!(
+                writer.poll_flush(cx, connection, &mut task),
+                Poll::Ready(Ok(Some(expected))),
+            );
+        }
+
+        fn assert_connect_data(events: Vec<NativeH3Event>, stream: StreamId, expected: &[u8]) {
+            let mut received = Vec::new();
+            for event in events {
+                let NativeH3Event::Data { stream_id, bytes } = event else {
+                    panic!("DATA must remain available before FIN: {event:?}");
+                };
+                assert_eq!(stream_id, stream);
+                assert!(!bytes.is_empty());
+                assert!(bytes.len() <= 3, "receive chunks obey the configured bound");
+                received.extend_from_slice(&bytes);
+            }
+            assert_eq!(received, expected);
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)]
+        fn negotiated_connect_exchanges_data_and_half_closes_over_native_quic() {
+            for server_fin_first in [false, true] {
+                let cx = Cx::for_testing();
+                let config = NativeQuicConnectionConfig {
+                    max_local_bidi: 16,
+                    max_local_uni: 8,
+                    send_window: 1 << 18,
+                    recv_window: 1 << 18,
+                    connection_send_limit: 4 << 20,
+                    connection_recv_limit: 4 << 20,
+                    ..NativeQuicConnectionConfig::default()
+                };
+                let mut client = QuicConnection::client(config);
+                let mut server = QuicConnection::server(config);
+                client.record_verified_server_identity();
+                crate::net::quic_native::establish_loopback(&cx, &mut client, &mut server)
+                    .expect("establish native QUIC pair");
+                let mut client_h3 = NativeH3Session::client();
+                let mut server_h3 = NativeH3Session::server();
+                for session in [&mut client_h3, &mut server_h3] {
+                    session
+                        .enable_streaming_receive(NonZeroUsize::new(3).unwrap())
+                        .unwrap();
+                }
+                let client_settings = H3Settings::default();
+                let server_settings = H3Settings {
+                    enable_connect_protocol: Some(true),
+                    ..H3Settings::default()
+                };
+                client_h3
+                    .initialize(&cx, &mut client, client_settings.clone())
+                    .unwrap();
+                server_h3
+                    .initialize(&cx, &mut server, server_settings.clone())
+                    .unwrap();
+                let mut tick = 0;
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::Settings(client_settings)],
+                );
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::Settings(server_settings)],
+                );
+
+                let head = request();
+                let mut upload = client_h3
+                    .start_request_writer(&cx, &mut client, &head, false)
+                    .unwrap();
+                let stream = upload.stream_id();
+                assert_eq!(stream, StreamId(0));
+                flush_connect_request(
+                    &cx, &mut upload, &mut client,
+                    NativeH3RequestWriteEvent::Headers { end_stream: false },
+                );
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::RequestHeaders {
+                        stream_id: stream,
+                        head: head.clone(),
+                    }],
+                );
+                let accepted = H3ResponseHead::new(200, Vec::new()).unwrap();
+                let mut response = server_h3
+                    .start_response_body_writer(&cx, &mut server, stream, &accepted, false)
+                    .unwrap();
+                flush_connect_response(
+                    &cx, &mut response, &mut server,
+                    NativeH3ResponseWriteEvent::Headers { end_stream: false },
+                );
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::ResponseHeaders {
+                        stream_id: stream,
+                        head: accepted.clone(),
+                    }],
+                );
+
+                // Both directions carry bytes while both public writers remain open.
+                let client_bytes = b"client tunnel bytes";
+                upload.queue_data(Bytes::from_static(client_bytes)).unwrap();
+                flush_connect_request(
+                    &cx, &mut upload, &mut client,
+                    NativeH3RequestWriteEvent::Data { payload_bytes: client_bytes.len() },
+                );
+                assert_connect_data(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    stream, client_bytes,
+                );
+                let server_bytes = b"server tunnel bytes";
+                response.queue_data(Bytes::from_static(server_bytes)).unwrap();
+                flush_connect_response(
+                    &cx, &mut response, &mut server,
+                    NativeH3ResponseWriteEvent::Data { payload_bytes: server_bytes.len() },
+                );
+                assert_connect_data(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    stream, server_bytes,
+                );
+                assert!(!upload.is_finished());
+                assert!(!response.is_finished());
+
+                if server_fin_first {
+                    response.finish().unwrap();
+                    flush_connect_response(
+                        &cx, &mut response, &mut server, NativeH3ResponseWriteEvent::Finished,
+                    );
+                    assert_eq!(
+                        pump_connect_events(
+                            &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                        ),
+                        vec![NativeH3Event::Finished { stream_id: stream }],
+                    );
+                    assert!(!upload.is_finished());
+                    let after_fin = b"request after response FIN";
+                    upload.queue_data(Bytes::from_static(after_fin)).unwrap();
+                    flush_connect_request(
+                        &cx, &mut upload, &mut client,
+                        NativeH3RequestWriteEvent::Data { payload_bytes: after_fin.len() },
+                    );
+                    assert_connect_data(
+                        pump_connect_events(
+                            &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                        ),
+                        stream, after_fin,
+                    );
+                    upload.finish().unwrap();
+                    flush_connect_request(
+                        &cx, &mut upload, &mut client, NativeH3RequestWriteEvent::Finished,
+                    );
+                    assert_eq!(
+                        pump_connect_events(
+                            &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                        ),
+                        vec![NativeH3Event::Finished { stream_id: stream }],
+                    );
+                } else {
+                    upload.finish().unwrap();
+                    flush_connect_request(
+                        &cx, &mut upload, &mut client, NativeH3RequestWriteEvent::Finished,
+                    );
+                    assert_eq!(
+                        pump_connect_events(
+                            &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                        ),
+                        vec![NativeH3Event::Finished { stream_id: stream }],
+                    );
+                    assert!(!response.is_finished());
+                    let after_fin = b"response after request FIN";
+                    response.queue_data(Bytes::from_static(after_fin)).unwrap();
+                    flush_connect_response(
+                        &cx, &mut response, &mut server,
+                        NativeH3ResponseWriteEvent::Data { payload_bytes: after_fin.len() },
+                    );
+                    assert_connect_data(
+                        pump_connect_events(
+                            &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                        ),
+                        stream, after_fin,
+                    );
+                    response.finish().unwrap();
+                    flush_connect_response(
+                        &cx, &mut response, &mut server, NativeH3ResponseWriteEvent::Finished,
+                    );
+                    assert_eq!(
+                        pump_connect_events(
+                            &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                        ),
+                        vec![NativeH3Event::Finished { stream_id: stream }],
+                    );
+                }
+                assert!(upload.is_finished());
+                assert!(response.is_finished());
+                assert!(client_h3.next_event(&cx, &mut client).unwrap().is_none());
+                assert!(server_h3.next_event(&cx, &mut server).unwrap().is_none());
+                assert_eq!(client_h3.state.active_request_stream_count(), 0);
+                assert_eq!(server_h3.state.active_request_stream_count(), 0);
+
+                // Dropping an unfinished public response cancels only its tunnel.
+                let mut cancelled_upload = client_h3
+                    .start_request_writer(&cx, &mut client, &head, false)
+                    .unwrap();
+                let cancelled = cancelled_upload.stream_id();
+                assert_eq!(cancelled, StreamId(4));
+                flush_connect_request(
+                    &cx, &mut cancelled_upload, &mut client,
+                    NativeH3RequestWriteEvent::Headers { end_stream: false },
+                );
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::RequestHeaders { stream_id: cancelled, head }],
+                );
+                let mut cancelled_response = server_h3
+                    .start_response_body_writer(&cx, &mut server, cancelled, &accepted, false)
+                    .unwrap();
+                flush_connect_response(
+                    &cx, &mut cancelled_response, &mut server,
+                    NativeH3ResponseWriteEvent::Headers { end_stream: false },
+                );
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::ResponseHeaders {
+                        stream_id: cancelled,
+                        head: accepted.clone(),
+                    }],
+                );
+                let response_final_size =
+                    server.inner().streams().stream(cancelled).unwrap().send_offset;
+                let request_final_size =
+                    client.inner().streams().stream(cancelled).unwrap().send_offset;
+                cancelled_response.queue_data(Bytes::from_static(b"never sent")).unwrap();
+                drop(cancelled_response);
+                assert!(server_h3.next_event(&cx, &mut server).unwrap().is_none());
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::StreamReset {
+                        stream_id: cancelled,
+                        error_code: H3_REQUEST_CANCELLED,
+                        final_size: response_final_size,
+                    }],
+                );
+                let mut task = TaskContext::from_waker(Waker::noop());
+                assert_eq!(
+                    cancelled_upload.poll_flush(&cx, &mut client, &mut task),
+                    Poll::Ready(Err(NativeH3SessionError::InvalidState(
+                        "incremental request has been cancelled",
+                    ))),
+                );
+                drop(cancelled_upload);
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    vec![NativeH3Event::StreamReset {
+                        stream_id: cancelled,
+                        error_code: H3_REQUEST_CANCELLED,
+                        final_size: request_final_size,
+                    }],
+                );
+                assert_eq!(client_h3.state.active_request_stream_count(), 0);
+                assert_eq!(server_h3.state.active_request_stream_count(), 0);
+
+                // Ordinary CONNECT remains usable on the same connection after cancellation.
+                let ordinary = H3RequestHead::new(
+                    H3PseudoHeaders {
+                        method: Some("CONNECT".to_owned()),
+                        authority: Some("example.test:443".to_owned()),
+                        ..H3PseudoHeaders::default()
+                    },
+                    Vec::new(),
+                ).unwrap();
+                let successor = client_h3
+                    .send_request(&cx, &mut client, &ordinary, Bytes::new())
+                    .unwrap();
+                assert_eq!(successor, StreamId(8));
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut client, &mut server, &mut server_h3, &mut tick,
+                    ),
+                    vec![
+                        NativeH3Event::RequestHeaders { stream_id: successor, head: ordinary },
+                        NativeH3Event::Finished { stream_id: successor },
+                    ],
+                );
+                server_h3
+                    .send_response(&cx, &mut server, successor, &accepted, Bytes::new())
+                    .unwrap();
+                assert_eq!(
+                    pump_connect_events(
+                        &cx, &mut server, &mut client, &mut client_h3, &mut tick,
+                    ),
+                    vec![
+                        NativeH3Event::ResponseHeaders { stream_id: successor, head: accepted },
+                        NativeH3Event::Finished { stream_id: successor },
+                    ],
+                );
+            }
+        }
+    }
+
+    mod owned_response_writers {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        fn received_head(
+            cx: &Cx,
+            session: &mut NativeH3Session,
+            connection: &mut QuicConnection,
+            stream: StreamId,
+            fin: bool,
+        ) -> u64 {
+            let size = receive_request_head(cx, connection, stream, fin);
+            assert!(matches!(
+                next_field_limit_event(cx, session, connection),
+                NativeH3Event::RequestHeaders { stream_id, .. } if stream_id == stream
+            ));
+            if fin {
+                assert_eq!(
+                    next_field_limit_event(cx, session, connection),
+                    NativeH3Event::Finished { stream_id: stream },
+                );
+            }
+            size
+        }
+
+        #[test]
+        fn response_owner_requires_received_headers_without_reset_or_local_stop() {
+            for refusal in 0..5 {
+                let cx = Cx::for_testing();
+                let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+                let stream = StreamId(0);
+                let response = H3ResponseHead::new(200, Vec::new()).unwrap();
+                assert!(session
+                    .start_response_body_writer(&cx, &mut connection, stream, &response, false)
+                    .is_err(), "an unknown QUIC stream is not a request");
+                assert!(connection.inner().streams().stream(stream).is_err());
+                match refusal {
+                    0 => {
+                        connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+                    }
+                    1 => {
+                        // Transport bytes alone do not establish a decoded request.
+                        receive_request_head(&cx, &mut connection, stream, false);
+                    }
+                    2 => {
+                        connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+                        connection.stop_stream_receiving(&cx, stream, H3_REQUEST_CANCELLED).unwrap();
+                        assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+                        assert!(session.terminal_streams.contains(stream));
+                        assert!(!session.state.request_stream_lacks_initial_headers(stream.0));
+                    }
+                    3 => {
+                        let final_size = received_head(&cx, &mut session, &mut connection, stream, true);
+                        connection.inner_mut().reset_stream_receive(
+                            &cx, stream, H3_REQUEST_CANCELLED, final_size,
+                        ).unwrap();
+                    }
+                    _ => {
+                        received_head(&cx, &mut session, &mut connection, stream, false);
+                        session.reject_malformed_request(stream).unwrap();
+                        assert!(session.rejected_requests.iter().any(|(id, _)| *id == stream));
+                    }
+                }
+                let credit = connection.inner().streams().connection_send_remaining();
+                assert!(session
+                    .start_response_body_writer(&cx, &mut connection, stream, &response, false)
+                    .is_err(), "refusal case {refusal}");
+                assert!(session.request_writers.is_empty());
+                assert_eq!(connection.pending_stream_data_bytes(stream), 0);
+                let state = connection.inner().streams().stream(stream).unwrap();
+                assert_eq!(state.send_offset, 0);
+                assert!(state.send_reset.is_none(), "admission must not perform cleanup");
+                assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+            }
+        }
+
+        #[test]
+        fn response_owner_validates_mutable_heads_and_caller_before_admission() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+            let stream = StreamId(0);
+            received_head(&cx, &mut session, &mut connection, stream, false);
+            let credit = connection.inner().streams().connection_send_remaining();
+            for head in [
+                H3ResponseHead { status: 99, headers: Vec::new() },
+                H3ResponseHead { status: 200, headers: vec![("X-Upper".to_owned(), "bad".to_owned())] },
+                H3ResponseHead { status: 200, headers: vec![("x-value".to_owned(), "bad\r\nvalue".to_owned())] },
+                H3ResponseHead { status: 200, headers: vec![(":path".to_owned(), "/".to_owned())] },
+                H3ResponseHead::new(103, Vec::new()).unwrap(),
+            ] {
+                assert!(session
+                    .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                    .is_err());
+                assert!(session.request_writers.is_empty());
+                assert_eq!(connection.pending_stream_data_bytes(stream), 0);
+                assert_eq!(connection.inner().streams().stream(stream).unwrap().send_offset, 0);
+                assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+            }
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            assert_eq!(
+                session.start_response_body_writer(
+                    &cancelled, &mut connection, stream, &head, false,
+                ).unwrap_err(),
+                NativeH3SessionError::Transport(NativeQuicConnectionError::Cancelled),
+            );
+            assert!(session.request_writers.is_empty());
+            assert_eq!(connection.inner().streams().stream(stream).unwrap().send_offset, 0);
+            assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+            connection.inner_mut().set_fresh_stream_send_limit(&cx, stream, 0).unwrap();
+            let mut writer = session
+                .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                .expect("zero credit delays polling, not response ownership");
+            assert!(writer.poll_flush(
+                &cx, &mut connection, &mut TaskContext::from_waker(Waker::noop()),
+            ).is_pending());
+            writer.cancel(&cx, &mut connection).unwrap();
+            drop(writer);
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+            assert!(session.request_writers.is_empty());
+            assert_eq!(session.state.active_request_stream_count(), 0);
+        }
+
+        #[test]
+        fn response_owner_capacity_survives_request_fin_and_recovers_after_drop() {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let first = StreamId(0);
+            let second = StreamId(4);
+            received_head(&cx, &mut session, &mut connection, first, true);
+            let first_writer = session
+                .start_response_body_writer(&cx, &mut connection, first, &head, false)
+                .unwrap();
+            received_head(&cx, &mut session, &mut connection, second, true);
+            assert_eq!(session.state.active_request_stream_count(), 0);
+            assert!(matches!(
+                session.start_response_body_writer(&cx, &mut connection, second, &head, true),
+                Err(NativeH3SessionError::InvalidState(_)),
+            ), "request FIN must not release an unfinished response owner");
+            assert_eq!(session.request_writers.len(), 1);
+            assert_eq!(connection.pending_stream_data_bytes(second), 0);
+            assert_eq!(connection.inner().streams().stream(second).unwrap().send_offset, 0);
+            drop(first_writer);
+            let mut second_writer = session
+                .start_response_body_writer(&cx, &mut connection, second, &head, true)
+                .expect("admission reaps abandoned response ownership first");
+            assert_eq!(session.request_writers.len(), 1);
+            assert!(!session.request_writers.contains_key(&first));
+            assert!(session.request_writers.contains_key(&second));
+            assert_eq!(
+                connection.inner().streams().stream(first).unwrap().send_reset,
+                Some((H3_REQUEST_CANCELLED, 0)),
+            );
+            assert_eq!(
+                second_writer.poll_flush(
+                    &cx, &mut connection, &mut TaskContext::from_waker(Waker::noop()),
+                ),
+                Poll::Ready(Ok(Some(NativeH3ResponseWriteEvent::Headers { end_stream: true }))),
+            );
+            assert!(second_writer.is_finished());
+            drop(second_writer);
+            assert_eq!(session.next_event(&cx, &mut connection).unwrap(), None);
+            assert!(session.request_writers.is_empty());
+            assert!(connection.inner().streams().stream(second).unwrap().send_reset.is_none());
+            assert!(session
+                .start_response_body_writer(&cx, &mut connection, second, &head, false)
+                .is_err(), "completed response FIN cannot be reopened after reaping");
+        }
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+
+        #[test]
+        fn response_owner_drop_wakes_session_and_masks_only_bounded_cleanup() {
+            for credit in [0, 1] {
+                for termination in 0..3 {
+                    let cx = Cx::for_testing();
+                    let driver_cx = Cx::for_testing();
+                    let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+                    let stream = StreamId(0);
+                    received_head(&cx, &mut session, &mut connection, stream, false);
+                    let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+                    let mut writer = session
+                        .start_response_body_writer(&cx, &mut connection, stream, &head, false)
+                        .unwrap();
+                    connection.inner_mut().set_fresh_stream_send_limit(&cx, stream, credit).unwrap();
+                    let counter = Arc::new(WakeCount::default());
+                    let waker = Waker::from(Arc::clone(&counter));
+                    let mut task = TaskContext::from_waker(&waker);
+                    assert!(session.poll_event(&cx, &mut connection, &mut task).is_pending());
+                    assert!(writer.poll_flush(&cx, &mut connection, &mut task).is_pending());
+                    assert_eq!(connection.pending_stream_data_bytes(stream), credit as usize);
+                    assert_eq!(connection.inner().streams().stream(stream).unwrap().send_offset, credit);
+                    counter.0.store(0, Ordering::SeqCst);
+                    if termination != 0 {
+                        cx.set_cancel_requested(true);
+                        if termination == 1 {
+                            assert_eq!(
+                                writer.poll_flush(&cx, &mut connection, &mut task),
+                                Poll::Ready(Err(NativeH3SessionError::Transport(
+                                    NativeQuicConnectionError::Cancelled,
+                                ))),
+                            );
+                        } else {
+                            writer.cancel(&cx, &mut connection).unwrap();
+                        }
+                        assert!(!writer.has_pending_write());
+                    }
+                    drop(writer);
+                    assert!(counter.0.load(Ordering::SeqCst) > 0, "the event owner must wake");
+                    let result = session.next_event(&cx, &mut connection);
+                    if termination == 0 {
+                        assert_eq!(result.unwrap(), None);
+                    } else {
+                        assert_eq!(result.unwrap_err(), NativeH3SessionError::Transport(
+                            NativeQuicConnectionError::Cancelled,
+                        ));
+                        assert!(cx.checkpoint().is_err(), "cleanup must restore the caller's mask");
+                    }
+                    let state = connection.inner().streams().stream(stream).unwrap();
+                    assert_eq!(state.send_reset, Some((H3_REQUEST_CANCELLED, credit)));
+                    assert_eq!(state.receive_stopped_error_code, Some(H3_REQUEST_CANCELLED));
+                    assert_eq!(connection.pending_stream_data_bytes(stream), 0);
+                    assert!(session.request_writers.is_empty());
+                    // A cancelled attempt has queued cleanup; a live session
+                    // owner consumes the local receive-stop edge.
+                    assert_eq!(session.next_event(&driver_cx, &mut connection).unwrap(), None);
+                    assert_eq!(session.state.active_request_stream_count(), 0);
+                    assert!(!session.incoming.contains_key(&stream));
+                    assert_eq!(session.next_event(&driver_cx, &mut connection).unwrap(), None);
                 }
             }
         }
