@@ -49,7 +49,7 @@ use super::h3_native::{
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
     QpackBlockedStreamStatus, QpackDecoderInstruction, QpackEncoderInstruction,
     QpackFieldSectionMetadata, QpackInstructionStreamState,
-    header_fields_to_request_head,
+    header_fields_to_request_head_with_settings, validate_request_head_with_settings,
     header_fields_to_response_head, qpack_decode_decoder_instruction,
     qpack_decode_encoder_instruction, qpack_decode_field_section_with_context,
     qpack_decode_field_section_with_metadata,
@@ -996,6 +996,9 @@ pub struct NativeH3Session {
     // Our advertised receive limit, not a limit learned from peer SETTINGS.
     max_field_section_size: Option<u64>,
     peer_max_field_section_size: Arc<AtomicU64>,
+    // Extended CONNECT is authorized independently in each direction.
+    local_enable_connect_protocol: bool,
+    peer_enable_connect_protocol: bool,
     local_control_stream: Option<StreamId>,
     dynamic_receive: Option<NativeH3DynamicReceive>,
     dynamic_send: Option<NativeH3DynamicSend>,
@@ -1050,6 +1053,8 @@ impl NativeH3Session {
             local_control: H3ControlState::new(),
             max_field_section_size: None,
             peer_max_field_section_size: Arc::new(AtomicU64::new(u64::MAX)),
+            local_enable_connect_protocol: false,
+            peer_enable_connect_protocol: false,
             local_control_stream: None,
             dynamic_receive: None,
             dynamic_send: None,
@@ -1270,6 +1275,7 @@ impl NativeH3Session {
             None
         };
         let max_field_section_size = settings.max_field_section_size;
+        let enable_connect_protocol = settings.enable_connect_protocol == Some(true);
 
         let control_stream = connection.open_uni_stream(cx)?;
         let settings_frame = self.local_control.build_local_settings(settings)?;
@@ -1281,6 +1287,7 @@ impl NativeH3Session {
         self.local_control_stream = Some(control_stream);
         self.dynamic_receive = dynamic_receive;
         self.max_field_section_size = max_field_section_size;
+        self.local_enable_connect_protocol = enable_connect_protocol;
         if self.dynamic_receive.is_some() && self.streaming_receive.is_none() {
             self.enable_streaming_receive(
                 NonZeroUsize::new(NATIVE_H3_DYNAMIC_RECEIVE_CHUNK_BYTES)
@@ -1298,6 +1305,10 @@ impl NativeH3Session {
     /// remaining send credit. A larger request fails with the flow-control
     /// error and opens no stream. The peer's advertised uncompressed field
     /// section limit is checked before encoding or opening a stream.
+    ///
+    /// Extended CONNECT requires the peer's SETTINGS_ENABLE_CONNECT_PROTOCOL=1
+    /// to have been received. Refusal opens no stream. Ordinary CONNECT remains
+    /// usable without that setting.
     pub fn send_request(
         &mut self,
         cx: &Cx,
@@ -1327,7 +1338,7 @@ impl NativeH3Session {
             ));
         }
 
-        self.ensure_peer_request_field_limit(head)?;
+        self.ensure_request_admission(head)?;
         let (field_section, mut qpack_section) = self.prepare_request_head(
             StreamId(self.next_local_request_stream_id), head,
         )?;
@@ -1382,6 +1393,10 @@ impl NativeH3Session {
     /// session event poll or request start. Dropping a writer before FIN
     /// schedules RESET_STREAM and STOP_SENDING; continue driving the session
     /// and transport to transmit them.
+    ///
+    /// Extended CONNECT requires the peer's SETTINGS_ENABLE_CONNECT_PROTOCOL=1
+    /// to have been received. Refusal opens no stream. Ordinary CONNECT remains
+    /// usable without that setting.
     pub fn start_request_writer(
         &mut self,
         cx: &Cx,
@@ -1423,7 +1438,7 @@ impl NativeH3Session {
                 "incremental request writer limit reached",
             ));
         }
-        self.ensure_peer_request_field_limit(head)?;
+        self.ensure_request_admission(head)?;
         let (field_section, qpack_section) = self.prepare_request_head(
             StreamId(self.next_local_request_stream_id), head,
         )?;
@@ -2640,6 +2655,8 @@ impl NativeH3Session {
                         if let Some(sender) = &self.dynamic_send {
                             sender.configure_peer(&settings)?;
                         }
+                        self.peer_enable_connect_protocol =
+                            settings.enable_connect_protocol == Some(true);
                         self.peer_max_field_section_size.store(
                             settings.max_field_section_size.unwrap_or(u64::MAX),
                             Ordering::Release,
@@ -2670,7 +2687,10 @@ impl NativeH3Session {
                         else {
                             return Ok(());
                         };
-                        let Ok(head) = header_fields_to_request_head(&fields) else {
+                        let Ok(head) = header_fields_to_request_head_with_settings(
+                            &fields,
+                            self.local_enable_connect_protocol,
+                        ) else {
                             return self.reject_malformed_request(stream_id);
                         };
                         self.state.on_request_stream_frame(
@@ -2851,17 +2871,21 @@ impl NativeH3Session {
         Ok(())
     }
 
-    fn ensure_peer_request_field_limit(
+    fn ensure_request_admission(
         &self,
         head: &H3RequestHead,
     ) -> Result<(), NativeH3SessionError> {
-        // These are the pseudo-fields emitted by the static request encoder.
+        // Validate before allocating a stream or retaining QPACK references.
+        // Our own SETTINGS never authorize requests sent to the peer.
+        validate_request_head_with_settings(head, self.peer_enable_connect_protocol)?;
+        // These are the pseudo-fields emitted by the request encoder.
         // Count occurrences and UTF-8 bytes without cloning header strings.
         let pseudo = [
             (":method", head.pseudo.method.as_deref()),
             (":scheme", head.pseudo.scheme.as_deref()),
             (":path", head.pseudo.path.as_deref()),
             (":authority", head.pseudo.authority.as_deref()),
+            (":protocol", head.pseudo.protocol.as_deref()),
         ];
         let fields = pseudo
             .into_iter()

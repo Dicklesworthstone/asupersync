@@ -3137,3 +3137,254 @@
             }
         }
     }
+
+    mod extended_connect {
+        use super::*;
+
+        fn request() -> H3RequestHead {
+            H3RequestHead::new_with_settings(
+                H3PseudoHeaders {
+                    method: Some("CONNECT".to_owned()),
+                    scheme: Some("https".to_owned()),
+                    authority: Some("example.test:443".to_owned()),
+                    path: Some("/socket".to_owned()),
+                    protocol: Some("websocket".to_owned()),
+                    ..H3PseudoHeaders::default()
+                },
+                Vec::new(),
+                true,
+            )
+            .unwrap()
+        }
+
+        fn fixture(
+            cx: &Cx,
+            server: bool,
+            local_enable: bool,
+            streaming: bool,
+            dynamic_send: bool,
+        ) -> (NativeH3Session, QuicConnection) {
+            let mut connection = if server {
+                QuicConnection::server(NativeQuicConnectionConfig::default())
+            } else {
+                QuicConnection::client(NativeQuicConnectionConfig::default())
+            };
+            connection.begin_handshake(cx).unwrap();
+            connection.mark_handshake_keys_available(cx).unwrap();
+            connection.mark_app_keys_available(cx).unwrap();
+            if !server {
+                connection.record_verified_server_identity();
+            }
+            connection.confirm_handshake(cx).unwrap();
+            let mut session = if server {
+                NativeH3Session::server()
+            } else {
+                NativeH3Session::client()
+            };
+            if streaming {
+                session
+                    .enable_streaming_receive(NonZeroUsize::new(8).unwrap())
+                    .unwrap();
+            }
+            if dynamic_send {
+                session
+                    .enable_dynamic_qpack_encoder(NonZeroUsize::new(256).unwrap())
+                    .unwrap();
+            }
+            session
+                .initialize(
+                    cx,
+                    &mut connection,
+                    H3Settings {
+                        enable_connect_protocol: Some(local_enable),
+                        ..H3Settings::default()
+                    },
+                )
+                .unwrap();
+            (session, connection)
+        }
+
+        fn receive_settings(
+            cx: &Cx,
+            session: &mut NativeH3Session,
+            connection: &mut QuicConnection,
+            enable: Option<bool>,
+            field_limit: Option<u64>,
+        ) {
+            let stream = StreamId(if session.role == H3EndpointRole::Server { 2 } else { 3 });
+            let settings = H3Settings {
+                enable_connect_protocol: enable,
+                max_field_section_size: field_limit,
+                qpack_max_table_capacity: Some(256),
+                ..H3Settings::default()
+            };
+            let mut wire = vec![0];
+            H3Frame::Settings(settings.clone()).encode(&mut wire).unwrap();
+            connection.inner_mut().accept_remote_stream(cx, stream).unwrap();
+            connection
+                .inner_mut()
+                .receive_stream_bytes(cx, stream, 0, Bytes::from(wire), false)
+                .unwrap();
+            assert_eq!(
+                next_field_limit_event(cx, session, connection),
+                NativeH3Event::Settings(settings),
+            );
+        }
+
+        fn send(
+            cx: &Cx,
+            session: &mut NativeH3Session,
+            connection: &mut QuicConnection,
+            head: &H3RequestHead,
+            incremental: bool,
+        ) -> Result<StreamId, NativeH3SessionError> {
+            if incremental {
+                let mut writer = session.start_request_writer(cx, connection, head, true)?;
+                let stream = writer.stream_id();
+                let mut task = TaskContext::from_waker(Waker::noop());
+                assert_eq!(
+                    writer.poll_flush(cx, connection, &mut task),
+                    Poll::Ready(Ok(Some(NativeH3RequestWriteEvent::Headers {
+                        end_stream: true,
+                    }))),
+                );
+                assert!(writer.is_finished());
+                Ok(stream)
+            } else {
+                session.send_request(cx, connection, head, Bytes::new())
+            }
+        }
+
+        fn assert_unallocated(session: &NativeH3Session, connection: &QuicConnection, credit: u64) {
+            assert_eq!(session.next_local_request_stream_id, 0);
+            assert!(session.request_writers.is_empty());
+            assert!(connection.inner().streams().stream(StreamId(0)).is_err());
+            assert_eq!(connection.inner().streams().connection_send_remaining(), credit);
+            if let Some(sender) = &session.dynamic_send {
+                assert_eq!(sender.queued_encoder_bytes(), 0);
+                assert_eq!(sender.outstanding_reference_count(), 0);
+            }
+        }
+
+        #[test]
+        fn outgoing_connect_requires_peer_permission_before_both_send_paths() {
+            for incremental in [false, true] {
+                for dynamic in [false, true] {
+                    for advertised in [None, Some(false), Some(true)] {
+                        let cx = Cx::for_testing();
+                        // Advertising our own support cannot authorize a request to the peer.
+                        let (mut session, mut connection) =
+                            fixture(&cx, false, true, false, dynamic);
+                        let mut head = request();
+                        head.headers.push(("content-type".to_owned(), "application/json".to_owned()));
+                        let credit = connection.inner().streams().connection_send_remaining();
+                        let error = send(&cx, &mut session, &mut connection, &head, incremental)
+                            .unwrap_err();
+                        assert!(matches!(
+                            error,
+                            NativeH3SessionError::Protocol(H3NativeError::InvalidRequestPseudoHeader(_))
+                        ));
+                        assert_unallocated(&session, &connection, credit);
+
+                        receive_settings(&cx, &mut session, &mut connection, advertised, None);
+                        if advertised == Some(true) {
+                            assert_eq!(
+                                send(&cx, &mut session, &mut connection, &head, incremental).unwrap(),
+                                StreamId(0),
+                            );
+                        } else {
+                            let error = send(&cx, &mut session, &mut connection, &head, incremental)
+                                .unwrap_err();
+                            assert!(matches!(
+                                error,
+                                NativeH3SessionError::Protocol(H3NativeError::InvalidRequestPseudoHeader(_))
+                            ));
+                            assert_unallocated(&session, &connection, credit);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn protocol_field_is_counted_before_either_request_path_opens_a_stream() {
+            // Five pseudo fields: 46 + 44 + 44 + 58 + 50 = 242 decoded bytes,
+            // including RFC 9114's 32-byte overhead for each occurrence.
+            for incremental in [false, true] {
+                for limit in [241, 242] {
+                    let cx = Cx::for_testing();
+                    let (mut session, mut connection) =
+                        fixture(&cx, false, false, false, false);
+                    receive_settings(&cx, &mut session, &mut connection, Some(true), Some(limit));
+                    let credit = connection.inner().streams().connection_send_remaining();
+                    let result = send(&cx, &mut session, &mut connection, &request(), incremental);
+                    if limit == 241 {
+                        assert_eq!(result, Err(peer_field_limit_error()));
+                        assert_unallocated(&session, &connection, credit);
+                    } else {
+                        assert_eq!(result, Ok(StreamId(0)));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn received_connect_uses_local_permission_and_preserves_ordinary_connect() {
+            for streaming in [false, true] {
+                for local_enable in [false, true] {
+                    let cx = Cx::for_testing();
+                    let (mut session, mut connection) =
+                        fixture(&cx, true, local_enable, streaming, false);
+                    // The peer advertises the opposite value to expose reversed direction checks.
+                    receive_settings(
+                        &cx, &mut session, &mut connection, Some(!local_enable), None,
+                    );
+                    let head = request();
+                    let stream = StreamId(0);
+                    connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+                    inject_field_frame(
+                        &cx, &mut connection, stream, 0,
+                        qpack_encode_request_field_section(&head).unwrap(), true,
+                    );
+                    let event = next_field_limit_event(&cx, &mut session, &mut connection);
+                    if local_enable {
+                        assert_eq!(event, NativeH3Event::RequestHeaders { stream_id: stream, head });
+                        assert_eq!(
+                            next_field_limit_event(&cx, &mut session, &mut connection),
+                            NativeH3Event::Finished { stream_id: stream },
+                        );
+                    } else {
+                        assert_eq!(event, NativeH3Event::StreamReset {
+                            stream_id: stream,
+                            error_code: H3_MESSAGE_ERROR,
+                            final_size: 0,
+                        });
+                    }
+
+                    let ordinary = H3RequestHead::new(
+                        H3PseudoHeaders {
+                            method: Some("CONNECT".to_owned()),
+                            authority: Some("example.test:443".to_owned()),
+                            ..H3PseudoHeaders::default()
+                        },
+                        Vec::new(),
+                    ).unwrap();
+                    let successor = StreamId(4);
+                    connection.inner_mut().accept_remote_stream(&cx, successor).unwrap();
+                    inject_field_frame(
+                        &cx, &mut connection, successor, 0,
+                        qpack_encode_request_field_section(&ordinary).unwrap(), true,
+                    );
+                    assert_eq!(
+                        next_field_limit_event(&cx, &mut session, &mut connection),
+                        NativeH3Event::RequestHeaders { stream_id: successor, head: ordinary },
+                    );
+                    assert_eq!(
+                        next_field_limit_event(&cx, &mut session, &mut connection),
+                        NativeH3Event::Finished { stream_id: successor },
+                    );
+                    assert_eq!(session.state.active_request_stream_count(), 0);
+                }
+            }
+        }
+    }
