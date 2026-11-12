@@ -493,7 +493,7 @@ fn exact_explorer_enumerates_queued_cancellation_orders_and_replays_them() {
 }
 
 #[test]
-fn exact_explorer_refuses_a_promoted_task_that_keeps_running() {
+fn exact_explorer_never_completes_parked_cancellation_cleanup() {
     let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let report = ExactScheduleExplorer::new(LabConfig::new(92), limits()).explore(|runtime| {
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -512,13 +512,227 @@ fn exact_explorer_refuses_a_promoted_task_that_keeps_running() {
     assert_eq!(report.termination, ExactScheduleSearchTermination::IncompleteRun);
     assert_eq!(report.runs.len(), 1);
     let run = &report.runs[0];
-    assert_eq!(run.termination, ExactScheduleTermination::Unsupported {
-        reason: "promoted cancel dispatch did not retire its task",
-    });
-    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(run.execution.decisions().len(), 1);
+    assert_eq!(run.termination, ExactScheduleTermination::Stalled);
+    let polled = polls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(polled > 0);
+    assert_eq!(run.execution.decisions().len(), polled);
     assert!(!run.lab.quiescent);
-    assert!(run.schedule.is_none(), "partial cancellation cleanup cannot authorize replay completion");
+    assert!(run.schedule.is_none(), "Pending cleanup cannot authorize replay completion");
+}
+
+#[test]
+fn exact_explorer_bounds_self_waking_cancellation_cleanup() {
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut bounded = limits();
+    bounded.max_dispatches_per_run = 3;
+    let report = ExactScheduleExplorer::new(LabConfig::new(94), bounded).explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let polls = Arc::clone(&polls);
+        let (task, handle) = runtime.state.create_task(region, Budget::INFINITE,
+            std::future::poll_fn(move |task_cx| {
+                assert!(crate::Cx::current().unwrap().checkpoint().is_err());
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                task_cx.waker().wake_by_ref();
+                Poll::<()>::Pending
+            }),
+        ).unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        handle.abort();
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::IncompleteRun);
+    let run = &report.runs[0];
+    assert_eq!(run.termination, ExactScheduleTermination::DispatchLimit);
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(run.execution.decisions().len(), 3);
+    assert!(!run.lab.quiescent);
+    assert!(run.schedule.is_none());
+}
+
+#[test]
+fn exact_explorer_rejects_a_revived_copy_with_a_different_winning_priority() {
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let report = ExactScheduleExplorer::new(LabConfig::new(97), limits()).explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let polls = Arc::clone(&polls);
+        let (task, handle) = runtime.state.create_task(region, Budget::INFINITE,
+            std::future::poll_fn(move |task_cx| {
+                let poll = polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(poll < 2, "a rank-changing shadow must reject before the third poll");
+                if poll == 0 {
+                    assert!(crate::Cx::current().unwrap().checkpoint().is_err());
+                }
+                // The first checkpoint promotes this fresh wake to Cancel200.
+                // The second poll makes only a Ready wake, with no new ack.
+                task_cx.waker().wake_by_ref();
+                Poll::<()>::Pending
+            }),
+        ).unwrap();
+        // Promotion leaves a Ready255 copy. The User cancel command and
+        // subsequent cleanup wakes use priority200. Both frontiers name this
+        // same task, so the winning rank must be checked independently.
+        runtime.scheduler.lock().schedule(task, 255);
+        handle.abort();
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::IncompleteRun);
+    assert_eq!(report.runs.len(), 1);
+    let run = &report.runs[0];
+    assert_eq!(run.termination, ExactScheduleTermination::Unsupported {
+        reason: "retained cancel copies change the eligible scheduler frontier",
+    });
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(run.execution.decisions().len(), 2);
+    assert!(!run.lab.quiescent);
+    assert!(run.schedule.is_none(), "a changed ordinary frontier cannot authorize replay");
+}
+
+#[test]
+fn exact_explorer_enumerates_multi_poll_cancellation_cleanup_and_replays_every_order() {
+    fn setup(
+        runtime: &mut LabRuntime,
+        observed: Arc<Mutex<Vec<(u8, u8)>>>,
+    ) -> Vec<crate::runtime::TaskHandle<()>> {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let mut handles = Vec::new();
+        for label in 0..2 {
+            let observed = Arc::clone(&observed);
+            let mut polls = 0;
+            let (task, handle) = runtime.state.create_task(region, Budget::INFINITE,
+                std::future::poll_fn(move |task_cx| {
+                    let cx = crate::Cx::current().expect("lab task context");
+                    assert!(cx.checkpoint().is_err(), "every cleanup poll acknowledges cancellation");
+                    polls += 1;
+                    observed.lock().push((label, polls));
+                    if polls < 3 {
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                }),
+            ).unwrap();
+            runtime.scheduler.lock().schedule(task, 0);
+            handle.abort();
+            handles.push(handle);
+        }
+        handles
+    }
+
+    fn assert_cancelled(handles: &mut [crate::runtime::TaskHandle<()>]) {
+        for handle in handles {
+            assert!(handle.is_finished());
+            assert!(matches!(
+                handle.try_join(),
+                Err(crate::runtime::JoinError::Cancelled(reason))
+                    if reason.kind == crate::types::CancelKind::User
+            ));
+        }
+    }
+
+    let config = LabConfig::new(95);
+    let observations = RefCell::new(Vec::new());
+    let handles = RefCell::new(Vec::new());
+    let report = ExactScheduleExplorer::new(config.clone(), limits()).explore(|runtime| {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        handles.borrow_mut().push(setup(runtime, Arc::clone(&observed)));
+        observations.borrow_mut().push(observed);
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::SearchExhausted);
+    assert_eq!(report.completed_schedules(), 20, "all interleavings of two ordered three-poll cleanups");
+    let orders: BTreeSet<_> = observations.borrow().iter().map(|order| order.lock().clone()).collect();
+    assert_eq!(orders.len(), 20);
+    for order in &orders {
+        for label in 0..2 {
+            assert_eq!(
+                order.iter().filter(|(task, _)| *task == label).map(|(_, poll)| *poll).collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+        }
+    }
+    for (run, original) in report.runs.iter().zip(observations.borrow().iter()) {
+        assert!(run.lab.lab_test_passed(), "actual cleanup must retire without oracle failures");
+        assert_eq!(run.execution.decisions().len(), 6);
+        assert!(run.execution.decisions().iter().all(|decision| {
+            decision.selected().lane() == crate::runtime::scheduler::DispatchLane::Cancel
+        }));
+        let schedule = run.schedule.as_ref().expect("completed multi-poll cancellation receipt");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = LabRuntime::new_with_task_causality(config.clone());
+        let mut replay_handles = setup(&mut runtime, Arc::clone(&observed));
+        let replay = runtime.run_forced_schedule(schedule, ForcedScheduleLimits::new(64, 256))
+            .expect("every cancellation cleanup interleaving must strictly replay");
+        assert!(replay.quiescent);
+        assert_eq!(replay.schedule_hash, schedule.terminal_schedule_hash());
+        assert_eq!(*observed.lock(), *original.lock());
+        assert_eq!(runtime.state.live_task_count(), 0);
+        assert_cancelled(&mut replay_handles);
+    }
+    for handles in handles.borrow_mut().iter_mut() {
+        assert_cancelled(handles);
+    }
+}
+
+#[test]
+fn exact_explorer_resumes_parked_cancellation_after_another_task_wakes_it() {
+    fn setup(
+        runtime: &mut LabRuntime,
+        observed: Arc<Mutex<Vec<&'static str>>>,
+    ) -> crate::runtime::TaskHandle<()> {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let parked = Arc::new(Mutex::new(None::<Waker>));
+        let cleanup_ready = Arc::clone(&ready);
+        let cleanup_parked = Arc::clone(&parked);
+        let cleanup_observed = Arc::clone(&observed);
+        let (task, handle) = runtime.state.create_task(region, Budget::INFINITE,
+            std::future::poll_fn(move |task_cx| {
+                assert!(crate::Cx::current().unwrap().checkpoint().is_err());
+                if cleanup_ready.load(std::sync::atomic::Ordering::SeqCst) {
+                    cleanup_observed.lock().push("finished");
+                    Poll::Ready(())
+                } else {
+                    cleanup_observed.lock().push("waiting");
+                    *cleanup_parked.lock() = Some(task_cx.waker().clone());
+                    Poll::Pending
+                }
+            }),
+        ).unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        handle.abort();
+        let (waking_task, _waking_handle) = runtime.state.create_task(region, Budget::INFINITE,
+            async move {
+                observed.lock().push("wake");
+                ready.store(true, std::sync::atomic::Ordering::SeqCst);
+                parked.lock().take().expect("cleanup actually parked before wake").wake();
+            },
+        ).unwrap();
+        runtime.scheduler.lock().schedule(waking_task, 0);
+        handle
+    }
+
+    let config = LabConfig::new(96);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handles = RefCell::new(Vec::new());
+    let report = ExactScheduleExplorer::new(config.clone(), limits()).explore(|runtime| {
+        handles.borrow_mut().push(setup(runtime, Arc::clone(&observed)));
+    }).unwrap();
+    assert_eq!(report.termination, ExactScheduleSearchTermination::SearchExhausted);
+    assert_eq!(report.completed_schedules(), 1);
+    let run = &report.runs[0];
+    assert!(run.lab.lab_test_passed());
+    assert_eq!(observed.lock().first(), Some(&"waiting"));
+    assert!(observed.lock().ends_with(&["wake", "finished"]));
+    assert!(run.execution.decisions().len() >= 3, "park, external wake, and real cleanup completion");
+    let schedule = run.schedule.as_ref().expect("parked cleanup eventually retired");
+    let replay_observed = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = LabRuntime::new_with_task_causality(config);
+    let mut replay_handle = setup(&mut runtime, Arc::clone(&replay_observed));
+    let replay = runtime.run_forced_schedule(schedule, ForcedScheduleLimits::new(64, 256)).unwrap();
+    assert!(replay.quiescent);
+    assert_eq!(*replay_observed.lock(), *observed.lock());
+    assert!(matches!(replay_handle.try_join(), Err(crate::runtime::JoinError::Cancelled(_))));
+    for handle in handles.borrow_mut().iter_mut() {
+        assert!(matches!(handle.try_join(), Err(crate::runtime::JoinError::Cancelled(_))));
+    }
 }
 
 #[test]

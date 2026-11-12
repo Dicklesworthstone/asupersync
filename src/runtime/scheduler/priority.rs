@@ -1198,16 +1198,58 @@ impl Scheduler {
         entries.saturating_sub(1)
     }
 
+    /// Retains the physical entries removed by a cancel dispatch, except for
+    /// one entry at the selected task's highest cancel priority.
+    ///
+    /// The selected actual entry is an ordinary-selector witness. Keeping the
+    /// other entries as conservative shadows lets later polls prove that their
+    /// possible revival cannot change the eligible lane, rank, or task set.
+    pub(crate) fn exact_exploration_cancel_copies(
+        &self,
+        task: TaskId,
+    ) -> Vec<ExactExplorationCopy> {
+        let selected_priority = self
+            .cancel_lane
+            .iter()
+            .filter(|entry| entry.task == task)
+            .map(|entry| entry.priority)
+            .max();
+        let mut selected = false;
+        let mut copies = Vec::new();
+        for entry in self.cancel_lane.iter().filter(|entry| entry.task == task) {
+            if !selected && Some(entry.priority) == selected_priority {
+                selected = true;
+            } else {
+                copies.push(ExactExplorationCopy {
+                    task,
+                    key: ExactExplorationKey::Cancel(entry.priority),
+                });
+            }
+        }
+        debug_assert!(selected, "copied exact dispatch must select the cancel lane");
+        copies.extend(self.timed_lane.iter().filter(|entry| entry.task == task).map(
+            |entry| ExactExplorationCopy {
+                task,
+                key: ExactExplorationKey::Timed(entry.deadline),
+            },
+        ));
+        copies.extend(self.ready_lane.iter().filter(|entry| entry.task == task).map(
+            |entry| ExactExplorationCopy {
+                task,
+                key: ExactExplorationKey::Ready(entry.priority),
+            },
+        ));
+        copies
+    }
+
     /// Preserves a conservative upper bound on the ordinary selector's heaps.
     ///
     /// Exact dispatch removes promotion copies that an ordinary pop may leave
-    /// behind. The explorer only admits that removal when the task retires on
-    /// this poll, so those full-generation entries can never become live again.
-    /// Count every discarded copy against every subsequent frontier. Bounding
-    /// the whole inventory by the smaller physical window guarantees that no
-    /// priority/deadline tie group was widened by the earlier removal, even if
-    /// a completed task enqueued fresh work. Normal stale-entry skipping changes
-    /// neither the eligible live priorities nor the cancel streak.
+    /// behind. Count every discarded copy against every subsequent frontier,
+    /// including dormant copies and copies of terminal task generations.
+    /// Bounding the whole inventory by the smaller physical window guarantees
+    /// that no priority/deadline tie group was widened by the earlier removal.
+    /// Live copies additionally require full frontier equivalence below.
     pub(crate) fn validate_exact_exploration_copy_bound(
         &self,
         discarded: usize,
@@ -1222,6 +1264,51 @@ impl Scheduler {
         let window = self.scratch_entries.capacity().min(self.scratch_timed.capacity()).max(1);
         if entries > window {
             return Err("cancel-copy inventory exceeds the legacy selection window");
+        }
+        Ok(())
+    }
+
+    /// Rejects continuation whenever a removed copy could change the ordinary
+    /// selector's next lane, winning priority/deadline, or enabled task set.
+    ///
+    /// The ordinary queues contain every current actual entry plus some subset
+    /// of these shadows: dormant copies may already have been lazily skipped.
+    /// Equality at both endpoints proves equality for every such subset. The
+    /// winning rank must match, not merely the task IDs, so the actual selected
+    /// entry itself remains an ordinary witness on every poll.
+    pub(crate) fn validate_exact_exploration_copies(
+        &self,
+        now: Time,
+        cancel_first: bool,
+        copies: &[ExactExplorationCopy],
+        max_entries: usize,
+    ) -> Result<(), &'static str> {
+        if copies.is_empty() {
+            return Ok(());
+        }
+        self.validate_exact_exploration_copy_bound(copies.len(), max_entries)?;
+        let mut entries: Vec<_> = self
+            .cancel_lane
+            .iter()
+            .map(|entry| ExactExplorationCopy {
+                task: entry.task,
+                key: ExactExplorationKey::Cancel(entry.priority),
+            })
+            .chain(self.timed_lane.iter().map(|entry| ExactExplorationCopy {
+                task: entry.task,
+                key: ExactExplorationKey::Timed(entry.deadline),
+            }))
+            .chain(self.ready_lane.iter().map(|entry| ExactExplorationCopy {
+                task: entry.task,
+                key: ExactExplorationKey::Ready(entry.priority),
+            }))
+            .collect();
+        let actual = ExactExplorationCopy::frontier(&entries, now, cancel_first);
+        entries.extend(
+            copies.iter().copied().filter(|entry| self.scheduled.contains(entry.task)),
+        );
+        if ExactExplorationCopy::frontier(&entries, now, cancel_first) != actual {
+            return Err("retained cancel copies change the eligible scheduler frontier");
         }
         Ok(())
     }
@@ -1272,8 +1359,8 @@ impl Scheduler {
     /// cancel entries. Those copies are admitted only when the next frontier
     /// is the cancel lane: every physical tie entry participates in the normal
     /// selector before equivalent task choices are deduplicated. The caller
-    /// must additionally enforce the terminal-poll and discarded-copy bounds.
-    /// Stale entries,
+    /// must additionally enforce discarded-copy bounds and continuation-frontier
+    /// equivalence. Stale entries,
     /// ambiguous non-cancel frontiers and oversized physical tie groups remain
     /// unsupported rather than silently changing the scheduler's policy.
     pub(crate) fn exact_exploration_choices(
@@ -1484,6 +1571,60 @@ pub(crate) enum ExactDispatchError {
     },
     /// The dedup set says the task is scheduled, but no authoritative lane entry exists.
     QueueInvariant,
+}
+
+/// A physical entry removed by exact cancel dispatch.
+///
+/// Full task generations and exact scheduling ranks are retained. The lab uses
+/// these entries only to constrain exploration; they never create runnable work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExactExplorationCopy {
+    task: TaskId,
+    key: ExactExplorationKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExactExplorationKey {
+    Cancel(u8),
+    Timed(Time),
+    Ready(u8),
+}
+
+impl ExactExplorationCopy {
+    fn frontier(
+        entries: &[Self],
+        now: Time,
+        cancel_first: bool,
+    ) -> (Option<ExactExplorationKey>, Vec<TaskId>) {
+        let cancel = entries.iter().filter_map(|entry| match entry.key {
+            ExactExplorationKey::Cancel(priority) => Some(priority),
+            _ => None,
+        }).max();
+        let timed = entries.iter().filter_map(|entry| match entry.key {
+            ExactExplorationKey::Timed(deadline) if deadline <= now => Some(deadline),
+            _ => None,
+        }).min();
+        let ready = entries.iter().filter_map(|entry| match entry.key {
+            ExactExplorationKey::Ready(priority) => Some(priority),
+            _ => None,
+        }).max();
+        let key = if cancel_first && cancel.is_some() {
+            cancel.map(ExactExplorationKey::Cancel)
+        } else if timed.is_some() {
+            timed.map(ExactExplorationKey::Timed)
+        } else if ready.is_some() {
+            ready.map(ExactExplorationKey::Ready)
+        } else {
+            cancel.map(ExactExplorationKey::Cancel)
+        };
+        let mut tasks: Vec<_> = entries.iter()
+            .filter(|entry| Some(entry.key) == key)
+            .map(|entry| entry.task)
+            .collect();
+        tasks.sort_unstable();
+        tasks.dedup();
+        (key, tasks)
+    }
 }
 
 impl ScheduleCertificate {
