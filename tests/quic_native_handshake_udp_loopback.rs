@@ -3284,6 +3284,21 @@ fn a_refusing_owner_answers_another_sources_initial_at_most_once_per_interval() 
     });
 }
 
+/// The refusal path must not enlarge `drive_io_once`: its future is held
+/// (often nested several times) by every caller's drive loop. It was 1088
+/// bytes before the refusal existed; awaiting the batch send inline made it
+/// 3632.
+#[test]
+fn the_refusal_path_keeps_the_drive_future_small() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let (_client, mut server) = served_pair(&cx).await;
+        let drive = server.drive_io_once(&cx, Duration::from_millis(1));
+        let size = std::mem::size_of_val(&drive);
+        assert!(size <= 1536, "drive_io_once future is {size} bytes");
+    });
+}
+
 /// End to end: while one client is served, a second real client's handshake
 /// ends at once with `peer_connection_refused` from the refusing owner's
 /// answer, long before its first Initial retransmission (1.5 s handshake PTO)

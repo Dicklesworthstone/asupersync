@@ -1099,17 +1099,18 @@ impl NativeQuicUdpConnection {
             return;
         };
         *last = Some(packet.receive_time);
-        let _ = self
-            .endpoint
-            .send_batch(
-                cx,
-                &[OutgoingPacket {
-                    dst_addr: packet.src_addr,
-                    data,
-                    send_time: None,
-                }],
-            )
-            .await;
+        // Boxed: inline, the batch sender's state (about 3 KB) would become
+        // part of every `drive_io_once` future and of every caller's future
+        // that holds one, for a send that happens at most ten times a second.
+        let _ = Box::pin(self.endpoint.send_batch(
+            cx,
+            &[OutgoingPacket {
+                dst_addr: packet.src_addr,
+                data,
+                send_time: None,
+            }],
+        ))
+        .await;
     }
 
     /// Receive at most one bounded UDP batch, deliver authenticated 1-RTT
