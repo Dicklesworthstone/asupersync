@@ -263,6 +263,31 @@ impl NativeH3RequestWriter {
         Ok(())
     }
 
+    /// Release a stopped upload without cancelling its response direction.
+    ///
+    /// The transport must already own a send reset, either in response to peer
+    /// STOP_SENDING or explicitly queued after the response FIN. Unlike
+    /// abandonment, this must not make the session reaper send STOP_SENDING:
+    /// an early response can still be arriving on the other half of the stream.
+    #[cfg(feature = "tls")]
+    pub(crate) fn retire_stopped_upload(
+        &mut self,
+        connection: &QuicConnection,
+    ) -> Result<bool, NativeH3SessionError> {
+        let stream = connection
+            .inner()
+            .streams()
+            .stream(self.stream_id())
+            .map_err(super::NativeQuicConnectionError::from)?;
+        if stream.send_reset.is_none() {
+            return Ok(false);
+        }
+        self.inner.pending = None;
+        self.write_offset = 0;
+        self.owner.cancel();
+        Ok(true)
+    }
+
     /// Poll one complete H3 frame into the transport, retaining its unsent
     /// suffix across `Pending`. Each poll queues at most one QUIC fragment.
     ///

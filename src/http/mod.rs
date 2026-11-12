@@ -42,6 +42,10 @@ mod h1_h2_header_conformance_test;
 /// contracts without enabling parked compatibility wrappers.
 #[cfg(feature = "http3")]
 pub mod h3 {
+    #[cfg(feature = "tls")]
+    pub use super::h3_client::{
+        NativeH3Client, NativeH3ClientConfig, NativeH3ClientError, NativeH3ClientResponse,
+    };
     pub use super::h3_native::{
         H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame,
         H3NativeError as H3Error, H3PseudoHeaders, H3QpackMode, H3RequestHead,
@@ -65,6 +69,8 @@ pub mod h3 {
         NativeH3ResponseWriter, NativeH3WriteEvent, h3_data_frame_wire_len,
     };
 }
+#[cfg(all(feature = "http3", feature = "tls"))]
+mod h3_client;
 pub mod h3_native;
 #[cfg(feature = "http3")]
 pub mod h3_quic;
