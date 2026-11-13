@@ -21,7 +21,10 @@
 //! and timer drivers, the same wait uses those drivers instead.
 
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::pin::{Pin, pin};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::bytes::{Bytes, BytesMut};
@@ -1120,10 +1123,37 @@ impl NativeQuicUdpConnection {
     /// The receive wait also observes the negotiated idle deadline, with the
     /// required three-PTO minimum. Idle expiry closes locally without sending
     /// CONNECTION_CLOSE; `connection().state()` then reports `Closed`.
-    pub async fn drive_io_once(
+    pub fn drive_io_once(
         &mut self,
         cx: &Cx,
         receive_timeout: Duration,
+    ) -> impl Future<Output = Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError>> {
+        // The inner future itself, not one wrapping it: no added state.
+        self.drive_io_once_inner(cx, receive_timeout, None)
+    }
+
+    /// [`drive_io_once`](Self::drive_io_once) whose receive wait also ends
+    /// when `wake` completes, so an owner with new data to send need not wait
+    /// out `receive_timeout` before it can queue it. A packet already
+    /// readable is received first. An early end is a quiet timeout: the loss
+    /// timer is serviced, pending frames are flushed and `receive_timed_out`
+    /// is set. `wake` is polled only during the receive wait; the caller
+    /// supplies a fresh one for each call.
+    pub fn drive_io_once_or_wake<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        receive_timeout: Duration,
+        wake: Pin<&'a mut (dyn Future<Output = ()> + Send)>,
+    ) -> impl Future<Output = Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError>> + 'a
+    {
+        self.drive_io_once_inner(cx, receive_timeout, Some(wake))
+    }
+
+    async fn drive_io_once_inner(
+        &mut self,
+        cx: &Cx,
+        receive_timeout: Duration,
+        mut wake: Option<Pin<&mut (dyn Future<Output = ()> + Send)>>,
     ) -> Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
@@ -1141,16 +1171,26 @@ impl NativeQuicUdpConnection {
                 progress.packets_sent = self.flush(cx).await?;
                 return Ok(progress);
             }
-            match timeout(
-                cx.now(),
-                bounded_wait,
-                self.endpoint.receive_batch(cx, RECEIVE_BATCH_SIZE),
-            )
-            .await
-            {
-                Ok(Ok(packets)) => packets,
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) => {
+            let waited = {
+                let mut receive = pin!(self.endpoint.receive_batch(cx, RECEIVE_BATCH_SIZE));
+                let raced = poll_fn(|task| {
+                    if let Poll::Ready(result) = receive.as_mut().poll(task) {
+                        return Poll::Ready(Some(result));
+                    }
+                    if let Some(wake) = wake.as_mut() {
+                        if wake.as_mut().poll(task).is_ready() {
+                            return Poll::Ready(None);
+                        }
+                    }
+                    Poll::Pending
+                });
+                timeout(cx.now(), bounded_wait, raced).await
+            };
+            match waited {
+                Ok(Some(Ok(packets))) => packets,
+                Ok(Some(Err(error))) => return Err(error.into()),
+                // Woken, or the wait elapsed.
+                Ok(None) | Err(_) => {
                     progress.receive_timed_out = true;
                     self.service_due_loss_timer(cx)?;
                     progress.packets_sent = self.flush(cx).await?;

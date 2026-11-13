@@ -1430,6 +1430,11 @@ path = "tests/quic_native_idle_cpu.rs"
 required-features = ["quic", "test-internals", "tls"]
 
 [[test]]
+name = "quic_native_drive_wake"
+path = "tests/quic_native_drive_wake.rs"
+required-features = ["quic", "test-internals", "tls"]
+
+[[test]]
 name = "quic_native_x509_verification"
 path = "tests/quic_native_x509_verification.rs"
 required-features = ["tls"]
