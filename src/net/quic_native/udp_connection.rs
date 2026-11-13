@@ -910,7 +910,23 @@ impl NativeQuicUdpConnection {
     /// retained local close while draining.
     /// Unsent protected packets stay in this owner across errors or a dropped
     /// flush future and are retried before new application frames are admitted.
-    pub async fn flush(&mut self, cx: &Cx) -> Result<usize, NativeQuicUdpConnectionError> {
+    pub fn flush(
+        &mut self,
+        cx: &Cx,
+    ) -> impl Future<Output = Result<usize, NativeQuicUdpConnectionError>> {
+        // The inner future itself, not one wrapping it: no added state.
+        self.flush_inner(cx, false)
+    }
+
+    /// `acks_only`: assemble pending ACK frames and nothing else. No PTO
+    /// probe, STREAM, DATAGRAM or other control frame and no close; and
+    /// nothing at all outside the established state or while packets
+    /// assembled earlier still wait for the socket.
+    async fn flush_inner(
+        &mut self,
+        cx: &Cx,
+        acks_only: bool,
+    ) -> Result<usize, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
@@ -920,6 +936,11 @@ impl NativeQuicUdpConnection {
         }
         let now_micros = self.instant_micros(now);
         let state = self.connection.inner().state();
+        if acks_only
+            && (state != QuicConnectionState::Established || !self.pending_outgoing.is_empty())
+        {
+            return Ok(0);
+        }
         if matches!(
             state,
             QuicConnectionState::Closed | QuicConnectionState::Draining
@@ -948,13 +969,20 @@ impl NativeQuicUdpConnection {
         for _ in 0..packet_budget {
             // A due PTO permits one PING even when the original flight fills
             // cwnd. It must not drain application frames or declare them lost.
-            let probe_frames = self
-                .connection
-                .inner_mut()
-                .generate_pto_probe_frames(cx, max_frame_bytes)?;
+            let probe_frames = if acks_only {
+                Vec::new()
+            } else {
+                self.connection
+                    .inner_mut()
+                    .generate_pto_probe_frames(cx, max_frame_bytes)?
+            };
             let pto_probe = !probe_frames.is_empty();
             let frames = if pto_probe {
                 probe_frames
+            } else if acks_only {
+                self.connection
+                    .inner_mut()
+                    .generate_pending_ack_frames(cx, max_frame_bytes)?
             } else {
                 generate_congestion_admitted_1rtt_frames(
                     cx,
@@ -1129,7 +1157,30 @@ impl NativeQuicUdpConnection {
         receive_timeout: Duration,
     ) -> impl Future<Output = Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError>> {
         // The inner future itself, not one wrapping it: no added state.
-        self.drive_io_once_inner(cx, receive_timeout, None)
+        self.drive_io_once_inner(cx, receive_timeout, None, true)
+    }
+
+    /// [`drive_io_once`](Self::drive_io_once) that transmits ACK frames ONLY:
+    /// receive at most one bounded UDP batch, process authenticated 1-RTT
+    /// payloads (so the peer's ACKs release retained frames) and acknowledge
+    /// what arrived. It does not service the loss timer (no PTO probe and no
+    /// time-threshold loss), send STREAM, DATAGRAM or other control frames,
+    /// resend a handshake flight, or send a CONNECTION_CLOSE for a peer
+    /// violation (the error is returned and the close waits for a later
+    /// flush). Bytes the peer's ACKs declare lost are requeued as usual but
+    /// not sent. Nothing is sent outside the established state or while
+    /// packets assembled earlier still wait for the socket.
+    ///
+    /// For an owner that must learn which already-sent bytes the peer has
+    /// acknowledged without sending application data, e.g. after an
+    /// authority fence, while still acknowledging a peer that may be waiting
+    /// the same way.
+    pub fn acknowledge_io_once(
+        &mut self,
+        cx: &Cx,
+        receive_timeout: Duration,
+    ) -> impl Future<Output = Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError>> {
+        self.drive_io_once_inner(cx, receive_timeout, None, false)
     }
 
     /// [`drive_io_once`](Self::drive_io_once) whose receive wait also ends
@@ -1146,14 +1197,16 @@ impl NativeQuicUdpConnection {
         wake: Pin<&'a mut (dyn Future<Output = ()> + Send)>,
     ) -> impl Future<Output = Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError>> + 'a
     {
-        self.drive_io_once_inner(cx, receive_timeout, Some(wake))
+        self.drive_io_once_inner(cx, receive_timeout, Some(wake), true)
     }
 
+    /// `transmit: false` is [`acknowledge_io_once`](Self::acknowledge_io_once).
     async fn drive_io_once_inner(
         &mut self,
         cx: &Cx,
         receive_timeout: Duration,
         mut wake: Option<Pin<&mut (dyn Future<Output = ()> + Send)>>,
+        transmit: bool,
     ) -> Result<NativeQuicUdpIoProgress, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
@@ -1167,8 +1220,10 @@ impl NativeQuicUdpConnection {
             let bounded_wait = self.receive_wait_duration(cx, receive_timeout)?;
             if bounded_wait.is_zero() {
                 progress.receive_timed_out = true;
-                self.service_due_loss_timer(cx)?;
-                progress.packets_sent = self.flush(cx).await?;
+                if transmit {
+                    self.service_due_loss_timer(cx)?;
+                }
+                progress.packets_sent = self.flush_inner(cx, !transmit).await?;
                 return Ok(progress);
             }
             let waited = {
@@ -1192,8 +1247,10 @@ impl NativeQuicUdpConnection {
                 // Woken, or the wait elapsed.
                 Ok(None) | Err(_) => {
                     progress.receive_timed_out = true;
-                    self.service_due_loss_timer(cx)?;
-                    progress.packets_sent = self.flush(cx).await?;
+                    if transmit {
+                        self.service_due_loss_timer(cx)?;
+                    }
+                    progress.packets_sent = self.flush_inner(cx, !transmit).await?;
                     return Ok(progress);
                 }
             }
@@ -1259,7 +1316,8 @@ impl NativeQuicUdpConnection {
                     self.sent_since_receive = false;
                     continue;
                 }
-                if !self.final_handshake_flight.is_empty()
+                if transmit
+                    && !self.final_handshake_flight.is_empty()
                     && self.last_final_flight_retransmit.is_none_or(|last| {
                         packet.receive_time.saturating_duration_since(last)
                             >= FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL
@@ -1345,9 +1403,10 @@ impl NativeQuicUdpConnection {
                 // A peer violation closed the connection: send its transport
                 // CONNECTION_CLOSE before reporting the error. A failed send
                 // keeps the close for a later flush.
-                if self.connection.inner().local_close_frame_type().is_some()
+                if transmit
+                    && self.connection.inner().local_close_frame_type().is_some()
                     && matches!(
-                        self.flush(cx).await,
+                        self.flush_inner(cx, false).await,
                         Err(NativeQuicUdpConnectionError::Cancelled)
                     )
                 {
@@ -1360,8 +1419,10 @@ impl NativeQuicUdpConnection {
             progress.packets_received = progress.packets_received.saturating_add(1);
         }
 
-        self.service_due_loss_timer(cx)?;
-        progress.packets_sent = self.flush(cx).await?;
+        if transmit {
+            self.service_due_loss_timer(cx)?;
+        }
+        progress.packets_sent = self.flush_inner(cx, !transmit).await?;
         Ok(progress)
     }
 

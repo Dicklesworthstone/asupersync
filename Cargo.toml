@@ -1435,6 +1435,11 @@ path = "tests/quic_native_drive_wake.rs"
 required-features = ["quic", "test-internals", "tls"]
 
 [[test]]
+name = "quic_native_acknowledge_io"
+path = "tests/quic_native_acknowledge_io.rs"
+required-features = ["quic", "test-internals", "tls"]
+
+[[test]]
 name = "quic_native_x509_verification"
 path = "tests/quic_native_x509_verification.rs"
 required-features = ["tls"]
