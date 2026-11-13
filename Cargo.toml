@@ -1348,6 +1348,12 @@ name = "pool_timeout_test"
 path = "tests/pool_timeout_test.rs"
 required-features = ["test-internals"]
 
+# Plain main: the binary is also the child process whose stdio it tests.
+[[test]]
+name = "process_windows_child_stdio"
+path = "tests/process_windows_child_stdio.rs"
+harness = false
+
 [[test]]
 name = "postgres_array_codec"
 path = "tests/postgres_array_codec.rs"

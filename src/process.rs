@@ -3242,6 +3242,8 @@ impl Drop for Child {
 #[derive(Debug)]
 pub struct ChildStdin {
     registration: ReactorRegistration, // dropped first: deregisters before the fd closes
+    #[cfg(windows)]
+    overlapped: windows_pipe::Overlapped, // dropped before the handle closes
     inner: Option<std_process::ChildStdin>,
 }
 
@@ -3261,6 +3263,8 @@ impl ChildStdin {
         Ok(Self {
             inner: Some(stdin),
             registration: ReactorRegistration::new(),
+            #[cfg(windows)]
+            overlapped: windows_pipe::Overlapped::default(),
         })
     }
 
@@ -3321,12 +3325,22 @@ impl AsyncWrite for ChildStdin {
                 Err(e) => Poll::Ready(Err(e)),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let Some(inner) = this.inner.as_ref() else {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "child stdin already closed",
+                )));
+            };
+            this.overlapped.poll_write(inner.as_raw_handle(), cx, buf)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (this, cx, buf);
             Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "async child stdin is only supported on Unix in this build",
+                "async child stdin is only supported on Unix and Windows in this build",
             )))
         }
     }
@@ -3359,12 +3373,16 @@ impl AsyncWrite for ChildStdin {
                 Err(e) => Poll::Ready(Err(e)),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            this.overlapped.poll_flush(cx)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (this, cx);
             Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "async child stdin is only supported on Unix in this build",
+                "async child stdin is only supported on Unix and Windows in this build",
             )))
         }
     }
@@ -3374,9 +3392,15 @@ impl AsyncWrite for ChildStdin {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
+        // A write still in flight finishes before the pipe closes; its error
+        // is the shutdown's.
+        #[cfg(windows)]
+        let flushed = std::task::ready!(this.overlapped.poll_flush(_cx));
+        #[cfg(not(windows))]
+        let flushed = Ok(());
         this.registration.clear();
         drop(this.inner.take());
-        Poll::Ready(Ok(()))
+        Poll::Ready(flushed)
     }
 }
 
@@ -3403,6 +3427,8 @@ impl AsyncWrite for ChildStdin {
 pub struct ChildStdout {
     #[cfg(unix)]
     registration: ReactorRegistration, // dropped first: deregisters before the fd closes
+    #[cfg(windows)]
+    overlapped: windows_pipe::Overlapped, // dropped before the handle closes
     inner: std_process::ChildStdout,
 }
 
@@ -3419,7 +3445,11 @@ impl ChildStdout {
     #[cfg(not(unix))]
     fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
         set_nonblocking()?;
-        Ok(Self { inner: stdout })
+        Ok(Self {
+            inner: stdout,
+            #[cfg(windows)]
+            overlapped: windows_pipe::Overlapped::default(),
+        })
     }
 
     /// Returns the raw file descriptor.
@@ -3469,12 +3499,22 @@ impl AsyncRead for ChildStdout {
                 Err(e) => Poll::Ready(Err(e)),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let read = std::task::ready!(this.overlapped.poll_read(
+                this.inner.as_raw_handle(),
+                cx,
+                buf.unfilled()
+            ))?;
+            buf.advance(read);
+            Poll::Ready(Ok(()))
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (this, cx, buf);
             Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "async child stdout is only supported on Unix in this build",
+                "async child stdout is only supported on Unix and Windows in this build",
             )))
         }
     }
@@ -3503,6 +3543,8 @@ impl AsyncRead for ChildStdout {
 pub struct ChildStderr {
     #[cfg(unix)]
     registration: ReactorRegistration, // dropped first: deregisters before the fd closes
+    #[cfg(windows)]
+    overlapped: windows_pipe::Overlapped, // dropped before the handle closes
     inner: std_process::ChildStderr,
 }
 
@@ -3519,7 +3561,11 @@ impl ChildStderr {
     #[cfg(not(unix))]
     fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
         set_nonblocking()?;
-        Ok(Self { inner: stderr })
+        Ok(Self {
+            inner: stderr,
+            #[cfg(windows)]
+            overlapped: windows_pipe::Overlapped::default(),
+        })
     }
 
     /// Returns the raw file descriptor.
@@ -3569,12 +3615,22 @@ impl AsyncRead for ChildStderr {
                 Err(e) => Poll::Ready(Err(e)),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let read = std::task::ready!(this.overlapped.poll_read(
+                this.inner.as_raw_handle(),
+                cx,
+                buf.unfilled()
+            ))?;
+            buf.advance(read);
+            Poll::Ready(Ok(()))
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (this, cx, buf);
             Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "async child stderr is only supported on Unix in this build",
+                "async child stderr is only supported on Unix and Windows in this build",
             )))
         }
     }
@@ -6011,3 +6067,6 @@ mod bounded_output;
 pub use bounded_output::{
     BoundedOutputError, CapturedOutputStream, OutputCaptureLimits, OutputLimitExceeded,
 };
+// Overlapped I/O for the Windows child stdio streams above.
+#[cfg(windows)]
+mod windows_pipe;

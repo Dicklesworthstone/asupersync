@@ -38,7 +38,8 @@
       "asupersync-b5rza5 (2026-10-10) re-locates the two src/fs/path_ops.rs locators by +83 lines (671, 676 to 754, 759) after safe-only StagedAtomicWrite::commit_async and write_atomic_offloaded were added above them. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-xukyx5 (2026-10-10) re-locates the two src/fs/path_ops.rs locators by +35 lines (754, 759 to 789, 794) after unifying commit/commit_async with commit_with_hook and expanding cancellation docs above them. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-x2cqdf (2026-10-10) registers six locators in src/sync/mutex_cancel_tests.rs for raw_waker_probe exercising L3 (cancellation during RawWaker clone outside the mutex state lock). Categories, invariants, evidence, and no-claim boundaries are documented.",
-      "asupersync-rp8mnn (2026-10-12) re-locates two src/bin/atp.rs locators by +26 lines (13757, 13765 to 13783, 13791) after adding BondRecvArgs --rq-auth-key-stdin CLI support and unit test. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "asupersync-rp8mnn (2026-10-12) re-locates two src/bin/atp.rs locators by +26 lines (13757, 13765 to 13783, 13791) after adding BondRecvArgs --rq-auth-key-stdin CLI support and unit test. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "2026-11-12 (FR Windows host): registers src/process/windows_pipe.rs (12 locators: overlapped child-pipe I/O for ChildStdin/ChildStdout/ChildStderr on Windows) and re-locates 0 src/process.rs locators that the new cfg(windows) stream fields and poll arms moved. 28 src/process.rs locators that were already stale at the parent commit are left as found."
     ]
   },
   "required_row_fields": [
@@ -362,13 +363,13 @@
     }
   },
   "summary": {
-    "boundary_rows": 103,
-    "operation_count": 910,
+    "boundary_rows": 104,
+    "operation_count": 922,
     "operation_kind_counts": {
       "allow_unsafe_code": 110,
-      "unsafe_block": 675,
+      "unsafe_block": 685,
       "unsafe_fn": 104,
-      "unsafe_impl": 21,
+      "unsafe_impl": 23,
       "unsafe_trait": 0
     },
     "category_counts": {
@@ -384,7 +385,7 @@
       "network-ffi": 4,
       "observability-test-boundary": 1,
       "platform-resource-metrics": 2,
-      "process-signal-ffi": 3,
+      "process-signal-ffi": 4,
       "reactor-ffi": 5,
       "secret-memory-security": 3,
       "simd-kernel": 1,
@@ -2779,6 +2780,83 @@
           "kind": "unsafe_block",
           "line": 5166,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-process-windows-pipe-rs",
+      "path": "src/process/windows_pipe.rs",
+      "category": "process-signal-ffi",
+      "scope": "file-or-item-boundary",
+      "feature_or_platform_gate": "cfg(windows): ChildStdin AsyncWrite and ChildStdout/ChildStderr AsyncRead over std's overlapped parent pipe ends",
+      "why_safe_rust_is_insufficient": "std exposes only blocking Read/Write on child pipes. Polling them without a blocked thread needs overlapped ReadFile/WriteFile, GetOverlappedResult, CancelIoEx, an event per operation and a thread-pool wait (RegisterWaitForSingleObject/UnregisterWaitEx) whose callback wakes the task; none has a safe std or windows-sys wrapper.",
+      "safety_invariant": "Each operation's OVERLAPPED, buffer, event and waker Signal are heap allocations owned by one Operation and never moved while the kernel or the callback may reach them. An unfinished operation is cancelled with CancelIoEx for exactly its OVERLAPPED and drained with a waiting GetOverlappedResult before anything is released; the thread-pool wait is unregistered with UnregisterWaitEx(INVALID_HANDLE_VALUE), which waits for a running callback, before the Signal is freed. The pipe handle outlives the operation state (the stream declares that state before its std handle). The callback only takes the waker behind a mutex. Send/Sync: kernel handles and the OVERLAPPED are used only through &mut self or by the kernel.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md. For this site: tests/process_windows_child_stdio.rs (harness = false; the binary is its own child) run natively on Windows: a 1 MiB echo through 64 KiB pipes with interleaved writes and reads, a first read returning Pending at once and a parked task woken by output 300 ms later (stdout and stderr), dropping a pending read in well under 1 s, and BrokenPipe after the child exits. Planted negatives: a callback that does not wake fails at the 20 s deadline; a drop without CancelIoEx waits out the child (10 s) and fails.",
+      "explicit_no_claims": [
+        "A Windows cross-target check proves type and cfg integrity only; the native run above is the execution evidence.",
+        "Linux and macOS process tests do not execute this path.",
+        "Relies on std opening the parent end of each child pipe for overlapped I/O (std's child_pipe.rs); a synchronous handle would make these calls block, which the late-output test would catch."
+      ],
+      "operation_locators": [
+        {
+          "kind": "unsafe_block",
+          "line": 213,
+          "pattern": "let signal = unsafe { &*context.cast::<Signal>() };"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 244,
+          "pattern": "unsafe impl Send for Operation {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 246,
+          "pattern": "unsafe impl Sync for Operation {}"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 250,
+          "pattern": "io::Error::from_raw_os_error(unsafe { GetLastError() }.cast_signed())"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 263,
+          "pattern": "let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 268,
+          "pattern": "let event = unsafe { OwnedHandle::from_raw_handle(event) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 270,
+          "pattern": "let mut overlapped: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 288,
+          "pattern": "let finished = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 323,
+          "pattern": "let registered = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 348,
+          "pattern": "let ended = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 383,
+          "pattern": "unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 392,
+          "pattern": "unsafe {"
         }
       ]
     },
