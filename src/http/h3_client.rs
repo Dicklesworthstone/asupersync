@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
-use crate::io::AsyncWrite;
+use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::quic_native::{
     ConnectionRouterError, ManagedEndpointConfig, ManagedEndpointError, NativeQuicConnectionError,
     NativeQuicUdpConnection, QuicConnection, StreamId, StreamRole,
@@ -38,7 +38,8 @@ const MAX_CLIENT_FIELD_SECTION_SIZE: usize = 64 * 1024;
 /// this adapter does not decompress content encodings.
 #[derive(Debug, Clone)]
 pub struct NativeH3ClientConfig {
-    /// Maximum buffered request payload. Zero allows only empty bodies.
+    /// Maximum total request payload, including a streaming upload.
+    /// Zero allows only empty bodies.
     pub max_request_body_bytes: usize,
     /// Maximum total response payload, buffered or streamed to a sink.
     /// Zero allows only empty bodies.
@@ -50,8 +51,8 @@ pub struct NativeH3ClientConfig {
     pub max_response_header_bytes: usize,
     /// Maximum retained informational responses, from zero through 64.
     pub max_informational_responses: usize,
-    /// Deadline measured from the first poll of `execute` or `execute_to`,
-    /// including sink backpressure, flush and cleanup.
+    /// Deadline measured from the first poll of any execution method,
+    /// including source reads, sink backpressure, flush and cleanup.
     /// Must be nonzero. An already completed response survives cleanup errors
     /// or expiry of this deadline.
     pub timeout: Duration,
@@ -161,6 +162,8 @@ pub enum NativeH3ClientError {
         /// Number of actual content bytes.
         actual: usize,
     },
+    /// The streaming request body could not be read.
+    RequestBody(io::Error),
     /// The request was not accepted before the peer's GOAWAY boundary.
     Goaway {
         /// First request stream the peer refuses.
@@ -181,7 +184,7 @@ pub enum NativeH3ClientError {
     Sink(io::Error),
     /// The owning task was cancelled before response completion.
     Cancelled,
-    /// The response and, for `execute_to`, its sink flush did not complete
+    /// The response and, when supplied, its sink flush did not complete
     /// before the configured deadline.
     TimedOut,
 }
@@ -202,6 +205,7 @@ impl fmt::Display for NativeH3ClientError {
                     "HTTP/3 content-length is {expected}, but received {actual} bytes"
                 )
             }
+            Self::RequestBody(error) => write!(f, "HTTP/3 request body read failed: {error}"),
             Self::Goaway {
                 first_rejected_stream,
             } => {
@@ -231,6 +235,7 @@ impl fmt::Display for NativeH3ClientError {
 impl std::error::Error for NativeH3ClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::RequestBody(error) => Some(error),
             Self::Session(error) => Some(error),
             Self::Transport(error) => Some(error),
             Self::Sink(error) => Some(error),
@@ -278,12 +283,17 @@ impl From<ManagedEndpointError> for NativeH3ClientError {
 /// A complete early response can finish before the upload does; peer
 /// STOP_SENDING retires only the upload and leaves response reads active.
 ///
-/// This adapter buffers one bounded response or writes it incrementally through
-/// [`Self::execute_to`]. It does not pool, reconnect,
-/// retry, follow redirects, multiplex, or implement CONNECT tunnels. Use
-/// [`NativeH3Session`] with an explicitly owned transport for streaming uploads
-/// or multi-request compositions. Existing streams must not be shared with
-/// this consuming adapter.
+/// [`Self::execute_stream`] reads an upload incrementally with at most 16 KiB
+/// of staging plus one queued DATA frame. The source is polled only after the
+/// previous frame clears local transport backpressure, while response reads
+/// and transport recovery continue independently of a parked source.
+///
+/// [`Self::execute_to`] streams a buffered request's response to an async sink;
+/// [`Self::execute_stream_to`] streams both bodies without collecting either.
+/// This adapter does not pool, reconnect, retry, follow redirects, multiplex,
+/// or implement CONNECT tunnels. Use [`NativeH3Session`] with an explicitly
+/// owned transport for multi-request compositions. Existing streams must not
+/// be shared with this consuming adapter.
 /// The session uses static QPACK, a 1 MiB maximum wire-frame payload, and
 /// 16 KiB receive chunks; response collection remains bounded independently.
 #[derive(Debug)]
@@ -381,6 +391,84 @@ impl NativeH3Client {
         cx.checkpoint()
             .map_err(|_| NativeH3ClientError::Cancelled)?;
         validate_request(&head, &body, &self.config)?;
+        self.execute_validated_to(cx, started, head, body, None, sink)
+            .await
+    }
+
+    /// Stream a request from an owned async reader and collect its response.
+    ///
+    /// The reader need not be `Unpin` or `'static`; it stays owned by this
+    /// exchange and is never polled by a detached task. The configured request
+    /// body limit bounds total uploaded bytes, while staging is at most 16 KiB
+    /// plus one queued DATA frame, independently of the total payload size.
+    /// This bound excludes buffering inside the reader and the QUIC transport.
+    ///
+    /// A declared Content-Length is checked before opening a stream against
+    /// the body limit, and against the actual bytes as they are read. Without
+    /// Content-Length, source EOF ends the request. Even a declared zero length
+    /// requires EOF; excess bytes, premature EOF and read errors fail the
+    /// exchange without publishing a successful request FIN. The reader can
+    /// be polled for one extra byte to distinguish EOF from a limit overrun.
+    ///
+    /// Response reads, ACKs, flow control and deadlines keep progressing while
+    /// the reader is pending. A complete early response or peer STOP_SENDING
+    /// retires the reader without requiring EOF. Cancellation, timeout and
+    /// dropping the future release the reader and the owned connection.
+    pub async fn execute_stream<R: AsyncRead + Send>(
+        self,
+        cx: &Cx,
+        head: H3RequestHead,
+        reader: R,
+    ) -> Result<NativeH3ClientResponse, NativeH3ClientError> {
+        let mut collected = Vec::new();
+        let summary = self
+            .execute_stream_to(cx, head, reader, &mut collected)
+            .await?;
+        Ok(NativeH3ClientResponse {
+            head: summary.head,
+            body: Bytes::from(collected),
+            trailers: summary.trailers,
+            informational: summary.informational,
+        })
+    }
+
+    /// Stream the request from an async reader and its response into a sink.
+    ///
+    /// This combines [`Self::execute_stream`]'s owned source and request-length
+    /// checks with [`Self::execute_to`]'s borrowed destination and flush
+    /// contract. Neither complete body is collected by this adapter. The
+    /// request and response limits independently bound their total byte counts,
+    /// and the same deadline covers both directions and destination flush.
+    ///
+    /// A pending source still permits response progress. A pending sink still
+    /// permits upload progress. Validated response FIN releases the source
+    /// before the sink is flushed; cancellation while that flush is pending
+    /// can still leave a valid response prefix in the destination.
+    pub async fn execute_stream_to<R: AsyncRead + Send, W: AsyncWrite + Unpin + ?Sized>(
+        self,
+        cx: &Cx,
+        head: H3RequestHead,
+        reader: R,
+        sink: &mut W,
+    ) -> Result<NativeH3ClientResponseSummary, NativeH3ClientError> {
+        let started = cx.now();
+        cx.checkpoint()
+            .map_err(|_| NativeH3ClientError::Cancelled)?;
+        let expected = validate_streaming_request(&head, &self.config)?;
+        let upload = StreamingUpload::new(reader, expected, self.config.max_request_body_bytes);
+        self.execute_validated_to(cx, started, head, Bytes::new(), Some(upload), sink)
+            .await
+    }
+
+    async fn execute_validated_to<W: AsyncWrite + Unpin + ?Sized>(
+        self,
+        cx: &Cx,
+        started: crate::types::Time,
+        head: H3RequestHead,
+        body: Bytes,
+        upload: Option<StreamingUpload<'_>>,
+        sink: &mut W,
+    ) -> Result<NativeH3ClientResponseSummary, NativeH3ClientError> {
         let Self { connection, config } = self;
         let connection_id = connection.local_connection_id();
         let mut endpoint = connection
@@ -393,7 +481,7 @@ impl NativeH3Client {
             )
             .map_err(|error| NativeH3ClientError::from(error.into_parts().0))?;
         let mut exchange = endpoint.with_connection_mut(cx, connection_id, |connection| {
-            Exchange::new(cx, connection, &head, body, config.clone())
+            Exchange::new(cx, connection, &head, body, upload, config.clone())
         })??;
         let operation = crate::time::timeout(
             started,
@@ -443,6 +531,33 @@ fn validate_request(
     body: &Bytes,
     config: &NativeH3ClientConfig,
 ) -> Result<(), NativeH3ClientError> {
+    validate_request_fields(head, config)?;
+    check_limit(body.len(), config.max_request_body_bytes, "request body")?;
+    if let Some(expected) = content_length(&head.headers)? {
+        check_length(expected, body.len())?;
+    }
+    Ok(())
+}
+
+fn validate_streaming_request(
+    head: &H3RequestHead,
+    config: &NativeH3ClientConfig,
+) -> Result<Option<u64>, NativeH3ClientError> {
+    validate_request_fields(head, config)?;
+    let expected = content_length(&head.headers)?;
+    if expected.is_some_and(|length| length > config.max_request_body_bytes as u64) {
+        return Err(NativeH3ClientError::LimitExceeded {
+            resource: "request body",
+            limit: config.max_request_body_bytes,
+        });
+    }
+    Ok(expected)
+}
+
+fn validate_request_fields(
+    head: &H3RequestHead,
+    config: &NativeH3ClientConfig,
+) -> Result<(), NativeH3ClientError> {
     if head.pseudo.method.as_deref() == Some("CONNECT") {
         return Err(NativeH3ClientError::UnsupportedRequest(
             "CONNECT needs a duplex session owner",
@@ -460,31 +575,113 @@ fn validate_request(
             size = add_field_size(size, name, value)?;
         }
     }
-    check_limit(size, config.max_field_section_size, "request fields")?;
-    check_limit(body.len(), config.max_request_body_bytes, "request body")?;
-    if let Some(expected) = content_length(&head.headers)? {
-        check_length(expected, body.len())?;
-    }
-    Ok(())
+    check_limit(size, config.max_field_section_size, "request fields")
 }
 
-struct Exchange {
+struct StreamingUpload<'a> {
+    reader: Pin<Box<dyn AsyncRead + Send + 'a>>,
+    buffer: Vec<u8>,
+    total_read: usize,
+    expected: Option<u64>,
+    limit: usize,
+}
+
+impl<'a> StreamingUpload<'a> {
+    fn new<R: AsyncRead + Send + 'a>(reader: R, expected: Option<u64>, limit: usize) -> Self {
+        Self {
+            reader: Box::pin(reader),
+            buffer: vec![0; IO_CHUNK_BYTES],
+            total_read: 0,
+            expected,
+            limit,
+        }
+    }
+
+    fn poll_chunk(
+        &mut self,
+        task: &mut Context<'_>,
+        max_frame_payload: usize,
+    ) -> Poll<Result<Option<Bytes>, NativeH3ClientError>> {
+        // At either boundary, read at most one excess byte. In particular a
+        // zero Content-Length is not an instruction to ignore a nonempty body.
+        let remaining = self.limit.saturating_sub(self.total_read);
+        let remaining = self.expected.map_or(remaining, |expected| {
+            remaining.min(expected.saturating_sub(self.total_read as u64) as usize)
+        });
+        let offered = IO_CHUNK_BYTES
+            .min(max_frame_payload)
+            .min(remaining.saturating_add(1));
+        if offered == 0 {
+            return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                "request DATA frame payload budget is zero",
+            )));
+        }
+        let start = self.buffer.as_ptr();
+        let mut buffer = ReadBuf::new(&mut self.buffer[..offered]);
+        let result = self.reader.as_mut().poll_read(task, &mut buffer);
+        let filled = buffer.filled();
+        if !crate::io::transfer_session::filled_in_place(filled, start, offered) {
+            return Poll::Ready(Err(NativeH3ClientError::RequestBody(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request reader replaced the offered destination buffer",
+            ))));
+        }
+        let pending = match result {
+            Poll::Pending => true,
+            Poll::Ready(Ok(())) => false,
+            Poll::Ready(Err(error)) => {
+                return Poll::Ready(Err(NativeH3ClientError::RequestBody(error)));
+            }
+        };
+        let read = filled.len();
+        if read == 0 {
+            if pending {
+                return Poll::Pending;
+            }
+            if let Some(expected) = self.expected {
+                check_length(expected, self.total_read)?;
+            }
+            return Poll::Ready(Ok(None));
+        }
+        let total = self.total_read.checked_add(read).ok_or(
+            NativeH3ClientError::InvalidMessage("request body size overflow"),
+        )?;
+        if let Some(expected) = self.expected {
+            if total as u64 > expected {
+                return Poll::Ready(Err(NativeH3ClientError::ContentLengthMismatch {
+                    expected,
+                    actual: total,
+                }));
+            }
+        }
+        check_limit(total, self.limit, "request body")?;
+        self.total_read = total;
+        // A provider may report Pending after filling the offered storage.
+        // Those bytes have already been consumed: publish them exactly once
+        // instead of discarding progress or waiting for an unrelated wake.
+        Poll::Ready(Ok(Some(Bytes::copy_from_slice(filled))))
+    }
+}
+
+struct Exchange<'a> {
     session: NativeH3Session,
     writer: NativeH3RequestWriter,
     body: Bytes,
     offset: usize,
+    upload: Option<StreamingUpload<'a>>,
     upload_stopped: bool,
     response: ResponseCollector,
     pending_data: Bytes,
     completed: Option<NativeH3ClientResponseSummary>,
 }
 
-impl Exchange {
+impl<'a> Exchange<'a> {
     fn new(
         cx: &Cx,
         connection: &mut QuicConnection,
         head: &H3RequestHead,
         body: Bytes,
+        upload: Option<StreamingUpload<'a>>,
         config: NativeH3ClientConfig,
     ) -> Result<Self, NativeH3ClientError> {
         let mut session = NativeH3Session::client();
@@ -498,7 +695,12 @@ impl Exchange {
                 ..H3Settings::default()
             },
         )?;
-        let writer = session.start_request_writer(cx, connection, head, body.is_empty())?;
+        let writer = session.start_request_writer(
+            cx,
+            connection,
+            head,
+            body.is_empty() && upload.is_none(),
+        )?;
         let response = ResponseCollector::new(
             writer.stream_id(),
             head.pseudo.method.as_deref() == Some("HEAD"),
@@ -509,6 +711,7 @@ impl Exchange {
             writer,
             body,
             offset: 0,
+            upload,
             upload_stopped: false,
             response,
             pending_data: Bytes::new(),
@@ -550,9 +753,11 @@ impl Exchange {
                 match self.response.accept(event) {
                     Err(error) => return Poll::Ready(Err(error)),
                     Ok(ResponseProgress::Finished(response)) => {
-                        // FIN retires only the upload, even if flushing the
-                        // sink now parks. Retain the validated metadata so a
-                        // resumed flush never consumes FIN twice.
+                        // Source ownership ends with the validated response,
+                        // even if resetting the upload fails or sink flush
+                        // now parks. A resumed flush must not consume FIN twice.
+                        self.body = Bytes::new();
+                        self.upload = None;
                         if !self.upload_stopped && !self.writer.is_finished() {
                             let _ = self.stop_upload_after_response(cx, connection);
                         }
@@ -579,6 +784,7 @@ impl Exchange {
                 Ok(true) => {
                     self.upload_stopped = true;
                     self.body = Bytes::new();
+                    self.upload = None;
                 }
                 Ok(false) => {}
                 Err(error) => return Poll::Ready(Err(error.into())),
@@ -586,6 +792,7 @@ impl Exchange {
         }
         if self.upload_stopped || self.writer.is_finished() {
             self.body = Bytes::new();
+            self.upload = None;
             return Poll::Pending;
         }
         for step in 0..POLL_STEPS {
@@ -596,6 +803,7 @@ impl Exchange {
             }
             if self.writer.is_finished() {
                 self.body = Bytes::new();
+                self.upload = None;
                 return Poll::Pending;
             }
             let queued = if self.offset < self.body.len() {
@@ -606,6 +814,16 @@ impl Exchange {
                 let result = self.writer.queue_data(self.body.slice(self.offset..end));
                 self.offset = end;
                 result
+            } else if let Some(upload) = self.upload.as_mut() {
+                match upload.poll_chunk(task, self.writer.max_frame_payload_size()) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(Some(bytes))) => self.writer.queue_data(bytes),
+                    Poll::Ready(Ok(None)) => {
+                        self.upload = None;
+                        self.writer.finish()
+                    }
+                }
             } else {
                 self.writer.finish()
             };
@@ -674,6 +892,7 @@ impl Exchange {
         }
         self.upload_stopped = true;
         self.body = Bytes::new();
+        self.upload = None;
         Ok(())
     }
 }
@@ -1114,6 +1333,197 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn streaming_request_preflight_bounds_declared_length() {
+        let config = NativeH3ClientConfig {
+            max_request_body_bytes: 4,
+            ..Default::default()
+        };
+        let mut head = request("POST");
+        assert_eq!(validate_streaming_request(&head, &config).unwrap(), None);
+        for length in ["0", "4"] {
+            head.headers = fields("content-length", length);
+            assert_eq!(
+                validate_streaming_request(&head, &config).unwrap(),
+                Some(length.parse().unwrap())
+            );
+        }
+        head.headers = fields("content-length", "5");
+        assert!(matches!(
+            validate_streaming_request(&head, &config),
+            Err(NativeH3ClientError::LimitExceeded {
+                resource: "request body",
+                limit: 4,
+            })
+        ));
+        head.headers = fields("content-length", "3,4");
+        assert!(matches!(
+            validate_streaming_request(&head, &config),
+            Err(NativeH3ClientError::InvalidMessage(_))
+        ));
+    }
+
+    fn next_upload_chunk(
+        upload: &mut StreamingUpload<'_>,
+        max_frame_payload: usize,
+    ) -> Poll<Result<Option<Bytes>, NativeH3ClientError>> {
+        let mut task = Context::from_waker(std::task::Waker::noop());
+        upload.poll_chunk(&mut task, max_frame_payload)
+    }
+
+    #[test]
+    fn streaming_upload_stages_only_bounded_frames_and_requires_eof() {
+        let source = vec![b'x'; IO_CHUNK_BYTES * 2 + 7];
+        for expected in [None, Some(source.len() as u64)] {
+            let mut upload = StreamingUpload::new(&source[..], expected, source.len());
+            let mut received = 0;
+            loop {
+                match next_upload_chunk(&mut upload, 1024) {
+                    Poll::Ready(Ok(Some(bytes))) => {
+                        assert!(!bytes.is_empty());
+                        assert!(bytes.len() <= 1024);
+                        assert!(bytes.iter().all(|byte| *byte == b'x'));
+                        received += bytes.len();
+                        assert_eq!(upload.total_read, received);
+                    }
+                    Poll::Ready(Ok(None)) => break,
+                    other => panic!("unexpected source result: {other:?}"),
+                }
+            }
+            assert_eq!(received, source.len());
+            assert_eq!(upload.buffer.len(), IO_CHUNK_BYTES);
+        }
+        let mut empty = StreamingUpload::new(&b""[..], Some(0), 0);
+        assert!(matches!(
+            next_upload_chunk(&mut empty, IO_CHUNK_BYTES),
+            Poll::Ready(Ok(None))
+        ));
+    }
+
+    #[test]
+    fn streaming_upload_rejects_short_excess_and_over_limit_sources() {
+        let mut short = StreamingUpload::new(&b"abc"[..], Some(4), 8);
+        assert!(matches!(
+            next_upload_chunk(&mut short, IO_CHUNK_BYTES),
+            Poll::Ready(Ok(Some(bytes))) if &bytes[..] == b"abc"
+        ));
+        assert!(matches!(
+            next_upload_chunk(&mut short, IO_CHUNK_BYTES),
+            Poll::Ready(Err(NativeH3ClientError::ContentLengthMismatch {
+                expected: 4,
+                actual: 3,
+            }))
+        ));
+        for expected in [0, 2] {
+            let mut excess = StreamingUpload::new(&b"abc"[..], Some(expected), 8);
+            assert!(matches!(
+                next_upload_chunk(&mut excess, IO_CHUNK_BYTES),
+                Poll::Ready(Err(NativeH3ClientError::ContentLengthMismatch {
+                    expected: declared,
+                    actual,
+                })) if declared == expected && actual as u64 == expected + 1
+            ));
+            assert_eq!(excess.total_read, 0, "excess DATA must not be queued");
+        }
+        let mut oversized = StreamingUpload::new(&b"abcdef"[..], None, 4);
+        assert!(matches!(
+            next_upload_chunk(&mut oversized, IO_CHUNK_BYTES),
+            Poll::Ready(Err(NativeH3ClientError::LimitExceeded {
+                resource: "request body",
+                limit: 4,
+            }))
+        ));
+        assert_eq!(oversized.total_read, 0);
+    }
+
+    #[test]
+    fn streaming_upload_keeps_positive_pending_progress_exactly_once() {
+        struct PendingReader(u8);
+
+        impl AsyncRead for PendingReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.get_mut();
+                this.0 += 1;
+                match this.0 {
+                    1 => Poll::Pending,
+                    2 => {
+                        buffer.put_slice(b"ab");
+                        Poll::Pending
+                    }
+                    3 => {
+                        buffer.put_slice(b"c");
+                        Poll::Ready(Ok(()))
+                    }
+                    _ => Poll::Ready(Ok(())),
+                }
+            }
+        }
+
+        let mut upload = StreamingUpload::new(PendingReader(0), Some(3), 3);
+        assert!(next_upload_chunk(&mut upload, 16).is_pending());
+        assert_eq!(upload.total_read, 0);
+        for expected in [&b"ab"[..], &b"c"[..]] {
+            assert!(matches!(
+                next_upload_chunk(&mut upload, 16),
+                Poll::Ready(Ok(Some(bytes))) if &bytes[..] == expected
+            ));
+        }
+        assert_eq!(upload.total_read, 3);
+        assert!(matches!(
+            next_upload_chunk(&mut upload, 16),
+            Poll::Ready(Ok(None))
+        ));
+    }
+
+    #[test]
+    fn streaming_upload_accepts_pinned_readers_with_borrowed_state() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PinnedReader<'a> {
+            bytes: &'a [u8],
+            polls: &'a AtomicUsize,
+            _pin: std::marker::PhantomPinned,
+        }
+
+        impl AsyncRead for PinnedReader<'_> {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.as_ref().get_ref();
+                if this.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    buffer.put_slice(this.bytes);
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut source = String::from("body");
+        let polls = AtomicUsize::new(0);
+        let reader = PinnedReader {
+            bytes: source.as_bytes(),
+            polls: &polls,
+            _pin: std::marker::PhantomPinned,
+        };
+        let mut upload = StreamingUpload::new(reader, Some(4), 4);
+        assert!(matches!(
+            next_upload_chunk(&mut upload, IO_CHUNK_BYTES),
+            Poll::Ready(Ok(Some(bytes))) if &bytes[..] == b"body"
+        ));
+        assert!(matches!(
+            next_upload_chunk(&mut upload, IO_CHUNK_BYTES),
+            Poll::Ready(Ok(None))
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        drop(upload);
+        source.clear();
     }
 
     #[test]

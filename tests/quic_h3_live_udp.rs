@@ -5958,6 +5958,141 @@ struct OwnedClientServerProgress {
     application_polls: usize,
 }
 
+#[derive(Debug, Default)]
+struct OwnedUploadObservation {
+    polls: AtomicUsize,
+    produced: AtomicUsize,
+    largest_read: AtomicUsize,
+    peer_bytes: AtomicUsize,
+    pending_reads: AtomicUsize,
+    eof_reads: AtomicUsize,
+    error_reads: AtomicUsize,
+    drops: AtomicUsize,
+    source_wake: std::sync::Mutex<Option<Waker>>,
+    server_wake: std::sync::Mutex<Option<Waker>>,
+}
+
+impl OwnedUploadObservation {
+    fn record_pending(&self, task: &Context<'_>) {
+        *self.source_wake.lock().unwrap() = Some(task.waker().clone());
+        if self.pending_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            let wake = self.server_wake.lock().unwrap().clone();
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+        }
+    }
+
+    fn received_by_peer(&self, count: usize) {
+        self.peer_bytes.store(count, Ordering::SeqCst);
+        let wake = self.source_wake.lock().unwrap().take();
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OwnedUploadTail {
+    Eof,
+    Pending,
+    Error,
+}
+
+/// Produces bytes on demand, without retaining the full upload. The optional
+/// gate refuses to produce the suffix until the actual UDP peer has consumed
+/// its prefix, so buffering this reader to EOF before sending would deadlock.
+#[derive(Debug)]
+struct OwnedUploadReader {
+    remaining: usize,
+    gate_after: Option<usize>,
+    gate_polled: bool,
+    tail: OwnedUploadTail,
+    observed: Arc<OwnedUploadObservation>,
+}
+
+impl OwnedUploadReader {
+    fn new(bytes: usize, tail: OwnedUploadTail) -> Self {
+        Self {
+            remaining: bytes,
+            gate_after: None,
+            gate_polled: false,
+            tail,
+            observed: Arc::new(OwnedUploadObservation::default()),
+        }
+    }
+}
+
+impl asupersync::io::AsyncRead for OwnedUploadReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        task: &mut Context<'_>,
+        buf: &mut asupersync::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.observed.polls.fetch_add(1, Ordering::SeqCst);
+        self.observed
+            .largest_read
+            .fetch_max(buf.remaining(), Ordering::SeqCst);
+        assert!(
+            buf.remaining() > 0,
+            "a body read needs real EOF-probe capacity"
+        );
+        if let Some(gate) = self.gate_after
+            && self.observed.produced.load(Ordering::SeqCst) >= gate
+            && (!self.gate_polled
+                || self.observed.peer_bytes.load(Ordering::SeqCst) < gate)
+        {
+            self.gate_polled = true;
+            self.observed.record_pending(task);
+            // Register before rechecking, so consumption racing this poll
+            // cannot strand the source behind its peer-progress barrier.
+            if self.observed.peer_bytes.load(Ordering::SeqCst) >= gate {
+                task.waker().wake_by_ref();
+            }
+            return Poll::Pending;
+        }
+        if self.remaining != 0 {
+            const CHUNK: [u8; 4096] = [b'u'; 4096];
+            let count = self.remaining.min(buf.remaining()).min(CHUNK.len());
+            buf.put_slice(&CHUNK[..count]);
+            self.remaining -= count;
+            self.observed.produced.fetch_add(count, Ordering::SeqCst);
+            return Poll::Ready(Ok(()));
+        }
+        match self.tail {
+            OwnedUploadTail::Eof => {
+                self.observed.eof_reads.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }
+            OwnedUploadTail::Pending => {
+                self.observed.record_pending(task);
+                Poll::Pending
+            }
+            OwnedUploadTail::Error => {
+                self.observed.error_reads.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "upload source failed before EOF",
+                )))
+            }
+        }
+    }
+}
+
+impl Drop for OwnedUploadReader {
+    fn drop(&mut self) {
+        self.observed.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+enum OwnedClientUpload {
+    Buffered(usize),
+    Streaming {
+        reader: OwnedUploadReader,
+        content_length: Option<usize>,
+    },
+}
+
 #[derive(Default)]
 struct OwnedClientUploadGate {
     request_finished: std::sync::atomic::AtomicBool,
@@ -5976,22 +6111,54 @@ async fn owned_client_exchange(
     Result<NativeH3ClientResponse, NativeH3ClientError>,
     OwnedClientServerProgress,
 ) {
-    owned_client_exchange_using(
+    owned_client_exchange_with_upload(
         cx,
         reply,
-        upload_bytes,
+        OwnedClientUpload::Buffered(upload_bytes),
         download_bytes,
         config,
-        None,
-        |client, head, body| client.execute(cx, head, body),
     )
     .await
 }
 
-/// The server uses the same native poll driver as the public client. Its
-/// completion wake comes from the client's terminal result, never a periodic
-/// timer or a noop-waker transport pump. Holding it until then also prevents a
-/// locally queued response FIN from being mistaken for delivery to the client.
+async fn owned_client_exchange_with_upload(
+    cx: &Cx,
+    reply: OwnedClientReply,
+    upload: OwnedClientUpload,
+    download_bytes: usize,
+    config: NativeH3ClientConfig,
+) -> (
+    Result<NativeH3ClientResponse, NativeH3ClientError>,
+    OwnedClientServerProgress,
+) {
+    owned_client_exchange_with_upload_using(
+        cx,
+        reply,
+        upload,
+        download_bytes,
+        config,
+        None,
+        |client, head, upload| {
+            let future: std::pin::Pin<
+                Box<
+                    dyn Future<Output = Result<NativeH3ClientResponse, NativeH3ClientError>>
+                        + Send
+                        + '_,
+                >,
+            > = match upload {
+                OwnedClientUpload::Buffered(bytes) => {
+                    Box::pin(client.execute(cx, head, Bytes::from(vec![b'u'; bytes])))
+                }
+                OwnedClientUpload::Streaming { reader, .. } => {
+                    Box::pin(client.execute_stream(cx, head, reader))
+                }
+            };
+            future
+        },
+    )
+    .await
+}
+
 async fn owned_client_exchange_using<R, F, Fut>(
     cx: &Cx,
     reply: OwnedClientReply,
@@ -6005,6 +6172,47 @@ where
     F: FnOnce(NativeH3Client, H3RequestHead, Bytes) -> Fut,
     Fut: Future<Output = Result<R, NativeH3ClientError>>,
 {
+    owned_client_exchange_with_upload_using(
+        cx,
+        reply,
+        OwnedClientUpload::Buffered(upload_bytes),
+        download_bytes,
+        config,
+        upload_gate,
+        |client, head, upload| {
+            let OwnedClientUpload::Buffered(bytes) = upload else {
+                unreachable!("the buffered exchange helper owns a buffered upload");
+            };
+            execute(client, head, Bytes::from(vec![b'u'; bytes]))
+        },
+    )
+    .await
+}
+
+/// The server uses the same native poll driver as the public client. Its
+/// completion wake comes from the client's terminal result, never a periodic
+/// timer or a noop-waker transport pump. Holding it until then also prevents a
+/// locally queued response FIN from being mistaken for delivery to the client.
+async fn owned_client_exchange_with_upload_using<R, F, Fut>(
+    cx: &Cx,
+    reply: OwnedClientReply,
+    upload: OwnedClientUpload,
+    download_bytes: usize,
+    config: NativeH3ClientConfig,
+    upload_gate: Option<Arc<OwnedClientUploadGate>>,
+    execute: F,
+) -> (Result<R, NativeH3ClientError>, OwnedClientServerProgress)
+where
+    F: FnOnce(NativeH3Client, H3RequestHead, OwnedClientUpload) -> Fut,
+    Fut: Future<Output = Result<R, NativeH3ClientError>>,
+{
+    let (content_length, observed) = match &upload {
+        OwnedClientUpload::Buffered(bytes) => (Some(*bytes), None),
+        OwnedClientUpload::Streaming {
+            reader,
+            content_length,
+        } => (*content_length, Some(Arc::clone(&reader.observed))),
+    };
     let (client, server) = live_pair_with_client_session(cx, H3_ALPN, H3_ALPN, false).await;
     let (client, absent_session) = client.expect("authenticated fresh client owner");
     assert!(absent_session.is_none());
@@ -6048,6 +6256,9 @@ where
     let mut offset = 0;
     let serving = endpoint.run_event_loop_with_application(cx, |cx, endpoint, task| {
         *server_wake.lock().unwrap() = Some(task.waker().clone());
+        if let Some(observed) = &observed {
+            *observed.server_wake.lock().unwrap() = Some(task.waker().clone());
+        }
         if let Some(gate) = &upload_gate {
             *gate.server_wake.lock().unwrap() = Some(task.waker().clone());
         }
@@ -6085,13 +6296,17 @@ where
                         assert_eq!(Some(stream_id), stream);
                         assert!(bytes.iter().all(|byte| *byte == b'u'));
                         progress.upload_bytes += bytes.len();
+                        if let Some(observed) = &observed {
+                            observed.received_by_peer(progress.upload_bytes);
+                        }
                     }
                     NativeH3Event::Finished { stream_id } => {
                         assert_eq!(Some(stream_id), stream);
                         progress.request_finished = true;
                         if let Some(gate) = &upload_gate {
                             gate.request_finished.store(true, Ordering::SeqCst);
-                            if let Some(wake) = gate.sink_wake.lock().unwrap().take() {
+                            let wake = gate.sink_wake.lock().unwrap().take();
+                            if let Some(wake) = wake {
                                 wake.wake();
                             }
                         }
@@ -6104,7 +6319,11 @@ where
                 }
             }
             let may_respond = stream.is_some()
-                && (!matches!(reply, OwnedClientReply::AfterUpload) || progress.request_finished);
+                && (!matches!(reply, OwnedClientReply::AfterUpload) || progress.request_finished)
+                && (!matches!(reply, OwnedClientReply::Early413)
+                    || observed.as_ref().is_none_or(|observed| {
+                        observed.pending_reads.load(Ordering::SeqCst) != 0
+                    }));
             if may_respond && !progress.response_started {
                 progress.response_started = true;
                 let stream = stream.unwrap();
@@ -6190,21 +6409,26 @@ where
     });
     let request = H3RequestHead::new(
         H3PseudoHeaders {
-            method: Some(if upload_bytes == 0 { "GET" } else { "POST" }.to_owned()),
+            method: Some(
+                if content_length == Some(0) {
+                    "GET"
+                } else {
+                    "POST"
+                }
+                .to_owned(),
+            ),
             scheme: Some("https".to_owned()),
             authority: Some("localhost".to_owned()),
             path: Some("/owned-exchange".to_owned()),
             ..Default::default()
         },
-        vec![("content-length".to_owned(), upload_bytes.to_string())],
+        content_length
+            .map(|length| vec![("content-length".to_owned(), length.to_string())])
+            .unwrap_or_default(),
     )
     .unwrap();
     let requesting = async {
-        let mut future = Box::pin(execute(
-            client,
-            request,
-            Bytes::from(vec![b'u'; upload_bytes]),
-        ));
+        let mut future = Box::pin(execute(client, request, upload));
         // Exercise an explicitly supplied Cx even when its future is polled
         // without an ambient context. The deadline must still wake on no FIN.
         let result = std::future::poll_fn(|task| {
@@ -6261,6 +6485,213 @@ fn owned_h3_client_streams_upload_and_download_past_initial_credit() {
             response.trailers,
             [("x-complete".to_owned(), "yes".to_owned())]
         );
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_streams_async_sources_before_eof_and_resumes_peer_gated_reads() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        for (upload_bytes, content_length) in
+            [(0, Some(0)), (800_000, None), (800_000, Some(800_000))]
+        {
+            let mut reader = OwnedUploadReader::new(upload_bytes, OwnedUploadTail::Eof);
+            reader.gate_after = (upload_bytes != 0).then_some(8192);
+            let observed = Arc::clone(&reader.observed);
+            let (result, progress) = owned_client_exchange_with_upload(
+                &cx,
+                OwnedClientReply::AfterUpload,
+                OwnedClientUpload::Streaming {
+                    reader,
+                    content_length,
+                },
+                9000,
+                NativeH3ClientConfig {
+                    max_request_body_bytes: upload_bytes,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let response = result.expect("a peer-gated AsyncRead upload completes over actual UDP");
+            assert_eq!(response.head.status, 200);
+            assert_eq!(response.body.len(), 9000);
+            assert!(response.body.iter().all(|byte| *byte == b'd'));
+            assert_eq!(
+                response.trailers,
+                [("x-complete".to_owned(), "yes".to_owned())]
+            );
+            assert_eq!(progress.upload_bytes, upload_bytes);
+            assert!(progress.request_finished, "the server observed request FIN");
+            assert_eq!(observed.produced.load(Ordering::SeqCst), upload_bytes);
+            assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 1);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert!(observed.largest_read.load(Ordering::SeqCst) <= 16 * 1024);
+            if upload_bytes != 0 {
+                assert!(upload_bytes as u64 > connection_config().recv_window);
+                assert!(observed.pending_reads.load(Ordering::SeqCst) > 0);
+                assert_eq!(observed.peer_bytes.load(Ordering::SeqCst), upload_bytes);
+            }
+        }
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_streaming_source_pending_keeps_response_and_deadline_live() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        for early_reply in [true, false] {
+            // This reader never emits a body byte or self-wakes. The server
+            // answers only after its Pending witness has been observed.
+            let reader = OwnedUploadReader::new(0, OwnedUploadTail::Pending);
+            let observed = Arc::clone(&reader.observed);
+            let (result, progress) = owned_client_exchange_with_upload(
+                &cx,
+                if early_reply {
+                    OwnedClientReply::Early413
+                } else {
+                    OwnedClientReply::AfterUpload
+                },
+                OwnedClientUpload::Streaming {
+                    reader,
+                    content_length: None,
+                },
+                0,
+                NativeH3ClientConfig {
+                    timeout: if early_reply {
+                        IO_TIMEOUT
+                    } else {
+                        Duration::from_millis(250)
+                    },
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(observed.pending_reads.load(Ordering::SeqCst) > 0);
+            assert!(
+                observed.polls.load(Ordering::SeqCst) < 1024,
+                "a parked source must not spin"
+            );
+            assert_eq!(observed.produced.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 0);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+            assert!(!progress.request_finished);
+            if early_reply {
+                assert!(progress.response_started);
+                let response = result
+                    .expect("a stalled producer cannot block a complete early response");
+                assert_eq!(response.head.status, 413);
+                assert_eq!(
+                    &response.body[..],
+                    b"upload rejected; response remains readable"
+                );
+            } else {
+                assert!(!progress.response_started);
+                assert!(matches!(result, Err(NativeH3ClientError::TimedOut)));
+            }
+        }
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_streaming_source_errors_and_length_limits_retire_the_exchange() {
+    #[derive(Debug, Clone, Copy)]
+    enum Failure {
+        Short,
+        Long,
+        DeclaredZero,
+        Limit,
+        Read,
+    }
+
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        for failure in [
+            Failure::Short,
+            Failure::Long,
+            Failure::DeclaredZero,
+            Failure::Limit,
+            Failure::Read,
+        ] {
+            let (bytes, content_length, tail) = match failure {
+                Failure::Short => (3, Some(5), OwnedUploadTail::Eof),
+                Failure::Long => (5, Some(3), OwnedUploadTail::Eof),
+                Failure::DeclaredZero => (1, Some(0), OwnedUploadTail::Eof),
+                Failure::Limit => (5, None, OwnedUploadTail::Eof),
+                Failure::Read => (0, None, OwnedUploadTail::Error),
+            };
+            let reader = OwnedUploadReader::new(bytes, tail);
+            let observed = Arc::clone(&reader.observed);
+            let mut config = NativeH3ClientConfig::default();
+            if matches!(failure, Failure::Limit) {
+                config.max_request_body_bytes = 4;
+            }
+            let (result, progress) = owned_client_exchange_with_upload(
+                &cx,
+                OwnedClientReply::AfterUpload,
+                OwnedClientUpload::Streaming {
+                    reader,
+                    content_length,
+                },
+                0,
+                config,
+            )
+            .await;
+            match failure {
+                Failure::Short => {
+                    assert!(matches!(
+                        result,
+                        Err(NativeH3ClientError::ContentLengthMismatch {
+                            expected: 5,
+                            actual: 3
+                        })
+                    ));
+                    assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 1);
+                }
+                Failure::Long => assert!(matches!(
+                    result,
+                    Err(NativeH3ClientError::ContentLengthMismatch { expected: 3, actual })
+                        if actual > 3
+                )),
+                Failure::DeclaredZero => assert!(matches!(
+                    result,
+                    Err(NativeH3ClientError::ContentLengthMismatch {
+                        expected: 0,
+                        actual: 1
+                    })
+                )),
+                Failure::Limit => assert!(matches!(
+                    result,
+                    Err(NativeH3ClientError::LimitExceeded {
+                        resource: "request body",
+                        limit: 4
+                    })
+                )),
+                Failure::Read => {
+                    assert!(matches!(
+                        result,
+                        Err(NativeH3ClientError::RequestBody(error))
+                            if error.kind() == std::io::ErrorKind::InvalidData
+                    ));
+                    assert_eq!(observed.error_reads.load(Ordering::SeqCst), 1);
+                }
+            }
+            assert!(
+                !progress.request_finished,
+                "invalid source must not authorize request FIN: {failure:?}"
+            );
+            assert!(!progress.response_started);
+            assert!(observed.polls.load(Ordering::SeqCst) > 0);
+            assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        }
     });
     runtime.block_on(runtime.handle().spawn(work));
     managed_assert_runtime_cleanup(&runtime);
@@ -6356,6 +6787,44 @@ fn owned_h3_client_bounds_unknown_length_body_missing_fin_and_reset() {
     managed_assert_runtime_cleanup(&runtime);
 }
 
+fn owned_client_parked_execution<'a>(
+    client: NativeH3Client,
+    cx: &'a Cx,
+    head: H3RequestHead,
+    observed: Option<Arc<OwnedUploadObservation>>,
+) -> std::pin::Pin<
+    Box<dyn Future<Output = Result<NativeH3ClientResponse, NativeH3ClientError>> + Send + 'a>,
+> {
+    if let Some(observed) = observed {
+        let mut reader = OwnedUploadReader::new(0, OwnedUploadTail::Pending);
+        reader.observed = observed;
+        Box::pin(client.execute_stream(cx, head, reader))
+    } else {
+        Box::pin(client.execute(cx, head, Bytes::new()))
+    }
+}
+
+fn assert_owned_source_pending(observed: &Option<Arc<OwnedUploadObservation>>) {
+    if let Some(observed) = observed {
+        assert!(
+            observed.pending_reads.load(Ordering::SeqCst) > 0,
+            "the body source itself must reach Pending before interruption"
+        );
+        assert_eq!(observed.produced.load(Ordering::SeqCst), 0);
+        assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(observed.drops.load(Ordering::SeqCst), 0);
+    }
+}
+
+fn assert_owned_source_retired(observed: &Option<Arc<OwnedUploadObservation>>) {
+    if let Some(observed) = observed {
+        assert!(observed.pending_reads.load(Ordering::SeqCst) > 0);
+        assert_eq!(observed.produced.load(Ordering::SeqCst), 0);
+        assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+    }
+}
+
 #[derive(Default)]
 struct OwnedClientSink {
     received: usize,
@@ -6399,7 +6868,8 @@ impl asupersync::io::AsyncWrite for OwnedClientSink {
             *gate.sink_wake.lock().unwrap() = Some(task.waker().clone());
             if !gate.request_finished.load(Ordering::SeqCst) {
                 gate.sink_parked.store(true, Ordering::SeqCst);
-                if let Some(wake) = gate.server_wake.lock().unwrap().take() {
+                let wake = gate.server_wake.lock().unwrap().take();
+                if let Some(wake) = wake {
                     wake.wake();
                 }
                 if !gate.request_finished.load(Ordering::SeqCst) {
@@ -6494,6 +6964,77 @@ fn owned_h3_client_download_to_sink_keeps_upload_live_under_backpressure() {
             sink.max_offered <= 16_384,
             "the peer emits bounded DATA frames"
         );
+        assert_eq!(sink.flush_polls, 2);
+        assert_eq!(
+            response.trailers,
+            [("x-complete".to_owned(), "yes".to_owned())]
+        );
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_streaming_source_and_sink_resume_independent_backpressure() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let upload_bytes = 800_000;
+        let download_bytes = 900_000;
+        assert!(upload_bytes as u64 > connection_config().recv_window);
+        assert!(download_bytes as u64 > connection_config().recv_window);
+
+        let mut reader = OwnedUploadReader::new(upload_bytes, OwnedUploadTail::Eof);
+        reader.gate_after = Some(8192);
+        let observed = Arc::clone(&reader.observed);
+        let gate = Arc::new(OwnedClientUploadGate::default());
+        let mut sink = OwnedClientSink {
+            upload_gate: Some(Arc::clone(&gate)),
+            interrupt_write_once: true,
+            interrupt_flush_once: true,
+            patterned: true,
+            ..Default::default()
+        };
+
+        // The peer refuses to consume the upload until the sink parks, and
+        // the sink stays parked until the upload finishes. In between, the
+        // source itself must park until the peer consumes its first 8192 bytes.
+        let (result, progress) = owned_client_exchange_with_upload_using(
+            &cx,
+            OwnedClientReply::DuringUpload,
+            OwnedClientUpload::Streaming {
+                reader,
+                content_length: None,
+            },
+            download_bytes,
+            NativeH3ClientConfig {
+                max_request_body_bytes: upload_bytes,
+                max_response_body_bytes: download_bytes,
+                ..Default::default()
+            },
+            Some(Arc::clone(&gate)),
+            |client, head, upload| {
+                let OwnedClientUpload::Streaming { reader, .. } = upload else {
+                    unreachable!("this exchange owns a streaming source");
+                };
+                client.execute_stream_to(&cx, head, reader, &mut sink)
+            },
+        )
+        .await;
+        let response = result.expect("source and sink backpressure must progress independently");
+        assert!(gate.sink_parked.load(Ordering::SeqCst));
+        assert!(observed.pending_reads.load(Ordering::SeqCst) > 0);
+        assert_eq!(observed.produced.load(Ordering::SeqCst), upload_bytes);
+        assert_eq!(observed.peer_bytes.load(Ordering::SeqCst), upload_bytes);
+        assert_eq!(observed.eof_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(observed.drops.load(Ordering::SeqCst), 1);
+        assert!(observed.largest_read.load(Ordering::SeqCst) <= 16_384);
+        assert!(progress.request_finished);
+        assert_eq!(progress.upload_bytes, upload_bytes);
+        assert_eq!(response.head.status, 200);
+        assert_eq!(response.body_bytes, download_bytes);
+        assert_eq!(sink.received, download_bytes);
+        assert!(sink.max_offered <= 16_384);
         assert_eq!(sink.flush_polls, 2);
         assert_eq!(
             response.trailers,
@@ -6724,8 +7265,17 @@ mod owned_native_h3_client_drop {
 
     #[test]
     fn parked_owned_http3_execution_drop_releases_its_socket_and_timers() {
+        check_parked_execution_drop(false);
+    }
+
+    #[test]
+    fn parked_owned_http3_streaming_drop_retires_pending_source_socket_and_timers() {
+        check_parked_execution_drop(true);
+    }
+
+    fn check_parked_execution_drop(streaming: bool) {
         let runtime = managed_runtime();
-        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
             let cx = Cx::current().expect("actual native task Cx");
             let (client, server) =
                 live_pair_with_client_session(&cx, H3_ALPN, H3_ALPN, false).await;
@@ -6755,7 +7305,9 @@ mod owned_native_h3_client_drop {
                 Vec::new(),
             )
             .expect("ordinary GET request");
-            let mut execute = Box::pin(client.execute(&cx, head, Bytes::new()));
+            let observed = streaming.then(|| Arc::new(OwnedUploadObservation::default()));
+            let mut execute =
+                owned_client_parked_execution(client, &cx, head, observed.clone());
             let mut parent = None::<Arc<ManagedParentWake>>;
             let mut attempts = 0;
             std::future::poll_fn(|task_cx| {
@@ -6775,18 +7327,28 @@ mod owned_native_h3_client_drop {
                     "a silent peer cannot complete the response: {result:?}"
                 );
                 if parent.wakes.load(Ordering::SeqCst) == before {
-                    Poll::Ready(())
+                    if observed.as_ref().is_none_or(|observed| {
+                        observed.pending_reads.load(Ordering::SeqCst) > 0
+                    }) {
+                        Poll::Ready(())
+                    } else {
+                        // A parked handshake or HEADERS flush does not prove
+                        // that the upload reader has ever been polled.
+                        Poll::Pending
+                    }
                 } else {
                     task_cx.waker().wake_by_ref();
                     Poll::Pending
                 }
             })
             .await;
+            assert_owned_source_pending(&observed);
             // Negative control: this is a live, exclusively owned UDP socket,
             // not an unpolled future which never acquired its resources.
             std::net::UdpSocket::bind(local)
                 .expect_err("the parked execution still owns the real UDP address");
             drop(execute);
+            assert_owned_source_retired(&observed);
             let rebound = std::net::UdpSocket::bind(local)
                 .expect("dropping the parked consuming future releases its UDP socket");
             assert_eq!(rebound.local_addr().unwrap(), local);
@@ -6807,8 +7369,17 @@ mod owned_native_h3_client_cancel {
 
     #[test]
     fn parked_owned_http3_execution_abort_returns_cancelled_and_releases_ownership() {
+        check_parked_execution_abort(false);
+    }
+
+    #[test]
+    fn parked_owned_http3_streaming_abort_returns_cancelled_and_retires_pending_source() {
+        check_parked_execution_abort(true);
+    }
+
+    fn check_parked_execution_abort(streaming: bool) {
         let runtime = managed_runtime();
-        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
             let cx = Cx::current().expect("actual native task Cx");
             let (client, server) =
                 live_pair_with_client_session(&cx, H3_ALPN, H3_ALPN, false).await;
@@ -6837,6 +7408,8 @@ mod owned_native_h3_client_cancel {
             .expect("ordinary GET request");
             let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let child_parked = Arc::clone(&parked);
+            let observed = streaming.then(|| Arc::new(OwnedUploadObservation::default()));
+            let child_observed = observed.clone();
             let mut child = cx
                 .spawn(move |child_cx| {
                     // Keep the native cancellation path's Send boundary
@@ -6848,8 +7421,12 @@ mod owned_native_h3_client_cancel {
                                 > + Send,
                         >,
                     > = Box::pin(async move {
-                        let mut execute =
-                            Box::pin(client.execute(&child_cx, head, Bytes::new()));
+                        let mut execute = owned_client_parked_execution(
+                            client,
+                            &child_cx,
+                            head,
+                            child_observed.clone(),
+                        );
                         let mut parent = None::<Arc<ManagedParentWake>>;
                         let result = std::future::poll_fn(|task_cx| {
                             let parent = parent.get_or_insert_with(|| {
@@ -6864,6 +7441,9 @@ mod owned_native_h3_client_cancel {
                                 execute.as_mut().poll(&mut Context::from_waker(&waker));
                             if result.is_pending()
                                 && parent.wakes.load(Ordering::SeqCst) == before
+                                && child_observed.as_ref().is_none_or(|observed| {
+                                    observed.pending_reads.load(Ordering::SeqCst) > 0
+                                })
                             {
                                 child_parked.store(true, Ordering::SeqCst);
                             }
@@ -6885,6 +7465,7 @@ mod owned_native_h3_client_cancel {
                 assert!(!child.is_finished(), "silent exchange completed before cancellation");
                 asupersync::runtime::yield_now().await;
             }
+            assert_owned_source_pending(&observed);
             // The child has actually started and still owns a live socket;
             // this must exercise an in-flight cancellation wake, not refusal
             // of a future which was already cancelled before its first poll.
@@ -6902,6 +7483,7 @@ mod owned_native_h3_client_cancel {
             );
             assert!(child.is_finished());
             drop(child);
+            assert_owned_source_retired(&observed);
             let rebound = std::net::UdpSocket::bind(local)
                 .expect("cancelled HTTP/3 execution releases its owned UDP socket before join");
             assert_eq!(rebound.local_addr().unwrap(), local);
