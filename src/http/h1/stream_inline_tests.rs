@@ -1331,6 +1331,78 @@
     }
 
     #[test]
+    fn outgoing_body_size_hint_follows_every_consumer_path() {
+        for path in 0..3 {
+            let cx: Cx = Cx::for_testing();
+            let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::ContentLength(5));
+            block_on(sender.send_bytes(&cx, Bytes::from_static(b"ab"))).unwrap();
+            block_on(sender.send_bytes(&cx, Bytes::from_static(b"cde"))).unwrap();
+            sender.finish(&cx).unwrap();
+
+            let mut task = Context::from_waker(Waker::noop());
+            let mut next = |body: &mut OutgoingBody| match path {
+                0 => poll_body(body),
+                1 => match body.poll_committed_frame(&mut task) {
+                    Poll::Ready(frame) => frame,
+                    Poll::Pending => panic!("all frames are already committed"),
+                },
+                _ => body.take_frame_after_producer_returned(),
+            };
+            assert_eq!(body.size_hint().exact(), Some(5));
+            let first = next(&mut body).unwrap().unwrap();
+            assert_eq!(first.into_data().unwrap().chunk(), b"ab");
+            assert_eq!(body.size_hint().exact(), Some(3), "consumer path {path}");
+            let second = next(&mut body).unwrap().unwrap();
+            assert_eq!(second.into_data().unwrap().chunk(), b"cde");
+            assert_eq!(body.size_hint().exact(), Some(0), "consumer path {path}");
+            assert!(next(&mut body).is_none());
+            assert!(body.is_end_stream());
+            assert_eq!(body.size_hint().exact(), Some(0));
+            assert_eq!(body.kind(), BodyKind::ContentLength(5));
+        }
+    }
+
+    #[test]
+    fn outgoing_body_terminal_hint_preserves_committed_drain_accounting() {
+        let cx: Cx = Cx::for_testing();
+        let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::ContentLength(5));
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"ab"))).unwrap();
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"cde"))).unwrap();
+        sender.finish(&cx).unwrap();
+        cx.cancel_fast(CancelKind::User);
+
+        // The public view has ended, but the transport still owns a separate
+        // right to drain bytes that committed before producer cancellation.
+        assert!(matches!(
+            poll_body(&mut body),
+            Some(Err(HttpError::BodyCancelled))
+        ));
+        assert_eq!(body.size_hint().exact(), Some(0));
+        let first = body.take_frame_after_producer_returned().unwrap().unwrap();
+        assert_eq!(first.into_data().unwrap().chunk(), b"ab");
+        assert_eq!(body.size_hint().exact(), Some(3));
+        let second = body.take_frame_after_producer_returned().unwrap().unwrap();
+        assert_eq!(second.into_data().unwrap().chunk(), b"cde");
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(body.take_frame_after_producer_returned().is_none());
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn outgoing_chunked_body_hint_becomes_zero_at_terminal_trailers() {
+        let cx: Cx = Cx::for_testing();
+        let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
+        assert_eq!(body.size_hint().exact(), None);
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"data"))).unwrap();
+        block_on(sender.send_trailers(&cx, HeaderMap::new())).unwrap();
+        assert!(poll_body(&mut body).unwrap().unwrap().is_data());
+        assert_eq!(body.size_hint().exact(), None);
+        assert!(poll_body(&mut body).unwrap().unwrap().is_trailers());
+        assert!(body.is_end_stream());
+        assert_eq!(body.size_hint().exact(), Some(0));
+    }
+
+    #[test]
     fn outgoing_body_backpressure_blocks_until_recv() {
         let cx: Cx = Cx::for_testing();
         let (mut sender, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);

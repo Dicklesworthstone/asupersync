@@ -2881,6 +2881,15 @@ impl OutgoingBody {
     pub fn kind(&self) -> BodyKind {
         self.kind
     }
+
+    fn account_delivered_frame(&mut self, frame: &Frame<BytesCursor>) {
+        if let Frame::Data(data) = frame
+            && let Some(remaining) = self.size_hint.exact()
+        {
+            let delivered = u64::try_from(data.remaining()).unwrap_or(u64::MAX);
+            self.size_hint = SizeHint::with_exact(remaining.saturating_sub(delivered));
+        }
+    }
 }
 
 impl Body for OutgoingBody {
@@ -2899,6 +2908,7 @@ impl Body for OutgoingBody {
         match self.receiver.poll_recv(&cx, poll_cx) {
             Poll::Ready(Ok(frame)) => {
                 if let Ok(ref f) = frame {
+                    self.account_delivered_frame(f);
                     if f.is_trailers() {
                         // Trailers are terminal for chunked bodies.
                         self.done = true;
@@ -2923,7 +2933,11 @@ impl Body for OutgoingBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.size_hint
+        if self.done {
+            SizeHint::with_exact(0)
+        } else {
+            self.size_hint
+        }
     }
 }
 
@@ -3014,6 +3028,11 @@ impl OutgoingBody {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn take_committed_frame(&mut self) -> Option<Result<Frame<BytesCursor>, HttpError>> {
         let frame = self.receiver.try_recv().ok()?;
+        // The transport drain bypasses poll_frame, but it transfers the same
+        // DATA ownership and must reduce the remaining length exactly once.
+        if let Ok(ref frame) = frame {
+            self.account_delivered_frame(frame);
+        }
         // Trailers are terminal for chunked bodies; any other frame leaves the
         // body open even if a cancelled receive already marked it done.
         self.done = matches!(&frame, Ok(frame) if frame.is_trailers());
