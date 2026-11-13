@@ -8,17 +8,18 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use crate::bytes::Bytes;
+use crate::bytes::{Buf, Bytes};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::quic_native::{
-    ConnectionRouterError, ManagedEndpointConfig, ManagedEndpointError, NativeQuicConnectionError,
-    NativeQuicUdpConnection, QuicConnection, StreamId, StreamRole,
+    ConnectionRouterError, ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint,
+    NativeQuicConnectionError, NativeQuicUdpConnection, QuicConnection, StreamId, StreamRole,
 };
 
+use super::body::{Body, Frame, HeaderMap};
 use super::h3_native::{
     H3RequestHead, H3ResponseHead, H3Settings, validate_request_head_with_settings,
-    validate_response_head,
+    validate_response_head, validate_trailer_fields,
 };
 use super::h3_quic::{
     H3_REQUEST_CANCELLED, NativeH3Event, NativeH3RequestWriter, NativeH3Session,
@@ -38,7 +39,7 @@ const MAX_CLIENT_FIELD_SECTION_SIZE: usize = 64 * 1024;
 /// this adapter does not decompress content encodings.
 #[derive(Debug, Clone)]
 pub struct NativeH3ClientConfig {
-    /// Maximum total request payload, including a streaming upload.
+    /// Maximum total request payload, buffered or produced incrementally.
     /// Zero allows only empty bodies.
     pub max_request_body_bytes: usize,
     /// Maximum total response payload, buffered or streamed to a sink.
@@ -51,8 +52,8 @@ pub struct NativeH3ClientConfig {
     pub max_response_header_bytes: usize,
     /// Maximum retained informational responses, from zero through 64.
     pub max_informational_responses: usize,
-    /// Deadline measured from the first poll of any execution method,
-    /// including source reads, sink backpressure, flush and cleanup.
+    /// Deadline measured from the first poll of the execution future,
+    /// including producer waits, sink backpressure, flush and cleanup.
     /// Must be nonzero. An already completed response survives cleanup errors
     /// or expiry of this deadline.
     pub timeout: Duration,
@@ -182,6 +183,9 @@ pub enum NativeH3ClientError {
     Transport(ManagedEndpointError),
     /// The response sink failed to write or flush accepted DATA.
     Sink(io::Error),
+    /// The request body producer failed. Its diagnostic is captured only after
+    /// the owned transport has been retired.
+    Source(io::Error),
     /// The owning task was cancelled before response completion.
     Cancelled,
     /// The response and, when supplied, its sink flush did not complete
@@ -226,6 +230,7 @@ impl fmt::Display for NativeH3ClientError {
             Self::Session(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
             Self::Sink(error) => write!(f, "HTTP/3 response sink failed: {error}"),
+            Self::Source(error) => write!(f, "HTTP/3 request body failed: {error}"),
             Self::Cancelled => f.write_str("HTTP/3 exchange cancelled"),
             Self::TimedOut => f.write_str("HTTP/3 exchange timed out before response completion"),
         }
@@ -239,6 +244,7 @@ impl std::error::Error for NativeH3ClientError {
             Self::Session(error) => Some(error),
             Self::Transport(error) => Some(error),
             Self::Sink(error) => Some(error),
+            Self::Source(error) => Some(error),
             _ => None,
         }
     }
@@ -283,17 +289,20 @@ impl From<ManagedEndpointError> for NativeH3ClientError {
 /// A complete early response can finish before the upload does; peer
 /// STOP_SENDING retires only the upload and leaves response reads active.
 ///
-/// [`Self::execute_stream`] reads an upload incrementally with at most 16 KiB
-/// of staging plus one queued DATA frame. The source is polled only after the
-/// previous frame clears local transport backpressure, while response reads
-/// and transport recovery continue independently of a parked source.
+/// Uploads may be buffered bytes, an [`AsyncRead`] reader through
+/// [`Self::execute_stream`], or an incremental [`Body`] through
+/// [`Self::execute_with_body`]. The reader path uses at most 16 KiB of staging
+/// plus one queued DATA frame and polls only after the previous frame clears
+/// local transport backpressure. Response reads and transport recovery keep
+/// progressing independently of a parked source.
 ///
-/// [`Self::execute_to`] streams a buffered request's response to an async sink;
-/// [`Self::execute_stream_to`] streams both bodies without collecting either.
-/// This adapter does not pool, reconnect, retry, follow redirects, multiplex,
-/// or implement CONNECT tunnels. Use [`NativeH3Session`] with an explicitly
-/// owned transport for multi-request compositions. Existing streams must not
-/// be shared with this consuming adapter.
+/// Responses may be collected or written incrementally to an [`AsyncWrite`]
+/// sink with [`Self::execute_to`], [`Self::execute_stream_to`], or
+/// [`Self::execute_with_body_to`], respectively. This adapter
+/// does not pool, reconnect, retry, follow redirects, multiplex, or implement
+/// CONNECT tunnels. Use [`NativeH3Session`] with an explicitly owned transport
+/// for multi-request compositions. Existing streams must not be shared with
+/// this consuming adapter.
 /// The session uses static QPACK, a 1 MiB maximum wire-frame payload, and
 /// 16 KiB receive chunks; response collection remains bounded independently.
 #[derive(Debug)]
@@ -481,7 +490,7 @@ impl NativeH3Client {
             )
             .map_err(|error| NativeH3ClientError::from(error.into_parts().0))?;
         let mut exchange = endpoint.with_connection_mut(cx, connection_id, |connection| {
-            Exchange::new(cx, connection, &head, body, upload, config.clone())
+            Exchange::new(cx, connection, &head, body, upload, false, config.clone())
         })??;
         let operation = crate::time::timeout(
             started,
@@ -494,9 +503,16 @@ impl NativeH3Client {
                     return completed.map(Ok);
                 }
                 match endpoint.with_connection_mut(cx, connection_id, |connection| {
-                    exchange.poll(cx, connection, task, sink)
+                    exchange.poll(cx, connection, task, None::<&mut Upload<Bytes>>, sink)
                 }) {
-                    Ok(poll) => poll.map(Ok),
+                    Ok(poll) => poll.map(|result| {
+                        Ok(result.map_err(|error| match error {
+                            ExchangeError::Client(error) => error,
+                            ExchangeError::Source => NativeH3ClientError::InvalidMessage(
+                                "generic body failure without a producer owner",
+                            ),
+                        }))
+                    }),
                     Err(error) => Poll::Ready(Err(error)),
                 }
             }),
@@ -512,6 +528,195 @@ impl NativeH3Client {
             poll_with_context(cx, crate::time::timeout_at(deadline, endpoint.shutdown(cx))).await;
         Ok(response)
     }
+
+    /// Stream a [`Body`] upload and collect the bounded response.
+    ///
+    /// This has the producer, framing and ownership rules of
+    /// [`Self::execute_with_body_to`]. The response body is collected under
+    /// `max_response_body_bytes`; the request is never collected or replayed.
+    pub fn execute_with_body<B>(
+        self,
+        cx: &Cx,
+        head: H3RequestHead,
+        body: B,
+    ) -> impl Future<Output = Result<NativeH3ClientResponse, NativeH3ClientError>> + use<B>
+    where
+        B: Body,
+        B::Error: fmt::Display,
+    {
+        // Construct before entering the async block so even an unpolled
+        // future closes its socket before dropping caller-supplied code.
+        let request = RequestOwner::new(cx, self.connection, body);
+        let config = self.config;
+        async move {
+            let mut collected = Vec::new();
+            let summary = execute_owned_to(request, head, config, &mut collected).await?;
+            Ok(NativeH3ClientResponse {
+                head: summary.head,
+                body: Bytes::from(collected),
+                trailers: summary.trailers,
+                informational: summary.informational,
+            })
+        }
+    }
+
+    /// Stream a [`Body`] upload and write the response to a borrowed sink.
+    ///
+    /// [`super::ReaderBody`] and [`super::MultipartBody`] can supply the upload
+    /// without collecting it. One producer DATA frame is retained and split
+    /// into at most 16 KiB wire payloads as transport capacity becomes ready.
+    /// The frame itself may be larger; `max_request_body_bytes` bounds the
+    /// total admitted payload independently of the producer's allocation.
+    /// A pending producer never prevents response or transport progress, and
+    /// a completed early response or peer STOP_SENDING stops producer polls.
+    ///
+    /// An exact size hint supplies Content-Length if none was declared.
+    /// Both declared and hinted lengths are checked against actual producer
+    /// EOF; an exact zero hint does not skip EOF. A single final trailer frame
+    /// is supported and is sent only after EOF validates the full upload.
+    /// Invalid or excessive DATA is rejected before that frame is sent.
+    /// A successful early response can precede upload EOF: in that case the
+    /// remaining producer is retired without consuming it or requiring its
+    /// declared length, while the complete response is still validated.
+    ///
+    /// The producer needs neither `Unpin` nor `Send`. Its polling, buffer
+    /// operations and destruction run under the explicit owner's restricted
+    /// context, including if this future is dropped before its first poll.
+    /// Cancellation, source failure, and drop release the owned transport
+    /// before destroying retained producer state. No task continues the
+    /// upload in the background and no failed request is retried.
+    ///
+    /// Sink backpressure, partial writes, flush, and partial-output behavior
+    /// are the same as [`Self::execute_to`]. The original total deadline covers
+    /// producer waits and the final sink flush together.
+    pub fn execute_with_body_to<'a, B, W>(
+        self,
+        cx: &Cx,
+        head: H3RequestHead,
+        body: B,
+        sink: &'a mut W,
+    ) -> impl Future<Output = Result<NativeH3ClientResponseSummary, NativeH3ClientError>> + use<'a, B, W>
+    where
+        B: Body,
+        B::Error: fmt::Display,
+        W: AsyncWrite + Unpin + ?Sized,
+    {
+        let request = RequestOwner::new(cx, self.connection, body);
+        execute_owned_to(request, head, self.config, sink)
+    }
+}
+
+/// The transport is owned from method invocation, including before any poll.
+/// Retire it before arbitrary source/data/error destructors can run on drop.
+struct RequestOwner<B: Body> {
+    connection: Option<NativeQuicUdpConnection>,
+    endpoint: Option<ManagedQuicEndpoint>,
+    upload: Upload<B>,
+}
+
+impl<B: Body> RequestOwner<B> {
+    fn new(cx: &Cx, connection: NativeQuicUdpConnection, source: B) -> Self {
+        Self {
+            connection: Some(connection),
+            endpoint: None,
+            upload: Upload::new(cx, source),
+        }
+    }
+
+    fn retire_transport(&mut self) {
+        let _ambient = self.upload.source.owner.clone().set_current_restricted();
+        drop(self.connection.take());
+        drop(self.endpoint.take());
+    }
+}
+
+impl<B: Body> Drop for RequestOwner<B> {
+    fn drop(&mut self) {
+        self.retire_transport();
+    }
+}
+
+async fn execute_owned_to<B, W>(
+    mut request: RequestOwner<B>,
+    mut head: H3RequestHead,
+    config: NativeH3ClientConfig,
+    sink: &mut W,
+) -> Result<NativeH3ClientResponseSummary, NativeH3ClientError>
+where
+    B: Body,
+    B::Error: fmt::Display,
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    let cx = request.upload.source.owner.clone();
+    let started = cx.now();
+    cx.checkpoint()
+        .map_err(|_| NativeH3ClientError::Cancelled)?;
+    request.upload.prepare(&mut head, &config)?;
+    let connection = request.connection.take().expect("owned fresh connection");
+    let connection_id = connection.local_connection_id();
+    request.endpoint = Some(
+        connection
+            .into_managed(
+                &cx,
+                ManagedEndpointConfig {
+                    max_connections: 1,
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .map_err(|error| NativeH3ClientError::from(error.into_parts().0))?,
+    );
+    let RequestOwner {
+        endpoint, upload, ..
+    } = &mut request;
+    let endpoint = endpoint.as_mut().expect("managed connection owner");
+    let mut exchange = endpoint.with_connection_mut(&cx, connection_id, |connection| {
+        Exchange::new(
+            &cx,
+            connection,
+            &head,
+            Bytes::new(),
+            None,
+            true,
+            config.clone(),
+        )
+    })??;
+    let operation = crate::time::timeout(
+        started,
+        config.timeout,
+        endpoint.run_event_loop_with_application(&cx, |cx, endpoint, task| {
+            // Local flush can finish after normal peer route retirement.
+            if let Some(completed) = exchange.poll_completed(cx, task, sink) {
+                return completed.map(|result| Ok(result.map_err(ExchangeError::Client)));
+            }
+            match endpoint.with_connection_mut(cx, connection_id, |connection| {
+                exchange.poll(cx, connection, task, Some(&mut *upload), sink)
+            }) {
+                Ok(poll) => poll.map(Ok),
+                Err(error) => Poll::Ready(Err(error)),
+            }
+        }),
+    );
+    let deadline = operation.deadline();
+    let response = poll_with_context(&cx, operation)
+        .await
+        .map_err(|_| NativeH3ClientError::TimedOut)??;
+    let response = match response {
+        Ok(response) => response,
+        Err(ExchangeError::Client(error)) => return Err(error),
+        Err(ExchangeError::Source) => {
+            // Display and destruction of B::Error are user code. Neither may
+            // observe the socket still owned, even if formatting panics.
+            request.retire_transport();
+            return Err(request.upload.take_source_error());
+        }
+    };
+    // Validated FIN and successful flush already established completion.
+    let _ = poll_with_context(
+        &cx,
+        crate::time::timeout_at(deadline, endpoint.shutdown(&cx)),
+    )
+    .await;
+    Ok(response)
 }
 
 /// The timeout and driver must see the same explicit caller clock. A future
@@ -575,7 +780,8 @@ fn validate_request_fields(
             size = add_field_size(size, name, value)?;
         }
     }
-    check_limit(size, config.max_field_section_size, "request fields")
+    check_limit(size, config.max_field_section_size, "request fields")?;
+    Ok(())
 }
 
 struct StreamingUpload<'a> {
@@ -643,9 +849,12 @@ impl<'a> StreamingUpload<'a> {
             }
             return Poll::Ready(Ok(None));
         }
-        let total = self.total_read.checked_add(read).ok_or(
-            NativeH3ClientError::InvalidMessage("request body size overflow"),
-        )?;
+        let total =
+            self.total_read
+                .checked_add(read)
+                .ok_or(NativeH3ClientError::InvalidMessage(
+                    "request body size overflow",
+                ))?;
         if let Some(expected) = self.expected {
             if total as u64 > expected {
                 return Poll::Ready(Err(NativeH3ClientError::ContentLengthMismatch {
@@ -661,6 +870,311 @@ impl<'a> StreamingUpload<'a> {
         // instead of discarding progress or waiting for an unrelated wake.
         Poll::Ready(Ok(Some(Bytes::copy_from_slice(filled))))
     }
+}
+
+struct SourceOwner<B> {
+    owner: Cx,
+    source: Option<Pin<Box<B>>>,
+}
+
+impl<B> SourceOwner<B> {
+    fn new(owner: &Cx, source: B) -> Self {
+        Self {
+            owner: owner.clone(),
+            source: Some(Box::pin(source)),
+        }
+    }
+}
+
+impl<B> Drop for SourceOwner<B> {
+    fn drop(&mut self) {
+        let _ambient = self.owner.clone().set_current_restricted();
+        drop(self.source.take());
+    }
+}
+
+struct UploadData<D> {
+    // Not structurally pinned; B::Data need not implement Unpin.
+    data: Box<D>,
+    remaining: usize,
+}
+
+struct SourceError<E> {
+    owner: Cx,
+    error: Option<E>,
+}
+
+impl<E> Drop for SourceError<E> {
+    fn drop(&mut self) {
+        let _ambient = self.owner.clone().set_current_restricted();
+        drop(self.error.take());
+    }
+}
+
+struct Upload<B: Body> {
+    source: SourceOwner<B>,
+    data: Option<UploadData<B::Data>>,
+    error: Option<SourceError<B::Error>>,
+    produced: usize,
+    expected: Option<u64>,
+    limit: usize,
+    field_limit: usize,
+    trailers: Option<Vec<(String, String)>>,
+    saw_trailers: bool,
+    eof: bool,
+    poisoned: bool,
+}
+
+impl<B: Body> Drop for Upload<B> {
+    fn drop(&mut self) {
+        let _ambient = self.source.owner.clone().set_current_restricted();
+        drop(self.data.take());
+        // Independent scoped guards also cover unwinding from a Buf drop.
+        drop(self.error.take());
+    }
+}
+
+enum UploadProgress {
+    Continue,
+    Data(Bytes),
+    Trailers(Vec<(String, String)>),
+    Finished,
+    SourceFailed,
+}
+
+impl<B: Body> Upload<B> {
+    fn new(cx: &Cx, source: B) -> Self {
+        Self {
+            source: SourceOwner::new(cx, source),
+            data: None,
+            error: None,
+            produced: 0,
+            expected: None,
+            limit: 0,
+            field_limit: 0,
+            trailers: None,
+            saw_trailers: false,
+            eof: false,
+            poisoned: false,
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        head: &mut H3RequestHead,
+        config: &NativeH3ClientConfig,
+    ) -> Result<(), NativeH3ClientError> {
+        validate_request_fields(head, config)?;
+        let declared = content_length(&head.headers)?;
+        let _ambient = self.source.owner.clone().set_current_restricted();
+        let hint = self
+            .source
+            .source
+            .as_ref()
+            .expect("live producer")
+            .size_hint();
+        if hint.lower() > config.max_request_body_bytes as u64
+            || declared.is_some_and(|length| length > config.max_request_body_bytes as u64)
+        {
+            return Err(NativeH3ClientError::LimitExceeded {
+                resource: "request body",
+                limit: config.max_request_body_bytes,
+            });
+        }
+        if let (Some(expected), Some(actual)) = (declared, hint.exact()) {
+            if expected != actual {
+                return Err(NativeH3ClientError::InvalidMessage(
+                    "request size hint disagrees with content-length",
+                ));
+            }
+        }
+        self.expected = declared.or(hint.exact());
+        if declared.is_none() {
+            if let Some(length) = hint.exact() {
+                head.headers
+                    .push(("content-length".to_owned(), length.to_string()));
+                validate_request_fields(head, config)?;
+            }
+        }
+        self.limit = config.max_request_body_bytes;
+        self.field_limit = config.max_field_section_size;
+        Ok(())
+    }
+
+    fn poll(
+        &mut self,
+        task: &mut Context<'_>,
+        capacity: usize,
+    ) -> Poll<Result<UploadProgress, NativeH3ClientError>> {
+        if self.eof {
+            return Poll::Ready(Ok(UploadProgress::Finished));
+        }
+        if std::mem::replace(&mut self.poisoned, true) {
+            return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                "request body resumed after a provider panic",
+            )));
+        }
+        let _ambient = self.source.owner.clone().set_current_restricted();
+        let result = self.poll_inner(task, capacity);
+        self.poisoned = false;
+        result
+    }
+
+    fn poll_inner(
+        &mut self,
+        task: &mut Context<'_>,
+        capacity: usize,
+    ) -> Poll<Result<UploadProgress, NativeH3ClientError>> {
+        if let Some(data) = &mut self.data {
+            let chunk_length = data.data.chunk().len();
+            if data.data.remaining() != data.remaining
+                || chunk_length == 0
+                || chunk_length > data.remaining
+            {
+                return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                    "request body buffer violated its remaining/chunk contract",
+                )));
+            }
+            let length = capacity.min(data.remaining).min(chunk_length);
+            if length == 0 {
+                return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                    "request writer has no DATA capacity",
+                )));
+            }
+            let bytes = data.data.copy_to_bytes(length);
+            let remaining = data.remaining - length;
+            if bytes.len() != length || data.data.remaining() != remaining {
+                return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                    "request body buffer did not advance by the emitted length",
+                )));
+            }
+            data.remaining = remaining;
+            if remaining == 0 {
+                self.data = None;
+            }
+            return Poll::Ready(Ok(UploadProgress::Data(bytes)));
+        }
+        match self
+            .source
+            .source
+            .as_mut()
+            .expect("live producer")
+            .as_mut()
+            .poll_frame(task)
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Err(error))) => {
+                self.error = Some(SourceError {
+                    owner: self.source.owner.clone(),
+                    error: Some(error),
+                });
+                Poll::Ready(Ok(UploadProgress::SourceFailed))
+            }
+            Poll::Ready(Some(Ok(Frame::Data(data)))) => {
+                // Retain before validation so rejected data is destroyed only
+                // after RequestOwner has retired the transport.
+                self.data = Some(UploadData {
+                    data: Box::new(data),
+                    remaining: 0,
+                });
+                if self.saw_trailers {
+                    return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                        "request DATA follows trailers",
+                    )));
+                }
+                let data = self.data.as_mut().expect("stored above");
+                let length = data.data.remaining();
+                let total = self.produced.checked_add(length).ok_or(
+                    NativeH3ClientError::LimitExceeded {
+                        resource: "request body",
+                        limit: self.limit,
+                    },
+                )?;
+                check_limit(total, self.limit, "request body")?;
+                if self
+                    .expected
+                    .is_some_and(|expected| total as u64 > expected)
+                {
+                    return Poll::Ready(Err(NativeH3ClientError::ContentLengthMismatch {
+                        expected: self.expected.expect("checked above"),
+                        actual: total,
+                    }));
+                }
+                self.produced = total;
+                data.remaining = length;
+                if length == 0 {
+                    self.data = None;
+                }
+                Poll::Ready(Ok(UploadProgress::Continue))
+            }
+            Poll::Ready(Some(Ok(Frame::Trailers(trailers)))) => {
+                if self.saw_trailers {
+                    return Poll::Ready(Err(NativeH3ClientError::InvalidMessage(
+                        "multiple request trailer frames",
+                    )));
+                }
+                self.trailers = Some(request_trailers(trailers, self.field_limit)?);
+                self.saw_trailers = true;
+                Poll::Ready(Ok(UploadProgress::Continue))
+            }
+            Poll::Ready(None) => {
+                if let Some(expected) = self.expected {
+                    check_length(expected, self.produced)?;
+                }
+                self.eof = true;
+                Poll::Ready(Ok(match self.trailers.take() {
+                    Some(trailers) => UploadProgress::Trailers(trailers),
+                    None => UploadProgress::Finished,
+                }))
+            }
+        }
+    }
+
+    fn take_source_error(&mut self) -> NativeH3ClientError
+    where
+        B::Error: fmt::Display,
+    {
+        let _ambient = self.source.owner.clone().set_current_restricted();
+        let error = self
+            .error
+            .take()
+            .expect("failed producer retains its error");
+        NativeH3ClientError::Source(io::Error::other(
+            error
+                .error
+                .as_ref()
+                .expect("retained producer error")
+                .to_string(),
+        ))
+    }
+}
+
+fn request_trailers(
+    trailers: HeaderMap,
+    limit: usize,
+) -> Result<Vec<(String, String)>, NativeH3ClientError> {
+    let mut fields = Vec::new();
+    let mut size = 0;
+    for (name, value) in trailers.iter() {
+        if name.as_str().starts_with(':') || super::h1::codec::is_forbidden_trailer(name.as_str()) {
+            return Err(NativeH3ClientError::InvalidMessage(
+                "forbidden request trailer field",
+            ));
+        }
+        let value = value
+            .to_str()
+            .map_err(|_| NativeH3ClientError::InvalidMessage("request trailer is not UTF-8"))?;
+        size = add_field_size(size, name.as_str(), value)?;
+        check_limit(size, limit, "request trailers")?;
+        fields.push((name.as_str().to_owned(), value.to_owned()));
+    }
+    validate_trailer_fields(&fields).map_err(NativeH3SessionError::from)?;
+    Ok(fields)
+}
+
+enum ExchangeError {
+    Client(NativeH3ClientError),
+    Source,
 }
 
 struct Exchange<'a> {
@@ -682,6 +1196,7 @@ impl<'a> Exchange<'a> {
         head: &H3RequestHead,
         body: Bytes,
         upload: Option<StreamingUpload<'a>>,
+        external_body: bool,
         config: NativeH3ClientConfig,
     ) -> Result<Self, NativeH3ClientError> {
         let mut session = NativeH3Session::client();
@@ -699,7 +1214,7 @@ impl<'a> Exchange<'a> {
             cx,
             connection,
             head,
-            body.is_empty() && upload.is_none(),
+            body.is_empty() && upload.is_none() && !external_body,
         )?;
         let response = ResponseCollector::new(
             writer.stream_id(),
@@ -719,18 +1234,19 @@ impl<'a> Exchange<'a> {
         })
     }
 
-    fn poll<W: AsyncWrite + Unpin + ?Sized>(
+    fn poll<B: Body, W: AsyncWrite + Unpin + ?Sized>(
         &mut self,
         cx: &Cx,
         connection: &mut QuicConnection,
         task: &mut Context<'_>,
+        mut body_upload: Option<&mut Upload<B>>,
         sink: &mut W,
-    ) -> Poll<Result<NativeH3ClientResponseSummary, NativeH3ClientError>> {
+    ) -> Poll<Result<NativeH3ClientResponseSummary, ExchangeError>> {
         if let Some(completed) = self.poll_completed(cx, task, sink) {
-            return completed;
+            return completed.map_err(ExchangeError::Client);
         }
         if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(NativeH3ClientError::Cancelled));
+            return Poll::Ready(Err(ExchangeError::Client(NativeH3ClientError::Cancelled)));
         }
         // Read before writing so a reset or an early final response can retire
         // pending upload work. Both halves get a bounded turn on every poll.
@@ -741,21 +1257,25 @@ impl<'a> Exchange<'a> {
                     // advance below. A full-duplex peer can require request
                     // progress before the consumer can accept its response.
                     Poll::Pending => break,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(ExchangeError::Client(error)));
+                    }
                     Poll::Ready(Ok(())) => {}
                 }
             } else {
                 let event = match self.session.poll_event(cx, connection, task) {
                     Poll::Pending => break,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(ExchangeError::Client(error.into())));
+                    }
                     Poll::Ready(Ok(event)) => event,
                 };
                 match self.response.accept(event) {
-                    Err(error) => return Poll::Ready(Err(error)),
+                    Err(error) => return Poll::Ready(Err(ExchangeError::Client(error))),
                     Ok(ResponseProgress::Finished(response)) => {
-                        // Source ownership ends with the validated response,
-                        // even if resetting the upload fails or sink flush
-                        // now parks. A resumed flush must not consume FIN twice.
+                        // Keep the reader API's eager retirement contract.
+                        // The generic Body remains in its external owner so
+                        // arbitrary destructors run after transport retirement.
                         self.body = Bytes::new();
                         self.upload = None;
                         if !self.upload_stopped && !self.writer.is_finished() {
@@ -765,14 +1285,16 @@ impl<'a> Exchange<'a> {
                         // A ready sink flush establishes success in this poll,
                         // preserving execute's existing terminal semantics.
                         // A pending flush remains cancellable on the next poll.
-                        return self.poll_sink_flush(task, sink);
+                        return self
+                            .poll_sink_flush(task, sink)
+                            .map_err(ExchangeError::Client);
                     }
                     Ok(ResponseProgress::Data(bytes)) => self.pending_data = bytes,
                     Ok(ResponseProgress::Continue) => {}
                 }
             }
             if cx.checkpoint().is_err() {
-                return Poll::Ready(Err(NativeH3ClientError::Cancelled));
+                return Poll::Ready(Err(ExchangeError::Client(NativeH3ClientError::Cancelled)));
             }
             if step + 1 == POLL_STEPS {
                 // Only self-wake after actual bounded application progress.
@@ -787,7 +1309,7 @@ impl<'a> Exchange<'a> {
                     self.upload = None;
                 }
                 Ok(false) => {}
-                Err(error) => return Poll::Ready(Err(error.into())),
+                Err(error) => return Poll::Ready(Err(ExchangeError::Client(error.into()))),
             }
         }
         if self.upload_stopped || self.writer.is_finished() {
@@ -798,7 +1320,9 @@ impl<'a> Exchange<'a> {
         for step in 0..POLL_STEPS {
             match self.writer.poll_flush(cx, connection, task) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(ExchangeError::Client(error.into())));
+                }
                 Poll::Ready(Ok(_)) => {}
             }
             if self.writer.is_finished() {
@@ -817,18 +1341,42 @@ impl<'a> Exchange<'a> {
             } else if let Some(upload) = self.upload.as_mut() {
                 match upload.poll_chunk(task, self.writer.max_frame_payload_size()) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(ExchangeError::Client(error)));
+                    }
                     Poll::Ready(Ok(Some(bytes))) => self.writer.queue_data(bytes),
                     Poll::Ready(Ok(None)) => {
                         self.upload = None;
                         self.writer.finish()
                     }
                 }
+            } else if let Some(upload) = body_upload.as_deref_mut() {
+                match upload.poll(
+                    task,
+                    IO_CHUNK_BYTES.min(self.writer.max_frame_payload_size()),
+                ) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(ExchangeError::Client(error)));
+                    }
+                    Poll::Ready(Ok(UploadProgress::SourceFailed)) => {
+                        return Poll::Ready(Err(ExchangeError::Source));
+                    }
+                    Poll::Ready(Ok(UploadProgress::Continue)) => Ok(()),
+                    Poll::Ready(Ok(UploadProgress::Data(bytes))) => self.writer.queue_data(bytes),
+                    Poll::Ready(Ok(UploadProgress::Trailers(trailers))) => {
+                        self.writer.queue_trailers(&trailers)
+                    }
+                    Poll::Ready(Ok(UploadProgress::Finished)) => self.writer.finish(),
+                }
             } else {
                 self.writer.finish()
             };
             if let Err(error) = queued {
-                return Poll::Ready(Err(error.into()));
+                return Poll::Ready(Err(ExchangeError::Client(error.into())));
+            }
+            if body_upload.is_some() && cx.checkpoint().is_err() {
+                return Poll::Ready(Err(ExchangeError::Client(NativeH3ClientError::Cancelled)));
             }
             if step + 1 == POLL_STEPS {
                 task.waker().wake_by_ref();

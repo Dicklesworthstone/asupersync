@@ -5944,6 +5944,7 @@ t1Xfx0NGxOzzDaZCSlrAJXuk+K+UxhmqfWmwVkzvjWfZzQEwi/qmDZFH
 enum OwnedClientReply {
     AfterUpload,
     DuringUpload,
+    DuringSourceWait,
     Early413,
     Oversized,
     MissingFin,
@@ -5953,6 +5954,8 @@ enum OwnedClientReply {
 #[derive(Debug, Default)]
 struct OwnedClientServerProgress {
     upload_bytes: usize,
+    request_headers: Vec<(String, String)>,
+    request_trailers: Vec<(String, String)>,
     request_finished: bool,
     response_started: bool,
     application_polls: usize,
@@ -6099,6 +6102,11 @@ struct OwnedClientUploadGate {
     sink_parked: std::sync::atomic::AtomicBool,
     sink_wake: std::sync::Mutex<Option<Waker>>,
     server_wake: std::sync::Mutex<Option<Waker>>,
+    source_parked: std::sync::atomic::AtomicBool,
+    source_released: std::sync::atomic::AtomicBool,
+    source_wake: std::sync::Mutex<Option<Waker>>,
+    patterned_upload: bool,
+    client_addr: std::sync::Mutex<Option<std::net::SocketAddr>>,
 }
 
 async fn owned_client_exchange(
@@ -6217,6 +6225,9 @@ where
     let (client, absent_session) = client.expect("authenticated fresh client owner");
     assert!(absent_session.is_none());
     let client_addr = client.local_addr();
+    if let Some(gate) = &upload_gate {
+        *gate.client_addr.lock().unwrap() = Some(client_addr);
+    }
     let client = NativeH3Client::new(client, config).expect("admit verified h3 client");
     let mut server = server.expect("authenticated server owner");
     let server_id = server.local_connection_id();
@@ -6241,7 +6252,10 @@ where
     let server_wake = Arc::new(std::sync::Mutex::new(None::<Waker>));
     let response_bytes = if matches!(reply, OwnedClientReply::Early413) {
         Bytes::from_static(b"upload rejected; response remains readable")
-    } else if matches!(reply, OwnedClientReply::DuringUpload) {
+    } else if matches!(
+        reply,
+        OwnedClientReply::DuringUpload | OwnedClientReply::DuringSourceWait
+    ) {
         Bytes::from(
             (0..download_bytes)
                 .map(|index| (index % 251) as u8)
@@ -6291,14 +6305,28 @@ where
                     NativeH3Event::RequestHeaders { stream_id, head } => {
                         assert!(stream.replace(stream_id).is_none(), "exactly one request");
                         assert_eq!(head.pseudo.path.as_deref(), Some("/owned-exchange"));
+                        progress.request_headers = head.headers;
                     }
                     NativeH3Event::Data { stream_id, bytes } => {
                         assert_eq!(Some(stream_id), stream);
-                        assert!(bytes.iter().all(|byte| *byte == b'u'));
+                        if upload_gate
+                            .as_ref()
+                            .is_some_and(|gate| gate.patterned_upload)
+                        {
+                            assert!(bytes.iter().enumerate().all(|(offset, byte)| *byte
+                                == ((progress.upload_bytes + offset) % 251) as u8));
+                        } else {
+                            assert!(bytes.iter().all(|byte| *byte == b'u'));
+                        }
                         progress.upload_bytes += bytes.len();
                         if let Some(observed) = &observed {
                             observed.received_by_peer(progress.upload_bytes);
                         }
+                    }
+                    NativeH3Event::Trailers { stream_id, fields } => {
+                        assert_eq!(Some(stream_id), stream);
+                        assert!(progress.request_trailers.is_empty());
+                        progress.request_trailers = fields;
                     }
                     NativeH3Event::Finished { stream_id } => {
                         assert_eq!(Some(stream_id), stream);
@@ -6386,9 +6414,17 @@ where
                         offset = end;
                     } else if matches!(reply, OwnedClientReply::MissingFin) {
                         break;
+                    } else if matches!(reply, OwnedClientReply::DuringSourceWait)
+                        && !progress.request_finished
+                    {
+                        // The first response bytes release a parked producer,
+                        // but response FIN still requires its actual EOF.
+                        break;
                     } else if matches!(
                         reply,
-                        OwnedClientReply::AfterUpload | OwnedClientReply::DuringUpload
+                        OwnedClientReply::AfterUpload
+                            | OwnedClientReply::DuringUpload
+                            | OwnedClientReply::DuringSourceWait
                     ) {
                         writer
                             .queue_trailers(&[("x-complete".to_owned(), "yes".to_owned())])
@@ -6429,13 +6465,7 @@ where
     .unwrap();
     let requesting = async {
         let mut future = Box::pin(execute(client, request, upload));
-        // Exercise an explicitly supplied Cx even when its future is polled
-        // without an ambient context. The deadline must still wake on no FIN.
-        let result = std::future::poll_fn(|task| {
-            let _ambient = Cx::set_current(None);
-            future.as_mut().poll(task)
-        })
-        .await;
+        let result = future.as_mut().await;
         drop(future);
         completed.store(true, Ordering::SeqCst);
         let wake = server_wake.lock().unwrap().clone();
@@ -7492,6 +7522,749 @@ mod owned_native_h3_client_cancel {
             assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
         });
         runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+}
+
+mod owned_native_h3_streaming_upload {
+    use super::*;
+    use asupersync::bytes::{Buf, BytesCursor, Chain};
+    use asupersync::http::{Body, Frame, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::marker::PhantomPinned;
+    use std::pin::Pin;
+
+    #[derive(Default)]
+    struct Probe {
+        polls: AtomicUsize,
+        hints: AtomicUsize,
+        frames: AtomicUsize,
+        eof: AtomicUsize,
+        drops: AtomicUsize,
+        error_formats: AtomicUsize,
+        error_drops: AtomicUsize,
+        gate: Arc<OwnedClientUploadGate>,
+    }
+
+    impl Probe {
+        fn patterned() -> Self {
+            Self {
+                gate: Arc::new(OwnedClientUploadGate {
+                    patterned_upload: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        fn owner(&self, owner: &Cx) {
+            let current = Cx::current().expect("producer callback has its explicit owner");
+            assert_eq!(current.task_id(), owner.task_id());
+            assert_eq!(current.region_id(), owner.region_id());
+        }
+
+        fn retired(&self, owner: &Cx) {
+            self.owner(owner);
+            let address = self
+                .gate
+                .client_addr
+                .lock()
+                .unwrap()
+                .expect("real client address");
+            drop(
+                std::net::UdpSocket::bind(address)
+                    .expect("transport is retired before producer destruction or error formatting"),
+            );
+        }
+    }
+
+    struct ProducerFailure {
+        owner: Cx,
+        probe: Arc<Probe>,
+    }
+
+    impl std::fmt::Display for ProducerFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.probe.retired(&self.owner);
+            self.probe.error_formats.fetch_add(1, Ordering::SeqCst);
+            f.write_str("intentional incremental producer failure")
+        }
+    }
+
+    impl Drop for ProducerFailure {
+        fn drop(&mut self) {
+            self.probe.retired(&self.owner);
+            self.probe.error_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ProducerData {
+        bytes: Chain<BytesCursor, BytesCursor>,
+        owner: Cx,
+        probe: Arc<Probe>,
+        broken: bool,
+        _pin: PhantomPinned,
+    }
+
+    impl Buf for ProducerData {
+        fn remaining(&self) -> usize {
+            self.probe.owner(&self.owner);
+            self.bytes.remaining()
+        }
+
+        fn chunk(&self) -> &[u8] {
+            self.probe.owner(&self.owner);
+            self.bytes.chunk()
+        }
+
+        fn advance(&mut self, count: usize) {
+            self.probe.owner(&self.owner);
+            if !self.broken {
+                self.bytes.advance(count);
+            }
+        }
+
+        fn copy_to_bytes(&mut self, count: usize) -> Bytes {
+            self.probe.owner(&self.owner);
+            if self.broken {
+                Bytes::copy_from_slice(&self.bytes.chunk()[..count])
+            } else {
+                self.bytes.copy_to_bytes(count)
+            }
+        }
+    }
+
+    impl Drop for ProducerData {
+        fn drop(&mut self) {
+            self.probe.owner(&self.owner);
+            if self.broken {
+                self.probe.retired(&self.owner);
+            }
+        }
+    }
+
+    enum Step {
+        Data {
+            start: usize,
+            length: usize,
+            broken: bool,
+        },
+        Trailers(&'static str, &'static str),
+        Fail,
+    }
+
+    struct Producer {
+        owner: Cx,
+        probe: Arc<Probe>,
+        steps: RefCell<VecDeque<Step>>,
+        hint: Option<u64>,
+        wait_for_response: bool,
+        park_at_eof: bool,
+        _pin: PhantomPinned,
+    }
+
+    impl Producer {
+        fn new(owner: &Cx, probe: &Arc<Probe>, steps: Vec<Step>) -> Self {
+            Self {
+                owner: owner.clone(),
+                probe: Arc::clone(probe),
+                steps: RefCell::new(steps.into()),
+                hint: None,
+                wait_for_response: false,
+                park_at_eof: false,
+                _pin: PhantomPinned,
+            }
+        }
+    }
+
+    impl Body for Producer {
+        type Data = ProducerData;
+        type Error = ProducerFailure;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let this = self.as_ref().get_ref();
+            this.probe.owner(&this.owner);
+            this.probe.polls.fetch_add(1, Ordering::SeqCst);
+            if (this.wait_for_response && !this.probe.gate.source_released.load(Ordering::SeqCst))
+                || (this.park_at_eof && this.steps.borrow().is_empty())
+            {
+                this.probe.gate.source_parked.store(true, Ordering::SeqCst);
+                *this.probe.gate.source_wake.lock().unwrap() = Some(task.waker().clone());
+                if this.park_at_eof || !this.probe.gate.source_released.load(Ordering::SeqCst) {
+                    return Poll::Pending;
+                }
+            }
+            let frame = match this.steps.borrow_mut().pop_front() {
+                Some(Step::Data {
+                    start,
+                    length,
+                    broken,
+                }) => {
+                    this.probe.frames.fetch_add(1, Ordering::SeqCst);
+                    let bytes = Bytes::from(
+                        (start..start + length)
+                            .map(|offset| (offset % 251) as u8)
+                            .collect::<Vec<_>>(),
+                    );
+                    let split = (length / 3 + 1).min(length);
+                    Frame::data(ProducerData {
+                        bytes: BytesCursor::new(bytes.slice(..split))
+                            .chain(BytesCursor::new(bytes.slice(split..))),
+                        owner: this.owner.clone(),
+                        probe: Arc::clone(&this.probe),
+                        broken,
+                        _pin: PhantomPinned,
+                    })
+                }
+                Some(Step::Trailers(name, value)) => {
+                    let mut trailers = HeaderMap::new();
+                    trailers.append(
+                        HeaderName::from_static(name),
+                        HeaderValue::from_static(value),
+                    );
+                    Frame::trailers(trailers)
+                }
+                Some(Step::Fail) => {
+                    return Poll::Ready(Some(Err(ProducerFailure {
+                        owner: this.owner.clone(),
+                        probe: Arc::clone(&this.probe),
+                    })));
+                }
+                None => {
+                    this.probe.eof.fetch_add(1, Ordering::SeqCst);
+                    return Poll::Ready(None);
+                }
+            };
+            Poll::Ready(Some(Ok(frame)))
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            self.probe.owner(&self.owner);
+            self.probe.hints.fetch_add(1, Ordering::SeqCst);
+            self.hint
+                .map_or_else(SizeHint::default, SizeHint::with_exact)
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.hint == Some(0)
+        }
+    }
+
+    impl Drop for Producer {
+        fn drop(&mut self) {
+            self.probe.retired(&self.owner);
+            self.probe.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ReleasingSink {
+        inner: OwnedClientSink,
+        gate: Arc<OwnedClientUploadGate>,
+    }
+
+    impl asupersync::io::AsyncWrite for ReleasingSink {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            assert!(
+                self.gate.source_parked.load(Ordering::SeqCst),
+                "the source really parked before response DATA arrived"
+            );
+            self.gate.source_released.store(true, Ordering::SeqCst);
+            if let Some(wake) = self.gate.source_wake.lock().unwrap().take() {
+                wake.wake();
+            }
+            Pin::new(&mut self.inner).poll_write(task, bytes)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(task)
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            panic!("borrowed destination must remain open");
+        }
+    }
+
+    struct CompletionSink {
+        bytes: Vec<u8>,
+        probe: Arc<Probe>,
+        polls_at_fin: Option<usize>,
+        flush_turns: usize,
+    }
+
+    impl asupersync::io::AsyncWrite for CompletionSink {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let polls = self.probe.polls.load(Ordering::SeqCst);
+            if let Some(at_fin) = self.polls_at_fin {
+                assert_eq!(
+                    polls, at_fin,
+                    "completed response never polls the stopped producer again"
+                );
+            } else {
+                self.polls_at_fin = Some(polls);
+            }
+            self.flush_turns += 1;
+            if self.flush_turns < 4 {
+                task.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            panic!("borrowed destination must remain open");
+        }
+    }
+
+    #[test]
+    fn body_upload_and_download_progress_when_producer_waits_for_response() {
+        let runtime = managed_runtime();
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let probe = Arc::new(Probe::patterned());
+            let bytes = 800_000;
+            assert!(bytes as u64 > connection_config().recv_window);
+            let mut body = Producer::new(
+                &cx,
+                &probe,
+                vec![
+                    Step::Data {
+                        start: 0,
+                        length: bytes,
+                        broken: false,
+                    },
+                    Step::Trailers("x-upload-complete", "yes"),
+                ],
+            );
+            body.hint = Some(bytes as u64);
+            body.wait_for_response = true;
+            let mut sink = ReleasingSink {
+                inner: OwnedClientSink {
+                    patterned: true,
+                    ..Default::default()
+                },
+                gate: Arc::clone(&probe.gate),
+            };
+            let (result, progress) = owned_client_exchange_using(
+                &cx,
+                OwnedClientReply::DuringSourceWait,
+                bytes,
+                900_000,
+                Default::default(),
+                Some(Arc::clone(&probe.gate)),
+                |client, mut head, _| {
+                    head.headers.clear();
+                    client.execute_with_body_to(&cx, head, body, &mut sink)
+                },
+            )
+            .await;
+            let response = result.expect("both streaming halves finish through the native driver");
+            assert_eq!(progress.upload_bytes, bytes);
+            assert!(progress.request_finished);
+            assert_eq!(
+                progress.request_headers,
+                [("content-length".to_owned(), bytes.to_string())]
+            );
+            assert_eq!(
+                progress.request_trailers,
+                [("x-upload-complete".to_owned(), "yes".to_owned())]
+            );
+            assert_eq!(response.body_bytes, 900_000);
+            assert_eq!(sink.inner.received, 900_000);
+            assert_eq!(probe.frames.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.eof.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        });
+        runtime.block_on(runtime.handle().spawn(work));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+
+    #[test]
+    fn reader_body_upload_works_without_content_length_or_collection() {
+        let runtime = managed_runtime();
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let (result, progress) = owned_client_exchange_using(
+                &cx,
+                OwnedClientReply::AfterUpload,
+                190_001,
+                4096,
+                Default::default(),
+                None,
+                |client, mut head, bytes| {
+                    head.headers.clear();
+                    client.execute_with_body(
+                        &cx,
+                        head,
+                        ReaderBody::with_capacity(std::io::Cursor::new(bytes), 997),
+                    )
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap().body.len(), 4096);
+            assert_eq!(progress.upload_bytes, 190_001);
+            assert!(progress.request_finished);
+            assert!(progress.request_headers.is_empty());
+        });
+        runtime.block_on(runtime.handle().spawn(work));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+
+    #[test]
+    fn body_upload_rejects_invalid_frames_and_waits_for_actual_eof() {
+        enum Expected {
+            Length(u64, usize),
+            Limit,
+            Invalid(&'static str),
+            Source,
+            EmptySuccess,
+        }
+        let runtime = managed_runtime();
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let data = |length| Step::Data {
+                start: 0,
+                length,
+                broken: false,
+            };
+            for (declared, hint, limit, steps, expected) in [
+                (Some(5), None, 16, vec![data(3)], Expected::Length(5, 3)),
+                (Some(3), None, 16, vec![data(4)], Expected::Length(3, 4)),
+                (None, None, 3, vec![data(4)], Expected::Limit),
+                (None, Some(0), 16, vec![data(1)], Expected::Length(0, 1)),
+                (None, Some(0), 16, vec![], Expected::EmptySuccess),
+                (
+                    None,
+                    None,
+                    16,
+                    vec![Step::Trailers("x-upload", "held-until-eof"), data(1)],
+                    Expected::Invalid("request DATA follows trailers"),
+                ),
+                (
+                    None,
+                    None,
+                    16,
+                    vec![
+                        Step::Trailers("x-upload", "first"),
+                        Step::Trailers("x-upload", "second"),
+                    ],
+                    Expected::Invalid("multiple request trailer frames"),
+                ),
+                (
+                    None,
+                    None,
+                    16,
+                    vec![Step::Trailers("content-length", "0")],
+                    Expected::Invalid("forbidden request trailer field"),
+                ),
+                (
+                    None,
+                    None,
+                    16,
+                    vec![Step::Trailers("x-upload", "must-not-escape"), Step::Fail],
+                    Expected::Source,
+                ),
+                (
+                    None,
+                    None,
+                    16,
+                    vec![Step::Data {
+                        start: 0,
+                        length: 1,
+                        broken: true,
+                    }],
+                    Expected::Invalid("request body buffer did not advance by the emitted length"),
+                ),
+            ] {
+                let probe = Arc::new(Probe::patterned());
+                let mut body = Producer::new(&cx, &probe, steps);
+                body.hint = hint;
+                let (result, progress) = owned_client_exchange_using(
+                    &cx,
+                    OwnedClientReply::AfterUpload,
+                    1,
+                    128,
+                    NativeH3ClientConfig {
+                        max_request_body_bytes: limit,
+                        ..Default::default()
+                    },
+                    Some(Arc::clone(&probe.gate)),
+                    |client, mut head, _| {
+                        head.headers.clear();
+                        if let Some(length) = declared {
+                            head.headers
+                                .push(("content-length".to_owned(), length.to_string()));
+                        }
+                        client.execute_with_body(&cx, head, body)
+                    },
+                )
+                .await;
+                match expected {
+                    Expected::Length(expected, actual) => {
+                        assert!(matches!(result,
+                            Err(NativeH3ClientError::ContentLengthMismatch { expected: got, actual: bytes })
+                            if got == expected && bytes == actual));
+                        if actual > expected as usize {
+                            assert_eq!(
+                                progress.upload_bytes, 0,
+                                "offending frame never reaches wire"
+                            );
+                        }
+                    }
+                    Expected::Limit => {
+                        assert!(matches!(
+                            result,
+                            Err(NativeH3ClientError::LimitExceeded {
+                                resource: "request body",
+                                limit: 3,
+                            })
+                        ));
+                        assert_eq!(progress.upload_bytes, 0);
+                    }
+                    Expected::Invalid(message) => {
+                        assert!(
+                            matches!(result, Err(NativeH3ClientError::InvalidMessage(got)) if got == message)
+                        );
+                        assert_eq!(progress.upload_bytes, 0);
+                    }
+                    Expected::Source => {
+                        assert!(matches!(result, Err(NativeH3ClientError::Source(error))
+                            if error.to_string() == "intentional incremental producer failure"));
+                        assert_eq!(probe.error_formats.load(Ordering::SeqCst), 1);
+                        assert_eq!(probe.error_drops.load(Ordering::SeqCst), 1);
+                    }
+                    Expected::EmptySuccess => {
+                        assert_eq!(result.unwrap().body.len(), 128);
+                        assert!(progress.request_finished);
+                        assert_eq!(
+                            probe.eof.load(Ordering::SeqCst),
+                            1,
+                            "an exact zero hint never substitutes for producer EOF"
+                        );
+                    }
+                }
+                assert!(
+                    progress.request_trailers.is_empty(),
+                    "unvalidated trailers never escape"
+                );
+                assert_eq!(probe.hints.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            }
+        });
+        runtime.block_on(runtime.handle().spawn(work));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+
+    #[test]
+    fn early_response_retires_a_parked_producer_before_pending_sink_flush() {
+        let runtime = managed_runtime();
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let probe = Arc::new(Probe::patterned());
+            let mut body = Producer::new(&cx, &probe, vec![]);
+            body.park_at_eof = true;
+            let mut sink = CompletionSink {
+                bytes: Vec::new(),
+                probe: Arc::clone(&probe),
+                polls_at_fin: None,
+                flush_turns: 0,
+            };
+            let (result, progress) = owned_client_exchange_using(
+                &cx,
+                OwnedClientReply::Early413,
+                800_000,
+                0,
+                Default::default(),
+                Some(Arc::clone(&probe.gate)),
+                |client, head, _| client.execute_with_body_to(&cx, head, body, &mut sink),
+            )
+            .await;
+            let response = result.expect("early rejection does not wait for producer EOF");
+            assert_eq!(response.head.status, 413);
+            assert_eq!(sink.bytes, b"upload rejected; response remains readable");
+            assert!(probe.gate.source_parked.load(Ordering::SeqCst));
+            assert_eq!(progress.upload_bytes, 0);
+            assert!(!progress.request_finished);
+            assert_eq!(probe.eof.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(sink.flush_turns, 4);
+        });
+        runtime.block_on(runtime.handle().spawn(work));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+
+    #[test]
+    fn producer_wait_is_bounded_by_deadline_and_explicit_cancellation() {
+        let runtime = managed_runtime();
+        let parent: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            for abort in [false, true] {
+                let probe = Arc::new(Probe::patterned());
+                let child_probe = Arc::clone(&probe);
+                let mut child = cx
+                    .spawn(move |child_cx| {
+                        let future: Pin<
+                            Box<
+                                dyn Future<
+                                        Output = Result<
+                                            NativeH3ClientResponse,
+                                            NativeH3ClientError,
+                                        >,
+                                    > + Send,
+                            >,
+                        > = Box::pin(async move {
+                            let mut body = Producer::new(&child_cx, &child_probe, vec![]);
+                            // Both completion hints claim empty, but real EOF
+                            // parks: neither hint may prematurely queue FIN.
+                            body.hint = Some(0);
+                            body.park_at_eof = true;
+                            let (result, progress) = owned_client_exchange_using(
+                                &child_cx,
+                                OwnedClientReply::AfterUpload,
+                                0,
+                                0,
+                                NativeH3ClientConfig {
+                                    timeout: if abort {
+                                        IO_TIMEOUT
+                                    } else {
+                                        Duration::from_millis(750)
+                                    },
+                                    ..Default::default()
+                                },
+                                Some(Arc::clone(&child_probe.gate)),
+                                |client, head, _| client.execute_with_body(&child_cx, head, body),
+                            )
+                            .await;
+                            assert!(!progress.request_finished);
+                            result
+                        });
+                        future
+                    })
+                    .unwrap();
+                let started = Instant::now();
+                while !probe.gate.source_parked.load(Ordering::SeqCst) {
+                    assert!(
+                        started.elapsed() < IO_TIMEOUT,
+                        "producer must actually park"
+                    );
+                    assert!(!child.is_finished());
+                    asupersync::runtime::yield_now().await;
+                }
+                assert!(!child.is_finished());
+                if abort {
+                    child.abort();
+                }
+                let result = asupersync::time::timeout(cx.now(), IO_TIMEOUT, child.join(&cx))
+                    .await
+                    .expect("parked producer must wake for deadline or cancellation")
+                    .expect("typed cancellation acknowledgment survives child join");
+                if abort {
+                    assert!(matches!(result, Err(NativeH3ClientError::Cancelled)));
+                } else {
+                    assert!(matches!(result, Err(NativeH3ClientError::TimedOut)));
+                }
+                assert_eq!(probe.eof.load(Ordering::SeqCst), 0);
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            }
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+    }
+
+    #[test]
+    fn unpolled_and_parked_body_futures_retire_socket_before_source_drop() {
+        let runtime = managed_runtime();
+        let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let mut foreign = cx.spawn(|foreign_cx| async move { foreign_cx }).unwrap();
+            let foreign = foreign.join(&cx).await.unwrap();
+            assert_ne!(foreign.task_id(), cx.task_id());
+            for poll_first in [false, true] {
+                let (client, server) =
+                    live_pair_with_client_session(&cx, H3_ALPN, H3_ALPN, false).await;
+                let (connection, session) = client.unwrap();
+                assert!(session.is_none());
+                let server = server.unwrap();
+                let probe = Arc::new(Probe::patterned());
+                let local = connection.local_addr();
+                *probe.gate.client_addr.lock().unwrap() = Some(local);
+                let client = NativeH3Client::new(connection, Default::default()).unwrap();
+                let mut body = Producer::new(&cx, &probe, vec![]);
+                body.park_at_eof = true;
+                let head = H3RequestHead::new(
+                    H3PseudoHeaders {
+                        method: Some("POST".to_owned()),
+                        scheme: Some("https".to_owned()),
+                        authority: Some("localhost".to_owned()),
+                        path: Some("/drop-body".to_owned()),
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                )
+                .unwrap();
+                let mut future = Box::pin(client.execute_with_body(&cx, head, body));
+                if poll_first {
+                    let mut turns = 0;
+                    std::future::poll_fn(|task| {
+                        turns += 1;
+                        assert!(turns < 512);
+                        assert!(future.as_mut().poll(task).is_pending());
+                        if probe.gate.source_parked.load(Ordering::SeqCst) {
+                            Poll::Ready(())
+                        } else {
+                            task.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                }
+                std::net::UdpSocket::bind(local).expect_err("future still owns actual UDP socket");
+                {
+                    let _foreign_drop_context = Cx::set_current(Some(foreign.clone()));
+                    drop(future);
+                    let restored = Cx::current().expect("foreign dropping context is restored");
+                    assert_eq!(restored.task_id(), foreign.task_id());
+                    assert_eq!(restored.region_id(), foreign.region_id());
+                }
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.hints.load(Ordering::SeqCst), usize::from(poll_first));
+                assert_eq!(probe.polls.load(Ordering::SeqCst) > 0, poll_first);
+                drop(std::net::UdpSocket::bind(local).unwrap());
+                drop(server);
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            }
+        });
+        runtime.block_on(runtime.handle().spawn(work));
         managed_assert_runtime_cleanup(&runtime);
     }
 }
