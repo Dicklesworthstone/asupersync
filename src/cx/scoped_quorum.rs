@@ -5,7 +5,8 @@ use super::{ChildRegionError, Cx, ScopedTimeoutClose, cap};
 use crate::runtime::spawn_mailbox::{BranchRegionSlot, SpawnGateway};
 use crate::runtime::state::SpawnError;
 use crate::runtime::{JoinError, TaskHandle};
-use crate::types::{CancelReason, RegionId};
+use crate::time::{Sleep, TimerDriverHandle};
+use crate::types::{CancelReason, RegionId, Time};
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::task::Poll;
@@ -22,6 +23,9 @@ pub enum ScopedQuorumStop {
     Satisfied,
     /// Too few unfinished candidates remained to reach the required count.
     InsufficientSuccesses,
+    /// The explicit owner's timer reached the selection deadline.
+    /// Already selected votes and all eventual task results remain available.
+    TimedOut,
     /// The explicit owner requested cancellation before quorum was selected.
     Cancelled(CancelReason),
     /// Submission or private-region admission refused this branch.
@@ -83,6 +87,8 @@ pub struct ScopedQuorumReport<T, E> {
 pub enum ScopedQuorumError {
     /// Requires `1 <= required <= total <= MAX_SCOPED_QUORUM_BRANCHES`.
     InvalidQuorum { required: usize, total: usize },
+    /// A deadline requires the explicit owner's authorized timer driver.
+    TimerUnavailable,
     /// No owning runtime is available. Per-branch submission errors instead
     /// remain in the report so they cannot discard earlier task results.
     Spawn(SpawnError),
@@ -95,6 +101,9 @@ impl std::fmt::Display for ScopedQuorumError {
                 f,
                 "scoped quorum requires 1 <= required ({required}) <= total ({total}) <= {MAX_SCOPED_QUORUM_BRANCHES}"
             ),
+            Self::TimerUnavailable => {
+                f.write_str("scoped quorum deadline requires an authorized timer driver")
+            }
             Self::Spawn(error) => write!(f, "scoped quorum admission failed: {error}"),
         }
     }
@@ -104,7 +113,7 @@ impl std::error::Error for ScopedQuorumError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn(error) => Some(error),
-            Self::InvalidQuorum { .. } => None,
+            Self::InvalidQuorum { .. } | Self::TimerUnavailable => None,
         }
     }
 }
@@ -112,6 +121,7 @@ impl std::error::Error for ScopedQuorumError {
 enum BodyResult<T, E> {
     Value(Result<T, E>),
     NotStarted(Option<CancelReason>),
+    DeadlineReached,
 }
 
 struct Branch<T, E> {
@@ -121,14 +131,18 @@ struct Branch<T, E> {
 }
 
 impl<T, E> Branch<T, E> {
-    fn joined(&mut self, result: Result<BodyResult<T, E>, JoinError>) -> Option<CancelReason> {
+    fn joined(&mut self, result: Result<BodyResult<T, E>, JoinError>) -> Option<ScopedQuorumStop> {
         // A consumed join must never be polled again, even during final drain.
         self.handle = None;
         let mut refusal = None;
         self.receipt.task = match result {
             Ok(BodyResult::Value(value)) => ScopedQuorumTask::Joined(Ok(value)),
             Ok(BodyResult::NotStarted(reason)) => {
-                refusal = reason;
+                refusal = reason.map(ScopedQuorumStop::Cancelled);
+                ScopedQuorumTask::NotStarted
+            }
+            Ok(BodyResult::DeadlineReached) => {
+                refusal = Some(ScopedQuorumStop::TimedOut);
                 ScopedQuorumTask::NotStarted
             }
             Err(error) => ScopedQuorumTask::Joined(Err(error)),
@@ -191,6 +205,20 @@ fn owner_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
     owner
         .cancel_reason()
         .unwrap_or_else(|| CancelReason::user("scoped quorum owner cancelled"))
+}
+
+fn validate_quorum(required: usize, total: usize) -> Result<(), ScopedQuorumError> {
+    if required == 0 || required > total || total > MAX_SCOPED_QUORUM_BRANCHES {
+        Err(ScopedQuorumError::InvalidQuorum { required, total })
+    } else {
+        Ok(())
+    }
+}
+
+fn deadline_expired(schedule: &Option<(Time, TimerDriverHandle)>) -> bool {
+    schedule
+        .as_ref()
+        .is_some_and(|(deadline, driver)| driver.now() >= *deadline)
 }
 
 impl<Caps> Cx<Caps>
@@ -279,10 +307,71 @@ where
         T: Send + 'static,
         E: Send + 'static,
     {
+        self.quorum_scoped_inner(required, factories, None).await
+    }
+
+    /// Selects a quorum before an absolute deadline in this context's clock.
+    ///
+    /// This has the same private-region ownership, input bounds, retained
+    /// receipts, and unconditional subtree drain as [`Self::quorum_scoped`].
+    /// Only this context's authorized timer is used. The deadline is checked
+    /// before each submission, again before invoking each admitted factory,
+    /// and before accepting a completed task as a vote. A task observed at or
+    /// after the deadline is retained in its receipt but never becomes a vote,
+    /// even if it had completed earlier while this owner was not polling.
+    ///
+    /// Owner cancellation takes precedence over an observed deadline. Timeout
+    /// freezes the partial selection as [`ScopedQuorumStop::TimedOut`], requests
+    /// timeout cancellation for EVERY subtree before any join, and waits for
+    /// their actual cleanup. The deadline bounds selection, not cleanup time.
+    /// Once `Satisfied` has been selected, expiry during cleanup cannot erase
+    /// it. Late values, errors, and cleanup failures remain independently
+    /// inspectable in the report.
+    ///
+    /// An expired deadline starts no factory. Missing or denied time authority
+    /// is refused before any task is submitted, including for an already
+    /// expired deadline. The untimed method still requires no time capability.
+    ///
+    /// # Errors
+    ///
+    /// Invalid quorum bounds are checked first. A missing authorized timer
+    /// returns [`ScopedQuorumError::TimerUnavailable`]. Other admission and
+    /// cleanup rules are the same as [`Self::quorum_scoped`].
+    pub async fn quorum_scoped_until<T, E, F, Fut>(
+        &self,
+        deadline: Time,
+        required: usize,
+        factories: Vec<F>,
+    ) -> Result<ScopedQuorumReport<T, E>, ScopedQuorumError>
+    where
+        Caps: cap::HasTime,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        validate_quorum(required, factories.len())?;
+        let driver = self
+            .timer_driver()
+            .ok_or(ScopedQuorumError::TimerUnavailable)?;
+        self.quorum_scoped_inner(required, factories, Some((deadline, driver)))
+            .await
+    }
+
+    async fn quorum_scoped_inner<T, E, F, Fut>(
+        &self,
+        required: usize,
+        factories: Vec<F>,
+        schedule: Option<(Time, TimerDriverHandle)>,
+    ) -> Result<ScopedQuorumReport<T, E>, ScopedQuorumError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
         let total = factories.len();
-        if required == 0 || required > total || total > MAX_SCOPED_QUORUM_BRANCHES {
-            return Err(ScopedQuorumError::InvalidQuorum { required, total });
-        }
+        validate_quorum(required, total)?;
         let gateway = self
             .spawn_gateway_handle()
             .ok_or(ScopedQuorumError::Spawn(SpawnError::RuntimeUnavailable))?;
@@ -296,16 +385,24 @@ where
                 admission_stop = Some(ScopedQuorumStop::Cancelled(owner_reason(self)));
                 break;
             }
+            if deadline_expired(&schedule) {
+                admission_stop = Some(ScopedQuorumStop::TimedOut);
+                break;
+            }
             let factory = factories.next().expect("one factory for each input");
             let region = Arc::clone(&owned.branches[index].region);
             let factory_region = Arc::clone(&region);
             let factory_owner = self.clone();
+            let factory_schedule = schedule.clone();
             match self.spawn_owned_branch(region, move |body| async move {
                 if factory_region.get().is_none() {
                     return BodyResult::NotStarted(None);
                 }
                 if factory_owner.is_cancel_requested() {
                     return BodyResult::NotStarted(Some(owner_reason(&factory_owner)));
+                }
+                if deadline_expired(&factory_schedule) {
+                    return BodyResult::DeadlineReached;
                 }
                 if factory_region.close_requested() || body.is_cancel_requested() {
                     return BodyResult::NotStarted(None);
@@ -327,9 +424,15 @@ where
         } else {
             let mut remaining = total;
             let mut cancelled = std::pin::pin!(self.cancelled());
+            let mut timer = schedule
+                .as_ref()
+                .map(|(deadline, driver)| Sleep::with_timer_driver(*deadline, driver.clone()));
             poll_fn(|task| {
                 if cancelled.as_mut().poll(task).is_ready() {
                     return Poll::Ready(ScopedQuorumStop::Cancelled(owner_reason(self)));
+                }
+                if deadline_expired(&schedule) {
+                    return Poll::Ready(ScopedQuorumStop::TimedOut);
                 }
                 for (index, branch) in owned.branches.iter_mut().enumerate() {
                     let Some(handle) = &mut branch.handle else {
@@ -338,13 +441,25 @@ where
                     let Poll::Ready(result) = handle.poll_join(task) else {
                         continue;
                     };
-                    if let Some(reason) = branch.joined(result) {
-                        return Poll::Ready(ScopedQuorumStop::Cancelled(reason));
+                    if let Some(stop) = branch.joined(result) {
+                        // A lazy wrapper can refuse at the deadline before its
+                        // owner is polled again. Preserve that fact, while an
+                        // explicit owner cancellation still takes precedence.
+                        if matches!(stop, ScopedQuorumStop::TimedOut) && self.is_cancel_requested()
+                        {
+                            return Poll::Ready(ScopedQuorumStop::Cancelled(owner_reason(self)));
+                        }
+                        return Poll::Ready(stop);
                     }
                     // A different worker can request owner cancellation after
                     // the observer's poll but before this terminal join.
                     if self.is_cancel_requested() {
                         return Poll::Ready(ScopedQuorumStop::Cancelled(owner_reason(self)));
+                    }
+                    // Joining/retiring a value can cross the deadline inside
+                    // this poll. Keep the receipt, but do not count a late vote.
+                    if deadline_expired(&schedule) {
+                        return Poll::Ready(ScopedQuorumStop::TimedOut);
                     }
                     remaining -= 1;
                     if branch.region.get().is_none() {
@@ -367,12 +482,23 @@ where
                         return Poll::Ready(ScopedQuorumStop::InsufficientSuccesses);
                     }
                 }
+                if let (Some(timer), Some((deadline, _))) = (timer.as_mut(), schedule.as_ref())
+                    && std::pin::Pin::new(&mut *timer)
+                        .poll_deadline(task)
+                        .is_ready()
+                {
+                    // A coalesced wake can precede the exact deadline. Never
+                    // re-poll a completed Sleep; re-arm it for a later turn.
+                    timer.reset(*deadline);
+                    task.waker().wake_by_ref();
+                }
                 Poll::Pending
             })
             .await
         };
         let reason = match &stop {
             ScopedQuorumStop::Satisfied => CancelReason::race_loser(),
+            ScopedQuorumStop::TimedOut => CancelReason::timeout(),
             ScopedQuorumStop::Cancelled(reason) => reason.clone(),
             _ => CancelReason::fail_fast(),
         };
