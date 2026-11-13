@@ -4,6 +4,8 @@
 //! stage's output feeds the next stage's input. The existing folds and macro
 //! retain their sequential behavior. [`PipelineExecution`] additionally runs
 //! typed streaming stages as scope-owned workers with bounded checked channels.
+//! [`ScopedPipelineExecution`] gives the complete pipeline its own region and
+//! waits for its descendants and finalizers independently of the stage report.
 //!
 //! # Design Philosophy
 //!
@@ -39,14 +41,14 @@
 //! - **Cancel-correctness**: Respects cancellation at stage boundaries
 
 use crate::channel::mpsc;
-use crate::cx::{Cx, Scope};
+use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx, Scope};
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
-use crate::types::Outcome;
 use crate::types::Policy;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
+use crate::types::{Outcome, RegionId};
 use core::fmt;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -135,6 +137,63 @@ impl<E> PipelineExecutionReport<E> {
         match &self.outcome {
             Outcome::Err(error) => Some(error),
             _ => self.suppressed_error.as_ref(),
+        }
+    }
+}
+
+/// Actual region, descendant, and finalizer outcomes after a scoped pipeline.
+pub type ScopedPipelineClose = crate::cx::ScopedTimeoutClose;
+
+/// A streaming execution report and its independent operation-subtree receipt.
+///
+/// Inspect both `execution` and `close`. A successful sink may have published
+/// its entire output before descendant or finalizer cleanup fails. A close
+/// failure never erases the original execution result or its initiating error,
+/// and never certifies subtree quiescence.
+#[derive(Debug)]
+#[non_exhaustive]
+#[must_use = "inspect both the pipeline execution and its subtree close receipt"]
+pub struct ScopedPipelineExecutionReport<E> {
+    /// Existing four-way stage report, counters, and retained initiating error.
+    pub execution: PipelineExecutionReport<E>,
+    /// Private operation region containing every transform and sink worker.
+    pub region_id: RegionId,
+    /// Actual complete subtree close, independently of the execution result.
+    pub close: Result<ScopedPipelineClose, ChildRegionError>,
+    /// Owner cancellation observed before return, including during final close.
+    /// This does not replace a previously selected stage execution result.
+    pub owner_cancellation: Option<CancelReason>,
+}
+
+/// Refusal before a scoped pipeline acquires its private operation region.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ScopedPipelineExecutionError {
+    /// The explicit owner already requested cancellation; no input was pulled.
+    Cancelled(CancelReason),
+    /// Region admission failed before the source, transforms, or sink ran.
+    Region(ChildRegionError),
+}
+
+impl fmt::Display for ScopedPipelineExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled(reason) => {
+                write!(formatter, "scoped pipeline owner cancelled: {reason}")
+            }
+            Self::Region(error) => write!(
+                formatter,
+                "scoped pipeline region admission failed: {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ScopedPipelineExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cancelled(_) => None,
+            Self::Region(error) => Some(error),
         }
     }
 }
@@ -238,6 +297,228 @@ pub struct PipelineExecution<'scope, I: IntoIterator, T, E, P: Policy> {
     ingress: mpsc::Sender<PipelineItem<I::Item>>,
     output: mpsc::Receiver<PipelineItem<T>>,
     workers: Vec<PipelineWorker<E>>,
+}
+
+/// A lazy typed pipeline with one privately owned operation subtree per run.
+///
+/// [`Self::then`] reuses the existing bounded, sequential transform workers.
+/// [`Self::run`] opens a child region under the explicit owner and admits every
+/// transform and sink there. Work-window credits and ingress sends use the
+/// original owner task's checked authority, never the region principal.
+/// Building does not mint a region, pull inputs, or invoke callbacks.
+///
+/// Failure and owner cancellation cancel the whole subtree before joining
+/// workers, including a worker awaiting an ordinary join of its own descendant.
+/// Successful runs also close leftover descendants before returning. Other
+/// tasks in the owner's region remain unrelated. A noncooperative descendant
+/// can keep close pending; dropping the running future requests cleanup but
+/// cannot await it. The runtime retains ownership until actual quiescence.
+///
+/// Execution retains [`PipelineExecutionReport`]'s existing severity join:
+/// induced sibling cancellation is a real `Cancelled` outcome, and `error()`
+/// still exposes the initiating typed failure. The independent close receipt
+/// retains descendant and finalizer failures without rewriting that report.
+/// Owner cancellation during final close is recorded separately.
+///
+/// The configured item window lasts through sink acknowledgement and bounds
+/// direct pipeline work, not arbitrary descendants. No coordinator task is
+/// added. Source state may borrow and need not be `Send`. Source polling and
+/// builder/future destruction use the explicit owner's ambient context,
+/// including dropping a builder before `run` or a future before its first poll.
+/// Argument construction and outputs already delivered to a sink remain the
+/// caller's work; retained values must not hold obligations needed for close.
+///
+/// ```no_run
+/// # async fn example(cx: &asupersync::Cx) {
+/// use asupersync::{Outcome, combinator::{PipelineExecutionConfig, ScopedPipelineExecution}};
+/// use std::num::NonZeroUsize;
+/// let one = NonZeroUsize::new(1).unwrap();
+/// let config = PipelineExecutionConfig::new(one, NonZeroUsize::new(2).unwrap());
+/// let report = ScopedPipelineExecution::new(cx, 0..3, config)
+///     .then(one, |_stage, value| async move {
+///         Outcome::<_, ()>::Ok(format!("item:{value}"))
+///     })
+///     .run(|_sink, text| async move {
+///         assert!(text.starts_with("item:"));
+///         Outcome::Ok(())
+///     })
+///     .await.expect("operation region admitted");
+/// assert!(matches!(report.execution.outcome, Outcome::Ok(_)));
+/// assert_eq!(report.execution.summary.consumed, 3);
+/// let close = report.close.expect("operation subtree quiesced");
+/// assert!(close.cleanup_outcome.is_none());
+/// assert!(close.descendant_panic.is_none());
+/// # }
+/// ```
+#[must_use = "a scoped pipeline executes only when run is awaited"]
+pub struct ScopedPipelineExecution<I: IntoIterator, T, E> {
+    inner: Option<PipelineExecution<'static, I, T, E, crate::types::policy::FailFast>>,
+}
+
+impl<I, E> ScopedPipelineExecution<I, I::Item, E>
+where
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    E: Send + 'static,
+{
+    /// Creates an identity pipeline without entering the source or runtime.
+    #[must_use]
+    pub fn new(cx: &Cx, inputs: I, config: PipelineExecutionConfig) -> Self {
+        Self {
+            inner: Some(PipelineExecution::new(&cx.scope(), cx, inputs, config)),
+        }
+    }
+}
+
+impl<I, T, E> ScopedPipelineExecution<I, T, E>
+where
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    /// Appends a typed transform using the existing bounded worker engine.
+    #[must_use]
+    pub fn then<U, F, Fut>(
+        mut self,
+        output_capacity: NonZeroUsize,
+        transform: F,
+    ) -> ScopedPipelineExecution<I, U, E>
+    where
+        U: Send + 'static,
+        F: FnMut(Cx, T) -> Fut + Send + 'static,
+        Fut: Future<Output = Outcome<U, E>> + Send + 'static,
+    {
+        let inner = self.inner.take().expect("owned scoped pipeline builder");
+        let _ambient = inner.cx.clone().set_current_restricted();
+        ScopedPipelineExecution {
+            inner: Some(inner.then(output_capacity, transform)),
+        }
+    }
+
+    /// Runs all stages and the sink, then observes the actual subtree close.
+    ///
+    /// A pre-cancelled owner or failed region admission returns an error before
+    /// `into_iter`, `next`, any transform, or the sink is invoked. Later stage
+    /// and close failures are retained independently in the returned report.
+    pub fn run<F, Fut>(
+        mut self,
+        sink: F,
+    ) -> impl Future<Output = Result<ScopedPipelineExecutionReport<E>, ScopedPipelineExecutionError>>
+    where
+        F: FnMut(Cx, T) -> Fut + Send + 'static,
+        Fut: Future<Output = Outcome<(), E>> + Send + 'static,
+    {
+        let owner = self
+            .inner
+            .as_ref()
+            .expect("owned scoped pipeline builder")
+            .cx
+            .clone();
+        owner.clone().with_ambient(async move {
+            if owner.is_cancel_requested() {
+                return Err(ScopedPipelineExecutionError::Cancelled(
+                    owner
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("scoped pipeline owner cancelled")),
+                ));
+            }
+            let region = owner
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .map_err(ScopedPipelineExecutionError::Region)?;
+            let region_id = region.region_id();
+            let execution = {
+                let mut inner = self.inner.take().expect("admitted scoped pipeline builder");
+                inner.scope = region.cx().scope();
+                let mut engine = std::pin::pin!(inner.run_inner(sink, region.cx(), Some(&region)));
+                let mut abandoned = PipelineBoundaryDrop(Some(&region));
+                let result = engine.as_mut().await;
+                abandoned.0 = None;
+                result
+            };
+            let mut owner_cancellation = owner.cancel_reason();
+            let close = region
+                .close_with_outcome()
+                .await
+                .map(|close| ScopedPipelineClose {
+                    outcome: close.outcome,
+                    cleanup_outcome: close.cleanup_outcome,
+                    descendant_panic: close.descendant_panic,
+                });
+            if let Some(reason) = owner.cancel_reason() {
+                if let Some(observed) = &mut owner_cancellation {
+                    observed.strengthen(&reason);
+                } else {
+                    owner_cancellation = Some(reason);
+                }
+            }
+            Ok(ScopedPipelineExecutionReport {
+                execution,
+                region_id,
+                close,
+                owner_cancellation,
+            })
+        })
+    }
+}
+
+impl<I: IntoIterator, T, E> Drop for ScopedPipelineExecution<I, T, E> {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        let _ambient = inner.cx.clone().set_current_restricted();
+        let PipelineExecution {
+            scope,
+            cx,
+            inputs,
+            ingress,
+            output,
+            workers,
+            ..
+        } = inner;
+        // Retire arbitrary source/transform captures individually so a first
+        // destructor panic cannot prevent later cleanup under owner authority.
+        let mut panic = None;
+        pipeline_retire_builder_capture(inputs, &mut panic);
+        pipeline_retire_builder_capture(ingress, &mut panic);
+        pipeline_retire_builder_capture(output, &mut panic);
+        for worker in workers {
+            pipeline_retire_builder_capture(worker, &mut panic);
+        }
+        pipeline_retire_builder_capture(scope, &mut panic);
+        pipeline_retire_builder_capture(cx, &mut panic);
+        if let Some(payload) = panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn pipeline_retire_builder_capture<T>(value: T, panic: &mut Option<Box<dyn std::any::Any + Send>>) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value))) {
+        if panic.is_none() && !std::thread::panicking() {
+            *panic = Some(payload);
+        } else {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+/// Declared after the pinned engine: request subtree drainage before its
+/// arbitrary captures, queued values, and work credits are destroyed on drop.
+struct PipelineBoundaryDrop<'a>(Option<&'a ChildRegion>);
+
+impl Drop for PipelineBoundaryDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(region) = self.0.take()
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = region.cancel(CancelReason::user("scoped pipeline dropped"));
+            }))
+        {
+            std::mem::forget(payload);
+        }
+    }
 }
 
 impl<'scope, I, E, P> PipelineExecution<'scope, I, I::Item, E, P>
@@ -366,10 +647,24 @@ where
     /// only after every owned worker has terminated. Input order determines
     /// publication and equal-severity stage attribution. An induced loser
     /// cancellation remains a real `Cancelled` outcome in the severity join.
-    pub async fn run<F, Fut>(self, mut sink: F) -> PipelineExecutionReport<E>
+    pub async fn run<F, Fut>(self, sink: F) -> PipelineExecutionReport<E>
     where
         I: Send,
         I::IntoIter: Send,
+        F: FnMut(Cx, T) -> Fut + Send + 'static,
+        Fut: Future<Output = Outcome<(), E>> + Send + 'static,
+    {
+        let spawn_cx = self.cx.clone();
+        self.run_inner(sink, &spawn_cx, None).await
+    }
+
+    async fn run_inner<F, Fut>(
+        self,
+        mut sink: F,
+        spawn_cx: &Cx,
+        boundary: Option<&ChildRegion>,
+    ) -> PipelineExecutionReport<E>
+    where
         F: FnMut(Cx, T) -> Fut + Send + 'static,
         Fut: Future<Output = Outcome<(), E>> + Send + 'static,
     {
@@ -443,6 +738,7 @@ where
             })
         }));
         let mut owner = PipelineOwner::new(cx.clone(), stages);
+        owner.boundary = boundary;
         let mut execution = Box::pin(crate::cx::scope::CatchUnwind {
             inner: async {
                 for worker in workers {
@@ -456,13 +752,17 @@ where
                     // terminal path, including cancellation before the
                     // first poll.
                     match super::TerminationTally::track_spawn(&owner.terminated, |tally| {
-                        cx.spawn_in_cancellation_dominant(&scope, move |worker_cx| async move {
-                            let _tally = tally;
-                            let outcome = worker(worker_cx).await;
-                            *worker_terminal
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
-                        })
+                        spawn_cx.spawn_in_cancellation_dominant(
+                            &scope,
+                            move |worker_cx| async move {
+                                let _tally = tally;
+                                let outcome = worker(worker_cx).await;
+                                *worker_terminal
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(outcome);
+                            },
+                        )
                     }) {
                         Ok(handle) => owner.handles.push(Some(PipelineChild { handle, terminal })),
                         Err(error) => {
@@ -567,8 +867,9 @@ impl Drop for PipelineCredit {
     }
 }
 
-struct PipelineOwner<E> {
+struct PipelineOwner<'a, E> {
     cx: Cx,
+    boundary: Option<&'a ChildRegion>,
     handles: Vec<Option<PipelineChild<E>>>,
     credits: VecDeque<PipelineCredit>,
     failure: Option<(usize, Outcome<(), PipelineExecutionError<E>>)>,
@@ -593,10 +894,11 @@ struct PipelineChild<E> {
     terminal: std::sync::Arc<std::sync::Mutex<Option<Outcome<(), PipelineExecutionError<E>>>>>,
 }
 
-impl<E> PipelineOwner<E> {
+impl<E> PipelineOwner<'_, E> {
     fn new(cx: Cx, stages: usize) -> Self {
         Self {
             cx,
+            boundary: None,
             handles: Vec::new(),
             credits: VecDeque::new(),
             failure: None,
@@ -834,6 +1136,16 @@ impl<E> PipelineOwner<E> {
                 .cx
                 .cancel_reason()
                 .unwrap_or_else(CancelReason::sibling_failed);
+            if let Some(boundary) = self.boundary {
+                // A worker can be awaiting its own descendant's ordinary
+                // cancellation-insensitive join. Cancel the operation subtree
+                // before waiting for any direct worker to terminate.
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = boundary.cancel(reason.clone());
+                })) {
+                    self.record(usize::MAX, Outcome::Panicked(pipeline_panic(payload)));
+                }
+            }
             for index in 0..self.handles.len() {
                 if let Some(child) = &self.handles[index] {
                     if let Err(payload) =
@@ -938,6 +1250,9 @@ impl<E> PipelineOwner<E> {
             Some(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
             Some(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
         };
+        // The scoped wrapper now owns final close. Normal retirement of this
+        // guard must not publish an abandonment cancellation after selection.
+        self.boundary = None;
         PipelineExecutionReport {
             outcome,
             summary: self.summary,
@@ -946,7 +1261,7 @@ impl<E> PipelineOwner<E> {
     }
 }
 
-impl<E> Drop for PipelineOwner<E> {
+impl<E> Drop for PipelineOwner<'_, E> {
     fn drop(&mut self) {
         let mut panic = None;
         let mut capture = |result: std::thread::Result<()>| {
@@ -958,6 +1273,13 @@ impl<E> Drop for PipelineOwner<E> {
                 }
             }
         };
+        if let Some(boundary) = self.boundary {
+            capture(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || {
+                    let _ = boundary.cancel(CancelReason::user("scoped pipeline dropped"));
+                },
+            )));
+        }
         for handle in &mut self.handles {
             if let Some(handle) = handle.take() {
                 capture(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -996,7 +1318,7 @@ async fn pipeline_coordinate<I, E>(
     ingress: mpsc::Sender<PipelineItem<I::Item>>,
     config: PipelineExecutionConfig,
     acknowledgements: &mut mpsc::Receiver<usize>,
-    owner: &mut PipelineOwner<E>,
+    owner: &mut PipelineOwner<'_, E>,
 ) where
     I: IntoIterator,
 {
@@ -1785,3 +2107,7 @@ macro_rules! pipeline {
 #[cfg(test)]
 #[path = "pipeline_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pipeline_scoped_tests.rs"]
+mod scoped_tests;

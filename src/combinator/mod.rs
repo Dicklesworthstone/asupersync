@@ -162,8 +162,10 @@ pub use map_reduce::{
 pub use pipeline::{
     FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineExecution,
     PipelineExecutionConfig, PipelineExecutionError, PipelineExecutionReport,
-    PipelineExecutionSummary, PipelineResult, pipeline_n_outcomes, pipeline_to_result,
-    pipeline_with_final, pipeline2_outcomes, pipeline3_outcomes, stage_outcome_to_result,
+    PipelineExecutionSummary, PipelineResult, ScopedPipelineClose, ScopedPipelineExecution,
+    ScopedPipelineExecutionError, ScopedPipelineExecutionReport, pipeline_n_outcomes,
+    pipeline_to_result, pipeline_with_final, pipeline2_outcomes, pipeline3_outcomes,
+    stage_outcome_to_result,
 };
 pub use quorum::{
     Quorum, QuorumError, QuorumFailure, QuorumResult, quorum_achieved, quorum_outcomes,
