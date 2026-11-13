@@ -2,12 +2,15 @@
 
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
+use crate::io::AsyncWrite;
 use crate::net::quic_native::{
     ConnectionRouterError, ManagedEndpointConfig, ManagedEndpointError, NativeQuicConnectionError,
     NativeQuicUdpConnection, QuicConnection, StreamId, StreamRole,
@@ -37,7 +40,8 @@ const MAX_CLIENT_FIELD_SECTION_SIZE: usize = 64 * 1024;
 pub struct NativeH3ClientConfig {
     /// Maximum buffered request payload. Zero allows only empty bodies.
     pub max_request_body_bytes: usize,
-    /// Maximum collected response payload. Zero allows only empty bodies.
+    /// Maximum total response payload, buffered or streamed to a sink.
+    /// Zero allows only empty bodies.
     pub max_response_body_bytes: usize,
     /// Maximum individual request, response, or trailer field section.
     /// Must be nonzero and at most 64 KiB.
@@ -46,7 +50,8 @@ pub struct NativeH3ClientConfig {
     pub max_response_header_bytes: usize,
     /// Maximum retained informational responses, from zero through 64.
     pub max_informational_responses: usize,
-    /// Deadline measured from the first poll of `execute`, including cleanup.
+    /// Deadline measured from the first poll of `execute` or `execute_to`,
+    /// including sink backpressure, flush and cleanup.
     /// Must be nonzero. An already completed response survives cleanup errors
     /// or expiry of this deadline.
     pub timeout: Duration,
@@ -113,6 +118,23 @@ pub struct NativeH3ClientResponse {
     pub informational: Vec<H3ResponseHead>,
 }
 
+/// Validated response metadata after all DATA reached and flushed the sink.
+///
+/// Unlike [`NativeH3ClientResponse`], this value does not retain the response
+/// body. Its byte count covers the complete response, including across chunks
+/// and partial sink writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeH3ClientResponseSummary {
+    /// Final response head, with status at least 200.
+    pub head: H3ResponseHead,
+    /// Total DATA bytes successfully written to the supplied sink.
+    pub body_bytes: usize,
+    /// Ordinary trailing fields; these never replace the final head.
+    pub trailers: Vec<(String, String)>,
+    /// Informational heads in wire order.
+    pub informational: Vec<H3ResponseHead>,
+}
+
 /// Admission, transport, or HTTP message failure in an owned exchange.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -155,9 +177,12 @@ pub enum NativeH3ClientError {
     Session(NativeH3SessionError),
     /// Owned UDP driver or connection-routing failure.
     Transport(ManagedEndpointError),
+    /// The response sink failed to write or flush accepted DATA.
+    Sink(io::Error),
     /// The owning task was cancelled before response completion.
     Cancelled,
-    /// The response did not complete before the configured deadline.
+    /// The response and, for `execute_to`, its sink flush did not complete
+    /// before the configured deadline.
     TimedOut,
 }
 
@@ -196,8 +221,9 @@ impl fmt::Display for NativeH3ClientError {
             }
             Self::Session(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
+            Self::Sink(error) => write!(f, "HTTP/3 response sink failed: {error}"),
             Self::Cancelled => f.write_str("HTTP/3 exchange cancelled"),
-            Self::TimedOut => f.write_str("HTTP/3 exchange timed out before response FIN"),
+            Self::TimedOut => f.write_str("HTTP/3 exchange timed out before response completion"),
         }
     }
 }
@@ -207,6 +233,7 @@ impl std::error::Error for NativeH3ClientError {
         match self {
             Self::Session(error) => Some(error),
             Self::Transport(error) => Some(error),
+            Self::Sink(error) => Some(error),
             _ => None,
         }
     }
@@ -251,9 +278,10 @@ impl From<ManagedEndpointError> for NativeH3ClientError {
 /// A complete early response can finish before the upload does; peer
 /// STOP_SENDING retires only the upload and leaves response reads active.
 ///
-/// This adapter buffers one bounded response and does not pool, reconnect,
+/// This adapter buffers one bounded response or writes it incrementally through
+/// [`Self::execute_to`]. It does not pool, reconnect,
 /// retry, follow redirects, multiplex, or implement CONNECT tunnels. Use
-/// [`NativeH3Session`] with an explicitly owned transport for those streaming
+/// [`NativeH3Session`] with an explicitly owned transport for streaming uploads
 /// or multi-request compositions. Existing streams must not be shared with
 /// this consuming adapter.
 /// The session uses static QPACK, a 1 MiB maximum wire-frame payload, and
@@ -312,6 +340,43 @@ impl NativeH3Client {
         head: H3RequestHead,
         body: Bytes,
     ) -> Result<NativeH3ClientResponse, NativeH3ClientError> {
+        let mut collected = Vec::new();
+        let summary = self.execute_to(cx, head, body, &mut collected).await?;
+        Ok(NativeH3ClientResponse {
+            head: summary.head,
+            body: Bytes::from(collected),
+            trailers: summary.trailers,
+            informational: summary.informational,
+        })
+    }
+
+    /// Send one bounded request and download its response into an async sink.
+    ///
+    /// The same protocol validation, total body limit and deadline as
+    /// [`Self::execute`] apply. The client retains at most one accepted DATA
+    /// chunk while the sink is pending, in addition to the bounded QUIC and
+    /// HTTP/3 parser buffers. It does not collect the complete response body.
+    /// Each chunk is validated before any of its bytes reach the sink; body
+    /// limits and Content-Length count bytes across the entire response.
+    ///
+    /// Sink backpressure pauses further response consumption while packet
+    /// handling, recovery timers and request upload continue. Success requires
+    /// response FIN, exact Content-Length when applicable, all accepted DATA
+    /// written, and a successful sink flush within the total deadline. The
+    /// borrowed sink is never shut down. Endpoint cleanup after that completed
+    /// result cannot revoke it.
+    ///
+    /// Errors, cancellation or a dropped future can leave a valid response
+    /// prefix in the sink. These writes cannot be rolled back; callers needing
+    /// atomic publication should write into their own staging destination and
+    /// publish it only after this method succeeds.
+    pub async fn execute_to<W: AsyncWrite + Unpin + ?Sized>(
+        self,
+        cx: &Cx,
+        head: H3RequestHead,
+        body: Bytes,
+        sink: &mut W,
+    ) -> Result<NativeH3ClientResponseSummary, NativeH3ClientError> {
         let started = cx.now();
         cx.checkpoint()
             .map_err(|_| NativeH3ClientError::Cancelled)?;
@@ -334,8 +399,14 @@ impl NativeH3Client {
             started,
             config.timeout,
             endpoint.run_event_loop_with_application(cx, |cx, endpoint, task| {
+                // Once FIN was validated, only the borrowed destination can
+                // remain pending. A normal peer close may retire the QUIC
+                // route during that flush; it cannot invalidate the response.
+                if let Some(completed) = exchange.poll_completed(cx, task, sink) {
+                    return completed.map(Ok);
+                }
                 match endpoint.with_connection_mut(cx, connection_id, |connection| {
-                    exchange.poll(cx, connection, task)
+                    exchange.poll(cx, connection, task, sink)
                 }) {
                     Ok(poll) => poll.map(Ok),
                     Err(error) => Poll::Ready(Err(error)),
@@ -404,6 +475,8 @@ struct Exchange {
     offset: usize,
     upload_stopped: bool,
     response: ResponseCollector,
+    pending_data: Bytes,
+    completed: Option<NativeH3ClientResponseSummary>,
 }
 
 impl Exchange {
@@ -438,41 +511,63 @@ impl Exchange {
             offset: 0,
             upload_stopped: false,
             response,
+            pending_data: Bytes::new(),
+            completed: None,
         })
     }
 
-    fn poll(
+    fn poll<W: AsyncWrite + Unpin + ?Sized>(
         &mut self,
         cx: &Cx,
         connection: &mut QuicConnection,
         task: &mut Context<'_>,
-    ) -> Poll<Result<NativeH3ClientResponse, NativeH3ClientError>> {
+        sink: &mut W,
+    ) -> Poll<Result<NativeH3ClientResponseSummary, NativeH3ClientError>> {
+        if let Some(completed) = self.poll_completed(cx, task, sink) {
+            return completed;
+        }
         if cx.checkpoint().is_err() {
             return Poll::Ready(Err(NativeH3ClientError::Cancelled));
         }
         // Read before writing so a reset or an early final response can retire
         // pending upload work. Both halves get a bounded turn on every poll.
         for step in 0..POLL_STEPS {
-            let event = match self.session.poll_event(cx, connection, task) {
-                Poll::Pending => break,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Ready(Ok(event)) => event,
-            };
-            match self.response.accept(event) {
-                Err(error) => return Poll::Ready(Err(error)),
-                Ok(Some(response)) => {
-                    // Response FIN authorizes stopping only the outstanding
-                    // request send direction. Never cancel response reads as
-                    // an effect of dropping an unfinished request writer.
-                    if !self.upload_stopped && !self.writer.is_finished() {
-                        // The response is already complete. A terminal
-                        // transport or cancellation race during this send-only
-                        // cleanup cannot change the published HTTP result.
-                        let _ = self.stop_upload_after_response(cx, connection);
-                    }
-                    return Poll::Ready(Ok(response));
+            if !self.pending_data.is_empty() {
+                match poll_sink_write(sink, &mut self.pending_data, task) {
+                    // Do not read another response chunk, but let the upload
+                    // advance below. A full-duplex peer can require request
+                    // progress before the consumer can accept its response.
+                    Poll::Pending => break,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) => {}
                 }
-                Ok(None) => {}
+            } else {
+                let event = match self.session.poll_event(cx, connection, task) {
+                    Poll::Pending => break,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(event)) => event,
+                };
+                match self.response.accept(event) {
+                    Err(error) => return Poll::Ready(Err(error)),
+                    Ok(ResponseProgress::Finished(response)) => {
+                        // FIN retires only the upload, even if flushing the
+                        // sink now parks. Retain the validated metadata so a
+                        // resumed flush never consumes FIN twice.
+                        if !self.upload_stopped && !self.writer.is_finished() {
+                            let _ = self.stop_upload_after_response(cx, connection);
+                        }
+                        self.completed = Some(response);
+                        // A ready sink flush establishes success in this poll,
+                        // preserving execute's existing terminal semantics.
+                        // A pending flush remains cancellable on the next poll.
+                        return self.poll_sink_flush(task, sink);
+                    }
+                    Ok(ResponseProgress::Data(bytes)) => self.pending_data = bytes,
+                    Ok(ResponseProgress::Continue) => {}
+                }
+            }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(NativeH3ClientError::Cancelled));
             }
             if step + 1 == POLL_STEPS {
                 // Only self-wake after actual bounded application progress.
@@ -524,6 +619,41 @@ impl Exchange {
         Poll::Pending
     }
 
+    fn poll_completed<W: AsyncWrite + Unpin + ?Sized>(
+        &mut self,
+        cx: &Cx,
+        task: &mut Context<'_>,
+        sink: &mut W,
+    ) -> Option<Poll<Result<NativeH3ClientResponseSummary, NativeH3ClientError>>> {
+        self.completed.as_ref()?;
+        Some(if cx.checkpoint().is_err() {
+            Poll::Ready(Err(NativeH3ClientError::Cancelled))
+        } else {
+            self.poll_sink_flush(task, sink)
+        })
+    }
+
+    fn poll_sink_flush<W: AsyncWrite + Unpin + ?Sized>(
+        &mut self,
+        task: &mut Context<'_>,
+        sink: &mut W,
+    ) -> Poll<Result<NativeH3ClientResponseSummary, NativeH3ClientError>> {
+        for _ in 0..POLL_STEPS {
+            match Pin::new(&mut *sink).poll_flush(task) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(NativeH3ClientError::Sink(error)));
+                }
+                Poll::Ready(Ok(())) => {
+                    return Poll::Ready(Ok(self.completed.take().expect("validated response")));
+                }
+            }
+        }
+        task.waker().wake_by_ref();
+        Poll::Pending
+    }
+
     fn stop_upload_after_response(
         &mut self,
         cx: &Cx,
@@ -548,6 +678,46 @@ impl Exchange {
     }
 }
 
+/// Attempt one sink write, retaining its exact unwritten suffix. The enclosing
+/// exchange bounds repeated Interrupted or short writes and supplies its own
+/// application waker, so a sink can park without losing transport progress.
+fn poll_sink_write<W: AsyncWrite + Unpin + ?Sized>(
+    sink: &mut W,
+    pending: &mut Bytes,
+    task: &mut Context<'_>,
+) -> Poll<Result<(), NativeH3ClientError>> {
+    if pending.is_empty() {
+        return Poll::Ready(Ok(()));
+    }
+    match Pin::new(sink).poll_write(task, pending) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+            Poll::Ready(Ok(()))
+        }
+        Poll::Ready(Err(error)) => Poll::Ready(Err(NativeH3ClientError::Sink(error))),
+        Poll::Ready(Ok(0)) => Poll::Ready(Err(NativeH3ClientError::Sink(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "response sink accepted no bytes from nonempty DATA",
+        )))),
+        Poll::Ready(Ok(count)) if count > pending.len() => {
+            Poll::Ready(Err(NativeH3ClientError::Sink(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response sink reported more bytes than supplied",
+            ))))
+        }
+        Poll::Ready(Ok(count)) => {
+            *pending = pending.slice(count..);
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+
+enum ResponseProgress {
+    Continue,
+    Data(Bytes),
+    Finished(NativeH3ClientResponseSummary),
+}
+
 struct ResponseCollector {
     stream_id: StreamId,
     is_head: bool,
@@ -557,7 +727,7 @@ struct ResponseCollector {
     trailers: Vec<(String, String)>,
     saw_trailers: bool,
     header_bytes: usize,
-    body: Vec<u8>,
+    body_bytes: usize,
     content_length: Option<u64>,
     body_forbidden: bool,
 }
@@ -573,7 +743,7 @@ impl ResponseCollector {
             trailers: Vec::new(),
             saw_trailers: false,
             header_bytes: 0,
-            body: Vec::new(),
+            body_bytes: 0,
             content_length: None,
             body_forbidden: false,
         }
@@ -608,10 +778,7 @@ impl ResponseCollector {
         )
     }
 
-    fn accept(
-        &mut self,
-        event: NativeH3Event,
-    ) -> Result<Option<NativeH3ClientResponse>, NativeH3ClientError> {
+    fn accept(&mut self, event: NativeH3Event) -> Result<ResponseProgress, NativeH3ClientError> {
         match event {
             NativeH3Event::ResponseHeaders { stream_id, head } => {
                 self.check_stream(stream_id)?;
@@ -667,7 +834,7 @@ impl ResponseCollector {
                         "DATA is not permitted in this response",
                     ));
                 }
-                let size = self.body.len().checked_add(bytes.len()).ok_or(
+                let size = self.body_bytes.checked_add(bytes.len()).ok_or(
                     NativeH3ClientError::InvalidMessage("response body size overflow"),
                 )?;
                 check_limit(size, self.config.max_response_body_bytes, "response body")?;
@@ -679,7 +846,8 @@ impl ResponseCollector {
                         });
                     }
                 }
-                self.body.extend_from_slice(&bytes);
+                self.body_bytes = size;
+                return Ok(ResponseProgress::Data(bytes));
             }
             NativeH3Event::Trailers { stream_id, fields } => {
                 self.check_stream(stream_id)?;
@@ -707,12 +875,12 @@ impl ResponseCollector {
                 ))?;
                 if !self.body_forbidden {
                     if let Some(expected) = self.content_length {
-                        check_length(expected, self.body.len())?;
+                        check_length(expected, self.body_bytes)?;
                     }
                 }
-                return Ok(Some(NativeH3ClientResponse {
+                return Ok(ResponseProgress::Finished(NativeH3ClientResponseSummary {
                     head,
-                    body: Bytes::from(std::mem::take(&mut self.body)),
+                    body_bytes: self.body_bytes,
                     trailers: std::mem::take(&mut self.trailers),
                     informational: std::mem::take(&mut self.informational),
                 }));
@@ -742,7 +910,7 @@ impl ResponseCollector {
             }
             NativeH3Event::Settings(_) | NativeH3Event::Frame { .. } => {}
         }
-        Ok(None)
+        Ok(ResponseProgress::Continue)
     }
 
     fn check_stream(&self, stream_id: StreamId) -> Result<(), NativeH3ClientError> {
@@ -979,32 +1147,40 @@ mod tests {
     #[test]
     fn response_retains_informational_heads_body_and_trailers_until_fin() {
         let mut collected = collector();
-        assert!(
+        assert!(matches!(
             collected
                 .accept(response(103, fields("link", "</style.css>")))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
+                .unwrap(),
+            ResponseProgress::Continue
+        ));
+        assert!(matches!(
             collected
                 .accept(response(200, fields("content-length", "6")))
-                .unwrap()
-                .is_none()
-        );
-        assert!(collected.accept(data(b"abc")).unwrap().is_none());
-        assert!(collected.accept(data(b"def")).unwrap().is_none());
-        assert!(
+                .unwrap(),
+            ResponseProgress::Continue
+        ));
+        let mut body = Vec::new();
+        for chunk in [b"abc", b"def"] {
+            let ResponseProgress::Data(bytes) = collected.accept(data(chunk)).unwrap() else {
+                panic!("validated DATA must be handed to the sink");
+            };
+            body.extend_from_slice(&bytes);
+        }
+        assert!(matches!(
             collected
                 .accept(NativeH3Event::Trailers {
                     stream_id: StreamId(0),
                     fields: fields("x-check", "complete"),
                 })
-                .unwrap()
-                .is_none()
-        );
-        let result = collected.accept(fin()).unwrap().unwrap();
+                .unwrap(),
+            ResponseProgress::Continue
+        ));
+        let ResponseProgress::Finished(result) = collected.accept(fin()).unwrap() else {
+            panic!("valid FIN must complete the response");
+        };
         assert_eq!(result.head.status, 200);
-        assert_eq!(&result.body[..], b"abcdef");
+        assert_eq!(result.body_bytes, 6);
+        assert_eq!(body, b"abcdef");
         assert_eq!(result.informational[0].status, 103);
         assert_eq!(result.trailers, fields("x-check", "complete"));
     }
@@ -1040,9 +1216,9 @@ mod tests {
                 actual: 3
             })
         ));
-        assert!(
-            collected.body.is_empty(),
-            "oversized data is rejected before retaining it"
+        assert_eq!(
+            collected.body_bytes, 0,
+            "oversized DATA is rejected before admission"
         );
     }
 
@@ -1070,7 +1246,7 @@ mod tests {
                 limit: 4
             })
         ));
-        assert_eq!(collected.body, b"abc");
+        assert_eq!(collected.body_bytes, 3);
     }
 
     #[test]
@@ -1116,7 +1292,10 @@ mod tests {
             collected
                 .accept(response(status, fields("content-length", "999999999")))
                 .unwrap();
-            assert!(collected.accept(fin()).unwrap().unwrap().body.is_empty());
+            let ResponseProgress::Finished(result) = collected.accept(fin()).unwrap() else {
+                panic!("bodyless response must finish");
+            };
+            assert_eq!(result.body_bytes, 0);
             let mut collected = ResponseCollector::new(StreamId(0), is_head, Default::default());
             collected.accept(response(status, Vec::new())).unwrap();
             assert!(matches!(
@@ -1146,7 +1325,10 @@ mod tests {
         for status in [204, 205] {
             let mut collected = collector();
             collected.accept(response(status, Vec::new())).unwrap();
-            assert!(collected.accept(fin()).unwrap().unwrap().body.is_empty());
+            let ResponseProgress::Finished(result) = collected.accept(fin()).unwrap() else {
+                panic!("bodyless response must finish");
+            };
+            assert_eq!(result.body_bytes, 0);
         }
     }
 
@@ -1167,12 +1349,10 @@ mod tests {
                 final_size: 123
             })
         ));
-        assert!(
-            collector()
-                .accept(NativeH3Event::Goaway(4))
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            collector().accept(NativeH3Event::Goaway(4)).unwrap(),
+            ResponseProgress::Continue
+        ));
         assert!(matches!(
             collector().accept(NativeH3Event::Goaway(0)),
             Err(NativeH3ClientError::Goaway {
@@ -1226,5 +1406,48 @@ mod tests {
         assert_eq!(stream.send_reset.map(|(code, _)| code), Some(0x10c));
         assert!(stream.receive_stopped_error_code.is_none());
         assert!(stream.recv_reset.is_none());
+    }
+
+    #[test]
+    fn invalid_sink_counts_are_errors_without_losing_the_pending_chunk() {
+        struct WrongCount(usize);
+        impl AsyncWrite for WrongCount {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                assert!(!bytes.is_empty(), "empty chunks must not invoke the sink");
+                Poll::Ready(Ok(self.0))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<io::Result<()>> {
+                unreachable!("this test exercises write admission only")
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                unreachable!("borrowed sinks must not be shut down")
+            }
+        }
+        let mut task = Context::from_waker(std::task::Waker::noop());
+        for (count, expected) in [
+            (0, io::ErrorKind::WriteZero),
+            (4, io::ErrorKind::InvalidData),
+        ] {
+            let mut pending = Bytes::from_static(b"abc");
+            let result = poll_sink_write(&mut WrongCount(count), &mut pending, &mut task);
+            assert!(
+                matches!(result, Poll::Ready(Err(NativeH3ClientError::Sink(error))) if error.kind() == expected)
+            );
+            assert_eq!(&pending[..], b"abc");
+        }
+        let mut empty = Bytes::new();
+        assert!(matches!(
+            poll_sink_write(&mut WrongCount(0), &mut empty, &mut task),
+            Poll::Ready(Ok(()))
+        ));
     }
 }

@@ -594,10 +594,15 @@ fn scoped_quorum_native_closes_winner_and_joining_loser_subtrees_before_return()
 #[test]
 fn scoped_quorum_deadline_checks_bounds_and_explicit_time_before_submission() {
     let no_timer = Cx::for_testing();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let invalid_calls = Arc::clone(&calls);
     let mut invalid = Box::pin(no_timer.quorum_scoped_until(
         Time::ZERO,
         0,
-        vec![|_: Cx| async { Ok::<_, ()>(7_u8) }],
+        vec![move |_: Cx| {
+            invalid_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok::<_, ()>(7_u8) }
+        }],
     ));
     assert!(matches!(
         poll_once(invalid.as_mut()),
@@ -606,37 +611,40 @@ fn scoped_quorum_deadline_checks_bounds_and_explicit_time_before_submission() {
             total: 1
         }))
     ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let missing_calls = Arc::clone(&calls);
     let mut missing = Box::pin(no_timer.quorum_scoped_until(
         Time::ZERO,
         1,
-        vec![|_: Cx| async {
-            panic!("missing time authority must not run user work");
-            #[allow(unreachable_code)]
-            Ok::<u8, ()>(7)
+        vec![move |_: Cx| {
+            missing_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok::<_, ()>(7_u8) }
         }],
     ));
     assert!(matches!(
         poll_once(missing.as_mut()),
         Poll::Ready(Err(ScopedQuorumError::TimerUnavailable))
     ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     let (mut lab, mut owner, root, gate) = fixture(0x5C_5900);
     let timer = owner.timer_driver().unwrap();
     let pending = owner.pending_spawn_counter_handle().unwrap();
     owner.runtime_mask = cap::CapMask::none();
+    let denied_calls = Arc::clone(&calls);
     let mut denied = Box::pin(owner.quorum_scoped_until(
         Time::from_secs(60),
         1,
-        vec![|_: Cx| async {
-            panic!("denied time authority must not run user work");
-            #[allow(unreachable_code)]
-            Ok::<u8, ()>(7)
+        vec![move |_: Cx| {
+            denied_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok::<_, ()>(7_u8) }
         }],
     ));
     assert!(matches!(
         poll_once(denied.as_mut()),
         Poll::Ready(Err(ScopedQuorumError::TimerUnavailable))
     ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(pending.count(), 0);
     assert_eq!(lab.state.live_task_count(), 1);
     assert!(timer.is_empty());
@@ -653,16 +661,18 @@ fn scoped_quorum_deadline_expired_admission_preserves_masked_owner_precedence() 
             if cancelled {
                 owner.set_cancel_reason(reason.clone());
             }
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::clone(&calls);
             let mut group = Box::pin(owner.quorum_scoped_until(
                 Time::ZERO,
                 1,
-                vec![|_: Cx| async {
-                    panic!("an expired quorum must not start a factory");
-                    #[allow(unreachable_code)]
-                    Ok::<u8, ()>(7)
+                vec![move |_: Cx| {
+                    factory_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Ok::<_, ()>(7_u8) }
                 }],
             ));
             let report = complete(&mut lab, group.as_mut());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
             if cancelled {
                 assert!(matches!(
                     &report.stop,
@@ -692,13 +702,14 @@ fn scoped_quorum_deadline_expired_admission_preserves_masked_owner_precedence() 
 fn scoped_quorum_deadline_suppresses_factories_admitted_after_expiry() {
     let (mut lab, owner, root, gate) = fixture(0x5C_5B00);
     let deadline = Time::from_millis(50);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory_calls = Arc::clone(&calls);
     let mut group = Box::pin(owner.quorum_scoped_until(
         deadline,
         1,
-        vec![|_: Cx| async {
-            panic!("a queued wrapper must check the deadline before invoking user code");
-            #[allow(unreachable_code)]
-            Ok::<u8, ()>(7)
+        vec![move |_: Cx| {
+            factory_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok::<_, ()>(7_u8) }
         }],
     ));
     assert!(poll_once(group.as_mut()).is_pending());
@@ -709,6 +720,7 @@ fn scoped_quorum_deadline_suppresses_factories_admitted_after_expiry() {
     // suppress this real admission before it executes.
     admit(&mut lab, queued);
     lab.run_until_idle();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     let report = complete(&mut lab, group.as_mut());
     assert!(matches!(report.stop, ScopedQuorumStop::TimedOut));
     assert!(report.selected.is_empty());

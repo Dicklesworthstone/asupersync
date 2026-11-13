@@ -21,6 +21,7 @@ use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
 use asupersync::http::h3::{
     NativeH3Client, NativeH3ClientConfig, NativeH3ClientError, NativeH3ClientResponse,
+    NativeH3ClientResponseSummary,
 };
 use asupersync::http::h3_native::{H3PseudoHeaders, H3RequestHead, H3ResponseHead, H3Settings};
 use asupersync::http::h3_quic::{NativeH3Event, NativeH3Session};
@@ -5942,6 +5943,7 @@ t1Xfx0NGxOzzDaZCSlrAJXuk+K+UxhmqfWmwVkzvjWfZzQEwi/qmDZFH
 #[derive(Debug, Clone, Copy)]
 enum OwnedClientReply {
     AfterUpload,
+    DuringUpload,
     Early413,
     Oversized,
     MissingFin,
@@ -5956,10 +5958,14 @@ struct OwnedClientServerProgress {
     application_polls: usize,
 }
 
-/// The server uses the same native poll driver as the public client. Its
-/// completion wake comes from the client's terminal result, never a periodic
-/// timer or a noop-waker transport pump. Holding it until then also prevents a
-/// locally queued response FIN from being mistaken for delivery to the client.
+#[derive(Default)]
+struct OwnedClientUploadGate {
+    request_finished: std::sync::atomic::AtomicBool,
+    sink_parked: std::sync::atomic::AtomicBool,
+    sink_wake: std::sync::Mutex<Option<Waker>>,
+    server_wake: std::sync::Mutex<Option<Waker>>,
+}
+
 async fn owned_client_exchange(
     cx: &Cx,
     reply: OwnedClientReply,
@@ -5970,6 +5976,35 @@ async fn owned_client_exchange(
     Result<NativeH3ClientResponse, NativeH3ClientError>,
     OwnedClientServerProgress,
 ) {
+    owned_client_exchange_using(
+        cx,
+        reply,
+        upload_bytes,
+        download_bytes,
+        config,
+        None,
+        |client, head, body| client.execute(cx, head, body),
+    )
+    .await
+}
+
+/// The server uses the same native poll driver as the public client. Its
+/// completion wake comes from the client's terminal result, never a periodic
+/// timer or a noop-waker transport pump. Holding it until then also prevents a
+/// locally queued response FIN from being mistaken for delivery to the client.
+async fn owned_client_exchange_using<R, F, Fut>(
+    cx: &Cx,
+    reply: OwnedClientReply,
+    upload_bytes: usize,
+    download_bytes: usize,
+    config: NativeH3ClientConfig,
+    upload_gate: Option<Arc<OwnedClientUploadGate>>,
+    execute: F,
+) -> (Result<R, NativeH3ClientError>, OwnedClientServerProgress)
+where
+    F: FnOnce(NativeH3Client, H3RequestHead, Bytes) -> Fut,
+    Fut: Future<Output = Result<R, NativeH3ClientError>>,
+{
     let (client, server) = live_pair_with_client_session(cx, H3_ALPN, H3_ALPN, false).await;
     let (client, absent_session) = client.expect("authenticated fresh client owner");
     assert!(absent_session.is_none());
@@ -5998,6 +6033,12 @@ async fn owned_client_exchange(
     let server_wake = Arc::new(std::sync::Mutex::new(None::<Waker>));
     let response_bytes = if matches!(reply, OwnedClientReply::Early413) {
         Bytes::from_static(b"upload rejected; response remains readable")
+    } else if matches!(reply, OwnedClientReply::DuringUpload) {
+        Bytes::from(
+            (0..download_bytes)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        )
     } else {
         Bytes::from(vec![b'd'; download_bytes])
     };
@@ -6007,12 +6048,25 @@ async fn owned_client_exchange(
     let mut offset = 0;
     let serving = endpoint.run_event_loop_with_application(cx, |cx, endpoint, task| {
         *server_wake.lock().unwrap() = Some(task.waker().clone());
+        if let Some(gate) = &upload_gate {
+            *gate.server_wake.lock().unwrap() = Some(task.waker().clone());
+        }
         if completed.load(Ordering::SeqCst) {
             return Poll::Ready(Ok(()));
         }
         progress.application_polls += 1;
         match endpoint.with_connection_mut(cx, server_id, |connection| {
             for step in 0..32 {
+                // Make sink backpressure an observed precondition of reading
+                // the rest of this upload, not a scheduling assumption.
+                if matches!(reply, OwnedClientReply::DuringUpload)
+                    && stream.is_some()
+                    && upload_gate
+                        .as_ref()
+                        .is_some_and(|gate| !gate.sink_parked.load(Ordering::SeqCst))
+                {
+                    break;
+                }
                 let event = match session.poll_event(cx, connection, task) {
                     Poll::Pending => break,
                     Poll::Ready(Err(error)) => {
@@ -6035,6 +6089,12 @@ async fn owned_client_exchange(
                     NativeH3Event::Finished { stream_id } => {
                         assert_eq!(Some(stream_id), stream);
                         progress.request_finished = true;
+                        if let Some(gate) = &upload_gate {
+                            gate.request_finished.store(true, Ordering::SeqCst);
+                            if let Some(wake) = gate.sink_wake.lock().unwrap().take() {
+                                wake.wake();
+                            }
+                        }
                     }
                     NativeH3Event::Settings(_) | NativeH3Event::StreamReset { .. } => {}
                     other => panic!("unexpected server HTTP/3 event: {other:?}"),
@@ -6107,7 +6167,10 @@ async fn owned_client_exchange(
                         offset = end;
                     } else if matches!(reply, OwnedClientReply::MissingFin) {
                         break;
-                    } else if matches!(reply, OwnedClientReply::AfterUpload) {
+                    } else if matches!(
+                        reply,
+                        OwnedClientReply::AfterUpload | OwnedClientReply::DuringUpload
+                    ) {
                         writer
                             .queue_trailers(&[("x-complete".to_owned(), "yes".to_owned())])
                             .unwrap();
@@ -6137,8 +6200,11 @@ async fn owned_client_exchange(
     )
     .unwrap();
     let requesting = async {
-        let mut future =
-            Box::pin(client.execute(cx, request, Bytes::from(vec![b'u'; upload_bytes])));
+        let mut future = Box::pin(execute(
+            client,
+            request,
+            Bytes::from(vec![b'u'; upload_bytes]),
+        ));
         // Exercise an explicitly supplied Cx even when its future is polled
         // without an ambient context. The deadline must still wake on no FIN.
         let result = std::future::poll_fn(|task| {
@@ -6287,6 +6353,368 @@ fn owned_h3_client_bounds_unknown_length_body_missing_fin_and_reset() {
         }
     });
     runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[derive(Default)]
+struct OwnedClientSink {
+    received: usize,
+    max_offered: usize,
+    flush_polls: usize,
+    fail_after: Option<usize>,
+    hold_writes: bool,
+    hold_flush: bool,
+    interrupt_write_once: bool,
+    interrupt_flush_once: bool,
+    patterned: bool,
+    cancel_on_flush: Option<Cx>,
+    parked: Arc<std::sync::atomic::AtomicBool>,
+    upload_gate: Option<Arc<OwnedClientUploadGate>>,
+}
+
+impl asupersync::io::AsyncWrite for OwnedClientSink {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        task: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        assert!(!bytes.is_empty(), "empty DATA must not reach the sink");
+        if self.patterned {
+            assert!(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, byte)| { *byte == ((self.received + offset) % 251) as u8 }),
+                "partial writes must neither repeat nor omit any payload prefix"
+            );
+        } else {
+            assert!(bytes.iter().all(|byte| *byte == b'd'));
+        }
+        self.max_offered = self.max_offered.max(bytes.len());
+        if self.interrupt_write_once {
+            self.interrupt_write_once = false;
+            return Poll::Ready(Err(std::io::ErrorKind::Interrupted.into()));
+        }
+        if let Some(gate) = &self.upload_gate {
+            *gate.sink_wake.lock().unwrap() = Some(task.waker().clone());
+            if !gate.request_finished.load(Ordering::SeqCst) {
+                gate.sink_parked.store(true, Ordering::SeqCst);
+                if let Some(wake) = gate.server_wake.lock().unwrap().take() {
+                    wake.wake();
+                }
+                if !gate.request_finished.load(Ordering::SeqCst) {
+                    return Poll::Pending;
+                }
+            }
+        }
+        if self.hold_writes {
+            self.parked.store(true, Ordering::SeqCst);
+            return Poll::Pending;
+        }
+        let allowance = self
+            .fail_after
+            .map_or(usize::MAX, |limit| limit - self.received);
+        if allowance == 0 {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "intentional destination failure",
+            )));
+        }
+        let count = bytes.len().min(257).min(allowance);
+        self.received += count;
+        Poll::Ready(Ok(count))
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        _task: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.flush_polls += 1;
+        if self.interrupt_flush_once {
+            self.interrupt_flush_once = false;
+            return Poll::Ready(Err(std::io::ErrorKind::Interrupted.into()));
+        }
+        if self.hold_flush {
+            self.parked.store(true, Ordering::SeqCst);
+            Poll::Pending
+        } else {
+            if let Some(cx) = self.cancel_on_flush.take() {
+                cx.cancel_with(
+                    CancelKind::User,
+                    Some("sink completed as cancellation arrived"),
+                );
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _task: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        panic!("the download client must not shut down a borrowed sink");
+    }
+}
+
+#[test]
+fn owned_h3_client_download_to_sink_keeps_upload_live_under_backpressure() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let gate = Arc::new(OwnedClientUploadGate::default());
+        let mut sink = OwnedClientSink {
+            upload_gate: Some(Arc::clone(&gate)),
+            interrupt_write_once: true,
+            interrupt_flush_once: true,
+            patterned: true,
+            ..Default::default()
+        };
+        let upload_bytes = 800_000;
+        let download_bytes = 900_000;
+        assert!(upload_bytes as u64 > connection_config().recv_window);
+        assert!(download_bytes as u64 > connection_config().recv_window);
+        let (result, progress) = owned_client_exchange_using(
+            &cx,
+            OwnedClientReply::DuringUpload,
+            upload_bytes,
+            download_bytes,
+            Default::default(),
+            Some(Arc::clone(&gate)),
+            |client, head, body| client.execute_to(&cx, head, body, &mut sink),
+        )
+        .await;
+        let response = result.expect("pending response sink must not stop request upload");
+        assert!(gate.sink_parked.load(Ordering::SeqCst));
+        assert!(progress.request_finished);
+        assert_eq!(progress.upload_bytes, upload_bytes);
+        assert_eq!(response.head.status, 200);
+        assert_eq!(response.body_bytes, download_bytes);
+        assert_eq!(sink.received, download_bytes);
+        assert!(
+            sink.max_offered <= 16_384,
+            "the peer emits bounded DATA frames"
+        );
+        assert_eq!(sink.flush_polls, 2);
+        assert_eq!(
+            response.trailers,
+            [("x-complete".to_owned(), "yes".to_owned())]
+        );
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_download_sink_failure_and_total_limit_preserve_exact_prefix() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let mut sink = OwnedClientSink {
+            fail_after: Some(12_345),
+            ..Default::default()
+        };
+        let (result, progress) = owned_client_exchange_using(
+            &cx,
+            OwnedClientReply::AfterUpload,
+            0,
+            65_536,
+            Default::default(),
+            None,
+            |client, head, body| client.execute_to(&cx, head, body, &mut sink),
+        )
+        .await;
+        assert!(progress.response_started);
+        assert!(
+            matches!(result, Err(NativeH3ClientError::Sink(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(sink.received, 12_345);
+        assert_eq!(sink.flush_polls, 0);
+
+        let mut sink = OwnedClientSink::default();
+        let (result, _) = owned_client_exchange_using(
+            &cx,
+            OwnedClientReply::Oversized,
+            0,
+            65_536,
+            NativeH3ClientConfig {
+                max_response_body_bytes: 20_000,
+                ..Default::default()
+            },
+            None,
+            |client, head, body| client.execute_to(&cx, head, body, &mut sink),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(NativeH3ClientError::LimitExceeded {
+                resource: "response body",
+                limit: 20_000
+            })
+        ));
+        assert!(sink.received > 0 && sink.received <= 20_000);
+        assert_eq!(sink.flush_polls, 0);
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_download_deadline_bounds_parked_write_and_flush() {
+    let runtime = managed_runtime();
+    let work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        for hold_flush in [false, true] {
+            let mut sink = OwnedClientSink {
+                hold_writes: !hold_flush,
+                hold_flush,
+                ..Default::default()
+            };
+            let (result, progress) = owned_client_exchange_using(
+                &cx,
+                OwnedClientReply::AfterUpload,
+                0,
+                4096,
+                NativeH3ClientConfig {
+                    timeout: Duration::from_millis(750),
+                    ..Default::default()
+                },
+                None,
+                |client, head, body| client.execute_to(&cx, head, body, &mut sink),
+            )
+            .await;
+            assert!(progress.response_started);
+            assert!(
+                sink.parked.load(Ordering::SeqCst),
+                "sink must be reached before timeout"
+            );
+            assert!(matches!(result, Err(NativeH3ClientError::TimedOut)));
+            assert_eq!(sink.received, if hold_flush { 4096 } else { 0 });
+            assert_eq!(sink.flush_polls > 0, hold_flush);
+        }
+    });
+    runtime.block_on(runtime.handle().spawn(work));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_download_success_survives_cancellation_in_ready_flush() {
+    let runtime = managed_runtime();
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let mut child = cx
+            .spawn(|child_cx| {
+                let future: std::pin::Pin<Box<dyn Future<Output = (usize, usize)> + Send>> =
+                    Box::pin(async move {
+                        let mut sink = OwnedClientSink {
+                            cancel_on_flush: Some(child_cx.clone()),
+                            ..Default::default()
+                        };
+                        let (result, _) = owned_client_exchange_using(
+                            &child_cx,
+                            OwnedClientReply::AfterUpload,
+                            0,
+                            4096,
+                            Default::default(),
+                            None,
+                            |client, head, body| {
+                                client.execute_to(&child_cx, head, body, &mut sink)
+                            },
+                        )
+                        .await;
+                        let response =
+                            result.expect("ready sink flush must preserve the validated response");
+                        assert_eq!(response.head.status, 200);
+                        assert_eq!(response.body_bytes, 4096);
+                        assert!(
+                            sink.cancel_on_flush.is_none(),
+                            "ready flush triggers cancellation"
+                        );
+                        assert!(child_cx.is_cancel_requested());
+                        // The public HTTP result above is already established.
+                        // Acknowledge separately for this test task's join policy.
+                        assert!(child_cx.checkpoint().is_err());
+                        (sink.received, sink.flush_polls)
+                    });
+                future
+            })
+            .unwrap();
+        let observed = child
+            .join(&cx)
+            .await
+            .expect("acknowledged task preserves its result");
+        assert_eq!(observed, (4096, 1));
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+#[test]
+fn owned_h3_client_download_abort_wakes_parked_write_and_flush() {
+    let runtime = managed_runtime();
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        for hold_flush in [false, true] {
+            let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let child_parked = Arc::clone(&parked);
+            let mut child = cx
+                .spawn(move |child_cx| {
+                    let future: std::pin::Pin<
+                        Box<
+                            dyn Future<
+                                    Output = (
+                                        Result<NativeH3ClientResponseSummary, NativeH3ClientError>,
+                                        usize,
+                                        usize,
+                                    ),
+                                > + Send,
+                        >,
+                    > = Box::pin(async move {
+                        let mut sink = OwnedClientSink {
+                            hold_writes: !hold_flush,
+                            hold_flush,
+                            parked: child_parked,
+                            ..Default::default()
+                        };
+                        let (result, _) = owned_client_exchange_using(
+                            &child_cx,
+                            OwnedClientReply::AfterUpload,
+                            0,
+                            4096,
+                            Default::default(),
+                            None,
+                            |client, head, body| {
+                                client.execute_to(&child_cx, head, body, &mut sink)
+                            },
+                        )
+                        .await;
+                        (result, sink.received, sink.flush_polls)
+                    });
+                    future
+                })
+                .unwrap();
+            let started = Instant::now();
+            while !parked.load(Ordering::SeqCst) {
+                assert!(
+                    started.elapsed() < IO_TIMEOUT,
+                    "sink must actually park before abort"
+                );
+                assert!(!child.is_finished());
+                asupersync::runtime::yield_now().await;
+            }
+            assert!(!child.is_finished());
+            child.abort();
+            let (result, received, flush_polls) =
+                asupersync::time::timeout(cx.now(), IO_TIMEOUT, child.join(&cx))
+                    .await
+                    .expect("parked sink cancellation must finish")
+                    .expect("cooperative cancellation preserves the typed result");
+            assert!(matches!(result, Err(NativeH3ClientError::Cancelled)));
+            assert_eq!(received, if hold_flush { 4096 } else { 0 });
+            assert_eq!(flush_polls > 0, hold_flush);
+            assert!(child.is_finished());
+        }
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
     managed_assert_runtime_cleanup(&runtime);
 }
 
