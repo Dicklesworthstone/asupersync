@@ -99,6 +99,8 @@ fn transport_parameters(config: NativeQuicConnectionConfig) -> Vec<u8> {
         initial_max_streams_bidi: Some(config.max_local_bidi),
         initial_max_streams_uni: Some(config.max_local_uni),
         disable_active_migration: true,
+        // RFC 9221: lets the peer send DATAGRAM frames (the discard test).
+        max_datagram_frame_size: Some(1_200),
         ..TransportParameters::default()
     };
     let mut encoded = Vec::new();
@@ -307,6 +309,46 @@ fn an_ack_only_step_sends_no_probe_when_the_loss_timer_is_due() {
             .await
             .expect("transmitting drive");
         assert!(progress.packets_sent > 0, "no probe was due: {progress:?}");
+    });
+}
+
+fn queued_datagrams(owner: &NativeQuicUdpConnection) -> usize {
+    owner.connection().inner().pending_outbound_datagram_count()
+}
+
+/// Queued DATAGRAMs that are discarded are never sent: the peer receives none
+/// of them, and a DATAGRAM queued afterwards is sent as usual.
+#[test]
+fn discarded_datagrams_are_never_sent() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let (mut client, mut server) = live_pair(&cx).await;
+        settle(&cx, &mut client, &mut server).await;
+        let sent_before = client.connection().inner().datagrams_sent();
+        let payloads: [&'static [u8]; 3] = [b"one", b"two", b"three"];
+        for payload in payloads {
+            client
+                .connection_mut()
+                .send_datagram(&cx, Bytes::from_static(payload))
+                .expect("queue datagram");
+        }
+        assert_eq!(queued_datagrams(&client), 3);
+        assert_eq!(client.connection_mut().discard_outbound_datagrams(), 3);
+        assert_eq!(queued_datagrams(&client), 0);
+
+        client
+            .connection_mut()
+            .send_datagram(&cx, Bytes::from_static(b"after"))
+            .expect("queue after discard");
+        settle(&cx, &mut client, &mut server).await;
+        assert_eq!(
+            client.connection().inner().datagrams_sent(),
+            sent_before + 1,
+            "a discarded datagram was sent"
+        );
+        let received = server.connection_mut().recv_datagram();
+        assert_eq!(received.as_deref(), Some(&b"after"[..]));
+        assert!(server.connection_mut().recv_datagram().is_none());
     });
 }
 

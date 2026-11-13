@@ -309,6 +309,18 @@ impl QuicConnection {
         result
     }
 
+    /// Discard every queued outbound DATAGRAM payload without sending it and
+    /// return how many were discarded; see
+    /// [`NativeQuicConnection::discard_outbound_datagrams`].
+    pub fn discard_outbound_datagrams(&mut self) -> usize {
+        let discarded = self.inner.discard_outbound_datagrams();
+        apitrace!(
+            "event=datagram_discard role={:?} count={discarded}",
+            self.role
+        );
+        discarded
+    }
+
     /// Pop the next received datagram payload, if any (non-blocking).
     #[must_use]
     pub fn recv_datagram(&mut self) -> Option<Bytes> {

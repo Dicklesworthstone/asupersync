@@ -3633,6 +3633,23 @@ impl NativeQuicConnection {
         self.outbound_datagrams.len()
     }
 
+    /// Discard every queued outbound DATAGRAM payload without sending it and
+    /// return how many were discarded.
+    ///
+    /// DATAGRAM frames are unreliable (RFC 9221), so an owner that must send
+    /// no more application data, such as a session that has fenced its
+    /// authority, can drop what it queued instead of flushing it. Payloads
+    /// already assembled into packets are not affected, and later
+    /// [`Self::send_datagram`] calls queue as usual. Not counted in
+    /// [`Self::datagrams_dropped_on_send`], which counts the bounded queue's
+    /// own drops.
+    pub fn discard_outbound_datagrams(&mut self) -> usize {
+        let discarded = self.outbound_datagrams.len();
+        self.outbound_datagrams.clear();
+        quictrace!("event=datagram_send_discard count={}", discarded);
+        discarded
+    }
+
     /// Total DATAGRAM frames emitted onto the wire by [`Self::generate_frames`].
     #[must_use]
     pub fn datagrams_sent(&self) -> u64 {
