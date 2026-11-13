@@ -355,6 +355,74 @@
     }
 
     #[test]
+    fn response_body_size_hint_tracks_unconsumed_content_length() {
+        let payload = vec![b'x'; 9000];
+        let mut wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
+        wire.extend_from_slice(&payload);
+        let request = Request {
+            method: Method::Get,
+            uri: "/download".into(),
+            version: Version::Http11,
+            headers: vec![("Host".into(), "example.com".into())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        let mut response = block_on(Http1Client::request_streaming(TestIo::new(&wire), request))
+            .expect("response head");
+        let mut remaining = payload.len() as u64;
+        let mut frames = 0;
+        assert_eq!(response.body.size_hint().exact(), Some(remaining));
+        while let Some(frame) = poll_body(&mut response.body) {
+            let data = frame.expect("valid body").into_data().expect("DATA");
+            remaining -= data.remaining() as u64;
+            frames += 1;
+            assert_eq!(response.body.size_hint().exact(), Some(remaining));
+        }
+        assert!(frames > 1, "the fixture must cross a transport read");
+        assert_eq!(remaining, 0);
+        assert!(response.body.is_end_stream());
+        assert_eq!(response.body.size_hint().exact(), Some(0));
+    }
+
+    #[test]
+    fn terminal_response_bodies_have_zero_remaining_size_hint() {
+        for (wire, fails) in [
+            (&b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhi"[..], true),
+            (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nx-end: yes\r\n\r\n"[..], false),
+            (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi"[..], true),
+            (&b"HTTP/1.1 200 OK\r\n\r\nhi"[..], false),
+        ] {
+            let request = Request {
+                method: Method::Get,
+                uri: "/download".into(),
+                version: Version::Http11,
+                headers: vec![("Host".into(), "example.com".into())],
+                body: Vec::new(),
+                trailers: Vec::new(),
+                peer_addr: None,
+            };
+            let mut response = block_on(Http1Client::request_streaming(TestIo::new(wire), request))
+                .expect("response head");
+            let mut failed = false;
+            while let Some(frame) = poll_body(&mut response.body) {
+                if frame.is_err() {
+                    failed = true;
+                    assert!(response.body.is_end_stream());
+                    assert_eq!(response.body.size_hint().exact(), Some(0));
+                }
+            }
+            assert_eq!(failed, fails, "{wire:?}");
+            assert!(response.body.is_end_stream());
+            assert_eq!(response.body.size_hint().exact(), Some(0));
+        }
+    }
+
+    #[test]
     fn pooled_streaming_reuse_requires_a_complete_message_without_read_ahead() {
         for (wire, reusable, residual) in [
             (&b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..], true, &b""[..]),
@@ -1769,6 +1837,59 @@
             assert_eq!(observed.producer_drops.load(Ordering::SeqCst), 1);
             drop(response);
             assert_eq!(observed.transport_drops.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn forwarding_partially_consumed_response_uses_remaining_content_length() {
+            let original_body = vec![b'x'; 9000];
+            let mut wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                original_body.len()
+            )
+            .into_bytes();
+            wire.extend_from_slice(&original_body);
+            let download = Request {
+                method: Method::Get,
+                uri: "/download".into(),
+                version: Version::Http11,
+                headers: vec![("Host".into(), "example.com".into())],
+                body: Vec::new(),
+                trailers: Vec::new(),
+                peer_addr: None,
+            };
+            let mut response = drive(Http1Client::request_streaming(TestIo::new(&wire), download))
+                .expect("download response");
+            let consumed = poll_body(&mut response.body)
+                .expect("first frame")
+                .expect("valid first frame")
+                .into_data()
+                .expect("DATA")
+                .remaining();
+            assert!(consumed > 0 && consumed < original_body.len());
+            let remaining = &original_body[consumed..];
+
+            // Forward the same public body after inspecting its first frame.
+            // The receiver answers only after the whole remaining payload;
+            // it cannot hide a length mismatch with an early rejection.
+            let cx = Cx::for_testing();
+            let observed = Arc::new(Observed::default());
+            let forwarded = drive(Http1Client::request_with_body(
+                &cx,
+                io(&observed, Some(remaining)),
+                head(&[]),
+                response.body,
+            ))
+            .expect("forward the remainder");
+            assert_eq!(forwarded.head.status, 204);
+            assert!(!forwarded.body_withheld, "the upload must finish its framing");
+            assert_eq!(payload(&observed), remaining);
+            let written = observed.written.lock().unwrap();
+            let headers = &written[..find_headers_end(&written).expect("upload head")];
+            assert!(
+                std::str::from_utf8(headers)
+                    .unwrap()
+                    .contains(&format!("Content-Length: {}\r\n", remaining.len()))
+            );
         }
 
         #[test]

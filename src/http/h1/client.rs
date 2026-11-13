@@ -1774,6 +1774,10 @@ impl<T> ClientIncomingBody<T> {
         let chunk = self.buffer.split_to(to_yield);
 
         *remaining = remaining.saturating_sub(to_yield as u64);
+        // Body hints describe bytes still available to the consumer. Keeping
+        // the original Content-Length here misframes a partially consumed
+        // response when it is forwarded as another request's streaming body.
+        self.size_hint = SizeHint::with_exact(*remaining);
         self.received = self.received.saturating_add(to_yield as u64);
         if self.received > self.max_body_size {
             return Err(HttpError::BodyTooLarge);
@@ -1985,7 +1989,11 @@ where
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.size_hint
+        if self.done {
+            SizeHint::with_exact(0)
+        } else {
+            self.size_hint
+        }
     }
 }
 
