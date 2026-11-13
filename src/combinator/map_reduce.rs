@@ -11,6 +11,10 @@
 //! requests abort; the region remains responsible for children that have not
 //! yet terminated.
 //!
+//! [`execute_map_reduce_scoped`] additionally owns a private operation region.
+//! It cancels that whole subtree before draining failed work, and returns its
+//! actual close receipt separately from the ordered map-reduce result.
+//!
 //! The unchanged [`MapReduce`] marker and helpers such as
 //! [`map_reduce_outcomes`] and [`make_map_reduce_result`] operate on outcomes
 //! already supplied by the caller. Those helpers retain partial successes;
@@ -25,13 +29,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::task::Poll;
 
-use crate::cx::{CancelWakerToken, Cx, Scope};
+use crate::cx::{CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx, Scope};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
-use crate::types::Outcome;
 use crate::types::Policy;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::policy::AggregateDecision;
+use crate::types::{CancelKind, Outcome, RegionId};
 
 /// A compatibility marker for map-reduce computation.
 ///
@@ -595,6 +599,58 @@ pub struct MapReduceExecution<T, E> {
     pub max_retained: usize,
 }
 
+/// Actual region, descendant, and finalizer outcomes after scoped map-reduce.
+pub type ScopedMapReduceClose = crate::cx::ScopedTimeoutClose;
+
+/// An ordered execution result together with its independent subtree receipt.
+///
+/// `execution.outcome` describes direct mapping and reduction. It does not
+/// certify descendant or finalizer cleanup: inspect `close` as well, including
+/// its `cleanup_outcome` and `descendant_panic`. A close error never certifies
+/// quiescence and never discards the original execution result or indexed errors.
+#[derive(Debug)]
+#[non_exhaustive]
+#[must_use = "inspect both the map-reduce execution and its subtree close receipt"]
+pub struct ScopedMapReduceExecution<T, E> {
+    /// Unchanged direct execution report, retaining the initiating failure.
+    pub execution: MapReduceExecution<T, E>,
+    /// Private operation region in which every mapper was admitted.
+    pub region_id: RegionId,
+    /// Actual complete subtree close, independently of the execution outcome.
+    pub close: Result<ScopedMapReduceClose, ChildRegionError>,
+    /// Owner cancellation observed before return, including during final close.
+    /// This does not rewrite a previously selected direct execution result.
+    pub owner_cancellation: Option<CancelReason>,
+}
+
+/// Refusal before a scoped operation has acquired its private region.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ScopedMapReduceError {
+    /// The explicit owner already requested cancellation; no input was pulled.
+    Cancelled(CancelReason),
+    /// Private-region admission failed before any input or mapper was invoked.
+    Region(ChildRegionError),
+}
+
+impl fmt::Display for ScopedMapReduceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled(reason) => write!(f, "scoped map-reduce owner cancelled: {reason}"),
+            Self::Region(error) => write!(f, "scoped map-reduce region admission failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopedMapReduceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cancelled(_) => None,
+            Self::Region(error) => Some(error),
+        }
+    }
+}
+
 struct ExecutingMapSlot<T, E> {
     index: usize,
     handle: Option<TaskHandle<()>>,
@@ -603,8 +659,9 @@ struct ExecutingMapSlot<T, E> {
     drain_reason: Option<CancelReason>,
 }
 
-struct ExecutingMapOwner<T, E> {
+struct ExecutingMapOwner<'a, T, E> {
     cx: Cx,
+    boundary: Option<&'a ChildRegion>,
     cancel_waker: Option<CancelWakerToken>,
     slots: VecDeque<ExecutingMapSlot<T, E>>,
     accumulator: Option<T>,
@@ -612,17 +669,56 @@ struct ExecutingMapOwner<T, E> {
     scan_end: usize,
 }
 
-impl<T, E> ExecutingMapOwner<T, E> {
+/// Declared after the pinned engine so abandonment requests subtree drainage
+/// before the engine's input/reducer captures or retained values are destroyed.
+struct ExecutingMapBoundaryDrop<'a>(Option<&'a ChildRegion>);
+
+impl Drop for ExecutingMapBoundaryDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(region) = self.0.take()
+            && let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+                let _ = region.cancel(CancelReason::user("scoped map-reduce dropped"));
+            }))
+        {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+impl<T, E> ExecutingMapOwner<'_, T, E> {
     fn abort(&mut self) {
         let caller_reason = self.cx.cancel_reason();
         let induced = caller_reason.is_none();
         let reason = caller_reason.unwrap_or_else(|| {
             CancelReason::race_loser()
-                .with_region(self.cx.region_id())
+                .with_region(
+                    self.boundary
+                        .map_or_else(|| self.cx.region_id(), ChildRegion::region_id),
+                )
                 .with_task(self.cx.task_id())
                 .with_timestamp(self.cx.now_for_observability())
                 .with_message("map-reduce sibling drain")
         });
+        // Publish provenance for every live direct mapper before the region
+        // request can wake a worker. Descendant regions may add ParentCancelled
+        // causes, but direct mappers receive this exact operation-root reason.
+        if induced {
+            for slot in &mut self.slots {
+                if slot
+                    .handle
+                    .as_ref()
+                    .is_some_and(|handle| !handle.is_finished())
+                {
+                    slot.drain_reason = Some(reason.clone());
+                }
+            }
+        }
+        if let Some(boundary) = self.boundary {
+            // A mapper may be awaiting an ordinary join on its own descendant.
+            // Cancel the subtree BEFORE joining or aborting direct mapper tasks.
+            // Runtime loss remains visible in the subsequent close receipt.
+            let _ = boundary.cancel(reason.clone());
+        }
         for slot in &mut self.slots {
             if let Some(handle) = &slot.handle
                 && !handle.is_finished()
@@ -631,9 +727,6 @@ impl<T, E> ExecutingMapOwner<T, E> {
                 // would erase an independently returned cancellation of the
                 // same kind, and comparing only the input index would erase
                 // a stronger cancellation arriving during asynchronous drain.
-                if induced {
-                    slot.drain_reason = Some(reason.clone());
-                }
                 handle.abort_with_reason(reason.clone());
             }
         }
@@ -670,12 +763,19 @@ impl<T, E> ExecutingMapOwner<T, E> {
     }
 }
 
-impl<T, E> Drop for ExecutingMapOwner<T, E> {
+impl<T, E> Drop for ExecutingMapOwner<'_, T, E> {
     fn drop(&mut self) {
         // Drop requests cancellation; it cannot claim to have awaited cleanup.
         // The existing region owns any child that still needs cooperative polls.
         // A child that published its result has finished, even before its
         // record retires: do not stamp a cancellation onto it.
+        if let Some(boundary) = self.boundary
+            && let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+                let _ = boundary.cancel(CancelReason::user("scoped map-reduce dropped"));
+            }))
+        {
+            std::mem::forget(payload);
+        }
         for slot in &self.slots {
             if let Some(handle) = &slot.handle
                 && !handle.terminal_published()
@@ -728,7 +828,8 @@ impl<E> ExecutingMapFailures<E> {
 
     fn error(&mut self, index: usize, error: MapReduceExecutionError<E>) {
         self.stop(index, MapReduceStopCause::Error);
-        self.primary_error_index = Some(self.primary_error_index.map_or(index, |old| old.min(index)));
+        self.primary_error_index =
+            Some(self.primary_error_index.map_or(index, |old| old.min(index)));
         self.errors.push((index, error));
     }
 
@@ -811,6 +912,31 @@ fn executing_map_panic(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
     PanicPayload::new(message)
 }
 
+fn executing_map_induced_cancel(
+    mut reason: &CancelReason,
+    drain_reason: Option<&CancelReason>,
+    scoped: bool,
+) -> bool {
+    let Some(drain_reason) = drain_reason else {
+        return false;
+    };
+    loop {
+        if reason == drain_reason {
+            return true;
+        }
+        // Only the runtime's structural propagation may wrap our exact
+        // reason. A different kind, a missing/truncated cause, or independently
+        // strengthened cancellation remains a real failure.
+        if !scoped || reason.kind != CancelKind::ParentCancelled {
+            return false;
+        }
+        let Some(cause) = reason.cause.as_deref() else {
+            return false;
+        };
+        reason = cause;
+    }
+}
+
 fn executing_map_caller_cancel<E>(
     cx: &Cx,
     observed: &mut Option<(usize, CancelReason)>,
@@ -871,6 +997,155 @@ pub async fn execute_map_reduce<I, M, F, R, T, E, P>(
     limits: MapReduceLimits,
     inputs: I,
     map: M,
+    reduce: R,
+) -> MapReduceExecution<T, E>
+where
+    P: Policy,
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    M: Fn(Cx, I::Item) -> F + Send + Sync + 'static,
+    F: Future<Output = Outcome<T, E>> + Send + 'static,
+    R: FnMut(T, T) -> T,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    execute_map_reduce_inner(cx, cx, scope, None, limits, inputs, map, reduce).await
+}
+
+/// Maps and reduces inside one independently owned operation subtree.
+///
+/// This uses [`execute_map_reduce`]'s exact bounded admission, ordered left
+/// fold, failure attribution and direct joins. The explicit owner supplies
+/// cancellation and input/reducer authority; only mapper spawning uses the new
+/// region's principal. Every mapper receives a real task context in that
+/// region. Captured authority for another region remains unrelated authority.
+/// No additional coordinator task is created, and input/reducer state may borrow
+/// and need not be `Send`.
+/// Polling and destroying the returned future installs the explicit owner's
+/// ambient context, including abandonment before the first poll. Constructing
+/// the arguments and destroying a returned report remain the caller's work.
+///
+/// On any execution failure or owner cancellation, the ENTIRE operation subtree
+/// is cancelled before direct mapper joins. A mapper awaiting its descendant's
+/// ordinary join can therefore finish cooperative cleanup. On success, leftover
+/// descendants are cancelled during close. The result is returned only after
+/// observing the actual region close receipt; unrelated owner-region tasks are
+/// neither cancelled nor awaited. Uncooperative work can keep this pending.
+///
+/// The direct execution and close outcomes remain independent. In particular,
+/// a finalizer or descendant panic is retained in `close`, not used to erase
+/// an initiating mapper error or a successful fold. Always inspect both. Values
+/// retained in the execution report must not hold obligations needed to close
+/// their own region. Owner cancellation arriving during final close is recorded
+/// separately without replacing the already selected direct result.
+///
+/// Both configured limits still bound direct work, including completed results
+/// waiting for earlier inputs; they do not bound arbitrary descendants. Drop
+/// requests subtree cancellation/close but cannot await it. The runtime retains
+/// ownership, including when mint admission publishes after the call is dropped.
+///
+/// # Errors
+///
+/// A pre-cancelled owner or failed region admission returns
+/// [`ScopedMapReduceError`] before calling `into_iter`, `next`, or the mapper.
+/// Later task and close failures stay in the report.
+///
+/// ```no_run
+/// # async fn example(cx: &asupersync::Cx) {
+/// use asupersync::{Outcome, combinator::{MapReduceLimits, execute_map_reduce_scoped}};
+/// use std::num::NonZeroUsize;
+/// let limits = MapReduceLimits::new(
+///     NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap(),
+/// );
+/// let report = execute_map_reduce_scoped(cx, limits, [1, 2, 3],
+///     |_child, n| async move { Outcome::<_, ()>::Ok(n * 2) },
+///     |left, right| left + right,
+/// ).await.expect("operation region admitted");
+/// assert!(matches!(report.execution.outcome, Outcome::Ok(Some(12))));
+/// let close = report.close.expect("operation subtree quiesced");
+/// assert!(close.cleanup_outcome.is_none());
+/// assert!(close.descendant_panic.is_none());
+/// # }
+/// ```
+pub fn execute_map_reduce_scoped<I, M, F, R, T, E>(
+    cx: &Cx,
+    limits: MapReduceLimits,
+    inputs: I,
+    map: M,
+    reduce: R,
+) -> impl Future<Output = Result<ScopedMapReduceExecution<T, E>, ScopedMapReduceError>>
+where
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    M: Fn(Cx, I::Item) -> F + Send + Sync + 'static,
+    F: Future<Output = Outcome<T, E>> + Send + 'static,
+    R: FnMut(T, T) -> T,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    cx.with_ambient(async move {
+        if cx.is_cancel_requested() {
+            return Err(ScopedMapReduceError::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("scoped map-reduce owner cancelled")),
+            ));
+        }
+        let region = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .map_err(ScopedMapReduceError::Region)?;
+        let region_id = region.region_id();
+        let execution = {
+            let scope = region.cx().scope();
+            let mut engine = std::pin::pin!(execute_map_reduce_inner(
+                cx,
+                region.cx(),
+                &scope,
+                Some(&region),
+                limits,
+                inputs,
+                map,
+                reduce,
+            ));
+            let mut abandoned = ExecutingMapBoundaryDrop(Some(&region));
+            let result = engine.as_mut().await;
+            abandoned.0 = None;
+            result
+        };
+        let mut owner_cancellation = cx.cancel_reason();
+        let close = region
+            .close_with_outcome()
+            .await
+            .map(|close| ScopedMapReduceClose {
+                outcome: close.outcome,
+                cleanup_outcome: close.cleanup_outcome,
+                descendant_panic: close.descendant_panic,
+            });
+        if let Some(reason) = cx.cancel_reason() {
+            if let Some(observed) = &mut owner_cancellation {
+                observed.strengthen(&reason);
+            } else {
+                owner_cancellation = Some(reason);
+            }
+        }
+        Ok(ScopedMapReduceExecution {
+            execution,
+            region_id,
+            close,
+            owner_cancellation,
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_map_reduce_inner<I, M, F, R, T, E, P>(
+    cx: &Cx,
+    spawn_cx: &Cx,
+    scope: &Scope<'_, P>,
+    boundary: Option<&ChildRegion>,
+    limits: MapReduceLimits,
+    inputs: I,
+    map: M,
     mut reduce: R,
 ) -> MapReduceExecution<T, E>
 where
@@ -885,6 +1160,7 @@ where
 {
     let mut owner = ExecutingMapOwner {
         cx: cx.clone(),
+        boundary,
         cancel_waker: None,
         slots: VecDeque::new(),
         accumulator: None,
@@ -898,21 +1174,32 @@ where
         cancelled: None,
         panicked: None,
     };
-    let mut inputs = match catch_unwind(AssertUnwindSafe(|| inputs.into_iter())) {
-        Ok(inputs) => Some(inputs),
-        Err(payload) => {
-            failures.panic(
-                0,
-                MapReduceStopCause::InputPanicked,
-                executing_map_panic(payload),
-            );
-            None
+    let mut caller_cancel_observed = None;
+    let mut inputs = if boundary.is_some()
+        && executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, 0)
+    {
+        // Cancellation can arrive while the mint acknowledgement is pending.
+        // The admitted region still closes, but the source is never entered.
+        if let Some(payload) = executing_map_discard(inputs) {
+            failures.panic(0, MapReduceStopCause::InputPanicked, payload);
+        }
+        None
+    } else {
+        match catch_unwind(AssertUnwindSafe(|| inputs.into_iter())) {
+            Ok(inputs) => Some(inputs),
+            Err(payload) => {
+                failures.panic(
+                    0,
+                    MapReduceStopCause::InputPanicked,
+                    executing_map_panic(payload),
+                );
+                None
+            }
         }
     };
     let map = Arc::new(map);
     let mut exhausted = false;
     let mut abort_requested = false;
-    let mut caller_cancel_observed = None;
     let mut admitted = 0_usize;
     let mut completed = 0_usize;
     let mut reduced = 0_usize;
@@ -965,7 +1252,11 @@ where
                     failures.map_error(slot.index, error, &joined, slot.drain_reason.as_ref());
                 }
                 Some(Outcome::Cancelled(reason)) => {
-                    if slot.drain_reason.as_ref() != Some(&reason) {
+                    if !executing_map_induced_cancel(
+                        &reason,
+                        slot.drain_reason.as_ref(),
+                        boundary.is_some(),
+                    ) {
                         failures.cancel(slot.index, reason);
                     }
                 }
@@ -1105,7 +1396,7 @@ where
             // Moved into the future at spawn so it fires on every terminal
             // path, including cancellation before the first poll.
             match super::TerminationTally::track_spawn(&terminated, |tally| {
-                cx.spawn_in_cancellation_dominant(scope, move |child| async move {
+                spawn_cx.spawn_in_cancellation_dominant(scope, move |child| async move {
                     let _tally = tally;
                     let outcome = mapper(child, item).await;
                     *child_returned.lock() = Some(outcome);
@@ -1201,6 +1492,9 @@ where
     } else {
         (None, Outcome::Ok(owner.accumulator.take()))
     };
+    // Every direct task is settled. The scoped caller now owns final close;
+    // retiring this guard normally must not invent an abandonment request.
+    owner.boundary = None;
     MapReduceExecution {
         outcome,
         failure_index,
@@ -1217,3 +1511,7 @@ where
 #[cfg(test)]
 #[path = "map_reduce_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "map_reduce_scoped_tests.rs"]
+mod scoped_tests;

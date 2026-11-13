@@ -155,8 +155,9 @@ pub use join::{
 pub use join_set::{JoinSet, JoinSummary};
 pub use map_reduce::{
     MapReduce, MapReduceError, MapReduceExecution, MapReduceExecutionError, MapReduceLimits,
-    MapReduceResult, MapReduceStopCause, execute_map_reduce, make_map_reduce_result,
-    map_reduce_outcomes, map_reduce_to_result, reduce_successes,
+    MapReduceResult, MapReduceStopCause, ScopedMapReduceClose, ScopedMapReduceError,
+    ScopedMapReduceExecution, execute_map_reduce, execute_map_reduce_scoped,
+    make_map_reduce_result, map_reduce_outcomes, map_reduce_to_result, reduce_successes,
 };
 pub use pipeline::{
     FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineExecution,

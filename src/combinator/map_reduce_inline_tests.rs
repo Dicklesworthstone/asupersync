@@ -60,6 +60,7 @@
         };
         let owner = ExecutingMapOwner {
             cx: cx.clone(),
+            boundary: None,
             cancel_waker: None,
             slots: VecDeque::from([
                 slot(
