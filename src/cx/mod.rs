@@ -143,7 +143,8 @@ pub use scoped_hedge::{
     ScopedHedgeStop, ScopedHedgeTask,
 };
 pub use scoped_join::{
-    MAX_SCOPED_JOIN_BRANCHES, ScopedJoinAttempt, ScopedJoinClose, ScopedJoinError,
+    MAX_SCOPED_JOIN_BRANCHES, ScopedJoinAttempt, ScopedJoinBoundedReport, ScopedJoinBoundedStop,
+    ScopedJoinClose, ScopedJoinError,
     ScopedJoinPairReport, ScopedJoinReport, ScopedJoinStop, ScopedJoinTask,
 };
 pub use scoped_quorum::{
