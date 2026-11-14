@@ -690,9 +690,9 @@ const QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.25;
 const QUIC_LOSSY_COLD_START_RTT_MICROS: u64 = 200_000;
 const QUIC_STILL_VIABLE_FEEDBACK_GRACE_ROUNDS: u32 = 8;
 const REPAIR_ROUND_RECEIVE_GRACE_BYTES_PER_S: u64 = 128 * 1024;
-/// Bounded terminal Proof retransmits. This uses STREAM-offset requeue, not a
-/// duplicate higher-offset Proof, so it fills the receiver->sender stream gap
-/// that otherwise leaves the sender waiting until its idle timeout.
+/// Short terminal recovery budget for a negative receipt. A committed receipt
+/// instead uses the peer-idle and absolute liveness budgets: a brief outage
+/// must not make the sender report failure for data already committed.
 const TERMINAL_PROOF_RETRANSMIT_ATTEMPTS: u32 = 4;
 /// Quiet window that ends a receiver symbol round after at least one symbol was
 /// accepted without seeing ObjectComplete. It intentionally matches the
@@ -1466,6 +1466,81 @@ fn trace_native_repair_accounting(
     );
 }
 
+/// Elapsed-time policy for the final Proof/Close exchange.
+///
+/// Any successfully processed peer packet restarts the silence budget, but
+/// neither that packet nor a buffered KeepAlive postpones the retransmit
+/// cadence or the absolute liveness cap. Times are durations since the first
+/// Proof flush so the policy can be checked without a wall-clock wait.
+#[derive(Debug)]
+struct TerminalProofRecovery {
+    idle_timeout: Duration,
+    liveness_cap: Duration,
+    last_peer_packet: Duration,
+    last_retransmit: Duration,
+    retransmit_attempts: u32,
+}
+
+impl TerminalProofRecovery {
+    fn new(committed: bool, idle_timeout: Duration) -> Self {
+        let (idle_timeout, liveness_cap) = if committed {
+            (
+                idle_timeout,
+                idle_timeout.saturating_mul(PROOF_WAIT_LIVENESS_MULTIPLIER),
+            )
+        } else {
+            // Preserve the old four retries plus the final wait for a Close
+            // on negative receipts. Bound the busy-peer case as well: no
+            // committed data needs the longer recovery window here.
+            let attempts =
+                TERMINAL_PROOF_RETRANSMIT_ATTEMPTS.min(needmore_pto_attempt_budget(idle_timeout));
+            let limit = NEEDMORE_PTO.saturating_mul(attempts.saturating_add(1));
+            (limit, limit)
+        };
+        Self {
+            idle_timeout,
+            liveness_cap,
+            last_peer_packet: Duration::ZERO,
+            last_retransmit: Duration::ZERO,
+            retransmit_attempts: 0,
+        }
+    }
+
+    fn observe_peer_packet(&mut self, elapsed: Duration) {
+        self.last_peer_packet = elapsed;
+    }
+
+    fn silent_for(&self, elapsed: Duration) -> Duration {
+        elapsed.saturating_sub(self.last_peer_packet)
+    }
+
+    fn expired(&self, elapsed: Duration) -> Option<&'static str> {
+        if elapsed >= self.liveness_cap {
+            Some("liveness_cap")
+        } else if self.silent_for(elapsed) >= self.idle_timeout {
+            Some("idle_timeout")
+        } else {
+            None
+        }
+    }
+
+    fn retransmit_due(&self, elapsed: Duration) -> bool {
+        elapsed.saturating_sub(self.last_retransmit) >= NEEDMORE_PTO
+    }
+
+    fn note_retransmit(&mut self, elapsed: Duration) {
+        self.last_retransmit = elapsed;
+        self.retransmit_attempts = self.retransmit_attempts.saturating_add(1);
+    }
+
+    fn next_wait(&self, elapsed: Duration) -> Duration {
+        NEEDMORE_PTO
+            .saturating_sub(elapsed.saturating_sub(self.last_retransmit))
+            .min(self.idle_timeout.saturating_sub(self.silent_for(elapsed)))
+            .min(self.liveness_cap.saturating_sub(elapsed))
+    }
+}
+
 // `Sync` on the proof payload keeps the returned future `Send`: `&T` is only `Send`
 // when `T: Sync`, and every caller already passes a plain serializable record.
 async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
@@ -1488,19 +1563,19 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
         link.wait_diagnostics()
     );
 
-    let max_attempts =
-        TERMINAL_PROOF_RETRANSMIT_ATTEMPTS.min(needmore_pto_attempt_budget(config.idle_timeout));
-    let mut attempts = 0u32;
+    let started = Instant::now();
+    let mut recovery = TerminalProofRecovery::new(receipt.committed, config.idle_timeout);
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let mut had_control_frame = false;
+        let mut proof_requested = false;
         if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
+            had_control_frame = true;
             match frame.frame_type() {
                 FrameType::Close => return Ok(()),
-                FrameType::KeepAlive | FrameType::ObjectComplete => continue,
+                FrameType::KeepAlive | FrameType::ObjectComplete => {}
                 FrameType::ObjectRequest | FrameType::ObjectManifest => {
-                    link.retransmit_stream_frames(cx, &proof_frames, "terminal_proof_request")
-                        .await?;
-                    continue;
+                    proof_requested = true;
                 }
                 got => {
                     return Err(QuicTransportError::Unexpected {
@@ -1511,29 +1586,56 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
             }
         }
 
-        link.flush(cx).await?;
-        if link.pump_inbound_for(cx, NEEDMORE_PTO).await? > 0 {
-            continue;
-        }
-        if attempts >= max_attempts {
+        let elapsed = started.elapsed();
+        if let Some(reason) = recovery.expired(elapsed) {
             super::quic_progress(format_args!(
-                "receiver: proof_wait_exhausted attempts={attempts} {}",
+                "receiver: proof_wait_exhausted reason={reason} attempts={} committed={} silent_ms={} waited_ms={} cap_ms={} {}",
+                recovery.retransmit_attempts,
+                receipt.committed,
+                recovery.silent_for(elapsed).as_millis(),
+                elapsed.as_millis(),
+                recovery.liveness_cap.as_millis(),
                 link.wait_diagnostics()
             ));
             return Ok(());
         }
-        attempts = attempts.saturating_add(1);
-        quic_rqtrace!(
-            "receiver: Proof PTO retransmit attempt={} max_attempts={} stream_frames={} committed={} feedback_rounds={} symbols_accepted={}",
-            attempts,
-            max_attempts,
-            proof_frames.len(),
-            receipt.committed,
-            receipt.feedback_rounds,
-            receipt.symbols_accepted,
-        );
-        link.retransmit_stream_frames(cx, &proof_frames, "terminal_proof_pto")
-            .await?;
+        // ACKs, PINGs, or duplicate round markers show that the sender is
+        // alive, not that it received this Proof. Re-offer missing offsets
+        // at the PTO even while those packets keep arriving. Duplicate
+        // requests use the same cadence: retrying on every request can
+        // invalidate a flight before its acknowledgement has time to arrive.
+        if recovery.retransmit_due(elapsed) {
+            let reason = if proof_requested {
+                "terminal_proof_request"
+            } else {
+                "terminal_proof_pto"
+            };
+            link.retransmit_stream_frames(cx, &proof_frames, reason)
+                .await?;
+            recovery.note_retransmit(started.elapsed());
+            quic_rqtrace!(
+                "receiver: Proof PTO retransmit attempt={} stream_frames={} committed={} feedback_rounds={} symbols_accepted={}",
+                recovery.retransmit_attempts,
+                proof_frames.len(),
+                receipt.committed,
+                receipt.feedback_rounds,
+                receipt.symbols_accepted,
+            );
+        }
+        if had_control_frame {
+            // Drain buffered control frames without waiting for another
+            // packet, but check expiry and the PTO on every turn above.
+            continue;
+        }
+
+        link.flush(cx).await?;
+        let wait = recovery.next_wait(started.elapsed());
+        if wait.is_zero() {
+            continue;
+        }
+        if link.pump_inbound_for(cx, wait).await? > 0 {
+            recovery.observe_peer_packet(started.elapsed());
+        }
     }
 }
 

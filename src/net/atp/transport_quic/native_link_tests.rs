@@ -2949,6 +2949,139 @@ mod tests {
         );
     }
 
+    #[test]
+    fn committed_terminal_proof_survives_more_than_four_lost_flights() {
+        let mut recovery = TerminalProofRecovery::new(true, Duration::from_secs(45));
+
+        // Six consecutive lost PTO flights already exceed the old four-retry
+        // limit. The sender still has most of its 45 s idle budget left.
+        for attempt in 1..=6 {
+            let elapsed = NEEDMORE_PTO * attempt;
+            assert_eq!(
+                recovery.expired(elapsed),
+                None,
+                "a committed Proof must remain available after lost flight {attempt}"
+            );
+            assert!(recovery.retransmit_due(elapsed));
+            recovery.note_retransmit(elapsed);
+        }
+        assert_eq!(recovery.retransmit_attempts, 6);
+
+        // Sending our own retries is not evidence of a live peer and must
+        // never extend the configured silence window.
+        assert_eq!(recovery.expired(Duration::from_millis(44_999)), None);
+        assert_eq!(
+            recovery.expired(Duration::from_secs(45)),
+            Some("idle_timeout")
+        );
+    }
+
+    #[test]
+    fn terminal_proof_peer_progress_restarts_only_the_silence_budget() {
+        let mut recovery = TerminalProofRecovery::new(true, Duration::from_secs(45));
+        recovery.note_retransmit(Duration::from_secs(42));
+        recovery.observe_peer_packet(Duration::from_secs(44));
+
+        assert_eq!(recovery.expired(Duration::from_secs(45)), None);
+        assert_eq!(
+            recovery.silent_for(Duration::from_secs(45)),
+            Duration::from_secs(1)
+        );
+        assert!(
+            recovery.retransmit_due(Duration::from_secs(45)),
+            "peer traffic cannot postpone re-offering a missing Proof"
+        );
+        assert_eq!(recovery.expired(Duration::from_millis(88_999)), None);
+        assert_eq!(
+            recovery.expired(Duration::from_secs(89)),
+            Some("idle_timeout")
+        );
+    }
+
+    #[test]
+    fn terminal_proof_busy_peer_cannot_suppress_retries_or_hold_the_session_forever() {
+        let mut recovery = TerminalProofRecovery::new(true, Duration::from_secs(45));
+
+        recovery.observe_peer_packet(Duration::from_millis(1_499));
+        assert_eq!(
+            recovery.next_wait(Duration::from_millis(1_499)),
+            Duration::from_millis(1),
+            "a PING just before the PTO must not start another full PTO wait"
+        );
+        recovery.observe_peer_packet(NEEDMORE_PTO);
+        assert!(recovery.retransmit_due(NEEDMORE_PTO));
+        recovery.note_retransmit(NEEDMORE_PTO);
+        assert_eq!(recovery.next_wait(NEEDMORE_PTO), NEEDMORE_PTO);
+
+        // Continuous valid traffic may keep the idle timer alive, but a peer
+        // that never sends Close cannot retain a completed transfer forever.
+        for second in 2..360 {
+            let elapsed = Duration::from_secs(second);
+            recovery.observe_peer_packet(elapsed);
+            assert_eq!(recovery.expired(elapsed), None);
+        }
+        recovery.observe_peer_packet(Duration::from_secs(360));
+        assert_eq!(
+            recovery.expired(Duration::from_secs(360)),
+            Some("liveness_cap")
+        );
+    }
+
+    #[test]
+    fn negative_terminal_proof_retains_short_recovery_even_with_peer_traffic() {
+        let mut recovery = TerminalProofRecovery::new(false, Duration::from_secs(45));
+        for attempt in 1..=TERMINAL_PROOF_RETRANSMIT_ATTEMPTS {
+            let elapsed = NEEDMORE_PTO * attempt;
+            recovery.observe_peer_packet(elapsed);
+            assert_eq!(recovery.expired(elapsed), None);
+            assert!(recovery.retransmit_due(elapsed));
+            recovery.note_retransmit(elapsed);
+        }
+
+        let final_wait = NEEDMORE_PTO * (TERMINAL_PROOF_RETRANSMIT_ATTEMPTS + 1);
+        recovery.observe_peer_packet(final_wait);
+        assert_eq!(recovery.expired(final_wait), Some("liveness_cap"));
+
+        // Keep the existing one-retry floor for explicitly short negative
+        // receipt timeouts as well.
+        let short = TerminalProofRecovery::new(false, Duration::from_millis(100));
+        assert_eq!(short.expired(NEEDMORE_PTO), None);
+        assert_eq!(short.expired(NEEDMORE_PTO * 2), Some("liveness_cap"));
+    }
+
+    #[test]
+    fn terminal_proof_pump_wait_is_clipped_to_idle_and_absolute_bounds() {
+        let short = TerminalProofRecovery::new(true, Duration::from_millis(100));
+        assert_eq!(short.next_wait(Duration::ZERO), Duration::from_millis(100));
+        assert_eq!(
+            short.next_wait(Duration::from_millis(99)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(short.next_wait(Duration::from_millis(100)), Duration::ZERO);
+        assert_eq!(
+            short.expired(Duration::from_millis(100)),
+            Some("idle_timeout")
+        );
+
+        let mut live = TerminalProofRecovery::new(true, Duration::from_secs(1));
+        live.observe_peer_packet(Duration::from_millis(7_999));
+        live.note_retransmit(Duration::from_millis(7_999));
+        assert_eq!(
+            live.next_wait(Duration::from_millis(7_999)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(live.next_wait(Duration::from_secs(8)), Duration::ZERO);
+
+        let zero = TerminalProofRecovery::new(true, Duration::ZERO);
+        assert_eq!(zero.next_wait(Duration::ZERO), Duration::ZERO);
+        assert!(zero.expired(Duration::ZERO).is_some());
+
+        let maximum = TerminalProofRecovery::new(true, Duration::MAX);
+        assert_eq!(maximum.liveness_cap, Duration::MAX);
+        assert_eq!(maximum.next_wait(Duration::ZERO), NEEDMORE_PTO);
+        assert_eq!(maximum.expired(NEEDMORE_PTO), None);
+    }
+
     fn quic_staging_test_entry(size: u64) -> crate::net::atp::transport_quic::ManifestEntry {
         crate::net::atp::transport_quic::ManifestEntry {
             index: 0,
