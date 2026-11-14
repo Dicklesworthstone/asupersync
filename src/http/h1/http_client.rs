@@ -737,6 +737,176 @@ impl RetryPolicy {
 /// The longest `Retry-After` delay an automatic retry waits for.
 const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Immutable proxy settings supplied by the caller, never read during I/O.
+#[derive(Clone, Default)]
+struct ProxyEnvironment {
+    http: Option<String>,
+    https: Option<String>,
+    all: Option<String>,
+    bypass: Vec<NoProxyRule>,
+}
+
+impl std::fmt::Debug for ProxyEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Proxy URLs can contain passwords. Do not expose captured environment
+        // values through HttpClientBuilder/HttpClientConfig's Debug output.
+        f.debug_struct("ProxyEnvironment")
+            .field("http", &self.http.is_some())
+            .field("https", &self.https.is_some())
+            .field("all", &self.all.is_some())
+            .field("bypass_rules", &self.bypass.len())
+            .finish()
+    }
+}
+
+impl ProxyEnvironment {
+    fn from_vars<I, K, V>(vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut values = HashMap::new();
+        for (key, value) in vars {
+            let key = key.as_ref();
+            if matches!(
+                key,
+                "http_proxy" | "https_proxy" | "HTTPS_PROXY" | "all_proxy"
+                    | "ALL_PROXY" | "no_proxy" | "NO_PROXY"
+            ) {
+                values.insert(key.to_owned(), value.as_ref().trim().to_owned());
+            }
+        }
+        // Presence wins over casing, even for an empty value. An empty
+        // scheme setting then falls through to ALL_PROXY; empty no_proxy
+        // deliberately suppresses an uppercase NO_PROXY.
+        let preferred = |lower: &str, upper: &str| {
+            values.get(lower).or_else(|| values.get(upper)).cloned()
+        };
+        let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
+        Self {
+            // HTTP_PROXY can be injected by a CGI request header.
+            http: nonempty(values.get("http_proxy").cloned()),
+            https: nonempty(preferred("https_proxy", "HTTPS_PROXY")),
+            all: nonempty(preferred("all_proxy", "ALL_PROXY")),
+            bypass: preferred("no_proxy", "NO_PROXY")
+                .into_iter()
+                .flat_map(|value| {
+                    value.split(',').filter_map(NoProxyRule::parse).collect::<Vec<_>>()
+                })
+                .collect(),
+        }
+    }
+
+    fn proxy_for(&self, url: &ParsedUrl) -> Option<&str> {
+        let host = url.host.trim_start_matches('[').trim_end_matches(']')
+            .trim_end_matches('.').to_ascii_lowercase();
+        let ip = host.parse::<IpAddr>().ok();
+        if self.bypass.iter().any(|rule| rule.matches(&host, ip, url.port)) {
+            return None;
+        }
+        match url.scheme {
+            Scheme::Http => self.http.as_deref(),
+            Scheme::Https => self.https.as_deref(),
+        }.or(self.all.as_deref())
+    }
+}
+
+#[derive(Clone)]
+enum NoProxyRule {
+    All,
+    Host { host: String, port: Option<u16> },
+    Network { network: IpAddr, prefix: u8 },
+}
+
+impl NoProxyRule {
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "*" {
+            return Some(Self::All);
+        }
+        if value.is_empty() || contains_ctl_or_whitespace(value) {
+            return None;
+        }
+        if let Some((network, prefix)) = value.split_once('/') {
+            let network = network.strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']')).unwrap_or(network)
+                .parse::<IpAddr>().ok()?;
+            if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let prefix = prefix.parse::<u8>().ok()?;
+            let max = if network.is_ipv4() { 32 } else { 128 };
+            return (prefix <= max).then_some(Self::Network { network, prefix });
+        }
+        let parse_port = |port: &str| {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                None
+            } else {
+                port.parse::<u16>().ok()
+            }
+        };
+        let (host, port) = if let Some(bracketed) = value.strip_prefix('[') {
+            let (host, suffix) = bracketed.split_once(']')?;
+            host.parse::<std::net::Ipv6Addr>().ok()?;
+            let port = if suffix.is_empty() {
+                None
+            } else {
+                Some(parse_port(suffix.strip_prefix(':')?)?)
+            };
+            (host, port)
+        } else if value.parse::<IpAddr>().is_ok() {
+            (value, None)
+        } else if let Some((host, port)) = value.split_once(':') {
+            (host, Some(parse_port(port)?))
+        } else {
+            (value, None)
+        };
+        let host = host.strip_prefix('.').unwrap_or(host)
+            .trim_end_matches('.').to_ascii_lowercase();
+        if host.is_empty()
+            || host.starts_with('.')
+            || host.parse::<IpAddr>().is_err()
+                && host.contains(['*', '[', ']', ':', '/', '?', '#', '@'])
+        {
+            return None;
+        }
+        Some(Self::Host { host, port })
+    }
+
+    fn matches(&self, host: &str, ip: Option<IpAddr>, port: u16) -> bool {
+        match self {
+            Self::All => true,
+            Self::Host { host: expected, port: required } => {
+                if required.is_some_and(|required| required != port) {
+                    return false;
+                }
+                // IP rules and IP destinations only match numerically:
+                // neither "0.0.1" nor "child.127.0.0.1" is 127.0.0.1.
+                match (expected.parse::<IpAddr>().ok(), ip) {
+                    (Some(expected), Some(ip)) => expected == ip,
+                    (Some(_), None) | (None, Some(_)) => false,
+                    (None, None) => {
+                        host == expected.as_str()
+                            || host
+                                .strip_suffix(expected.as_str())
+                                .is_some_and(|prefix| prefix.ends_with('.'))
+                    }
+                }
+            }
+            Self::Network { network, prefix } => match (network, ip) {
+                (IpAddr::V4(network), Some(IpAddr::V4(ip))) => {
+                    *prefix == 0 || (u32::from(*network) ^ u32::from(ip)) >> (32 - *prefix) == 0
+                }
+                (IpAddr::V6(network), Some(IpAddr::V6(ip))) => {
+                    *prefix == 0 || (u128::from(*network) ^ u128::from(ip)) >> (128 - *prefix) == 0
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
 /// Builder for [`HttpClient`].
 ///
 /// This provides a reqwest-style fluent API for configuring the high-level
@@ -975,19 +1145,68 @@ impl HttpClientBuilder {
         self
     }
 
-    /// Routes requests through a proxy endpoint.
+    /// Routes requests through one explicit proxy, replacing environment routing.
     ///
     /// Supported URL schemes: `http://`, `https://`, and `socks5://`.
     #[must_use]
     pub fn proxy(mut self, proxy_url: impl Into<String>) -> Self {
         self.config.proxy_url = Some(proxy_url.into());
+        self.config.proxy_environment = None;
         self
     }
 
-    /// Disables proxy routing.
+    /// Routes requests using a snapshot of caller-supplied proxy variables.
+    ///
+    /// The client never reads the process environment itself. For example:
+    ///
+    /// ```
+    /// let client = asupersync::http::Client::builder()
+    ///     .proxy_from_env([
+    ///         ("HTTPS_PROXY", "http://proxy.example:3128"),
+    ///         ("NO_PROXY", "localhost,.internal.example,127.0.0.0/8"),
+    ///     ])
+    ///     .build();
+    /// ```
+    ///
+    /// Applications may pass `std::env::vars()` explicitly at their configuration
+    /// boundary. Only `http_proxy`, `https_proxy`/`HTTPS_PROXY`,
+    /// `all_proxy`/`ALL_PROXY`, and `no_proxy`/`NO_PROXY` are captured.
+    /// Uppercase `HTTP_PROXY` is ignored because CGI request headers can inject it.
+    /// Lowercase takes precedence, including empty values; duplicate keys use
+    /// the last supplied value. Empty scheme values fall back to `ALL_PROXY`.
+    ///
+    /// `NO_PROXY` is a comma-separated list of domain suffixes (at DNS-label
+    /// boundaries), IP literals, or IPv4/IPv6 CIDRs; `*` bypasses every proxy.
+    /// Host/IP entries may specify a port; IPv6 ports require brackets.
+    /// IP networks match literal URL addresses without resolving DNS.
+    /// Malformed bypass entries are ignored and never broaden a bypass.
+    ///
+    /// Selection is repeated for each redirect and applies to buffered,
+    /// streaming, pooled, and streaming-upload requests. Caller proxy credentials
+    /// stay with the initial selected proxy URL and are never sent on a direct
+    /// bypass or to a different proxy. A selected proxy's own URL credentials
+    /// apply only to that route. Invalid selected proxy URLs fail the request
+    /// before dialing; they do not fall back to a direct connection.
+    ///
+    /// This replaces an earlier `proxy` setting. A later `proxy` or `no_proxy`
+    /// replaces this policy. Defaults remain direct and environment-independent.
+    #[must_use]
+    pub fn proxy_from_env<I, K, V>(mut self, vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        self.config.proxy_url = None;
+        self.config.proxy_environment = Some(ProxyEnvironment::from_vars(vars));
+        self
+    }
+
+    /// Disables both explicit and environment-derived proxy routing.
     #[must_use]
     pub fn no_proxy(mut self) -> Self {
         self.config.proxy_url = None;
+        self.config.proxy_environment = None;
         self
     }
 
@@ -1047,8 +1266,12 @@ pub struct HttpClientConfig {
     pub default_headers: Vec<(String, String)>,
     /// Whether the client should automatically persist and attach cookies.
     pub cookie_store: bool,
-    /// Optional proxy URL used for outbound requests.
+    /// Optional explicit proxy URL used for outbound requests.
+    ///
+    /// When present, this overrides the captured environment policy.
     pub proxy_url: Option<String>,
+    /// Opt-in, immutable proxy selection; populated only by the builder.
+    proxy_environment: Option<ProxyEnvironment>,
     /// Maximum response body size in bytes.
     ///
     /// Defaults to `None`, which uses the per-codec default (16 MiB).
@@ -1099,6 +1322,7 @@ impl Default for HttpClientConfig {
             default_headers: Vec::new(),
             cookie_store: false,
             proxy_url: None,
+            proxy_environment: None,
             max_body_size: None,
             request_timeout: None,
             #[cfg(feature = "tls")]
@@ -2155,26 +2379,13 @@ impl HttpClient {
                                 body
                             };
 
-                            // When routing through a forward proxy, the proxy is the same
-                            // intermediate hop for the redirected request, so retain the
-                            // caller's Proxy-Authorization credentials (RFC 9110 §15.4 / asupersync-4ebib5).
-                            let proxy_auth = if self.config.proxy_url.is_some() {
-                                get_header(&extra_headers, "proxy-authorization")
-                            } else {
-                                None
-                            };
-
-                            // Strip sensitive headers on cross-origin redirect
-                            let mut next_headers = strip_sensitive_headers_on_redirect(
+                            // Origin credentials follow the origin; proxy credentials
+                            // follow the selected route, which can change at this hop.
+                            let next_headers = self.redirect_headers(
                                 &parsed,
                                 &next_parsed,
                                 extra_headers,
                             );
-                            if let Some(auth) = proxy_auth {
-                                if !has_header(&next_headers, "proxy-authorization") {
-                                    next_headers.push(("Proxy-Authorization".to_owned(), auth));
-                                }
-                            }
                             // A redirect that changes the method drops the body,
                             // and the headers that described it (RFC 9110 §15.4).
                             let next_headers = if next_method == method {
@@ -2289,26 +2500,13 @@ impl HttpClient {
                                 body
                             };
 
-                            // When routing through a forward proxy, the proxy is the same
-                            // intermediate hop for the redirected request, so retain the
-                            // caller's Proxy-Authorization credentials (RFC 9110 §15.4 / asupersync-4ebib5).
-                            let proxy_auth = if self.config.proxy_url.is_some() {
-                                get_header(&extra_headers, "proxy-authorization")
-                            } else {
-                                None
-                            };
-
-                            // Strip sensitive headers on cross-origin redirect
-                            let mut next_headers = strip_sensitive_headers_on_redirect(
+                            // Origin credentials follow the origin; proxy credentials
+                            // follow the selected route, which can change at this hop.
+                            let next_headers = self.redirect_headers(
                                 &parsed,
                                 &next_parsed,
                                 extra_headers,
                             );
-                            if let Some(auth) = proxy_auth {
-                                if !has_header(&next_headers, "proxy-authorization") {
-                                    next_headers.push(("Proxy-Authorization".to_owned(), auth));
-                                }
-                            }
                             // A redirect that changes the method drops the body,
                             // and the headers that described it (RFC 9110 §15.4).
                             let next_headers = if next_method == method {
@@ -2403,20 +2601,7 @@ impl HttpClient {
             let next_method = redirect_method(response.head.status, &method);
             // Unread redirect bodies release admission before the next hop.
             drop(response);
-            // A redirect changes the origin, not the configured proxy. Keep
-            // the proxy's credentials while stripping origin credentials.
-            let proxy_authorization = self.config.proxy_url.as_ref()
-                .and_then(|_| self.caller_proxy_authorization(&extra_headers));
-            extra_headers = strip_sensitive_headers_on_redirect(
-                &parsed,
-                &next_parsed,
-                extra_headers,
-            );
-            if let Some(authorization) = proxy_authorization
-                && !has_header(&extra_headers, "proxy-authorization")
-            {
-                extra_headers.push(("Proxy-Authorization".to_owned(), authorization));
-            }
+            extra_headers = self.redirect_headers(&parsed, &next_parsed, extra_headers);
             if next_method != method {
                 extra_headers = strip_content_headers(extra_headers);
             }
@@ -2549,7 +2734,7 @@ impl HttpClient {
         origin: Option<&ParsedUrl>,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
-        if let Some(proxy_url) = self.config.proxy_url.as_deref() {
+        if let Some(proxy_url) = self.proxy_url_for(parsed) {
             return self
                 .execute_single_with_proxy(cx, method, parsed, extra_headers, body, proxy_url, origin)
                 .await;
@@ -2674,7 +2859,7 @@ impl HttpClient {
         origin: Option<&ParsedUrl>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
-        if let Some(proxy_url) = self.config.proxy_url.as_deref() {
+        if let Some(proxy_url) = self.proxy_url_for(parsed) {
             return self
                 .execute_single_streaming_with_proxy(
                     cx,
@@ -2714,8 +2899,9 @@ impl HttpClient {
         origin: Option<&ParsedUrl>,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
-        let proxy = parse_proxy_endpoint(proxy_url)?;
-        let caller_proxy_authorization = self.caller_proxy_authorization(extra_headers);
+        let proxy = self.parse_selected_proxy(proxy_url)?;
+        let caller_proxy_authorization =
+            self.caller_proxy_authorization(parsed, extra_headers, origin);
         let proxy_conn = self
             .connect_via_proxy(cx, parsed, &proxy, caller_proxy_authorization.as_deref())
             .await?;
@@ -2760,8 +2946,9 @@ impl HttpClient {
         origin: Option<&ParsedUrl>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
-        let proxy = parse_proxy_endpoint(proxy_url)?;
-        let caller_proxy_authorization = self.caller_proxy_authorization(extra_headers);
+        let proxy = self.parse_selected_proxy(proxy_url)?;
+        let caller_proxy_authorization =
+            self.caller_proxy_authorization(parsed, extra_headers, origin);
         let proxy_conn = self
             .connect_via_proxy(cx, parsed, &proxy, caller_proxy_authorization.as_deref())
             .await?;
@@ -2805,11 +2992,11 @@ impl HttpClient {
         body: &[u8],
         origin: Option<&ParsedUrl>,
     ) -> Result<(Request, PooledStreamRoute), ClientError> {
-        let proxy = self.config.proxy_url.as_deref()
-            .map(parse_proxy_endpoint)
+        let proxy = self.proxy_url_for(parsed)
+            .map(|url| self.parse_selected_proxy(url))
             .transpose()?;
         let proxy_authorization = proxy.as_ref().and_then(|proxy| {
-            self.caller_proxy_authorization(extra_headers)
+            self.caller_proxy_authorization(parsed, extra_headers, origin)
                 .or_else(|| proxy.http_proxy_authorization().map(str::to_owned))
         });
         let absolute_form = proxy.as_ref().is_some_and(|proxy| {
@@ -2840,11 +3027,80 @@ impl HttpClient {
         }))
     }
 
-    /// The `Proxy-Authorization` the caller set, for this request or as a
-    /// client-wide default.
-    fn caller_proxy_authorization(&self, extra_headers: &[(String, String)]) -> Option<String> {
+    fn uses_environment_proxy(&self) -> bool {
+        self.config.proxy_url.is_none() && self.config.proxy_environment.is_some()
+    }
+
+    fn proxy_url_for(&self, parsed: &ParsedUrl) -> Option<&str> {
+        self.config.proxy_url.as_deref().or_else(|| {
+            self.config.proxy_environment.as_ref()
+                .and_then(|environment| environment.proxy_for(parsed))
+        })
+    }
+
+    fn parse_selected_proxy(&self, url: &str) -> Result<ProxyEndpoint, ClientError> {
+        parse_proxy_endpoint(url).map_err(|error| {
+            if self.uses_environment_proxy() {
+                // Legacy parser errors can embed the whole URL, including a
+                // password captured from the caller's environment.
+                ClientError::ProxyError("invalid proxy URL in supplied environment".into())
+            } else {
+                error
+            }
+        })
+    }
+
+    /// Environmental proxy defaults belong to the initial route, not to any
+    /// other proxy selected by a redirect, and never to a bypassed origin.
+    fn caller_proxy_authorization_applies(
+        &self,
+        parsed: &ParsedUrl,
+        origin: Option<&ParsedUrl>,
+    ) -> bool {
+        if !self.uses_environment_proxy() {
+            return true;
+        }
+        let selected = self.proxy_url_for(parsed);
+        selected.is_some()
+            && origin.is_none_or(|origin| self.proxy_url_for(origin) == selected)
+    }
+
+    /// The caller's proxy credentials, scoped separately from origin credentials.
+    fn caller_proxy_authorization(
+        &self,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        origin: Option<&ParsedUrl>,
+    ) -> Option<String> {
+        if !self.caller_proxy_authorization_applies(parsed, origin) {
+            return None;
+        }
         get_header(extra_headers, "proxy-authorization")
             .or_else(|| get_header(&self.config.default_headers, "proxy-authorization"))
+    }
+
+    fn redirect_headers(
+        &self,
+        from: &ParsedUrl,
+        to: &ParsedUrl,
+        headers: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        let previous_proxy = self.proxy_url_for(from);
+        let same_proxy = previous_proxy.is_some() && previous_proxy == self.proxy_url_for(to);
+        let proxy_authorization = if same_proxy {
+            get_header(&headers, "proxy-authorization")
+        } else {
+            None
+        };
+        let mut headers = strip_sensitive_headers_on_redirect(from, to, headers);
+        if self.uses_environment_proxy() && !same_proxy {
+            strip_proxy_authorization(&mut headers);
+        } else if let Some(value) = proxy_authorization
+            && !has_header(&headers, "proxy-authorization")
+        {
+            headers.push(("Proxy-Authorization".into(), value));
+        }
+        headers
     }
 
     /// Connects through `proxy`. `caller_proxy_authorization` authenticates an
@@ -3023,7 +3279,9 @@ impl HttpClient {
     /// Like `build_request`, but `origin` (the ORIGINAL request URL) lets the
     /// redirect path strip security-sensitive client-wide default headers when
     /// the current `parsed` target is a different origin (br-asupersync-u957g0).
-    /// `origin = None` (the plain `build_request`) never strips.
+    /// `origin = None` (the plain `build_request`) does not apply redirect
+    /// stripping. Environment routing still excludes proxy credentials from
+    /// direct requests.
     fn build_request_with_origin(
         &self,
         method: &Method,
@@ -3037,23 +3295,27 @@ impl HttpClient {
         let default_headers = &self.config.default_headers;
         // br-asupersync-u957g0: on a cross-origin redirect target, do NOT forward
         // security-sensitive client-wide DEFAULT headers (Authorization / Cookie /
-        // Proxy-Authorization). `build_request` re-applies `default_headers` on every
+        // Proxy-Authorization). Applicable proxy credentials are supplied through
+        // the route-specific fallback above the default-header loop below.
+        // `build_request` re-applies `default_headers` on every
         // hop, so without this a client-wide default bearer token / cookie leaks to a
         // redirect target of a different origin (or an https->http downgrade). Mirrors
         // `strip_sensitive_headers_on_redirect` for per-request headers. `origin` is
         // the ORIGINAL request URL (== `parsed` on the initial request), so a
         // same-origin redirect keeps its credentials.
         let cross_origin = origin.is_some_and(|o| !same_origin(o, parsed));
+        let proxy_auth_applies = self.caller_proxy_authorization_applies(parsed, origin);
         // A cross-origin target's default Cookie is stripped, but the host-scoped
         // cookie jar must still supply the CORRECT cookie for the new host — so a
         // stripped default Cookie/Proxy-Authorization must not suppress the jar/proxy
         // fallback path below.
         let default_cookie_applies = has_header(default_headers, "cookie") && !cross_origin;
         let default_proxy_auth_applies =
-            has_header(default_headers, "proxy-authorization") && !cross_origin;
+            has_header(default_headers, "proxy-authorization") && !cross_origin && proxy_auth_applies;
         let has_cookie_header = has_header(extra_headers, "cookie") || default_cookie_applies;
         let has_proxy_authorization =
-            has_header(extra_headers, "proxy-authorization") || default_proxy_auth_applies;
+            has_header(extra_headers, "proxy-authorization") && proxy_auth_applies
+                || default_proxy_auth_applies;
         let has_user_agent_header =
             has_header(extra_headers, "user-agent") || has_header(default_headers, "user-agent");
         let request_target = request_target.unwrap_or_else(|| parsed.path.clone());
@@ -3081,14 +3343,18 @@ impl HttpClient {
                     .filter(|(name, _)| {
                         !(name.eq_ignore_ascii_case("host")
                             || has_header(extra_headers, name)
-                            || cross_origin && is_sensitive_redirect_header(name))
+                            || cross_origin && is_sensitive_redirect_header(name)
+                            || !proxy_auth_applies && name.eq_ignore_ascii_case("proxy-authorization"))
                     })
                     .cloned(),
             )
             .headers(
                 extra_headers
                     .iter()
-                    .filter(|(name, _)| !name.eq_ignore_ascii_case("host"))
+                    .filter(|(name, _)| {
+                        !name.eq_ignore_ascii_case("host")
+                            && (proxy_auth_applies || !name.eq_ignore_ascii_case("proxy-authorization"))
+                    })
                     .cloned(),
             )
             .body(body.to_vec())

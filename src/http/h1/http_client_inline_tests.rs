@@ -70,6 +70,170 @@
         ClientIo::Plain(stream)
     }
 
+    #[test]
+    fn environment_proxy_selection_is_explicit_snapshotted_and_overridable() {
+        let target = ParsedUrl::parse("http://example.com/").unwrap();
+        assert_eq!(HttpClient::new().proxy_url_for(&target), None);
+
+        let mut vars = vec![("http_proxy".to_owned(), "http://first.proxy:3128".to_owned())];
+        let client = HttpClient::builder()
+            .proxy_from_env(vars.iter().map(|(key, value)| (key.as_str(), value.as_str())))
+            .build();
+        vars[0].1 = "http://changed.proxy:3128".into();
+        assert_eq!(client.proxy_url_for(&target), Some("http://first.proxy:3128"));
+        assert_eq!(client.clone().proxy_url_for(&target), Some("http://first.proxy:3128"));
+
+        let explicit = HttpClient::builder().proxy_from_env([("http_proxy", "http://env.proxy")]);
+        let explicit = explicit.proxy("socks5://explicit.proxy").build();
+        assert_eq!(explicit.proxy_url_for(&target), Some("socks5://explicit.proxy"));
+        let disabled = HttpClient::builder()
+            .proxy_from_env([("ALL_PROXY", "http://env.proxy")]).no_proxy().build();
+        assert_eq!(disabled.proxy_url_for(&target), None);
+        let replaced = HttpClient::builder().proxy("http://explicit.proxy")
+            .proxy_from_env([("ALL_PROXY", "http://env.proxy")]).build();
+        assert_eq!(replaced.proxy_url_for(&target), Some("http://env.proxy"));
+    }
+
+    #[test]
+    fn environment_proxy_scheme_case_empty_and_duplicate_precedence() {
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let https = ParsedUrl::parse("https://example.com/").unwrap();
+        let client = HttpClient::builder().proxy_from_env([
+            ("HTTP_PROXY", "http://untrusted-cgi.proxy"),
+            ("http_proxy", " http://http.proxy "),
+            ("HTTPS_PROXY", "http://upper.proxy"),
+            ("https_proxy", "socks5://lower.proxy"),
+            ("ALL_PROXY", "http://fallback.proxy"),
+        ]).build();
+        assert_eq!(client.proxy_url_for(&http), Some("http://http.proxy"));
+        assert_eq!(client.proxy_url_for(&https), Some("socks5://lower.proxy"));
+        let uppercase_http = HttpClient::builder()
+            .proxy_from_env([("HTTP_PROXY", "http://untrusted-cgi.proxy")]).build();
+        assert_eq!(uppercase_http.proxy_url_for(&http), None);
+        let fallback = HttpClient::builder().proxy_from_env([
+            ("HTTPS_PROXY", "http://upper.proxy"),
+            ("https_proxy", " "),
+            ("ALL_PROXY", "http://upper-fallback.proxy"),
+            ("all_proxy", "http://lower-fallback.proxy"),
+            ("http_proxy", "http://first.proxy"),
+            ("http_proxy", "http://last.proxy"),
+        ]).build();
+        assert_eq!(fallback.proxy_url_for(&http), Some("http://last.proxy"));
+        assert_eq!(fallback.proxy_url_for(&https), Some("http://lower-fallback.proxy"));
+        let no_bypass = HttpClient::builder().proxy_from_env([
+            ("ALL_PROXY", "http://proxy"), ("NO_PROXY", "*"), ("no_proxy", ""),
+        ]).build();
+        assert_eq!(no_bypass.proxy_url_for(&http), Some("http://proxy"));
+    }
+
+    #[test]
+    fn environment_no_proxy_matches_domains_ports_and_literal_networks() {
+        for (rule, url, bypass) in [
+            ("*", "https://anything.example/", true),
+            (" .Example.COM , localhost ", "https://example.com/", true),
+            (".example.com", "http://api.EXAMPLE.com./", true),
+            ("example.com", "http://notexample.com/", false),
+            ("example.com", "http://example.com.evil/", false),
+            ("example.com:443", "https://api.example.com/", true),
+            ("example.com:443", "http://api.example.com/", false),
+            ("example.com:8080", "http://api.example.com:8080/", true),
+            ("example.com:8080", "http://api.example.com:8081/", false),
+            ("127.0.0.1", "http://127.0.0.1/", true),
+            ("127.0.0.1", "http://child.127.0.0.1/", false),
+            ("127.0.0.1:8080", "http://child.127.0.0.1:8080/", false),
+            ("127.0.0.1:8080", "http://127.0.0.1:8080/", true),
+            ("0.0.1", "http://127.0.0.1/", false),
+            ("127.0.0.0/8", "http://127.64.0.1/", true),
+            ("127.0.0.0/8", "http://128.0.0.1/", false),
+            ("127.0.0.1/32", "http://127.0.0.1/", true),
+            ("127.0.0.1/32", "http://127.0.0.2/", false),
+            ("0.0.0.0/0", "http://192.0.2.1/", true),
+            ("0.0.0.0/0", "http://localhost/", false),
+            ("::1", "http://[0:0:0:0:0:0:0:1]/", true),
+            ("[::1]:443", "https://[::1]/", true),
+            ("[::1]:443", "http://[::1]/", false),
+            ("2001:db8::/32", "http://[2001:db8:1::1]/", true),
+            ("2001:db8::/32", "http://[2001:db9::1]/", false),
+            ("::1/128", "http://[::1]/", true),
+            ("::1/128", "http://[::2]/", false),
+            ("::/0", "http://[2001:db8::1]/", true),
+            ("::/0", "http://192.0.2.1/", false),
+            ("127.0.0.1/33", "http://127.0.0.1/", false),
+            ("::1/129", "http://[::1]/", false),
+            ("example.com:bad", "http://example.com/", false),
+            ("*.example.com", "http://api.example.com/", false),
+            ("http://example.com", "http://example.com/", false),
+            (".", "http://example.com/", false),
+            ("[::1]:", "http://[::1]/", false),
+        ] {
+            let client = HttpClient::builder()
+                .proxy_from_env([("ALL_PROXY", "http://proxy"), ("NO_PROXY", rule)]).build();
+            let target = ParsedUrl::parse(url).unwrap();
+            assert_eq!(client.proxy_url_for(&target).is_none(), bypass, "{rule:?} at {url}");
+        }
+    }
+
+    #[test]
+    fn environment_proxy_credentials_follow_routes_instead_of_redirected_origins() {
+        let client = HttpClient::builder().proxy_from_env([
+            ("http_proxy", "http://alice:a@first.proxy:3128"),
+            ("HTTPS_PROXY", "http://bob:b@second.proxy:3128"),
+            ("NO_PROXY", ".internal"),
+        ]).default_header("Proxy-Authorization", "Bearer private-default").build();
+        let first = ParsedUrl::parse("http://first.example/").unwrap();
+        let same_route = ParsedUrl::parse("http://second.example/").unwrap();
+        let other_route = ParsedUrl::parse("https://second.example/").unwrap();
+        let bypass = ParsedUrl::parse("http://service.internal/").unwrap();
+        let headers = vec![
+            ("Proxy-Authorization".into(), "Bearer private-request".into()),
+            ("Authorization".into(), "Bearer origin-only".into()),
+        ];
+        let carried = client.redirect_headers(&first, &same_route, headers.clone());
+        assert_eq!(get_header(&carried, "proxy-authorization").as_deref(), Some("Bearer private-request"));
+        assert_eq!(get_header(&carried, "authorization"), None);
+        for target in [&other_route, &bypass] {
+            let carried = client.redirect_headers(&first, target, headers.clone());
+            assert_eq!(get_header(&carried, "proxy-authorization"), None);
+            let (request, route) = client.build_pooled_streaming_request(
+                &Method::Get, target, &carried, &[], Some(&first),
+            ).unwrap();
+            assert_eq!(get_header(&request.headers, "proxy-authorization"), None);
+            if target.scheme == Scheme::Https {
+                assert_eq!(route.proxy_authorization.as_deref(), Some("Basic Ym9iOmI="));
+            } else {
+                assert!(route.proxy.is_none());
+                assert_eq!(route.proxy_authorization, None);
+            }
+        }
+        let (request, route) = client.build_pooled_streaming_request(
+            &Method::Get, &bypass, &headers, &[], None,
+        ).unwrap();
+        assert_eq!(get_header(&request.headers, "proxy-authorization"), None);
+        assert!(route.proxy.is_none());
+        let (request, route) = client.build_pooled_streaming_request(
+            &Method::Get, &first, &headers, &[], Some(&bypass),
+        ).unwrap();
+        assert_eq!(get_header(&request.headers, "proxy-authorization").as_deref(), Some("Basic YWxpY2U6YQ=="));
+        assert_eq!(route.proxy_authorization.as_deref(), Some("Basic YWxpY2U6YQ=="));
+        // The additive policy must not change legacy direct-request semantics.
+        let legacy = HttpClient::new().build_request(&Method::Get, &bypass, &headers, &[], None, None);
+        assert_eq!(get_header(&legacy.headers, "proxy-authorization").as_deref(), Some("Bearer private-request"));
+    }
+
+    #[test]
+    fn environment_proxy_errors_and_debug_never_disclose_captured_passwords() {
+        let client = HttpClient::builder().proxy_from_env([
+            ("ALL_PROXY", "ftp://alice:private-password@proxy"),
+        ]).build();
+        assert!(!format!("{:?}", client.config).contains("private-password"));
+        let target = ParsedUrl::parse("https://example.com/").unwrap();
+        let error = client.build_pooled_streaming_request(&Method::Get, &target, &[], &[], None)
+            .err().expect("invalid selected scheme must fail before admission");
+        assert!(matches!(error, ClientError::ProxyError(_)));
+        assert!(!error.to_string().contains("private-password"));
+        assert_eq!(client.pool_stats().total_connections, 0);
+    }
+
     // =========================================================================
     // URL parsing
     // =========================================================================
@@ -594,6 +758,205 @@
                     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
                 }
             }
+        }
+
+        async fn environment_request(
+            client: &HttpClient,
+            cx: &Cx,
+            url: &str,
+            mode: u8,
+            headers: Vec<(String, String)>,
+        ) -> Result<(u16, Vec<u8>), ClientError> {
+            if mode == 0 {
+                let response = client.request(cx, Method::Get, url, headers, Vec::new()).await?;
+                return Ok((response.status, response.body));
+            }
+            if mode == 1 {
+                let mut response = client.request_streaming(
+                    cx, Method::Get, url, headers, Vec::new(),
+                ).await?;
+                let mut bytes = Vec::new();
+                while let Some(frame) =
+                    poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await
+                {
+                    if let Frame::Data(data) = frame? {
+                        bytes.extend_from_slice(data.chunk());
+                    }
+                }
+                return Ok((response.head.status, bytes));
+            }
+            let mut response = if mode == 2 {
+                client.request_streaming_pooled(cx, Method::Get, url, headers, Vec::new()).await?
+            } else {
+                assert_eq!(mode, 3);
+                let body = UploadBody {
+                    frames: [upload_data(b"abc"), upload_data(b"def")].into(),
+                    exact: Some(6),
+                };
+                client.request_with_body(cx, Method::Post, url, headers, body).await?
+            };
+            Ok((response.head.status, drain(&mut response.body).await?))
+        }
+
+        #[test]
+        fn environment_proxy_routes_buffered_streaming_pooled_and_upload_requests() {
+            for multithread in [false, true] {
+                let (proxy, proxy_url) = listener();
+                let peer = std::thread::spawn(move || {
+                    for mode in 0..4 {
+                        let mut socket = accept(&proxy);
+                        let head = request_head(&mut socket);
+                        let method = if mode == 3 { "POST" } else { "GET" };
+                        assert!(head.starts_with(&format!(
+                            "{method} http://origin.invalid:8080/{mode} HTTP/1.1\r\n"
+                        )), "{head}");
+                        assert!(head.contains("Proxy-Authorization: Bearer configured\r\n"));
+                        if mode == 3 {
+                            let mut body = [0; 6];
+                            socket.read_exact(&mut body).unwrap();
+                            assert_eq!(&body, b"abcdef");
+                        }
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong").unwrap();
+                        expect_closed(&mut socket);
+                    }
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder()
+                    .proxy_from_env([("http_proxy", proxy_url)])
+                    .default_header("Proxy-Authorization", "Bearer configured")
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4)).build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let registered = cancel_waker_tokens(&cx);
+                    for mode in 0..4 {
+                        let url = format!("http://origin.invalid:8080/{mode}");
+                        let response = environment_request(&client, &cx, &url, mode, Vec::new()).await.unwrap();
+                        assert_eq!(response, (200, b"pong".to_vec()));
+                        assert_eq!(client.pool_stats().total_connections, 0);
+                    }
+                    assert_eq!(cancel_waker_tokens(&cx), registered);
+                });
+                peer.join().unwrap();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn environment_redirects_reselect_proxy_and_fence_credentials_at_direct_hops() {
+            for mode in 0..3 {
+                let (proxy, proxy_url) = listener();
+                let (origin, origin_url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut first = accept(&proxy);
+                    let head = request_head(&mut first);
+                    assert!(head.starts_with("GET http://first.invalid/start HTTP/1.1\r\n"));
+                    assert!(head.contains("Proxy-Authorization: Bearer per-request\r\n"));
+                    assert!(head.contains("Authorization: Bearer origin-only\r\n"));
+                    first.write_all(format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {origin_url}/bypass\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ).as_bytes()).unwrap();
+                    expect_closed(&mut first);
+
+                    let mut direct = accept(&origin);
+                    let head = request_head(&mut direct);
+                    assert!(head.starts_with("GET /bypass HTTP/1.1\r\n"), "{head}");
+                    assert!(!head.to_ascii_lowercase().contains("proxy-authorization:"));
+                    assert!(!head.contains("\r\nAuthorization:"));
+                    direct.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://second.invalid/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    expect_closed(&mut direct);
+
+                    let mut last = accept(&proxy);
+                    let head = request_head(&mut last);
+                    assert!(head.starts_with("GET http://second.invalid/final HTTP/1.1\r\n"));
+                    assert!(head.contains("Proxy-Authorization: Bearer configured\r\n"));
+                    assert!(!head.contains("per-request"));
+                    assert!(!head.contains("\r\nAuthorization:"));
+                    last.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+                    expect_closed(&mut last);
+                });
+                let runtime = runtime(mode != 0);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder().proxy_from_env([
+                    ("ALL_PROXY", proxy_url), ("NO_PROXY", "127.0.0.1".into()),
+                ]).default_header("Proxy-Authorization", "Bearer configured")
+                    .default_header("Authorization", "Bearer origin-only")
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4)).build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let result = environment_request(
+                        &client, &cx, "http://first.invalid/start", mode,
+                        vec![("Proxy-Authorization".into(), "Bearer per-request".into())],
+                    ).await.unwrap();
+                    assert_eq!(result, (200, b"ok".to_vec()));
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                });
+                peer.join().unwrap();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn environment_redirect_to_another_proxy_uses_only_that_proxy_credentials() {
+            for mode in 0..3 {
+                let (first_proxy, first_url) = listener();
+                let (second_proxy, _) = listener();
+                let second_url = format!("http://bob:b@{}", second_proxy.local_addr().unwrap());
+                let peer = std::thread::spawn(move || {
+                    let mut first = accept(&first_proxy);
+                    let head = request_head(&mut first);
+                    assert!(head.contains("Proxy-Authorization: Bearer private-first\r\n"));
+                    first.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://secure.invalid/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    expect_closed(&mut first);
+
+                    let mut second = accept(&second_proxy);
+                    let head = request_head(&mut second);
+                    assert!(head.starts_with("CONNECT secure.invalid:443 HTTP/1.1\r\n"));
+                    assert!(head.contains("Proxy-Authorization: Basic Ym9iOmI=\r\n"));
+                    assert!(!head.contains("private"));
+                    assert!(!head.contains("\r\nAuthorization:"));
+                    // Refuse before TLS; this is also a default-feature test.
+                    second.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").unwrap();
+                    expect_closed(&mut second);
+                });
+                let runtime = runtime(mode != 0);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder().proxy_from_env([
+                    ("http_proxy", first_url), ("HTTPS_PROXY", second_url),
+                ]).default_header("Proxy-Authorization", "Bearer private-default")
+                    .default_header("Authorization", "Bearer private-origin")
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4)).build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let error = environment_request(
+                        &client, &cx, "http://first.invalid/start", mode,
+                        vec![("Proxy-Authorization".into(), "Bearer private-first".into())],
+                    ).await.unwrap_err();
+                    assert!(matches!(error, ClientError::ConnectTunnelRefused { status: 407, .. }));
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                });
+                peer.join().unwrap();
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn invalid_environment_proxy_retires_upload_without_polling_or_admission() {
+            let runtime = runtime(false);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let client = HttpClient::builder()
+                .proxy_from_env([("ALL_PROXY", "ftp://private:password@proxy")]).build();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            runtime.block_on_with_cx(cx.clone(), async {
+                let body = ParkedUpload { polled: None, polls: polls.clone(), drops: drops.clone() };
+                let result = client.post("http://origin.invalid/upload").send_with_body(&cx, body).await;
+                assert!(matches!(result, Err(ClientError::ProxyError(_))));
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert_eq!(client.pool_stats().total_connections, 0);
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
         }
 
         #[test]
