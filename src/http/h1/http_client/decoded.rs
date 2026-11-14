@@ -90,6 +90,7 @@ struct RetainedEncodedBody {
     body: Option<PooledClientIncomingBody>,
     completed: CompletedBody,
     cx: Cx,
+    metadata_remaining: Option<usize>,
 }
 
 impl RetainedEncodedBody {
@@ -115,6 +116,21 @@ impl Body for RetainedEncodedBody {
             return Poll::Ready(None);
         };
         let result = Pin::new(body).poll_frame(task);
+        if let (Some(remaining), Poll::Ready(Some(Ok(Frame::Trailers(trailers))))) =
+            (this.metadata_remaining, &result)
+        {
+            let Some(bytes) = metadata_size(
+                trailers.iter().map(|(name, value)| (name.as_str().len(), value.as_bytes().len())),
+                remaining,
+            )
+            else {
+                // Check original fields before the decoder removes encoded-body
+                // metadata, and close before any pool waiter can reuse the socket.
+                drop(this.body.take());
+                return Poll::Ready(Some(Err(ClientError::HttpError(HttpError::HeadersTooLarge))));
+            };
+            this.metadata_remaining = Some(remaining - bytes);
+        }
         match result {
             Poll::Ready(Some(Err(error))) => {
                 let error = cancellation_reported_as_cancelled::<()>(
@@ -203,7 +219,18 @@ fn decode_response(
     owner: PooledStreamOwner,
     method: &Method,
     limits: ContentDecodeLimits,
+    metadata_limit: Option<usize>,
 ) -> Result<DecodedClientStreamingResponse, ClientError> {
+    let metadata_remaining = if let Some(limit) = metadata_limit {
+        let bytes = metadata_size(
+            response.head.headers.iter().map(|(name, value)| (name.len(), value.len())),
+            limit,
+        )
+        .ok_or(ClientError::HttpError(HttpError::HeadersTooLarge))?;
+        Some(limit - bytes)
+    } else {
+        None
+    };
     let map_error = |error| ClientError::HttpError(HttpError::Io(error));
     let decoder = ContentDecoder::for_response(method, response.head.status, &response.head.headers)
         .map_err(map_error)?;
@@ -228,6 +255,7 @@ fn decode_response(
         body: Some(response.body),
         completed: Arc::clone(&completed),
         cx: owner.cx.clone(),
+        metadata_remaining,
     };
     Ok(DecodedClientStreamingResponse {
         head: response.head,
@@ -238,6 +266,18 @@ fn decode_response(
         },
         body_withheld: response.body_withheld,
     })
+}
+
+fn metadata_size(fields: impl Iterator<Item = (usize, usize)>, limit: usize) -> Option<usize> {
+    let mut bytes = 0usize;
+    for (name, value) in fields {
+        let total = bytes.checked_add(name)?.checked_add(value)?.checked_add(4)?;
+        if total > limit {
+            return None;
+        }
+        bytes = total;
+    }
+    Some(bytes)
 }
 
 async fn drive_head<T>(
@@ -254,6 +294,10 @@ async fn drive_head<T>(
 }
 
 impl HttpClient {
+    pub(crate) const fn stream_decoding_accept_header() -> &'static str {
+        STREAM_CODINGS
+    }
+
     /// Stream and explicitly decode a response while retaining pool admission.
     ///
     /// Advertises only compiled-in codecs when neither the request nor client
@@ -280,7 +324,25 @@ impl HttpClient {
         body: Vec<u8>,
         limits: ContentDecodeLimits,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
-        self.request_streaming_decoded_timeout(cx, method, url, headers, body, limits, None).await
+        self.request_streaming_decoded_timeout(cx, method, url, headers, body, limits, None, None).await
+    }
+
+    /// Protocol adapters can bound the combined original response headers and
+    /// HTTP trailers before content decoding sanitizes either block.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_streaming_decoded_with_metadata_limit(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        limits: ContentDecodeLimits,
+        metadata_limit: usize,
+    ) -> Result<DecodedClientStreamingResponse, ClientError> {
+        self.request_streaming_decoded_timeout(
+            cx, method, url, headers, body, limits, None, Some(metadata_limit),
+        ).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -293,6 +355,7 @@ impl HttpClient {
         body: Vec<u8>,
         limits: ContentDecodeLimits,
         timeout: Option<Duration>,
+        metadata_limit: Option<usize>,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
         check_cx(cx)?;
         let timeout = self.config.request_timeout.into_iter().chain(timeout).min();
@@ -303,7 +366,7 @@ impl HttpClient {
         let (method, response) = drive_head(&mut owner,
             self.execute_with_redirects_pooled_streaming_method(cx, method, parsed, headers, body, &deadline),
         ).await?;
-        decode_response(response, owner, &method, limits)
+        decode_response(response, owner, &method, limits, metadata_limit)
     }
 
     /// Send a one-shot streaming upload and progressively decode its response.
@@ -351,7 +414,7 @@ impl HttpClient {
         let response = drive_head(&mut owner,
             self.request_with_body_timeout(cx, method.clone(), url, headers, body, timeout),
         ).await?;
-        decode_response(response, owner, &method, limits)
+        decode_response(response, owner, &method, limits, None)
     }
 
     fn advertise_stream_decoding(&self, headers: &mut Vec<(String, String)>) {
@@ -392,7 +455,7 @@ impl ClientRequestBuilder<'_> {
         limits: ContentDecodeLimits,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
         self.client.request_streaming_decoded_timeout(
-            cx, self.method, &self.url, self.headers, self.body, limits, self.timeout,
+            cx, self.method, &self.url, self.headers, self.body, limits, self.timeout, None,
         ).await
     }
 

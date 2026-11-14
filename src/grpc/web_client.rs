@@ -4,8 +4,9 @@
 //! Binary and independently padded text response streams are decoded as bytes
 //! arrive. No background reader or browser runtime is required. HTTPS uses the
 //! HTTP client's configured trust roots. HTTP, HTTPS and SOCKS5 proxies use
-//! the same bounded transport and call lifetime. HTTP content compression is not
-//! negotiated. Message-level gzip is opt-in through [`GrpcWebCompressionConfig`]
+//! the same bounded transport and call lifetime. HTTP content compression is
+//! opt-in through [`GrpcWebClient::with_http_content_decoding`]. Message-level
+//! gzip is independently opt-in through [`GrpcWebCompressionConfig`]
 //! and reuses the native gRPC codec's negotiated-encoding validation and
 //! decompression-bomb limits.
 
@@ -16,12 +17,12 @@ use super::server::{format_grpc_timeout, parse_grpc_timeout};
 use super::status::{Code, GrpcError, Status};
 use super::streaming::{Metadata, MetadataValue, Request, Streaming};
 use super::web::{Base64StreamDecoder, ContentType, TrailerFrame, WebFrame, WebFrameCodec};
-use crate::bytes::{Buf, BytesMut};
+use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::cx::{CancelWakerToken, Cx};
-use crate::http::body::{Body, Frame};
+use crate::http::body::{Body, ContentDecodeError, ContentDecodeLimits, Frame};
 use crate::http::h1::{
-    ClientError, HttpClient, HttpClientConfig, HttpError, Method, PooledClientIncomingBody,
-    RedirectPolicy, ResponseHead, RetryPolicy,
+    ClientError, DecodedClientIncomingBody, HttpClient, HttpClientConfig, HttpError, Method,
+    PooledClientIncomingBody, RedirectPolicy, ResponseHead, RetryPolicy,
 };
 use crate::time::Sleep;
 use crate::types::{CancelKind, Time};
@@ -140,6 +141,8 @@ impl GrpcWebCompressionConfig {
 /// Limits count encoded message bytes, HTTP body bytes (including base64
 /// padding in text mode), and HTTP metadata bytes respectively. A custom
 /// serialization codec can allocate internally before returning its bytes.
+/// Opted-in HTTP content decoding also applies `max_body_size` to every
+/// decoded stage; its explicit decoding limits can only tighten that ceiling.
 #[derive(Debug, Clone)]
 pub struct GrpcWebClientConfig {
     /// Request and preferred response representation. Binary is the default.
@@ -181,6 +184,7 @@ pub struct GrpcWebClient {
     http: HttpClient,
     config: GrpcWebClientConfig,
     compression: GrpcWebCompressionConfig,
+    http_content_decoding: Option<ContentDecodeLimits>,
     default_header_bytes: usize,
 }
 
@@ -189,6 +193,7 @@ impl fmt::Debug for GrpcWebClient {
         f.debug_struct("GrpcWebClient")
             .field("config", &self.config)
             .field("compression", &self.compression)
+            .field("http_content_decoding", &self.http_content_decoding)
             .finish_non_exhaustive()
     }
 }
@@ -253,7 +258,8 @@ impl GrpcWebClient {
     /// the configured TLS trust roots and hostname verification. Automatic
     /// redirects and retries are disabled, including through a proxy.
     /// HTTP `Content-Encoding` remains identity even when gRPC message gzip is
-    /// enabled; only message frames use `grpc-encoding`.
+    /// enabled; only message frames use `grpc-encoding`. Explicitly select
+    /// [`Self::with_http_content_decoding`] to accept HTTP compression too.
     pub fn with_http_config_and_compression(
         mut http: HttpClientConfig,
         mut config: GrpcWebClientConfig,
@@ -305,6 +311,7 @@ impl GrpcWebClient {
             http: HttpClient::with_config(http),
             config,
             compression,
+            http_content_decoding: None,
             default_header_bytes,
         })
     }
@@ -313,6 +320,45 @@ impl GrpcWebClient {
     #[must_use]
     pub const fn compression(&self) -> GrpcWebCompressionConfig {
         self.compression
+    }
+
+    /// Accept and progressively decode compressed HTTP response bodies.
+    ///
+    /// This is independent of gRPC message compression. HTTP decoding runs
+    /// before text-mode base64 and message framing, so it also covers proxies
+    /// that compress a complete gRPC-Web representation. Requests retain their
+    /// existing wire representation. Accept-Encoding advertises only codecs
+    /// compiled into the native HTTP client: gzip, deflate and Brotli require
+    /// `compression`; zstd requires `zstd`; identity is always available.
+    ///
+    /// The mandatory limits count encoded bytes and every decoded stage.
+    /// Both are tightened to this client's aggregate body ceiling; decoded
+    /// text still includes base64 padding. Message limits apply independently
+    /// after base64 and any negotiated message decompression. The combined
+    /// original HTTP response headers and trailers share the configured
+    /// metadata ceiling, including fields removed by content decoding. The
+    /// gRPC body trailer block retains its separate metadata allowance.
+    ///
+    /// The original context and absolute call deadline remain in force while
+    /// decoding buffered output. Pool admission is retained until the HTTP
+    /// decoder validates EOF; cancellation, drop, a bad checksum or a resource
+    /// refusal closes any socket still owned by the response. Messages remain
+    /// provisional until successful gRPC trailers and validated HTTP EOF. No
+    /// background task is spawned.
+    ///
+    /// Existing constructors keep identity-only HTTP behavior. Enabling this
+    /// method does not enable message gzip, redirects, retries or uploads with
+    /// HTTP content compression.
+    #[must_use]
+    pub fn with_http_content_decoding(mut self, limits: ContentDecodeLimits) -> Self {
+        self.http_content_decoding = Some(limits.tightened(self.config.max_body_size));
+        self
+    }
+
+    /// The effective HTTP decoding limits, or `None` for identity-only HTTP.
+    #[must_use]
+    pub const fn http_content_decoding_limits(&self) -> Option<ContentDecodeLimits> {
+        self.http_content_decoding
     }
 
     /// Send one request and receive exactly one response with terminal status.
@@ -399,34 +445,42 @@ impl GrpcWebClient {
             request.metadata(),
             &self.config,
             self.compression,
+            if self.http_content_decoding.is_some() {
+                HttpClient::stream_decoding_accept_header()
+            } else {
+                "identity"
+            },
             self.default_header_bytes,
             &control,
         )?;
-        let mut dispatch = std::pin::pin!(self.http.request_streaming_pooled(
-            cx,
-            Method::Post,
-            url,
-            headers,
-            body,
-        ));
-        let response = poll_fn(|task| {
+        let mut dispatch = std::pin::pin!(async {
+            if let Some(limits) = self.http_content_decoding {
+                let response = self.http.request_streaming_decoded_with_metadata_limit(
+                    cx, Method::Post, url, headers, body, limits, self.config.max_metadata_size,
+                ).await.map_err(content_decoding_http_status)?;
+                Ok::<_, Status>((response.head, GrpcWebHttpBody::Decoded(Box::new(response.body))))
+            } else {
+                let response = self.http.request_streaming_pooled(
+                    cx, Method::Post, url, headers, body,
+                ).await.map_err(transport_status)?;
+                Ok((response.head, GrpcWebHttpBody::Raw(response.body)))
+            }
+        });
+        let (head, body) = poll_fn(|task| {
             if let Err(status) = control.poll_stop(task) {
                 return Poll::Ready(Err(status));
             }
             let _ambient = Cx::set_current(Some(control.cx.clone()));
-            dispatch
-                .as_mut()
-                .poll(task)
-                .map(|result| result.map_err(transport_status))
+            dispatch.as_mut().poll(task)
         })
         .await?;
         let (content_type, grpc_encoding, initial_metadata, trailers) = response_headers(
-            &response.head,
+            &head,
             self.config.max_metadata_size,
             self.compression,
         )?;
         Ok(GrpcWebResponseStream {
-            body: Some(response.body),
+            body: Some(body),
             codec,
             frames: WebFrameCodec::with_max_size(
                 self.config
@@ -443,7 +497,7 @@ impl GrpcWebClient {
             trailers,
             trailers_validated: false,
             grpc_encoding,
-            http_status: response.head.status,
+            http_status: head.status,
             max_message_size: self.config.max_recv_message_size,
             max_metadata_size: self.config.max_metadata_size,
             max_body_size: self.config.max_body_size,
@@ -527,6 +581,25 @@ enum NegotiatedGrpcEncoding {
     Gzip,
 }
 
+// Preserve the raw path's existing allocation footprint; only the opt-in
+// codec state adds an indirection rather than inflating every response stream.
+#[allow(clippy::large_enum_variant)]
+enum GrpcWebHttpBody {
+    Raw(PooledClientIncomingBody),
+    Decoded(Box<DecodedClientIncomingBody>),
+}
+
+impl GrpcWebHttpBody {
+    fn poll_frame(&mut self, task: &mut Context<'_>) -> Poll<Option<Result<Frame<BytesCursor>, Status>>> {
+        match self {
+            Self::Raw(body) => Pin::new(body).poll_frame(task)
+                .map(|frame| frame.map(|frame| frame.map_err(transport_status))),
+            Self::Decoded(body) => Pin::new(&mut **body).poll_frame(task)
+                .map(|frame| frame.map(|frame| frame.map_err(content_decoding_status))),
+        }
+    }
+}
+
 impl NegotiatedGrpcEncoding {
     const fn header(self) -> Option<&'static str> {
         match self {
@@ -548,9 +621,11 @@ impl NegotiatedGrpcEncoding {
 /// its connection. No task is spawned to drain an abandoned body. An unpolled
 /// owner retains its resources; cancellation and timeouts are observed on
 /// polling. Read-ahead is bounded by one message plus a native HTTP body chunk,
-/// bounded headers/trailers, and transport buffers.
+/// bounded headers/trailers, and transport buffers. Opted-in HTTP decoding also
+/// retains codec state and per-stage output within [`ContentDecodeLimits`]; a
+/// small chunk size does not bound a codec's entire pending expansion buffer.
 pub struct GrpcWebResponseStream<C: Codec> {
-    body: Option<PooledClientIncomingBody>,
+    body: Option<GrpcWebHttpBody>,
     codec: FramedCodec<C>,
     frames: WebFrameCodec,
     base64: Option<Base64StreamDecoder>,
@@ -734,9 +809,9 @@ impl<C: Codec> GrpcWebResponseStream<C> {
                 });
             }
             let body = self.body.as_mut().expect("live HTTP body before EOF");
-            match Pin::new(body).poll_frame(task) {
+            match body.poll_frame(task) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(transport_status(error))),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
                 Poll::Ready(Some(Ok(Frame::Data(data)))) => {
                     let bytes = data.chunk();
                     self.received_body_bytes = self
@@ -962,6 +1037,7 @@ fn request_headers(
     metadata: &Metadata,
     config: &GrpcWebClientConfig,
     compression: GrpcWebCompressionConfig,
+    http_accept_encoding: &str,
     mut bytes: usize,
     control: &CallControl,
 ) -> Result<Vec<(String, String)>, Status> {
@@ -980,7 +1056,7 @@ fn request_headers(
             "accept".to_owned(),
             config.content_type.as_header_value().to_owned(),
         ),
-        ("accept-encoding".to_owned(), "identity".to_owned()),
+        ("accept-encoding".to_owned(), http_accept_encoding.to_owned()),
         (
             "grpc-accept-encoding".to_owned(),
             compression.accept_header().to_owned(),
@@ -1212,6 +1288,47 @@ fn transport_status(error: ClientError) -> Status {
             Status::resource_exhausted("gRPC-Web HTTP connection pool exhausted")
         }
         _ => Status::unavailable(error.to_string()),
+    }
+}
+
+fn content_decoding_io_status(error: std::io::Error) -> Status {
+    if crate::http::decode::is_limit_error(&error) {
+        Status::resource_exhausted("gRPC-Web HTTP content decoding limit exceeded")
+    } else if error.kind() == std::io::ErrorKind::Unsupported {
+        Status::unimplemented(error.to_string())
+    } else {
+        Status::internal(format!("invalid gRPC-Web HTTP content encoding: {error}"))
+    }
+}
+
+fn content_decoding_http_status(error: ClientError) -> Status {
+    match error {
+        ClientError::HttpError(HttpError::Io(error))
+            if crate::http::decode::is_limit_error(&error)
+                || matches!(error.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidData) =>
+        {
+            content_decoding_io_status(error)
+        }
+        error => transport_status(error),
+    }
+}
+
+fn content_decoding_status(error: ContentDecodeError<ClientError>) -> Status {
+    match error {
+        ContentDecodeError::Body(error) => transport_status(error),
+        ContentDecodeError::Decode(error) => content_decoding_io_status(error),
+        ContentDecodeError::EncodedLimit { .. } => {
+            Status::resource_exhausted("gRPC-Web encoded HTTP body limit exceeded")
+        }
+        ContentDecodeError::Cancelled { kind: CancelKind::Timeout | CancelKind::Deadline } => {
+            Status::deadline_exceeded("gRPC-Web HTTP content decoding deadline exceeded")
+        }
+        ContentDecodeError::Cancelled { kind: CancelKind::PollQuota | CancelKind::CostBudget } => {
+            Status::resource_exhausted("gRPC-Web HTTP content decoding budget exhausted")
+        }
+        ContentDecodeError::Cancelled { .. } => {
+            Status::cancelled("gRPC-Web HTTP content decoding cancelled")
+        }
     }
 }
 

@@ -15,6 +15,445 @@ use std::sync::{Arc, mpsc};
 use std::task::{Wake, Waker};
 use std::time::Instant;
 
+#[test]
+fn http_content_decoding_is_opt_in_and_tightens_both_body_limits() {
+    let mut bounds = config(ContentType::GrpcWeb);
+    bounds.max_body_size = 1024;
+    let original = GrpcWebClient::with_config(bounds).unwrap();
+    let decoded = original.clone().with_http_content_decoding(
+        ContentDecodeLimits::new(2048, 4096)
+            .with_chunk_size(std::num::NonZeroUsize::new(17).unwrap()),
+    );
+    assert_eq!(original.http_content_decoding_limits(), None);
+    let limits = decoded.http_content_decoding_limits().unwrap();
+    assert_eq!(limits.max_encoded_bytes(), 1024);
+    assert_eq!(limits.max_decoded_bytes(), 1024);
+    assert_eq!(limits.chunk_size(), 17);
+    assert_eq!(decoded.compression(), GrpcWebCompressionConfig::identity());
+
+    let tighter = decoded.with_http_content_decoding(ContentDecodeLimits::new(64, 128));
+    assert_eq!(
+        tighter.http_content_decoding_limits(),
+        Some(ContentDecodeLimits::new(64, 128)),
+    );
+}
+
+#[cfg(feature = "compression")]
+mod http_content_decoding {
+    use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::num::NonZeroUsize;
+
+    fn wire_representation(mode: ContentType, bytes: &[u8]) -> Vec<u8> {
+        if mode.is_text_mode() {
+            // Independent padding is valid gRPC-Web text. HTTP compression
+            // applies to those text bytes, before the client decodes base64.
+            bytes.chunks(2)
+                .flat_map(|part| base64::engine::general_purpose::STANDARD.encode(part).into_bytes())
+                .collect()
+        } else {
+            bytes.to_vec()
+        }
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn cancel_tokens(cx: &Cx) -> Vec<u64> {
+        let mut tokens: Vec<_> = cx.inner.read().cancel_waker_registrations.iter()
+            .map(|entry| entry.token).collect();
+        tokens.sort_unstable();
+        tokens
+    }
+
+    fn one_slot_http() -> HttpClientConfig {
+        let mut http = HttpClientConfig::default();
+        http.pool_config.max_connections_per_host = 1;
+        http.pool_config.max_total_connections = 1;
+        http
+    }
+
+    #[test]
+    fn http_content_decoding_streams_binary_and_padded_text_with_independent_message_gzip() {
+        for multithread in [false, true] {
+            for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+                for message_gzip in [false, true] {
+                    let (listener, url) = listener();
+                    let (continue_tx, continue_rx) = mpsc::channel();
+                    let eof_sent = Arc::new(AtomicBool::new(false));
+                    let peer_eof = Arc::clone(&eof_sent);
+                    let peer = std::thread::spawn(move || {
+                        let mut socket = accept(&listener);
+                        socket.set_nodelay(true).unwrap();
+                        let (head, body) = request(&mut socket);
+                        assert_eq!(
+                            header_values(&head, "accept-encoding"),
+                            vec![if cfg!(feature = "zstd") {
+                                "gzip, deflate, br, zstd"
+                            } else {
+                                "gzip, deflate, br"
+                            }],
+                        );
+                        assert!(header_values(&head, "content-encoding").is_empty());
+                        assert!(header_values(&head, "grpc-encoding").is_empty());
+                        assert_eq!(
+                            header_values(&head, "grpc-accept-encoding"),
+                            vec![if message_gzip { "gzip,identity" } else { "identity" }],
+                        );
+                        let request_message = message(b"request");
+                        assert_eq!(body, if mode.is_text_mode() {
+                            base64::engine::general_purpose::STANDARD.encode(request_message).into_bytes()
+                        } else {
+                            request_message
+                        });
+                        write!(socket,
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nx-initial: decoded\r\n{}\r\n",
+                            mode.as_header_value(),
+                            if message_gzip { "grpc-encoding: gzip\r\n" } else { "" },
+                        ).unwrap();
+                        let first = if message_gzip {
+                            envelope(1, &gzip(b"first"))
+                        } else {
+                            message(b"first")
+                        };
+                        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                        encoder.write_all(&wire_representation(mode, &first)).unwrap();
+                        encoder.flush().unwrap();
+                        let prefix_len = encoder.get_ref().len();
+                        for part in encoder.get_ref().chunks(7) {
+                            chunk(&mut socket, part);
+                        }
+                        continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        // Flag zero remains valid when grpc-encoding is gzip.
+                        let mut rest = message(b"second");
+                        rest.extend(trailers(b"grpc-status: 0\r\nx-final: yes\r\n"));
+                        encoder.write_all(&wire_representation(mode, &rest)).unwrap();
+                        let encoded = encoder.finish().unwrap();
+                        chunk(&mut socket, &encoded[prefix_len..]);
+                        socket.write_all(b"0\r\nDigest: stale-wire-digest\r\nx-http-proof: checked\r\n\r\n").unwrap();
+                        socket.flush().unwrap();
+                        peer_eof.store(true, Ordering::SeqCst);
+
+                        request(&mut socket);
+                        fixed(&mut socket, 200, "application/grpc-web", "Connection: close\r\n", &success(b"unary"));
+                        expect_closed(&mut socket);
+                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    });
+                    let runtime = runtime(multithread);
+                    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let client = GrpcWebClient::with_http_config_and_compression(
+                        one_slot_http(),
+                        config(mode),
+                        GrpcWebCompressionConfig::identity().with_accept_gzip(message_gzip),
+                    ).unwrap().with_http_content_decoding(
+                        ContentDecodeLimits::new(4096, 4096)
+                            .with_chunk_size(NonZeroUsize::new(3).unwrap()),
+                    );
+                    runtime.block_on_with_cx(cx.clone(), async {
+                        let baseline = cancel_tokens(&cx);
+                        let mut stream = client.server_streaming(
+                            &cx, &url, Request::new(Bytes::from_static(b"request")), IdentityCodec,
+                        ).await.unwrap();
+                        assert_eq!(metadata_text(stream.initial_metadata(), "x-initial").as_deref(), Some("decoded"));
+                        assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
+                        assert!(!eof_sent.load(Ordering::SeqCst), "HTTP decoding must deliver before wire EOF");
+                        assert!(stream.trailing_metadata().is_none());
+                        assert!(stream.terminal_status().is_none());
+                        assert_eq!(client.http.pool_stats().total_connections, 1);
+                        assert_eq!(client.http.pool_stats().idle_connections, 0);
+                        let mut wait = Box::pin(stream.message());
+                        poll_fn(|task| {
+                            assert!(wait.as_mut().poll(task).is_pending());
+                            Poll::Ready(())
+                        }).await;
+                        drop(wait);
+                        continue_tx.send(()).unwrap();
+                        assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"second");
+                        assert!(stream.message().await.unwrap().is_none());
+                        assert!(stream.terminal_status().unwrap().is_ok());
+                        assert_eq!(metadata_text(stream.trailing_metadata().unwrap(), "x-final").as_deref(), Some("yes"));
+                        assert_eq!(client.http.pool_stats().idle_connections, 1);
+                        assert_eq!(cancel_tokens(&cx), baseline);
+                        let unary = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap();
+                        assert_eq!(unary.into_inner().as_ref(), b"unary");
+                        assert_eq!(client.http.pool_stats().connections_created, 1);
+                        assert_eq!(client.http.pool_stats().total_connections, 0);
+                        assert_eq!(cancel_tokens(&cx), baseline);
+                    });
+                    peer.join().unwrap();
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+    }
+    #[test]
+    fn http_content_decoding_does_not_accept_grpc_success_before_gzip_integrity() {
+        for multithread in [false, true] {
+            for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+                for truncated in [false, true] {
+                    let (listener, url) = listener();
+                    let (finish_tx, finish_rx) = mpsc::channel();
+                    let peer = std::thread::spawn(move || {
+                        let mut socket = accept(&listener);
+                        request(&mut socket);
+                        write!(socket,
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n",
+                            mode.as_header_value(),
+                        ).unwrap();
+                        let mut encoded = gzip(&wire_representation(mode, &success(b"provisional")));
+                        let footer = encoded.len() - 8;
+                        // The entire gRPC success trailer is present, but the
+                        // HTTP representation has not passed its CRC/EOF check.
+                        chunk(&mut socket, &encoded[..footer]);
+                        finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        let mut tail = Vec::new();
+                        if !truncated {
+                            encoded[footer] ^= 1;
+                            tail.extend_from_slice(b"8\r\n");
+                            tail.extend_from_slice(&encoded[footer..]);
+                            tail.extend_from_slice(b"\r\n");
+                        }
+                        tail.extend_from_slice(b"0\r\n\r\n");
+                        socket.write_all(&tail).unwrap();
+                        expect_closed(&mut socket);
+                    });
+                    let runtime = runtime(multithread);
+                    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                    let client = GrpcWebClient::with_http_config(one_slot_http(), config(mode))
+                        .unwrap().with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+                    runtime.block_on_with_cx(cx.clone(), async {
+                        let baseline = cancel_tokens(&cx);
+                        let mut stream = client.server_streaming(
+                            &cx, &url, Request::new(Bytes::new()), IdentityCodec,
+                        ).await.unwrap();
+                        assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"provisional");
+                        assert!(stream.trailing_metadata().is_none());
+                        assert!(stream.terminal_status().is_none());
+                        assert_eq!(client.http.pool_stats().idle_connections, 0);
+                        finish_tx.send(()).unwrap();
+                        assert_eq!(stream.message().await.unwrap_err().code(), Code::Internal);
+                        assert_eq!(stream.terminal_status().unwrap().code(), Code::Internal);
+                        assert!(stream.trailing_metadata().is_none());
+                        assert!(stream.message().await.unwrap().is_none());
+                        assert_eq!(client.http.pool_stats().total_connections, 0);
+                        assert_eq!(cancel_tokens(&cx), baseline);
+                    });
+                    peer.join().unwrap();
+                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http_content_decoding_refuses_encoded_and_decoded_limits_and_stripped_metadata() {
+        for multithread in [false, true] {
+            for case in ["encoded", "decoded", "head", "trailer", "combined"] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    request(&mut socket);
+                    let encoded = gzip(&success(&vec![b'x'; 1024]));
+                    let hidden_metadata = "x".repeat(if case == "combined" { 220 } else { 600 });
+                    let mut response = Vec::new();
+                    if matches!(case, "trailer" | "combined") {
+                        response.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n");
+                        if case == "combined" {
+                            // The original head is 318 field bytes, the trailer
+                            // 230. Each fits 512 alone; their 548-byte sum does
+                            // not, even though both Digest fields disappear.
+                            write!(response, "Digest: {hidden_metadata}\r\n").unwrap();
+                        }
+                        response.extend_from_slice(b"\r\n");
+                        write!(response, "{:x}\r\n", encoded.len()).unwrap();
+                        response.extend_from_slice(&encoded);
+                        write!(response, "\r\n0\r\nDigest: {hidden_metadata}\r\n\r\n").unwrap();
+                    } else {
+                        write!(response,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n",
+                            encoded.len(),
+                        ).unwrap();
+                        if case == "head" {
+                            write!(response, "Digest: {hidden_metadata}\r\n").unwrap();
+                        }
+                        response.extend_from_slice(b"\r\n");
+                        response.extend_from_slice(&encoded);
+                    }
+                    // A single write avoids a response-head refusal racing a
+                    // second peer write. Reuse would be legal on the wire;
+                    // the decoding/metadata error must close it instead.
+                    socket.write_all(&response).unwrap();
+                    expect_closed(&mut socket);
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let mut bounds = config(ContentType::GrpcWeb);
+                bounds.max_metadata_size = 512;
+                bounds.max_body_size = 4096;
+                let limits = match case {
+                    "encoded" => ContentDecodeLimits::new(16, 4096),
+                    "decoded" => ContentDecodeLimits::new(4096, 64),
+                    _ => ContentDecodeLimits::new(4096, 4096),
+                };
+                let client = GrpcWebClient::with_http_config(one_slot_http(), bounds)
+                    .unwrap().with_http_content_decoding(limits);
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let baseline = cancel_tokens(&cx);
+                    let error = client.unary(
+                        &cx, &url, Request::new(Bytes::new()), IdentityCodec,
+                    ).await.unwrap_err();
+                    assert_eq!(error.code(), Code::ResourceExhausted, "{case}: {error}");
+                    assert_eq!(client.http.pool_stats().total_connections, 0, "{case}");
+                    assert_eq!(client.http.pool_stats().idle_connections, 0, "{case}");
+                    assert_eq!(cancel_tokens(&cx), baseline);
+                });
+                peer.join().unwrap();
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }
+
+    #[test]
+    fn http_content_decoding_cancellation_drop_and_original_deadline_release_admission() {
+        for multithread in [false, true] {
+            for mode in ["caller", "consumer", "drop", "deadline"] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    request(&mut socket);
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                    encoder.write_all(&message(b"first")).unwrap();
+                    encoder.flush().unwrap();
+                    chunk(&mut socket, encoder.get_ref());
+                    // Neither a gRPC status nor the HTTP/gzip terminators are
+                    // available. Cancellation must retire this exact socket.
+                    expect_closed(&mut socket);
+
+                    let mut replacement = accept(&listener);
+                    request(&mut replacement);
+                    fixed(&mut replacement, 200, "application/grpc-web", "Connection: close\r\n", &success(b"healthy"));
+                    expect_closed(&mut replacement);
+                });
+                let runtime = runtime(multithread);
+                let driver = runtime.request_cx_with_budget(Budget::INFINITE);
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let owner = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(400, 0),
+                    Budget::INFINITE.with_deadline(Time::from_nanos(110)),
+                    None,
+                    driver.io_driver_handle(),
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let client = GrpcWebClient::with_http_config(one_slot_http(), config(ContentType::GrpcWeb))
+                    .unwrap().with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+                runtime.block_on_with_cx(driver.clone(), async {
+                    let baseline = cancel_tokens(&driver);
+                    let mut stream = client.server_streaming(
+                        &owner, &url, Request::new(Bytes::new()), IdentityCodec,
+                    ).await.unwrap();
+                    assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
+                    let wakes = Arc::new(WakeCount::default());
+                    let waker = Waker::from(Arc::clone(&wakes));
+                    let mut task = Context::from_waker(&waker);
+                    assert!(stream.poll_message(&mut task).is_pending());
+                    assert_eq!(client.http.pool_stats().total_connections, 1);
+                    assert_eq!(client.http.pool_stats().idle_connections, 0);
+                    assert!(stream.trailing_metadata().is_none());
+                    match mode {
+                        "caller" | "deadline" => {
+                            let before = wakes.0.load(Ordering::SeqCst);
+                            let expected = if mode == "caller" {
+                                owner.cancel_with(CancelKind::User, Some("decoded call cancellation"));
+                                Code::Cancelled
+                            } else {
+                                clock.advance(10);
+                                assert!(timer.process_timers() > 0);
+                                Code::DeadlineExceeded
+                            };
+                            assert!(wakes.0.load(Ordering::SeqCst) > before);
+                            assert_eq!(stream.message().await.unwrap_err().code(), expected);
+                            assert_eq!(stream.terminal_status().unwrap().code(), expected);
+                            assert!(stream.message().await.unwrap().is_none());
+                        }
+                        "consumer" => {
+                            stream.cancel();
+                            assert_eq!(stream.terminal_status().unwrap().code(), Code::Cancelled);
+                            assert!(stream.message().await.unwrap().is_none());
+                            assert!(owner.checkpoint().is_ok());
+                        }
+                        "drop" => {}
+                        _ => unreachable!(),
+                    }
+                    drop(stream);
+                    assert_eq!(client.http.pool_stats().total_connections, 0);
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    assert!(driver.checkpoint().is_ok());
+                    let healthy = client.unary(
+                        &driver, &url, Request::new(Bytes::new()), IdentityCodec,
+                    ).await.unwrap();
+                    assert_eq!(healthy.into_inner().as_ref(), b"healthy");
+                    assert_eq!(client.http.pool_stats().connections_created, 2);
+                    assert_eq!(client.http.pool_stats().total_connections, 0);
+                    assert_eq!(cancel_tokens(&driver), baseline);
+                });
+                peer.join().unwrap();
+                assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "compression"))]
+#[test]
+fn http_content_decoding_without_gzip_keeps_identity_usable_and_refuses_gzip() {
+    let (listener, url) = listener();
+    let peer = std::thread::spawn(move || {
+        for unavailable in [false, true] {
+            let mut socket = accept(&listener);
+            let (head, _) = request(&mut socket);
+            assert_eq!(header_values(&head, "accept-encoding"),
+                vec![if cfg!(feature = "zstd") { "zstd" } else { "identity" }]);
+            let body = success(b"identity");
+            let mut response = Vec::new();
+            write!(response,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
+                body.len(),
+                if unavailable { "Content-Encoding: gzip\r\n" } else { "" },
+            ).unwrap();
+            response.extend_from_slice(&body);
+            socket.write_all(&response).unwrap();
+            expect_closed(&mut socket);
+        }
+    });
+    let runtime = runtime(false);
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let client = GrpcWebClient::new()
+        .with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+    runtime.block_on_with_cx(cx.clone(), async {
+        let response = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap();
+        assert_eq!(response.into_inner().as_ref(), b"identity");
+        let error = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap_err();
+        assert_eq!(error.code(), Code::Unimplemented);
+        assert_eq!(client.http.pool_stats().total_connections, 0);
+    });
+    peer.join().unwrap();
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
 fn listener() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
