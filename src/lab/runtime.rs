@@ -2580,9 +2580,10 @@ impl LabRuntime {
     /// consumption merge the published message clock, including buffered
     /// receives that need no wake. Mutex and RwLock acquisition import the
     /// previous writer's release clock. RwLock writers also inherit completed
-    /// readers, while sibling readers remain concurrent. Retirement-gated joins
-    /// merge the child's terminal clock only after its finalization and
-    /// retirement barrier.
+    /// readers, while sibling readers remain concurrent. Barrier participants
+    /// inherit all surviving arrivals from their own generation and runtime.
+    /// Retirement-gated joins merge the child's terminal clock only after its
+    /// finalization and retirement barrier.
     ///
     /// A wake without an active task from this runtime has an unknown source
     /// and contributes no cross-task edge. Arbitrary shared-memory access and

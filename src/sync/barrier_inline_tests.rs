@@ -1761,3 +1761,336 @@
 
         crate::test_complete!("audit_barrier_minimal_valid_n_equals_one");
     }
+
+    fn barrier_causality_context(runtime: u64, node: &str) -> Cx {
+        Cx::for_testing()
+            .with_logical_clock(
+                crate::trace::distributed::LogicalClockMode::Vector {
+                    node: crate::remote::NodeId::new(node),
+                }
+                .build_handle(None),
+            )
+            .with_task_causality_runtime(Some(runtime))
+    }
+
+    fn poll_causal_barrier<Caps>(
+        future: &mut BarrierWaitFuture<'_, Caps>,
+    ) -> Poll<Result<BarrierWaitResult, BarrierWaitError>> {
+        Pin::new(future).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn barrier_causality_joins_every_pre_arrival_without_sampling_later_events() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(3);
+        let first = barrier_causality_context(97, "first");
+        let second = barrier_causality_context(97, "second");
+        let leader = barrier_causality_context(97, "leader");
+        let before = [first.logical_tick(), second.logical_tick(), leader.logical_tick()];
+        let mut first_wait = barrier.wait(&first);
+        let mut second_wait = barrier.wait(&second);
+        let mut leader_wait = barrier.wait(&leader);
+
+        assert!(poll_causal_barrier(&mut first_wait).is_pending());
+        assert!(poll_causal_barrier(&mut second_wait).is_pending());
+        assert_eq!(
+            first.logical_now().causal_order(&second.logical_now()),
+            CausalOrder::Concurrent,
+            "arriving alone does not import another participant's past"
+        );
+        let after_first_arrival = first.logical_tick();
+        let after_second_arrival = second.logical_tick();
+        assert!(matches!(
+            poll_causal_barrier(&mut leader_wait),
+            Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
+        ));
+        let leader_observed = leader.logical_now();
+        for late in [&after_first_arrival, &after_second_arrival] {
+            assert_eq!(late.causal_order(&leader_observed), CausalOrder::Concurrent);
+        }
+        assert!(matches!(poll_causal_barrier(&mut first_wait), Poll::Ready(Ok(_))));
+        assert!(matches!(poll_causal_barrier(&mut second_wait), Poll::Ready(Ok(_))));
+        let after = [first.logical_now(), second.logical_now(), leader_observed];
+        for arrived in &before {
+            for completed in &after {
+                assert_eq!(arrived.causal_order(completed), CausalOrder::Before);
+            }
+        }
+        assert_eq!(after[0].causal_order(&after[1]), CausalOrder::Concurrent);
+        assert_eq!(
+            poll_causal_barrier(&mut first_wait),
+            Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion))
+        );
+        assert_eq!(first.logical_now(), after[0]);
+        let state = barrier.state.lock();
+        let causality = state.causality.as_ref().unwrap();
+        assert!(causality.arrivals.is_empty());
+        assert!(causality.released.is_empty());
+    }
+
+    #[test]
+    fn barrier_causality_withdraws_cancelled_and_dropped_arrivals() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for cancel in [false, true] {
+            let barrier = Barrier::new(3);
+            let withdrawn = barrier_causality_context(97, "withdrawn");
+            let survivor = barrier_causality_context(97, "survivor");
+            let replacement = barrier_causality_context(97, "replacement");
+            let leader = barrier_causality_context(97, "leader");
+            let withdrawn_before = withdrawn.logical_tick();
+            let survivor_before = survivor.logical_tick();
+            let mut withdrawn_wait = barrier.wait(&withdrawn);
+            let mut survivor_wait = barrier.wait(&survivor);
+            assert!(poll_causal_barrier(&mut withdrawn_wait).is_pending());
+            assert!(poll_causal_barrier(&mut survivor_wait).is_pending());
+            if cancel {
+                withdrawn.set_cancel_requested(true);
+                assert_eq!(
+                    poll_causal_barrier(&mut withdrawn_wait),
+                    Poll::Ready(Err(BarrierWaitError::Cancelled))
+                );
+            }
+            drop(withdrawn_wait);
+            assert_eq!(barrier.state_snapshot_for_test(), (1, 0, 1));
+            let mut replacement_wait = barrier.wait(&replacement);
+            assert!(poll_causal_barrier(&mut replacement_wait).is_pending());
+            let mut leader_wait = barrier.wait(&leader);
+            assert!(matches!(poll_causal_barrier(&mut leader_wait), Poll::Ready(Ok(_))));
+            assert!(matches!(poll_causal_barrier(&mut survivor_wait), Poll::Ready(Ok(_))));
+            assert!(matches!(poll_causal_barrier(&mut replacement_wait), Poll::Ready(Ok(_))));
+            for observed in [leader.logical_now(), survivor.logical_now(), replacement.logical_now()] {
+                assert_eq!(withdrawn_before.causal_order(&observed), CausalOrder::Concurrent);
+                assert_eq!(survivor_before.causal_order(&observed), CausalOrder::Before);
+            }
+            let state = barrier.state.lock();
+            assert_eq!(state.cancellation_count, 1);
+            let causality = state.causality.as_ref().unwrap();
+            assert!(causality.arrivals.is_empty());
+            assert!(causality.released.is_empty());
+        }
+    }
+
+    #[test]
+    fn barrier_causality_imports_a_trip_that_wins_the_cancellation_race() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let follower = barrier_causality_context(97, "follower");
+        let leader = barrier_causality_context(97, "leader");
+        let before_leader = leader.logical_tick();
+        let mut follower_wait = barrier.wait(&follower);
+        let mut leader_wait = barrier.wait(&leader);
+        assert!(poll_causal_barrier(&mut follower_wait).is_pending());
+        assert!(matches!(poll_causal_barrier(&mut leader_wait), Poll::Ready(Ok(_))));
+        follower.set_cancel_requested(true);
+        assert!(matches!(
+            poll_causal_barrier(&mut follower_wait),
+            Poll::Ready(Ok(BarrierWaitResult { is_leader: false }))
+        ));
+        assert_eq!(before_leader.causal_order(&follower.logical_now()), CausalOrder::Before);
+        let state = barrier.state.lock();
+        assert_eq!(state.cancellation_count, 0);
+        assert!(state.causality.as_ref().unwrap().released.is_empty());
+    }
+
+    #[test]
+    fn barrier_causality_keeps_lagging_generations_separate_and_retires_drops() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let old_follower = barrier_causality_context(97, "old-follower");
+        let old_leader = barrier_causality_context(97, "old-leader");
+        let next_follower = barrier_causality_context(97, "next-follower");
+        let next_leader = barrier_causality_context(97, "next-leader");
+        let dropper = barrier_causality_context(97, "dropper");
+        let old_before = old_leader.logical_tick();
+        let next_before = next_leader.logical_tick();
+        let mut old_wait = barrier.wait(&old_follower);
+        let mut old_trip = barrier.wait(&old_leader);
+        assert!(poll_causal_barrier(&mut old_wait).is_pending());
+        assert!(matches!(poll_causal_barrier(&mut old_trip), Poll::Ready(Ok(_))));
+        let mut next_wait = barrier.wait(&next_follower);
+        let mut next_trip = barrier.wait(&next_leader);
+        assert!(poll_causal_barrier(&mut next_wait).is_pending());
+        assert!(matches!(poll_causal_barrier(&mut next_trip), Poll::Ready(Ok(_))));
+        assert_eq!(old_before.causal_order(&next_leader.logical_now()), CausalOrder::Concurrent);
+        assert_eq!(barrier.state.lock().causality.as_ref().unwrap().released.len(), 2);
+
+        assert!(matches!(poll_causal_barrier(&mut old_wait), Poll::Ready(Ok(_))));
+        assert_eq!(old_before.causal_order(&old_follower.logical_now()), CausalOrder::Before);
+        assert_eq!(next_before.causal_order(&old_follower.logical_now()), CausalOrder::Concurrent);
+        assert_eq!(barrier.state.lock().causality.as_ref().unwrap().released.len(), 1);
+        let dropper_before = dropper.logical_tick();
+        {
+            let _current = Cx::set_current(Some(dropper.clone()));
+            drop(next_wait);
+        }
+        assert_eq!(dropper.logical_now(), dropper_before);
+        assert!(barrier.state.lock().causality.as_ref().unwrap().released.is_empty());
+    }
+
+    #[test]
+    fn barrier_causality_attributes_arrival_and_completion_to_the_actual_pollers() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let argument = barrier_causality_context(97, "argument");
+        let arriver = barrier_causality_context(97, "arriver");
+        let completer = barrier_causality_context(97, "completer");
+        let leader = barrier_causality_context(97, "leader");
+        let argument_before = argument.logical_tick();
+        let arrival_before = arriver.logical_tick();
+        let leader_before = leader.logical_tick();
+        let mut wait = barrier.wait(&argument);
+        {
+            let _current = Cx::set_current(Some(arriver.clone()));
+            assert!(poll_causal_barrier(&mut wait).is_pending());
+        }
+        let arrival_after = arriver.logical_now();
+        let mut trip = barrier.wait(&leader);
+        assert!(matches!(poll_causal_barrier(&mut trip), Poll::Ready(Ok(_))));
+        assert_eq!(arrival_before.causal_order(&leader.logical_now()), CausalOrder::Before);
+        assert_eq!(argument_before.causal_order(&leader.logical_now()), CausalOrder::Concurrent);
+        {
+            let _current = Cx::set_current(Some(completer.clone()));
+            assert!(matches!(poll_causal_barrier(&mut wait), Poll::Ready(Ok(_))));
+        }
+        assert_eq!(arrival_before.causal_order(&completer.logical_now()), CausalOrder::Before);
+        assert_eq!(leader_before.causal_order(&completer.logical_now()), CausalOrder::Before);
+        assert_eq!(argument.logical_now(), argument_before);
+        assert_eq!(arriver.logical_now(), arrival_after);
+    }
+
+    #[test]
+    fn barrier_causality_does_not_borrow_attribution_from_an_untracked_arrival() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let argument = barrier_causality_context(97, "argument");
+        let completer = barrier_causality_context(97, "completer");
+        let leader = barrier_causality_context(97, "leader");
+        let argument_before = argument.logical_tick();
+        let leader_before = leader.logical_tick();
+        let mut wait = barrier.wait(&argument);
+        {
+            let _current = Cx::set_current(Some(Cx::for_testing()));
+            assert!(poll_causal_barrier(&mut wait).is_pending());
+        }
+        assert!(barrier.state.lock().causality.is_none());
+        let mut trip = barrier.wait(&leader);
+        assert!(matches!(poll_causal_barrier(&mut trip), Poll::Ready(Ok(_))));
+        {
+            let _current = Cx::set_current(Some(completer.clone()));
+            assert!(matches!(poll_causal_barrier(&mut wait), Poll::Ready(Ok(_))));
+        }
+        assert_eq!(argument.logical_now(), argument_before);
+        assert_eq!(argument_before.causal_order(&completer.logical_now()), CausalOrder::Concurrent);
+        assert_eq!(leader_before.causal_order(&completer.logical_now()), CausalOrder::Before);
+    }
+
+    #[test]
+    fn barrier_causality_fences_runtime_ids_and_untracked_completion() {
+        use crate::trace::distributed::CausalOrder;
+
+        let _host = Cx::set_current(None);
+        for tracked_poller in [false, true] {
+            let barrier = Barrier::new(3);
+            let first = barrier_causality_context(97, "first");
+            let foreign = barrier_causality_context(98, "foreign");
+            let leader = barrier_causality_context(97, "leader");
+            let poller = if tracked_poller {
+                barrier_causality_context(99, "poller")
+            } else {
+                Cx::for_testing()
+            };
+            let first_before = first.logical_tick();
+            let foreign_before = foreign.logical_tick();
+            let leader_before = leader.logical_tick();
+            let mut first_wait = barrier.wait(&first);
+            let mut foreign_wait = barrier.wait(&foreign);
+            let mut trip = barrier.wait(&leader);
+            assert!(poll_causal_barrier(&mut first_wait).is_pending());
+            let first_arrived = first.logical_now();
+            assert!(poll_causal_barrier(&mut foreign_wait).is_pending());
+            assert!(matches!(poll_causal_barrier(&mut trip), Poll::Ready(Ok(_))));
+            assert!(matches!(poll_causal_barrier(&mut foreign_wait), Poll::Ready(Ok(_))));
+            assert_eq!(first_before.causal_order(&leader.logical_now()), CausalOrder::Before);
+            assert_eq!(foreign_before.causal_order(&leader.logical_now()), CausalOrder::Concurrent);
+            assert_eq!(leader_before.causal_order(&foreign.logical_now()), CausalOrder::Concurrent);
+            let poller_before = poller.logical_tick();
+            {
+                let _current = Cx::set_current(Some(poller.clone()));
+                assert!(matches!(poll_causal_barrier(&mut first_wait), Poll::Ready(Ok(_))));
+            }
+            assert_eq!(poller.logical_now(), poller_before);
+            assert_eq!(first.logical_now(), first_arrived);
+            assert!(barrier.state.lock().causality.as_ref().unwrap().released.is_empty());
+        }
+    }
+
+    #[test]
+    fn barrier_causality_default_and_single_party_keep_no_generation_receipts() {
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let first = Cx::for_testing();
+        let second = Cx::for_testing();
+        let first_before = first.logical_now();
+        let second_before = second.logical_now();
+        let mut first_wait = barrier.wait(&first);
+        let mut second_wait = barrier.wait(&second);
+        assert!(poll_causal_barrier(&mut first_wait).is_pending());
+        assert!(matches!(poll_causal_barrier(&mut second_wait), Poll::Ready(Ok(_))));
+        assert!(matches!(poll_causal_barrier(&mut first_wait), Poll::Ready(Ok(_))));
+        assert!(barrier.state.lock().causality.is_none());
+        assert_eq!(first.logical_now(), first_before);
+        assert_eq!(second.logical_now(), second_before);
+
+        let single = Barrier::new(1);
+        let tracked = barrier_causality_context(97, "single");
+        for _ in 0..3 {
+            let mut wait = single.wait(&tracked);
+            assert!(matches!(
+                poll_causal_barrier(&mut wait),
+                Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
+            ));
+            let state = single.state.lock();
+            let causality = state.causality.as_ref().unwrap();
+            assert!(causality.arrivals.is_empty());
+            assert!(causality.released.is_empty());
+        }
+    }
+
+    #[test]
+    fn barrier_causality_clock_overflow_still_notifies_every_released_waiter() {
+        let _host = Cx::set_current(None);
+        let barrier = Barrier::new(2);
+        let follower = barrier_causality_context(97, "follower");
+        let leader = barrier_causality_context(97, "leader");
+        let mut near_overflow = VectorClock::new();
+        near_overflow.set(&crate::remote::NodeId::new("leader"), u64::MAX - 2);
+        let _ = leader.logical_receive(&LogicalTime::Vector(near_overflow));
+        let (waker, wakes) = counting_waker();
+        let mut follower_wait = barrier.wait(&follower);
+        assert!(Pin::new(&mut follower_wait).poll(&mut Context::from_waker(&waker)).is_pending());
+        let mut leader_wait = barrier.wait(&leader);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_causal_barrier(&mut leader_wait);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            poll_causal_barrier(&mut leader_wait),
+            Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion))
+        );
+        assert!(matches!(poll_causal_barrier(&mut follower_wait), Poll::Ready(Ok(_))));
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 1, 0));
+        assert!(barrier.state.lock().causality.as_ref().unwrap().released.is_empty());
+    }

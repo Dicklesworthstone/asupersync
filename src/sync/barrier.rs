@@ -9,14 +9,21 @@
 //!   arrival count. The barrier will not trip until a replacement task arrives.
 //! - **Trip**: Once the barrier trips, all waiting tasks are woken and will
 //!   observe completion, even if cancelled concurrently.
+//!
+//! In the opt-in task-causal lab, successful waits observe every participant's
+//! pre-arrival vector clock from the same runtime. Withdrawn arrivals do not
+//! contribute, and a later generation cannot overwrite an earlier receipt.
 
 use parking_lot::Mutex;
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::{CancelWakerToken, Cx};
+use crate::trace::distributed::{LogicalTime, VectorClock};
 
 #[cfg(test)]
 std::thread_local! {
@@ -60,6 +67,118 @@ struct BarrierState {
     next_waiter_id: u64,
     waiters: SmallVec<[(u64, Waker); 7]>,
     cancellation_count: u64,
+    // Allocated only when a task from an opt-in causal lab actually arrives.
+    causality: Option<Box<BarrierCausality>>,
+}
+
+/// One arrival's immutable past. Pending arrivals remain separate so removing
+/// a cancelled participant also removes its contribution to the rendezvous.
+#[derive(Debug)]
+struct BarrierArrivalCausality {
+    runtime: u64,
+    time: VectorClock,
+}
+
+impl BarrierArrivalCausality {
+    fn capture<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        // A future may be polled by a task other than the supplied cancellation
+        // context. An untracked ambient task must not borrow that context's
+        // attribution; fall back only when there is no ambient task at all.
+        let snapshot = Cx::with_current(Cx::task_causality_snapshot)
+            .unwrap_or_else(|| cx.task_causality_snapshot());
+        match snapshot {
+            Some((runtime, LogicalTime::Vector(time))) => Some(Self { runtime, time }),
+            // The opt-in task-causality runtime always builds vector clocks.
+            // Scalar timestamps cannot establish the required partial order.
+            _ => None,
+        }
+    }
+}
+
+/// A generation's componentwise join, fenced by runtime provenance. It never
+/// samples live clock handles, including when a waiter resumes much later.
+#[derive(Debug, Default)]
+struct BarrierGenerationCausality {
+    times: BTreeMap<u64, VectorClock>,
+}
+
+impl BarrierGenerationCausality {
+    fn include(&mut self, arrival: &BarrierArrivalCausality) {
+        self.times
+            .entry(arrival.runtime)
+            .or_default()
+            .merge_in(&arrival.time);
+    }
+
+    fn observe<Caps>(&self, cx: &Cx<Caps>) {
+        if Cx::with_current(|current| self.observe_on(current)).is_none() {
+            self.observe_on(cx);
+        }
+    }
+
+    fn observe_on<Caps>(&self, cx: &Cx<Caps>) {
+        if let Some(runtime) = cx.task_causality_runtime()
+            && let Some(time) = self.times.get(&runtime)
+        {
+            let _ = cx.logical_receive(&LogicalTime::Vector(time.clone()));
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReleasedBarrierCausality {
+    remaining_waiters: usize,
+    snapshot: Arc<BarrierGenerationCausality>,
+}
+
+#[derive(Debug, Default)]
+struct BarrierCausality {
+    arrivals: BTreeMap<u64, BarrierArrivalCausality>,
+    // A new generation may trip before every earlier waiter resumes. Keep
+    // each released snapshot until its last waiting future completes or drops.
+    released: BTreeMap<u64, ReleasedBarrierCausality>,
+}
+
+impl BarrierCausality {
+    fn trip(
+        &mut self,
+        generation: u64,
+        remaining_waiters: usize,
+        leader: Option<&BarrierArrivalCausality>,
+    ) -> Option<Arc<BarrierGenerationCausality>> {
+        let mut snapshot = BarrierGenerationCausality::default();
+        for arrival in self.arrivals.values() {
+            snapshot.include(arrival);
+        }
+        if let Some(leader) = leader {
+            snapshot.include(leader);
+        }
+        if snapshot.times.is_empty() {
+            return None;
+        }
+        let snapshot = Arc::new(snapshot);
+        if remaining_waiters > 0 {
+            self.released.insert(
+                generation,
+                ReleasedBarrierCausality {
+                    remaining_waiters,
+                    snapshot: Arc::clone(&snapshot),
+                },
+            );
+        }
+        self.arrivals.clear();
+        Some(snapshot)
+    }
+
+    fn finish_waiter(&mut self, generation: u64) -> Option<Arc<BarrierGenerationCausality>> {
+        let released = self.released.get_mut(&generation)?;
+        let snapshot = Arc::clone(&released.snapshot);
+        released.remaining_waiters -= 1;
+        if released.remaining_waiters == 0 {
+            self.released.remove(&generation);
+        }
+        Some(snapshot)
+    }
 }
 
 /// Barrier for N-way rendezvous.
@@ -86,6 +205,7 @@ impl Barrier {
                 next_waiter_id: 0,
                 waiters: SmallVec::new(),
                 cancellation_count: 0,
+                causality: None,
             }),
         }
     }
@@ -257,6 +377,9 @@ impl<Caps> BarrierWaitFuture<'_, Caps> {
                     .iter()
                     .position(|w| w.0 == id)
                     .map(|idx| state.waiters.remove(idx).1);
+                if let Some(causality) = state.causality.as_mut() {
+                    causality.arrivals.remove(&id);
+                }
                 drop(state);
 
                 // Mark the future complete before releasing either waker so a
@@ -271,8 +394,15 @@ impl<Caps> BarrierWaitFuture<'_, Caps> {
 
             // Generation advancement wins a cancellation race: the barrier
             // already released this waiter successfully.
+            let released = state
+                .causality
+                .as_mut()
+                .and_then(|causality| causality.finish_waiter(generation));
             drop(state);
             self.state = WaitState::Done;
+            if let Some(released) = released {
+                released.observe(self.cx);
+            }
             self.clear_cancel_waker();
             return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
         }
@@ -315,12 +445,25 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
         // allocation or custom RawWaker clone cannot unwind through a live
         // BarrierState guard.
         let mut incoming_waker = Some(cx.waker().clone());
+        let arrival = if matches!(self.state, WaitState::Init) {
+            BarrierArrivalCausality::capture(self.cx)
+        } else {
+            None
+        };
         let mut state = self.barrier.state.lock();
 
         match self.state {
             WaitState::Init => {
                 if state.arrived + 1 >= self.barrier.parties {
                     // We are the leader (or the last one to arrive).
+                    let generation = state.generation;
+                    let remaining_waiters = state.waiters.len();
+                    if arrival.is_some() && state.causality.is_none() {
+                        state.causality = Some(Box::default());
+                    }
+                    let released = state.causality.as_mut().and_then(|causality| {
+                        causality.trip(generation, remaining_waiters, arrival.as_ref())
+                    });
                     // Trip the barrier.
                     state.arrived = 0;
                     state.generation = state.generation.wrapping_add(1);
@@ -339,7 +482,13 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     // forever despite the tripped generation — then resume the
                     // first panic to the leader's caller
                     // (br-asupersync-barrier-trip-waker-panic-28i6pa).
-                    let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+                    // A clock overflow must not prevent notification either.
+                    let mut first_panic = released.and_then(|released| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            released.observe(self.cx);
+                        }))
+                        .err()
+                    });
                     for (_, waker) in wakers {
                         if let Err(payload) =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
@@ -365,6 +514,13 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
 
                     // Do fallible operations first to ensure exception safety
                     state.waiters.push((id, waker));
+                    if let Some(arrival) = arrival {
+                        state
+                            .causality
+                            .get_or_insert_with(Box::default)
+                            .arrivals
+                            .insert(id, arrival);
+                    }
 
                     // Now commit infallible state changes
                     state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
@@ -436,8 +592,15 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     Poll::Pending
                 } else {
                     // Generation advanced! We are done.
+                    let released = state
+                        .causality
+                        .as_mut()
+                        .and_then(|causality| causality.finish_waiter(generation));
                     drop(state);
                     self.state = WaitState::Done;
+                    if let Some(released) = released {
+                        released.observe(self.cx);
+                    }
                     self.clear_cancel_waker();
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: false }))
                 }
@@ -473,12 +636,20 @@ impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
                     // stale hint after any prior swap_remove in the same
                     // generation; identity is the only safe key.
                     let _ = slot;
+                    if let Some(causality) = state.causality.as_mut() {
+                        causality.arrivals.remove(&id);
+                    }
                     state
                         .waiters
                         .iter()
                         .position(|w| w.0 == id)
                         .map(|idx| state.waiters.swap_remove(idx).1)
                 } else {
+                    if let Some(causality) = state.causality.as_mut() {
+                        // Dropping a released future retires its receipt without
+                        // importing an edge into the task performing the drop.
+                        let _ = causality.finish_waiter(generation);
+                    }
                     None
                 }
             }

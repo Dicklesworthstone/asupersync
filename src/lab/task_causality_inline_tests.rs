@@ -1545,3 +1545,44 @@ fn rwlock_all_readers_precede_the_next_writer_without_ordering_each_other() {
         );
     }
 }
+
+#[test]
+fn barrier_rendezvous_observes_every_members_arrival_without_ordering_departures() {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let barrier = Arc::new(crate::sync::Barrier::new(3));
+    let messages = [
+        ("barrier-left-before", "barrier-left-after"),
+        ("barrier-middle-before", "barrier-middle-after"),
+        ("barrier-right-before", "barrier-right-after"),
+    ];
+    for (before, after) in messages {
+        let barrier = Arc::clone(&barrier);
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            cx.trace(before);
+            barrier.wait(&cx).await.unwrap();
+            cx.trace(after);
+        });
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    let events = lab.trace().snapshot();
+    for (before, _) in messages {
+        for (_, after) in messages {
+            assert_eq!(
+                message_time(&events, before).causal_order(&message_time(&events, after)),
+                CausalOrder::Before
+            );
+        }
+    }
+    for left in 0..messages.len() {
+        for right in left + 1..messages.len() {
+            assert_eq!(
+                message_time(&events, messages[left].1)
+                    .causal_order(&message_time(&events, messages[right].1)),
+                CausalOrder::Concurrent
+            );
+        }
+    }
+}
