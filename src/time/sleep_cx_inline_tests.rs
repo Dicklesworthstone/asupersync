@@ -1,8 +1,10 @@
 use super::*;
+use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
 use crate::time::{TimeSource, TimerDriver, VirtualClock};
 use crate::types::{Budget, CancelKind, RegionId, TaskId};
-use std::sync::Arc;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::task::{Context, Wake, Waker};
 
 fn context_with_driver(budget: Budget, driver: TimerDriverHandle) -> Cx {
@@ -197,11 +199,12 @@ fn expired_masked_owner_deadline_parks_without_self_waking() {
             assert!(waiting.as_mut().poll(&mut task).is_pending());
             assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
             assert_eq!(driver.pending_count(), 1);
+            assert_eq!(registrations(&cx), 1);
             assert_eq!(driver.process_timers(), 0);
             assert_eq!(counter.0.load(Ordering::Acquire), 0);
         }
     });
-    // The synchronous mask does not promise a separate wake on exit.
+    assert!(counter.0.load(Ordering::Acquire) > 0, "unmask wakes the wait");
     assert!(matches!(
         waiting.as_mut().poll(&mut task),
         Poll::Ready(Err(SleepError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
@@ -219,9 +222,11 @@ fn masked_cancellation_can_finish_at_the_requested_deadline() {
     cx.masked(|| {
         assert!(waiting.as_mut().poll(&mut task).is_pending());
         assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+        assert_eq!(registrations(&cx), 1);
         clock.advance_to(Time::from_millis(100));
         assert_eq!(driver.process_timers(), 1);
         assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+        assert_eq!(registrations(&cx), 0);
     });
     assert!(cx.checkpoint().is_err());
     assert!(driver.is_empty());
@@ -267,6 +272,49 @@ fn dropping_one_sleep_does_not_remove_another_sleeps_cancellation_wake() {
     assert!(matches!(
         second.as_mut().poll(&mut task),
         Poll::Ready(Err(SleepError::Cancelled(reason))) if reason.kind == CancelKind::User
+    ));
+    assert!(driver.is_empty());
+    assert_eq!(registrations(&cx), 0);
+}
+
+#[test]
+fn masked_repolls_refresh_one_subscription_and_drop_only_their_own() {
+    let (cx, _, driver) = virtual_context(Budget::INFINITE);
+    let old_counter = Arc::new(CountWake::default());
+    let old_waker = Waker::from(Arc::clone(&old_counter));
+    let mut old_task = Context::from_waker(&old_waker);
+    let new_counter = Arc::new(CountWake::default());
+    let new_waker = Waker::from(Arc::clone(&new_counter));
+    let mut new_task = Context::from_waker(&new_waker);
+    let mut first = Box::pin(sleep_cx(&cx, Duration::from_secs(3600)));
+    let mut second = Box::pin(sleep_until_cx(&cx, Time::from_secs(7200)));
+    let reason = CancelReason::timeout().with_cause(CancelReason::user("masked wait"));
+
+    cx.masked(|| {
+        assert!(first.as_mut().poll(&mut old_task).is_pending());
+        assert!(second.as_mut().poll(&mut old_task).is_pending());
+        cx.cancel_with_reason(reason.clone());
+        assert!(first.as_mut().poll(&mut new_task).is_pending());
+        assert!(second.as_mut().poll(&mut old_task).is_pending());
+        old_counter.0.store(0, Ordering::Release);
+        new_counter.0.store(0, Ordering::Release);
+        for _ in 0..3 {
+            assert!(first.as_mut().poll(&mut new_task).is_pending());
+            assert_eq!(registrations(&cx), 2);
+            assert_eq!(driver.pending_count(), 2);
+            assert_eq!(old_counter.0.load(Ordering::Acquire), 0);
+            assert_eq!(new_counter.0.load(Ordering::Acquire), 0);
+        }
+        drop(first);
+        assert_eq!(registrations(&cx), 1);
+        assert_eq!(driver.pending_count(), 1);
+    });
+
+    assert!(old_counter.0.load(Ordering::Acquire) > 0);
+    assert_eq!(new_counter.0.load(Ordering::Acquire), 0);
+    assert!(matches!(
+        second.as_mut().poll(&mut old_task),
+        Poll::Ready(Err(SleepError::Cancelled(actual))) if actual == reason
     ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
@@ -354,4 +402,150 @@ fn crossing_an_owner_deadline_cannot_report_successful_expiry() {
     assert!(clock.0.load(Ordering::SeqCst) >= 3);
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
+}
+
+#[test]
+fn native_foreign_owner_unmask_wakes_relative_and_absolute_sleeps() {
+    for current_thread in [true, false] {
+        for absolute in [false, true] {
+            for request_before_first_poll in [false, true] {
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5000)));
+                let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                // This owner is separate from every native runtime task. Its
+                // auxiliary subscription is the only cancellation wake source.
+                let cx = context_with_driver(Budget::INFINITE, driver.clone());
+                let reason = CancelReason::timeout()
+                    .with_message("masked native sleep")
+                    .with_cause(CancelReason::user("foreign owner cancelled"));
+                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+
+                // The controller holds the mask through a real worker poll
+                // that observes the request. Only then does it unmask; the
+                // initial request's wake has already been consumed, if any.
+                let (worker, first_park, requested_park) = cx.masked(|| {
+                    if request_before_first_poll {
+                        cx.cancel_with_reason(reason.clone());
+                    }
+                    let worker = std::thread::spawn({
+                        let cx = cx.clone();
+                        let driver = driver.clone();
+                        let saved_waker = Arc::clone(&saved_waker);
+                        move || {
+                            let builder = if current_thread {
+                                RuntimeBuilder::current_thread()
+                            } else {
+                                RuntimeBuilder::multi_thread()
+                                    .worker_threads(2)
+                                    .with_sharded_state(true)
+                            };
+                            let runtime = builder
+                                .with_timer_driver(driver.clone())
+                                .build()
+                                .unwrap();
+                            let result = runtime.block_on(async {
+                                let mut waiting = std::pin::pin!(async {
+                                    if absolute {
+                                        sleep_until_cx(&cx, Time::from_secs(3605)).await
+                                    } else {
+                                        sleep_cx(&cx, Duration::from_secs(3600)).await
+                                    }
+                                });
+                                let mut reported_initial = false;
+                                let mut reported_requested = false;
+                                poll_fn(|task| {
+                                    let result = waiting.as_mut().poll(task);
+                                    if result.is_pending() {
+                                        *saved_waker.lock() = Some(task.waker().clone());
+                                        let requested = cx.is_cancel_requested();
+                                        if !reported_initial
+                                            || (requested && !reported_requested)
+                                        {
+                                            reported_initial = true;
+                                            reported_requested |= requested;
+                                            parked_tx
+                                                .send((
+                                                    requested,
+                                                    driver.pending_count(),
+                                                    registrations(&cx),
+                                                ))
+                                                .unwrap();
+                                        }
+                                    }
+                                    result
+                                })
+                                .await
+                            });
+                            let drain = runtime.shutdown_drained(Duration::from_secs(3));
+                            done_tx
+                                .send((
+                                    result,
+                                    drain,
+                                    runtime.is_quiescent(),
+                                    driver.pending_count(),
+                                    registrations(&cx),
+                                ))
+                                .unwrap();
+                        }
+                    });
+                    let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
+                    let requested_park = if request_before_first_poll {
+                        None
+                    } else {
+                        cx.cancel_with_reason(reason.clone());
+                        Some(parked_rx.recv_timeout(Duration::from_secs(3)))
+                    };
+                    (worker, first_park, requested_park)
+                });
+
+                let completed = done_rx.recv_timeout(Duration::from_secs(3));
+                let woke_without_rescue = completed.is_ok();
+                if !woke_without_rescue {
+                    // A failing old implementation must still release the
+                    // worker. This wake is recorded and cannot make it pass.
+                    let wake = saved_waker.lock().take();
+                    if let Some(wake) = wake {
+                        wake.wake();
+                    }
+                }
+                let (result, drain, quiescent, timers, observers) = completed
+                    .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+                    .expect("native sleep must finish after the rescue wake");
+                worker.join().unwrap();
+
+                assert_eq!(
+                    first_park.expect("native sleep must reach Pending"),
+                    (request_before_first_poll, 1, 1)
+                );
+                if let Some(parked) = requested_park {
+                    assert_eq!(
+                        parked.expect("worker must observe the request while masked"),
+                        (true, 1, 1)
+                    );
+                }
+                assert!(
+                    woke_without_rescue,
+                    "unmask must wake the foreign owner's sleep: \
+                     current_thread={current_thread}, absolute={absolute}, \
+                     request_before_first_poll={request_before_first_poll}"
+                );
+                assert!(matches!(
+                    result,
+                    Err(SleepError::Cancelled(actual)) if actual == reason
+                ));
+                assert_eq!(clock.now(), Time::from_millis(5000));
+                assert!(driver.is_empty());
+                assert_eq!((timers, observers), (0, 0));
+                assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
+                assert_eq!(drain.live_tasks, 0);
+                assert_eq!(drain.live_regions, 0);
+                assert_eq!(drain.pending_spawns, 0);
+                assert_eq!(drain.pending_obligations, 0);
+                assert_eq!(drain.queued_finalizers, 0);
+                assert!(!drain.has_pending_obligation_posts);
+                assert!(quiescent);
+            }
+        }
+    }
 }

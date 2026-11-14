@@ -1,9 +1,9 @@
 //! Fallible sleep operations driven by an explicitly supplied context.
 
 use super::{Sleep, TimerDriverHandle};
-use crate::cx::{Cx, cap::HasTime};
+use crate::cx::{CancelWakerToken, Cx, cap::HasTime};
 use crate::types::{CancelReason, Time};
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -50,6 +50,7 @@ impl SleepError {
 /// with `?` lets an operation stop before performing subsequent effects.
 /// Cancellation masks follow [`Cx::checkpoint`]: a masked request remains
 /// deferred, and a sleep may finish normally while cancellation is masked.
+/// If still pending, the sleep remains subscribed so leaving the mask wakes it.
 /// An unmasked request observed on the same poll as expiry takes precedence.
 ///
 /// Dropping or completing the future removes its timer and its owned
@@ -117,6 +118,22 @@ where
     wait_until(cx, driver, deadline).await
 }
 
+// A masked request must retain its subscription until the wait completes or is
+// dropped, so leaving the mask can wake an explicitly owned context's caller.
+// A fused `Cx::cancelled()` unregisters on the request itself, before unmasking.
+struct SleepCancellation<'cx, Caps> {
+    cx: &'cx Cx<Caps>,
+    token: Option<CancelWakerToken>,
+}
+
+impl<Caps> Drop for SleepCancellation<'_, Caps> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
 async fn wait_until<Caps>(
     cx: &Cx<Caps>,
     driver: TimerDriverHandle,
@@ -125,7 +142,7 @@ async fn wait_until<Caps>(
 where
     Caps: HasTime,
 {
-    let mut cancelled = std::pin::pin!(cx.cancelled());
+    let mut cancellation = SleepCancellation { cx, token: None };
     loop {
         let now = driver.now();
         // Check after the clock snapshot so crossing an owner deadline cannot
@@ -145,7 +162,9 @@ where
             .map_or(deadline, |owner_deadline| deadline.min(owner_deadline));
         let mut timer = std::pin::pin!(Sleep::with_timer_driver(wake_at, driver.clone()));
         poll_fn(|task| {
-            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+            cancellation.token =
+                Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+            if cx.checkpoint().is_err() {
                 return Poll::Ready(());
             }
             if timer.as_mut().poll_deadline(task).is_ready() {
