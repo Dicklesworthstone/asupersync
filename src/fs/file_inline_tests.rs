@@ -418,6 +418,164 @@
         crate::test_complete!("a_write_settled_by_an_interleaved_read_is_not_written_twice");
     }
 
+    #[derive(Default)]
+    struct IoWakeCounter(std::sync::atomic::AtomicUsize);
+
+    impl Wake for IoWakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn interleaved_file_trait_waiters_all_receive_the_syscall_wake() {
+        init_test("interleaved_file_trait_waiters_all_receive_the_syscall_wake");
+        let dir = tempdir().unwrap();
+        let mut file = File::from_std(std::fs::File::create(dir.path().join("waiters")).unwrap());
+        let completion = Arc::new(Mutex::new(None));
+        let submitted_completion = Arc::clone(&completion);
+        *file.pending.lock() = Some(PendingIo::Write {
+            future: Box::pin(std::future::poll_fn(move |cx| {
+                *submitted_completion.lock() = Some(cx.waker().clone());
+                Poll::Pending
+            })),
+            chunk: Arc::new(b"hello".to_vec()),
+            restore: None,
+        });
+        let counters: [_; 4] = std::array::from_fn(|_| Arc::new(IoWakeCounter::default()));
+        let wakers = counters
+            .each_ref()
+            .map(|counter| Waker::from(Arc::clone(counter)));
+        assert!(
+            Pin::new(&mut file)
+                .poll_write(&mut Context::from_waker(&wakers[1]), b"hello")
+                .is_pending()
+        );
+        let mut bytes = [0; 1];
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(
+                    &mut Context::from_waker(&wakers[0]),
+                    &mut ReadBuf::new(&mut bytes),
+                )
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut file)
+                .poll_flush(&mut Context::from_waker(&wakers[2]))
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut file)
+                .poll_seek(&mut Context::from_waker(&wakers[3]), SeekFrom::Start(0))
+                .is_pending()
+        );
+
+        let wake = completion.lock().take().expect("syscall registered a wake");
+        wake.wake_by_ref();
+        for counter in &counters {
+            assert_eq!(counter.0.load(Ordering::SeqCst), 1, "every role must wake");
+        }
+        // Delivery consumes the registrations; a stale syscall wake retains
+        // no task and does not spuriously wake callers again.
+        wake.wake_by_ref();
+        for counter in &counters {
+            assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+            assert_eq!(Arc::strong_count(counter), 2);
+        }
+        crate::test_complete!("interleaved_file_trait_waiters_all_receive_the_syscall_wake");
+    }
+
+    #[test]
+    fn cancelling_one_owned_file_waiter_preserves_the_other_and_releases_its_waker() {
+        init_test("cancelling_one_owned_file_waiter_preserves_the_other_and_releases_its_waker");
+        let dir = tempdir().unwrap();
+        let file = File::from_std(
+            std::fs::File::create(dir.path().join("owned-waiters")).unwrap(),
+        );
+        *file.pending.lock() = Some(PendingIo::Read {
+            future: Box::pin(std::future::pending()),
+        });
+        let cancelled = Arc::new(IoWakeCounter::default());
+        let retained = Arc::new(IoWakeCounter::default());
+        let cancelled_waker = Waker::from(Arc::clone(&cancelled));
+        let retained_waker = Waker::from(Arc::clone(&retained));
+        let mut first = Box::pin(file.sync_all());
+        let mut second = Box::pin(file.sync_data());
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&cancelled_waker))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&retained_waker))
+                .is_pending()
+        );
+        assert_eq!(Arc::strong_count(&cancelled), 3);
+        assert_eq!(Arc::strong_count(&retained), 3);
+        drop(first);
+        assert_eq!(
+            Arc::strong_count(&cancelled),
+            2,
+            "cancel drops its registration"
+        );
+        file.waiters.wake_by_ref();
+        assert_eq!(cancelled.0.load(Ordering::SeqCst), 0);
+        assert_eq!(retained.0.load(Ordering::SeqCst), 1);
+        drop(second);
+        assert!(file.waiters.owned.lock().is_empty());
+        assert_eq!(Arc::strong_count(&retained), 2);
+        crate::test_complete!(
+            "cancelling_one_owned_file_waiter_preserves_the_other_and_releases_its_waker"
+        );
+    }
+
+    #[test]
+    fn ready_file_role_does_not_unregister_a_pending_role_with_the_same_waker() {
+        init_test("ready_file_role_does_not_unregister_a_pending_role_with_the_same_waker");
+        let dir = tempdir().unwrap();
+        let file = File::from_std(std::fs::File::create(dir.path().join("same-waker")).unwrap());
+        let counter = Arc::new(IoWakeCounter::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let cx = Context::from_waker(&waker);
+        assert!(
+            file.poll_with_waiters(0, &cx, |_| Poll::<()>::Pending)
+                .is_pending()
+        );
+        assert!(
+            file.poll_with_waiters(1, &cx, |_| Poll::Ready(()))
+                .is_ready()
+        );
+        assert_eq!(
+            Arc::strong_count(&counter),
+            3,
+            "only the pending role retains a wake"
+        );
+        file.waiters.wake_by_ref();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(Arc::strong_count(&counter), 2);
+        assert!(
+            file.poll_with_waiters(0, &cx, |_| Poll::<()>::Pending)
+                .is_pending()
+        );
+        drop(file);
+        assert_eq!(
+            Arc::strong_count(&counter),
+            2,
+            "dropping the file releases pending trait wakes"
+        );
+        crate::test_complete!(
+            "ready_file_role_does_not_unregister_a_pending_role_with_the_same_waker"
+        );
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum CancelledCursorOp {
         Position,
@@ -651,6 +809,7 @@
             cursor_gate: Arc::clone(&file.cursor_gate),
             pending: Mutex::new(None),
             settled_write: Mutex::new(None),
+            waiters: Arc::new(FileIoWaiters::default()),
             cursor_probe: Some(Arc::clone(&probe)),
         };
         let pool = crate::runtime::BlockingPool::new(2, 2);
@@ -704,6 +863,7 @@
                 cursor_gate: Arc::new(Mutex::new(())),
                 pending: Mutex::new(None),
                 settled_write: Mutex::new(None),
+                waiters: Arc::new(FileIoWaiters::default()),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };
@@ -712,6 +872,7 @@
                 cursor_gate: Arc::clone(&seeker.cursor_gate),
                 pending: Mutex::new(None),
                 settled_write: Mutex::new(None),
+                waiters: Arc::new(FileIoWaiters::default()),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };

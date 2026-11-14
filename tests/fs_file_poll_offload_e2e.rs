@@ -285,6 +285,147 @@ fn restricted_seek_offloads_while_a_native_sibling_progresses() {
     restricted_file_operation_keeps_worker_available(RestrictedFileOperation::Seek);
 }
 
+/// Separate native tasks poll one File through a serializing adapter, as a
+/// borrowing split or a custom duplex adapter may do. The reader parks after
+/// the writer, while the actual write syscall is held at a witnessed gate.
+/// Neither task may depend on the other task's wake to make progress.
+#[cfg(feature = "test-internals")]
+#[test]
+fn interleaved_native_file_reader_and_writer_both_resume_without_rescue() {
+    use asupersync::channel::oneshot;
+    use asupersync::fs::FileCursorOperationProbe;
+    use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::{Poll, Waker};
+
+    let path = scratch_path("native-distinct-file-waiters");
+    std::fs::write(&path, b".....tail").expect("write duplex fixture");
+    let native_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open duplex fixture");
+    let probe = Arc::new(FileCursorOperationProbe::new());
+    let mut file = File::from_std(native_file);
+    file.install_cursor_operation_probe_for_test(Arc::clone(&probe));
+    let file = Arc::new(Mutex::new(file));
+    let writer_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+    let reader_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+    let (start_reader, mut reader_start) = oneshot::channel();
+    let (reader_parked, reader_parked_rx) = std::sync::mpsc::channel();
+    let (completed, completed_rx) = std::sync::mpsc::channel();
+    let controller_probe = Arc::clone(&probe);
+    let rescue_writer = Arc::clone(&writer_waker);
+    let rescue_reader = Arc::clone(&reader_waker);
+    let controller = std::thread::spawn(move || {
+        struct Release(Arc<FileCursorOperationProbe>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release_first();
+            }
+        }
+        let _release = Release(Arc::clone(&controller_probe));
+        let write_blocked = controller_probe.wait_until_first_blocked(Duration::from_secs(5));
+        let reader_started = start_reader.send_blocking(()).is_ok();
+        let read_parked = reader_parked_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        controller_probe.release_first();
+        let mut needed_rescue = false;
+        for _ in 0..2 {
+            if completed_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                needed_rescue = true;
+                // A deliberately broken build must fail the wake oracle
+                // without leaving a parked task or blocking worker behind.
+                for slot in [&rescue_writer, &rescue_reader] {
+                    let waker = slot.lock().expect("rescue slot").take();
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                }
+                break;
+            }
+        }
+        (write_blocked, reader_started, read_parked, needed_rescue)
+    });
+
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("native runtime with one blocking worker");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("root context");
+        let writer_file = Arc::clone(&file);
+        let writer_completed = completed.clone();
+        let mut writer = cx
+            .spawn(move |_task_cx| async move {
+                let written = poll_fn(|task| {
+                    let result = Pin::new(&mut *writer_file.lock().expect("write adapter"))
+                        .poll_write(task, b"hello");
+                    if result.is_pending() {
+                        *writer_waker.lock().expect("writer rescue slot") =
+                            Some(task.waker().clone());
+                    }
+                    result
+                })
+                .await;
+                let _ = writer_completed.send(());
+                assert_eq!(written.expect("native write"), 5);
+            })
+            .expect("spawn writer");
+        let reader_file = Arc::clone(&file);
+        let mut reader = cx
+            .spawn(move |task_cx| async move {
+                reader_start
+                    .recv(&task_cx)
+                    .await
+                    .expect("start after the write blocks");
+                let mut bytes = [0; 4];
+                let mut first_pending = Some(reader_parked);
+                let read = poll_fn(|task| {
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    let result = Pin::new(&mut *reader_file.lock().expect("read adapter"))
+                        .poll_read(task, &mut buf);
+                    match result {
+                        Poll::Pending => {
+                            *reader_waker.lock().expect("reader rescue slot") =
+                                Some(task.waker().clone());
+                            if let Some(signal) = first_pending.take() {
+                                let _ = signal.send(());
+                            }
+                            Poll::Pending
+                        }
+                        Poll::Ready(result) => Poll::Ready(result.map(|()| buf.filled().len())),
+                    }
+                })
+                .await;
+                let _ = completed.send(());
+                assert_eq!(read.expect("native read"), 4);
+                assert_eq!(&bytes, b"tail");
+            })
+            .expect("spawn reader");
+        writer.join(&cx).await.expect("join writer");
+        reader.join(&cx).await.expect("join reader");
+    });
+    let (write_blocked, reader_started, read_parked, needed_rescue) =
+        controller.join().expect("join controller");
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    assert!(
+        write_blocked && reader_started && read_parked,
+        "both tasks reached the witnessed pending state"
+    );
+    assert!(
+        !needed_rescue,
+        "one File poll replaced another task's syscall wake"
+    );
+    assert_eq!(
+        probe.acquisition_count(),
+        2,
+        "one write and one read, with no duplicate write"
+    );
+    assert_eq!(std::fs::read(path).expect("read completed file"), b"hellotail");
+}
+
 #[test]
 fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
     let path = scratch_path("roundtrip");

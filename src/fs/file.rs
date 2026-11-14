@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "test-internals")]
 use std::sync::{Condvar, Mutex as StdMutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 #[cfg(feature = "test-internals")]
 use std::time::Duration;
 
@@ -270,6 +270,102 @@ struct SettledWrite {
     written: usize,
 }
 
+/// A serialized syscall can have a reader, writer, flusher and seeker waiting
+/// on it. Its blocking future stores only one waker, so give it a fanout waker
+/// instead of letting an interleaved trait poll replace the original caller.
+#[derive(Default)]
+struct FileIoWaiters {
+    traits: Mutex<[Option<Waker>; 4]>,
+    // Shared-reference methods such as sync_all may wait concurrently. Their
+    // registration lives with the borrowing future and is removed on drop.
+    owned: Mutex<slab::Slab<Option<Waker>>>,
+}
+
+impl FileIoWaiters {
+    fn register_trait(&self, role: usize, waker: &Waker) {
+        let incoming = waker.clone();
+        let retired = self.traits.lock()[role].replace(incoming);
+        drop(retired);
+    }
+
+    fn clear_trait(&self, role: usize) {
+        let retired = self.traits.lock()[role].take();
+        drop(retired);
+    }
+}
+
+impl Wake for FileIoWaiters {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let traits = std::mem::take(&mut *self.traits.lock());
+        let owned = self
+            .owned
+            .lock()
+            .iter_mut()
+            .filter_map(|(_, waker)| waker.take())
+            .collect::<Vec<_>>();
+        // Waker callbacks run outside both locks. One panicking caller must
+        // not leave other callers asleep after their syscall has completed.
+        let mut first_panic = None;
+        for waker in traits.into_iter().flatten().chain(owned) {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+            {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                } else {
+                    std::mem::forget(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+struct FileTraitWaiter {
+    waiters: Arc<FileIoWaiters>,
+    role: usize,
+    pending: bool,
+}
+
+impl Drop for FileTraitWaiter {
+    fn drop(&mut self) {
+        if !self.pending {
+            self.waiters.clear_trait(self.role);
+        }
+    }
+}
+
+struct FileOwnedWaiter {
+    waiters: Arc<FileIoWaiters>,
+    key: usize,
+}
+
+impl FileOwnedWaiter {
+    fn new(waiters: Arc<FileIoWaiters>) -> Self {
+        let key = waiters.owned.lock().insert(None);
+        Self { waiters, key }
+    }
+
+    fn register(&self, waker: &Waker) {
+        let incoming = waker.clone();
+        let retired = self.waiters.owned.lock()[self.key].replace(incoming);
+        drop(retired);
+    }
+}
+
+impl Drop for FileOwnedWaiter {
+    fn drop(&mut self) {
+        let retired = self.waiters.owned.lock().remove(self.key);
+        drop(retired);
+    }
+}
+
 impl fmt::Debug for PendingIo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -298,6 +394,7 @@ pub struct File {
     /// A write settled by another operation, awaiting its caller's retry.
     /// Locked only while `pending` is held.
     settled_write: Mutex<Option<SettledWrite>>,
+    waiters: Arc<FileIoWaiters>,
     #[cfg(feature = "test-internals")]
     cursor_probe: Option<Arc<FileCursorOperationProbe>>,
 }
@@ -490,6 +587,7 @@ impl File {
             cursor_gate: Arc::new(Mutex::new(())),
             pending: Mutex::new(None),
             settled_write: Mutex::new(None),
+            waiters: Arc::new(FileIoWaiters::default()),
             #[cfg(feature = "test-internals")]
             cursor_probe: None,
         }
@@ -507,6 +605,7 @@ impl File {
             cursor_gate,
             pending,
             settled_write: _,
+            waiters: _,
             #[cfg(feature = "test-internals")]
                 cursor_probe: _,
         } = self;
@@ -612,6 +711,7 @@ impl File {
             cursor_gate: Arc::clone(&self.cursor_gate),
             pending: Mutex::new(None),
             settled_write: Mutex::new(None),
+            waiters: Arc::new(FileIoWaiters::default()),
             #[cfg(feature = "test-internals")]
             cursor_probe: self.cursor_probe.clone(),
         })
@@ -700,6 +800,24 @@ impl File {
 // gate as the owned operations, including while a started syscall settles.
 
 impl File {
+    fn poll_with_waiters<T>(
+        &self,
+        role: usize,
+        poll_cx: &Context<'_>,
+        poll: impl FnOnce(&mut Context<'_>) -> Poll<T>,
+    ) -> Poll<T> {
+        let mut waiter = FileTraitWaiter {
+            waiters: Arc::clone(&self.waiters),
+            role,
+            pending: false,
+        };
+        waiter.waiters.register_trait(role, poll_cx.waker());
+        let waker = Waker::from(Arc::clone(&waiter.waiters));
+        let result = poll(&mut Context::from_waker(&waker));
+        waiter.pending = result.is_pending();
+        result
+    }
+
     /// Submits one bounded blocking syscall to the runtime blocking pool on
     /// behalf of a poll-trait call. The cursor gate is taken inside the
     /// closure so a started syscall keeps the gate until it completes, exactly
@@ -870,9 +988,12 @@ impl File {
     /// Settles outstanding syscalls without discarding read-ahead. Internal
     /// rewind futures remain owned by the file if the caller is dropped.
     async fn settle_trait_pending(&self) -> io::Result<()> {
+        let waiter = FileOwnedWaiter::new(Arc::clone(&self.waiters));
+        let waker = Waker::from(Arc::clone(&self.waiters));
         std::future::poll_fn(|poll_cx| {
+            waiter.register(poll_cx.waker());
             let mut pending = self.pending.lock();
-            Self::settle_foreign_pending(&mut pending, None, poll_cx)
+            Self::settle_foreign_pending(&mut pending, None, &mut Context::from_waker(&waker))
         })
         .await
     }
@@ -884,10 +1005,21 @@ impl AsyncRead for File {
         poll_cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_with_waiters(0, poll_cx, |poll_cx| this.poll_read_inner(poll_cx, buf))
+    }
+}
+
+impl File {
+    fn poll_read_inner(
+        &self,
+        poll_cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self;
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        let this = self.get_mut();
         let mut pending = this.pending.lock();
         loop {
             match pending.take() {
@@ -947,10 +1079,33 @@ impl AsyncWrite for File {
         poll_cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        this.poll_with_waiters(1, poll_cx, |poll_cx| this.poll_write_inner(poll_cx, buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.poll_with_waiters(2, poll_cx, |poll_cx| this.poll_flush_inner(poll_cx))
+    }
+
+    /// Files have no protocol-level shutdown; this settles any poll-trait
+    /// write still in flight so its error is reported here instead of being
+    /// lost when the handle is dropped, then flushes.
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
+    }
+}
+
+impl File {
+    fn poll_write_inner(
+        &self,
+        poll_cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self;
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let this = self.get_mut();
         let mut pending = this.pending.lock();
         // A write another operation settled before this retry already
         // committed its bytes: report it instead of writing them again. Any
@@ -1044,8 +1199,8 @@ impl AsyncWrite for File {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
+    fn poll_flush_inner(&self, poll_cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self;
         let mut pending = this.pending.lock();
         loop {
             match pending.take() {
@@ -1080,13 +1235,6 @@ impl AsyncWrite for File {
             }
         }
     }
-
-    /// Files have no protocol-level shutdown; this settles any poll-trait
-    /// write still in flight so its error is reported here instead of being
-    /// lost when the handle is dropped, then flushes.
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
-    }
 }
 
 impl AsyncSeek for File {
@@ -1096,6 +1244,17 @@ impl AsyncSeek for File {
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
+        this.poll_with_waiters(3, poll_cx, |poll_cx| this.poll_seek_inner(poll_cx, pos))
+    }
+}
+
+impl File {
+    fn poll_seek_inner(
+        &self,
+        poll_cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<io::Result<u64>> {
+        let this = self;
         let mut pending = this.pending.lock();
         // A write retried after the cursor moves is a new write, not a retry.
         this.settled_write.lock().take();
