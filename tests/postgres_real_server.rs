@@ -1902,6 +1902,100 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
     });
 }
 
+/// Obtain binary codec fixtures from PostgreSQL itself. Ordinary query result
+/// negotiation stays text: the backend send functions return their wire bytes
+/// as bytea, which are then passed to the public binary decoders.
+#[test]
+fn pg_real_binary_string_scalars_and_arrays() {
+    use asupersync::database::postgres::{FromSql, PgArray, oid};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_binary_string_scalars_and_arrays") {
+        return;
+    }
+    let log = PgTestLogger::new("postgres_real", "pg_real_binary_string_scalars_and_arrays");
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        unwrap_pg(
+            conn.execute_unchecked(&cx, "SET TimeZone = 'Asia/Kolkata'")
+                .await,
+            &log,
+            "set_timezone",
+        );
+        log.phase("server_binary_fixtures");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT uuid_send('30313233-3435-3637-3839-616263646566'::uuid) AS id, \
+                 date_send('0001-01-01 BC'::date) AS day, \
+                 date_send('-infinity'::date) AS forever, \
+                 timestamp_send('1999-12-31 23:59:59.999999'::timestamp) AS local, \
+                 timestamptz_send('2000-01-01 00:00:00+00'::timestamptz) AS instant, \
+                 interval_send('2 mons -3 days 01:02:03.004'::interval) AS span, \
+                 array_send('[0:1][3:3]={{30313233-3435-3637-3839-616263646566},{NULL}}'::uuid[]) AS ids, \
+                 array_send(ARRAY['2000-01-01'::date,NULL,'infinity'::date]) AS days, \
+                 array_send(ARRAY['2000-01-01 00:00:00+00'::timestamptz,NULL]) AS instants",
+            ).await,
+            &log,
+            "binary_values",
+        );
+        let row = &rows[0];
+        for (name, type_oid, expected) in [
+            ("id", oid::UUID, "30313233-3435-3637-3839-616263646566"),
+            ("day", oid::DATE, "0001-01-01 BC"),
+            ("forever", oid::DATE, "-infinity"),
+            ("local", oid::TIMESTAMP, "1999-12-31 23:59:59.999999"),
+            ("instant", oid::TIMESTAMPTZ, "2000-01-01 00:00:00+00"),
+            ("span", oid::INTERVAL, "2 mons -3 days 01:02:03.004"),
+        ] {
+            let wire = row
+                .get_typed::<Vec<u8>>(name)
+                .expect("backend binary scalar");
+            assert_eq!(
+                String::from_sql(&wire, type_oid, Format::Binary).unwrap(),
+                expected
+            );
+        }
+        let ids = row.get_typed::<Vec<u8>>("ids").unwrap();
+        let ids = PgArray::<Option<String>>::from_sql(&ids, oid::UUID_ARRAY, Format::Binary)
+            .expect("backend binary UUID matrix");
+        assert_eq!(ids.rank(), 2);
+        assert_eq!(ids.dimensions()[0].lower_bound(), 0);
+        assert_eq!(ids.dimensions()[1].lower_bound(), 3);
+        assert_eq!(
+            ids.elements(),
+            [
+                Some("30313233-3435-3637-3839-616263646566".to_string()),
+                None
+            ]
+        );
+        for (name, type_oid, expected) in [
+            (
+                "days",
+                oid::DATE_ARRAY,
+                vec![
+                    Some("2000-01-01".to_string()),
+                    None,
+                    Some("infinity".to_string()),
+                ],
+            ),
+            (
+                "instants",
+                oid::TIMESTAMPTZ_ARRAY,
+                vec![Some("2000-01-01 00:00:00+00".to_string()), None],
+            ),
+        ] {
+            let wire = row.get_typed::<Vec<u8>>(name).unwrap();
+            assert_eq!(
+                Vec::<Option<String>>::from_sql(&wire, type_oid, Format::Binary).unwrap(),
+                expected
+            );
+        }
+        log.end("pass");
+    });
+}
+
 /// `Untyped` text binds into columns whose types `text` does not convert to
 /// (uuid, numeric, inet, date, interval) and into a comparison, on the
 /// unprepared and the prepared path; the same value bound as `&str` is
