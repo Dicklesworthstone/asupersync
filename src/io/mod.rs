@@ -106,12 +106,12 @@ pub use copy_session::{
 };
 pub use duplex::{DuplexStream, duplex};
 pub use ext::{
-    AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadI8, ReadToEnd, ReadToString, ReadU8,
-    ReadVectored,
+    AsyncReadExt, AsyncReadVectoredExt, Read, ReadBufFuture, ReadExact, ReadI8, ReadToEnd, ReadToString,
+    ReadU8, ReadVectored,
 };
 pub use ext::{AsyncSeekExt, Seek};
 pub use ext::{
-    AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteI8, WriteU8,
+    AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteBuf, WriteI8, WriteU8,
     WriteVectored,
 };
 pub use owned_split::{OwnedReadHalf, OwnedReuniteError, OwnedWriteHalf, split_owned};

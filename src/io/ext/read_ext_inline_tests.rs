@@ -537,3 +537,307 @@
         crate::assert_with_log!(out == "a", "out", "a", out);
         crate::test_complete!("cancel_safety_read_to_string_preserves_prefix");
     }
+
+    fn poll_buffer_read<R, B>(reader: &mut R, buffer: &mut B) -> Poll<io::Result<usize>>
+    where
+        R: AsyncRead + Unpin + ?Sized,
+        B: crate::bytes::BufMut + ?Sized,
+    {
+        let mut future = reader.read_buf(buffer);
+        Pin::new(&mut future).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    enum BufferReadStep {
+        Pending,
+        Data(&'static [u8]),
+        PendingData(&'static [u8]),
+        ErrorData(&'static [u8]),
+        Panic,
+    }
+
+    struct BufferReader {
+        steps: std::collections::VecDeque<BufferReadStep>,
+        polls: usize,
+    }
+
+    impl BufferReader {
+        fn new(steps: impl IntoIterator<Item = BufferReadStep>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                polls: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for BufferReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.polls += 1;
+            match self.steps.pop_front().expect("read script exhausted") {
+                BufferReadStep::Pending => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                BufferReadStep::Data(bytes) => {
+                    buf.put_slice(bytes);
+                    Poll::Ready(Ok(()))
+                }
+                BufferReadStep::PendingData(bytes) => {
+                    buf.put_slice(bytes);
+                    Poll::Pending
+                }
+                BufferReadStep::ErrorData(bytes) => {
+                    buf.put_slice(bytes);
+                    Poll::Ready(Err(io::Error::from(ErrorKind::BrokenPipe)))
+                }
+                BufferReadStep::Panic => panic!("read_buf provider panic sentinel"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_buf_appends_to_vec_bytes_mut_and_trait_object() {
+        let mut input: &[u8] = b"tail";
+        let mut bytes = b"head:".to_vec();
+        let destination: &mut dyn crate::bytes::BufMut = &mut bytes;
+        assert!(matches!(
+            poll_buffer_read(&mut input, destination),
+            Poll::Ready(Ok(4))
+        ));
+        assert_eq!(bytes, b"head:tail");
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut bytes),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(bytes, b"head:tail");
+
+        let mut buffer = crate::bytes::BytesMut::from(&b"prefix:"[..]);
+        let mut input: &[u8] = b"value";
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut buffer),
+            Poll::Ready(Ok(5))
+        ));
+        assert_eq!(&buffer[..], b"prefix:value");
+    }
+
+    #[test]
+    fn read_buf_direct_window_advances_without_overwriting_tail() {
+        let mut storage = [b'_'; 5];
+        let mut input: &[u8] = b"abc";
+        {
+            let mut destination = storage.as_mut_slice();
+            assert!(matches!(
+                poll_buffer_read(&mut input, &mut destination),
+                Poll::Ready(Ok(3))
+            ));
+            assert_eq!(destination, b"__");
+        }
+        assert_eq!(&storage, b"abc__");
+    }
+
+    #[test]
+    fn read_buf_respects_append_and_direct_limits() {
+        let mut input: &[u8] = b"abcdef";
+        let mut append = crate::bytes::BufMut::limit(Vec::<u8>::new(), 3);
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut append),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(append.get_ref(), b"abc");
+        assert_eq!(input, b"def");
+        assert!(matches!(
+            poll_buffer_read(&mut PanicOnUseReader, &mut append),
+            Poll::Ready(Ok(0))
+        ));
+
+        let mut storage = [0u8; 6];
+        let mut direct = crate::bytes::BufMut::limit(storage.as_mut_slice(), 2);
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut direct),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(direct.limit(), 0);
+        assert_eq!(input, b"f");
+        assert_eq!(&storage, b"de\0\0\0\0");
+
+        let mut empty = crate::bytes::BufMut::limit(Vec::<u8>::new(), 0);
+        assert!(matches!(
+            poll_buffer_read(&mut PanicOnUseReader, &mut empty),
+            Poll::Ready(Ok(0))
+        ));
+        assert!(empty.get_ref().is_empty());
+    }
+
+    #[test]
+    fn read_buf_append_fallback_is_bounded_per_poll() {
+        let payload = vec![7u8; 9000];
+        let mut input = payload.as_slice();
+        let mut destination = Vec::new();
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut destination),
+            Poll::Ready(Ok(8192))
+        ));
+        assert_eq!(input.len(), 808);
+        assert_eq!(destination.len(), 8192);
+        assert!(matches!(
+            poll_buffer_read(&mut input, &mut destination),
+            Poll::Ready(Ok(808))
+        ));
+        assert_eq!(destination, payload);
+    }
+
+    #[test]
+    fn read_buf_pending_drop_preserves_append_and_direct_cursors() {
+        let mut source = BufferReader::new([
+            BufferReadStep::Pending,
+            BufferReadStep::Data(b"ok"),
+        ]);
+        let mut append = b"old:".to_vec();
+        assert!(poll_buffer_read(&mut source, &mut append).is_pending());
+        assert_eq!(append, b"old:");
+        assert!(matches!(
+            poll_buffer_read(&mut source, &mut append),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(append, b"old:ok");
+        assert_eq!(source.polls, 2);
+
+        let mut source = BufferReader::new([
+            BufferReadStep::Pending,
+            BufferReadStep::Data(b"ok"),
+        ]);
+        let mut storage = [b'_'; 3];
+        {
+            let mut direct = storage.as_mut_slice();
+            assert!(poll_buffer_read(&mut source, &mut direct).is_pending());
+            assert_eq!(direct, b"___");
+            assert!(matches!(
+                poll_buffer_read(&mut source, &mut direct),
+                Poll::Ready(Ok(2))
+            ));
+            assert_eq!(direct, b"_");
+        }
+        assert_eq!(&storage, b"ok_");
+    }
+
+    #[test]
+    fn read_buf_commits_partial_pending_and_error_prefixes() {
+        for error in [false, true] {
+            let step = || {
+                if error {
+                    BufferReadStep::ErrorData(b"hi")
+                } else {
+                    BufferReadStep::PendingData(b"hi")
+                }
+            };
+            let check = |result: Poll<io::Result<usize>>| {
+                if error {
+                    assert!(matches!(
+                        result,
+                        Poll::Ready(Err(e)) if e.kind() == ErrorKind::BrokenPipe
+                    ));
+                } else {
+                    assert!(matches!(result, Poll::Ready(Ok(2))));
+                }
+            };
+            let mut source = BufferReader::new([step()]);
+            let mut append = b"old:".to_vec();
+            check(poll_buffer_read(&mut source, &mut append));
+            assert_eq!(append, b"old:hi");
+
+            let mut source = BufferReader::new([step()]);
+            let mut storage = [b'_'; 4];
+            {
+                let mut direct = storage.as_mut_slice();
+                check(poll_buffer_read(&mut source, &mut direct));
+                assert_eq!(direct, b"__");
+            }
+            assert_eq!(&storage, b"hi__");
+        }
+    }
+
+    struct InvalidWritableBuffer {
+        logical: usize,
+        direct: usize,
+        window: usize,
+        data: [u8; 2],
+    }
+
+    impl crate::bytes::BufMut for InvalidWritableBuffer {
+        fn remaining_mut(&self) -> usize {
+            self.logical
+        }
+
+        fn direct_remaining_mut(&self) -> usize {
+            self.direct
+        }
+
+        fn chunk_mut(&mut self) -> &mut [u8] {
+            &mut self.data[..self.window]
+        }
+
+        fn advance_mut(&mut self, _: usize) {
+            panic!("invalid writable buffer must not advance");
+        }
+    }
+
+    #[test]
+    fn read_buf_rejects_inconsistent_capacity_before_reading() {
+        for (logical, direct, window) in [(1, 2, 1), (2, 2, 0), (2, 1, 2)] {
+            let mut buffer = InvalidWritableBuffer {
+                logical,
+                direct,
+                window,
+                data: [0; 2],
+            };
+            assert!(matches!(
+                poll_buffer_read(&mut PanicOnUseReader, &mut buffer),
+                Poll::Ready(Err(e)) if e.kind() == ErrorKind::InvalidData
+            ));
+        }
+    }
+
+    #[test]
+    fn read_buf_error_without_progress_preserves_contents() {
+        let mut source = BufferReader::new([BufferReadStep::ErrorData(b"")]);
+        let mut destination = b"kept".to_vec();
+        assert!(matches!(
+            poll_buffer_read(&mut source, &mut destination),
+            Poll::Ready(Err(e)) if e.kind() == ErrorKind::BrokenPipe
+        ));
+        assert_eq!(destination, b"kept");
+    }
+
+    #[test]
+    fn read_buf_terminal_poll_and_provider_panic_never_reissue_reads() {
+        for panics in [false, true] {
+            let step = if panics {
+                BufferReadStep::Panic
+            } else {
+                BufferReadStep::Data(b"ok")
+            };
+            let mut source = BufferReader::new([step]);
+            let mut destination = Vec::new();
+            {
+                let mut future = source.read_buf(&mut destination);
+                let mut task = Context::from_waker(Waker::noop());
+                let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Pin::new(&mut future).poll(&mut task)
+                }));
+                if panics {
+                    assert!(first.is_err());
+                } else {
+                    assert!(matches!(first, Ok(Poll::Ready(Ok(2)))));
+                }
+                assert!(matches!(
+                    Pin::new(&mut future).poll(&mut task),
+                    Poll::Ready(Err(e)) if e.kind() == ErrorKind::Other
+                ));
+            }
+            assert_eq!(source.polls, 1);
+            assert_eq!(destination, if panics { &b""[..] } else { &b"ok"[..] });
+        }
+    }

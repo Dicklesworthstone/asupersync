@@ -17,14 +17,14 @@ mod write_ext;
 pub use buf_read_ext::{AsyncBufReadExt, FillBuf, ReadUntil, SkipUntilSession, Split};
 
 pub use read_ext::{
-    AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadF32, ReadF32Le, ReadF64, ReadF64Le,
-    ReadI8, ReadI16, ReadI16Le, ReadI32, ReadI32Le, ReadI64, ReadI64Le, ReadI128, ReadI128Le,
+    AsyncReadExt, AsyncReadVectoredExt, Read, ReadBufFuture, ReadExact, ReadF32, ReadF32Le, ReadF64,
+    ReadF64Le, ReadI8, ReadI16, ReadI16Le, ReadI32, ReadI32Le, ReadI64, ReadI64Le, ReadI128, ReadI128Le,
     ReadToEnd, ReadToString, ReadU8, ReadU16, ReadU16Le, ReadU32, ReadU32Le, ReadU64, ReadU64Le,
     ReadU128, ReadU128Le, ReadVectored,
 };
 pub use seek_ext::{AsyncSeekExt, Seek};
 pub use write_ext::{
-    AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteF32, WriteF32Le,
+    AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteBuf, WriteF32, WriteF32Le,
     WriteF64, WriteF64Le, WriteI8, WriteI16, WriteI16Le, WriteI32, WriteI32Le, WriteI64,
     WriteI64Le, WriteI128, WriteI128Le, WriteU8, WriteU16, WriteU16Le, WriteU32, WriteU32Le,
     WriteU64, WriteU64Le, WriteU128, WriteU128Le, WriteVectored,

@@ -47,6 +47,58 @@ pub trait AsyncReadExt: AsyncRead {
         }
     }
 
+    /// Read some bytes into a cursor or growable byte buffer.
+    ///
+    /// The buffer uses [`crate::bytes::BufMut`]. Initialized direct windows
+    /// are filled in place; append-only buffers such as `Vec<u8>` and
+    /// [`crate::bytes::BytesMut`] use an 8 KiB scratch window. At most one
+    /// underlying read is performed per poll. Returns zero at EOF or when
+    /// the buffer has no remaining capacity, without polling an empty buffer.
+    ///
+    /// # Cancel Safety
+    ///
+    /// A pending read that produced no bytes leaves the buffer's cursor and
+    /// logical contents unchanged. Dropping that wait loses no input. If a
+    /// provider fills bytes before returning `Pending`, those bytes are
+    /// committed and returned immediately instead. An error is preserved,
+    /// including any in-place prefix the provider filled before the error;
+    /// that prefix remains in the caller-owned buffer.
+    ///
+    /// Invalid capacity declarations or a provider replacing the offered
+    /// storage return `InvalidData` without advancing the buffer. Provider
+    /// side effects on error or panic cannot be rolled back.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example() -> std::io::Result<()> {
+    /// use asupersync::bytes::{BytesCursor, BytesMut};
+    /// use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+    ///
+    /// let mut input: &[u8] = b"payload";
+    /// let mut buffer = BytesMut::new();
+    /// assert_eq!(input.read_buf(&mut buffer).await?, 7);
+    ///
+    /// let mut pending = BytesCursor::new(buffer.freeze());
+    /// let mut output = Vec::new();
+    /// assert_eq!(output.write_buf(&mut pending).await?, 7);
+    /// assert_eq!(output, b"payload");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    fn read_buf<'a, B>(&'a mut self, buf: &'a mut B) -> ReadBufFuture<'a, Self, B>
+    where
+        Self: Unpin,
+        B: crate::bytes::BufMut + ?Sized,
+    {
+        ReadBufFuture {
+            reader: self,
+            buf,
+            completed: false,
+        }
+    }
+
     /// Read the exact number of bytes to fill `buf`.
     fn read_exact<'a>(&'a mut self, buf: &'a mut [u8]) -> ReadExact<'a, Self>
     where
@@ -207,6 +259,103 @@ where
             }
         }
     }
+}
+
+/// Future for [`AsyncReadExt::read_buf`].
+///
+/// The buffer retains every committed byte independently of this future.
+pub struct ReadBufFuture<'a, R: ?Sized, B: ?Sized> {
+    reader: &'a mut R,
+    buf: &'a mut B,
+    completed: bool,
+}
+
+impl<R, B> Future for ReadBufFuture<'_, R, B>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    B: crate::bytes::BufMut + ?Sized,
+{
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadBufFuture polled after completion",
+            )));
+        }
+        // A provider panic must not make this same operation pollable again
+        // with unknown input effects. Only a clean Pending reopens the wait.
+        this.completed = true;
+        let remaining = this.buf.remaining_mut();
+        if remaining == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let direct = this.buf.direct_remaining_mut();
+        if direct > remaining {
+            return Poll::Ready(Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "buffer direct capacity exceeds its logical capacity",
+            )));
+        }
+
+        let (result, filled) = if direct == 0 {
+            // Growable buffers expose logical append capacity without unsafe
+            // access to uninitialized spare memory. Keep the fallback bounded
+            // and off the heap, including when a reader remains pending.
+            let mut scratch = [0u8; 8192];
+            let offered = remaining.min(scratch.len());
+            let (result, filled) =
+                poll_read_buf_slice(this.reader, cx, &mut scratch[..offered]);
+            if filled != 0 {
+                this.buf.put_slice(&scratch[..filled]);
+            }
+            (result, filled)
+        } else {
+            let window = this.buf.chunk_mut();
+            if window.is_empty() || window.len() > direct {
+                return Poll::Ready(Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "buffer writable chunk does not match its direct capacity",
+                )));
+            }
+            let (result, filled) = poll_read_buf_slice(this.reader, cx, window);
+            if filled != 0 {
+                this.buf.advance_mut(filled);
+            }
+            (result, filled)
+        };
+
+        match result {
+            Poll::Pending if filled == 0 => {
+                this.completed = false;
+                Poll::Pending
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending | Poll::Ready(Ok(())) => Poll::Ready(Ok(filled)),
+        }
+    }
+}
+
+fn poll_read_buf_slice<R: AsyncRead + Unpin + ?Sized>(
+    reader: &mut R,
+    cx: &mut Context<'_>,
+    destination: &mut [u8],
+) -> (Poll<io::Result<()>>, usize) {
+    let start = destination.as_ptr();
+    let offered = destination.len();
+    let mut read_buf = ReadBuf::new(destination);
+    let result = Pin::new(reader).poll_read(cx, &mut read_buf);
+    if !crate::io::transfer_session::filled_in_place(read_buf.filled(), start, offered) {
+        return (
+            Poll::Ready(Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "reader replaced the buffer offered by read_buf",
+            ))),
+            0,
+        );
+    }
+    (result, read_buf.filled().len())
 }
 
 /// Future for `read_vectored`.

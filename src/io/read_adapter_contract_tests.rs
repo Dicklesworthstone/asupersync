@@ -509,3 +509,43 @@ mod zstd {
         }
     }
 }
+
+#[test]
+fn read_buf_rejects_shifted_storage_without_advancing_or_repolling() {
+    use crate::io::AsyncReadExt;
+    use std::future::Future;
+
+    fn check<B: crate::bytes::BufMut + ?Sized>(source: &mut Reader, destination: &mut B) {
+        let polls = Arc::clone(&source.polls);
+        let mut task = Context::from_waker(Waker::noop());
+        let mut future = source.read_buf(destination);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut task),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut task),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Other
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+
+    for status in [Status::Ready, Status::Pending, Status::Error] {
+        let mut source = Reader::new(status);
+        source.shifted = true;
+        let mut append = b"kept".to_vec();
+        check(&mut source, &mut append);
+        assert_eq!(append, b"kept");
+
+        let mut source = Reader::new(status);
+        source.shifted = true;
+        let mut storage = [0xa5; 8];
+        let mut direct = storage.as_mut_slice();
+        let start = direct.as_ptr();
+        check(&mut source, &mut direct);
+        assert_eq!(direct.len(), 8);
+        assert_eq!(direct.as_ptr(), start);
+        // The invalid provider can mutate the offered memory. No cursor
+        // advance claims its shifted fill was a valid destination prefix.
+    }
+}

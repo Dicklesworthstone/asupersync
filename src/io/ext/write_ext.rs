@@ -115,6 +115,33 @@ pub trait AsyncWriteExt: AsyncWrite {
         }
     }
 
+    /// Write one contiguous chunk from a cursor-style byte buffer.
+    ///
+    /// This method uses [`crate::bytes::Buf`], including chained buffers and
+    /// [`crate::bytes::BytesCursor`]. It advances the cursor by exactly the
+    /// number of bytes accepted by the writer. It may return before all
+    /// remaining bytes or all chunks are written. An empty buffer returns
+    /// zero without polling the writer; a nonempty buffer may also receive
+    /// zero from a writer that can no longer accept bytes.
+    ///
+    /// # Cancel Safety
+    ///
+    /// A pending write advances nothing, so dropping the wait and retrying
+    /// with the same buffer cannot skip input. Errors and invalid write
+    /// counts also leave the cursor unchanged; endpoint side effects on
+    /// error or panic cannot be rolled back.
+    fn write_buf<'a, B>(&'a mut self, buf: &'a mut B) -> WriteBuf<'a, Self, B>
+    where
+        Self: Unpin,
+        B: crate::bytes::Buf + ?Sized,
+    {
+        WriteBuf {
+            writer: self,
+            buf,
+            completed: false,
+        }
+    }
+
     /// Write all bytes from `buf`.
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> WriteAll<'a, Self>
     where
@@ -393,6 +420,59 @@ where
                     Err(err) => Poll::Ready(Err(err)),
                 }
             }
+        }
+    }
+}
+
+/// Future for [`AsyncWriteExt::write_buf`].
+pub struct WriteBuf<'a, W: ?Sized, B: ?Sized> {
+    writer: &'a mut W,
+    buf: &'a mut B,
+    completed: bool,
+}
+
+impl<W, B> Future for WriteBuf<'_, W, B>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+    B: crate::bytes::Buf + ?Sized,
+{
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteBuf future polled after completion",
+            )));
+        }
+        this.completed = true;
+        let remaining = this.buf.remaining();
+        if remaining == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let chunk = this.buf.chunk();
+        if chunk.is_empty() || chunk.len() > remaining {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "buffer readable chunk does not match its remaining length",
+            )));
+        }
+        let offered = chunk.len();
+        match Pin::new(&mut *this.writer).poll_write(cx, chunk) {
+            Poll::Pending => {
+                this.completed = false;
+                Poll::Pending
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(n)) => match checked_write_count(n, offered) {
+                Ok(n) => {
+                    if n != 0 {
+                        this.buf.advance(n);
+                    }
+                    Poll::Ready(Ok(n))
+                }
+                Err(error) => Poll::Ready(Err(error)),
+            },
         }
     }
 }

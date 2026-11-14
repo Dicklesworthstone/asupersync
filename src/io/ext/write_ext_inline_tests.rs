@@ -793,3 +793,231 @@
         crate::assert_with_log!(val == expected, "roundtrip u32", expected, val);
         crate::test_complete!("write_read_roundtrip_u32");
     }
+
+    fn poll_buffer_write<W, B>(writer: &mut W, buffer: &mut B) -> Poll<io::Result<usize>>
+    where
+        W: AsyncWrite + Unpin + ?Sized,
+        B: crate::bytes::Buf + ?Sized,
+    {
+        let mut future = writer.write_buf(buffer);
+        Pin::new(&mut future).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    enum BufferWriteStep {
+        Pending,
+        Accept(usize),
+        Error,
+        Overreport,
+        Panic,
+    }
+
+    struct BufferWriter {
+        steps: std::collections::VecDeque<BufferWriteStep>,
+        written: Vec<u8>,
+        polls: usize,
+    }
+
+    impl BufferWriter {
+        fn new(steps: impl IntoIterator<Item = BufferWriteStep>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                written: Vec::new(),
+                polls: 0,
+            }
+        }
+    }
+
+    impl AsyncWrite for BufferWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.polls += 1;
+            match self.steps.pop_front().expect("write script exhausted") {
+                BufferWriteStep::Pending => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                BufferWriteStep::Accept(limit) => {
+                    let n = limit.min(buf.len());
+                    self.written.extend_from_slice(&buf[..n]);
+                    Poll::Ready(Ok(n))
+                }
+                BufferWriteStep::Error => {
+                    Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+                }
+                BufferWriteStep::Overreport => Poll::Ready(Ok(buf.len() + 1)),
+                BufferWriteStep::Panic => panic!("write_buf provider panic sentinel"),
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn write_buf_advances_bytes_cursor_by_partial_writes() {
+        let mut writer = BufferWriter::new([
+            BufferWriteStep::Accept(2),
+            BufferWriteStep::Accept(usize::MAX),
+        ]);
+        let mut cursor = crate::bytes::Bytes::copy_from_slice(b"hello").reader();
+        let source: &mut dyn crate::bytes::Buf = &mut cursor;
+        assert!(matches!(
+            poll_buffer_write(&mut writer, source),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(cursor.position(), 2);
+        assert_eq!(writer.written, b"he");
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut cursor),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(cursor.position(), 5);
+        assert_eq!(writer.written, b"hello");
+    }
+
+    #[test]
+    fn write_buf_preserves_segmented_buffer_order() {
+        let mut source = crate::bytes::Buf::chain(&b"ab"[..], &b"cde"[..]);
+        let mut writer = Vec::new();
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(crate::bytes::Buf::remaining(&source), 3);
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(crate::bytes::Buf::remaining(&source), 0);
+        assert_eq!(writer, b"abcde");
+    }
+
+    #[test]
+    fn write_buf_pending_drop_leaves_retry_cursor_unchanged() {
+        let mut writer = BufferWriter::new([
+            BufferWriteStep::Pending,
+            BufferWriteStep::Accept(2),
+        ]);
+        let mut source: &[u8] = b"abc";
+        assert!(poll_buffer_write(&mut writer, &mut source).is_pending());
+        assert_eq!(source, b"abc");
+        assert!(writer.written.is_empty());
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(source, b"c");
+        assert_eq!(writer.written, b"ab");
+        assert_eq!(writer.polls, 2);
+    }
+
+    #[test]
+    fn write_buf_empty_input_never_polls_writer() {
+        let mut source: &[u8] = b"";
+        assert!(matches!(
+            poll_buffer_write(&mut PanicOnUseWriter, &mut source),
+            Poll::Ready(Ok(0))
+        ));
+    }
+
+    #[test]
+    fn write_buf_zero_and_error_keep_source_cursor() {
+        let mut writer = BufferWriter::new([
+            BufferWriteStep::Accept(0),
+            BufferWriteStep::Error,
+        ]);
+        let mut source: &[u8] = b"kept";
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(source, b"kept");
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(source, b"kept");
+        assert!(writer.written.is_empty());
+    }
+
+    #[test]
+    fn write_buf_checks_report_against_chunk_not_total_remaining() {
+        let mut writer = BufferWriter::new([BufferWriteStep::Overreport]);
+        let mut source = crate::bytes::Buf::chain(&b"a"[..], &b"bcdef"[..]);
+        assert!(matches!(
+            poll_buffer_write(&mut writer, &mut source),
+            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(crate::bytes::Buf::remaining(&source), 6);
+        assert_eq!(crate::bytes::Buf::chunk(&source), b"a");
+    }
+
+    struct InvalidReadableBuffer {
+        remaining: usize,
+        window: usize,
+    }
+
+    impl crate::bytes::Buf for InvalidReadableBuffer {
+        fn remaining(&self) -> usize {
+            self.remaining
+        }
+
+        fn chunk(&self) -> &[u8] {
+            &b"ab"[..self.window]
+        }
+
+        fn advance(&mut self, _: usize) {
+            panic!("invalid readable buffer must not advance");
+        }
+    }
+
+    #[test]
+    fn write_buf_rejects_inconsistent_chunk_before_writing() {
+        for (remaining, window) in [(2, 0), (1, 2)] {
+            let mut source = InvalidReadableBuffer { remaining, window };
+            assert!(matches!(
+                poll_buffer_write(&mut PanicOnUseWriter, &mut source),
+                Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::InvalidData
+            ));
+        }
+    }
+
+    #[test]
+    fn write_buf_terminal_poll_and_provider_panic_never_reissue_writes() {
+        for panics in [false, true] {
+            let step = if panics {
+                BufferWriteStep::Panic
+            } else {
+                BufferWriteStep::Accept(2)
+            };
+            let mut writer = BufferWriter::new([step]);
+            let mut source: &[u8] = b"abc";
+            {
+                let mut future = writer.write_buf(&mut source);
+                let mut task = Context::from_waker(Waker::noop());
+                let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Pin::new(&mut future).poll(&mut task)
+                }));
+                if panics {
+                    assert!(first.is_err());
+                } else {
+                    assert!(matches!(first, Ok(Poll::Ready(Ok(2)))));
+                }
+                assert!(matches!(
+                    Pin::new(&mut future).poll(&mut task),
+                    Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Other
+                ));
+            }
+            assert_eq!(writer.polls, 1);
+            assert_eq!(source, if panics { &b"abc"[..] } else { &b"c"[..] });
+            assert_eq!(writer.written, if panics { &b""[..] } else { &b"ab"[..] });
+        }
+    }
