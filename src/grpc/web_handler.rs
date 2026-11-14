@@ -20,11 +20,18 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
-use crate::bytes::{Buf, BytesMut};
+use crate::bytes::{Buf, Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::http::body::{Body, Frame, HeaderMap};
+use crate::http::decode::{
+    ContentDecodeError, ContentDecodeLimits, ContentDecodePlan, ContentDecodedBody, ContentDecoder,
+    invalidated_field, is_limit_error,
+};
 use crate::http::h1::types::{Method, Request as HttpRequest, Response as HttpResponse, Version};
-use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender, StreamingServerRequest};
+use crate::http::h1::{
+    Http1ProducedResponse, HttpError, IncomingBodyError, OutgoingBodySender, StreamingServerRequest,
+};
+use crate::types::CancelKind;
 
 use super::server::server_streaming::{ServerStreamSink, ServerStreamingConfig};
 
@@ -94,12 +101,80 @@ impl Server {
         self: &Arc<Self>,
         config: GrpcWebConfig,
     ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
+        self.grpc_web_unary_handler(config, None)
+    }
+
+    /// Opt a registered unary gRPC-Web handler into HTTP content decoding.
+    ///
+    /// HTTP `Content-Encoding` is decoded before text base64 and gRPC message
+    /// framing. This is independent of message-level `grpc-encoding`, which
+    /// still requires the server's existing compression policy. Identity works
+    /// without codec features; gzip, deflate, and Brotli require `compression`,
+    /// and zstd requires `zstd`.
+    ///
+    /// The mandatory encoded-input and per-stage decoded-output limits are
+    /// tightened to the request's binary/text wire allowance in `config`.
+    /// The listener has already collected the encoded body; its receive limit
+    /// must also be configured. Decoding moves that input into the decoder
+    /// without copying it, and collects one bounded decoded representation.
+    /// See [`ContentDecodeLimits`] for retained codec output bounds.
+    ///
+    /// Every codec must finish successfully before the registered service is
+    /// invoked. Malformed data and HTTP trailers are refused, size refusals
+    /// become RESOURCE_EXHAUSTED, and missing codecs become UNIMPLEMENTED.
+    /// Original HTTP fields are bounded before transformed length/coding/digest
+    /// fields are removed. The listener's current request `Cx` is required and
+    /// remains the cancellation authority throughout decoding and dispatch.
+    ///
+    /// # Errors
+    /// Returns the same installation errors as
+    /// [`Self::registered_grpc_web_unary_handler`].
+    pub fn registered_grpc_web_unary_handler_with_http_decoding(
+        self: &Arc<Self>,
+        config: GrpcWebConfig,
+        limits: ContentDecodeLimits,
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
+        self.grpc_web_unary_handler(config, Some(limits))
+    }
+
+    fn grpc_web_unary_handler(
+        self: &Arc<Self>,
+        config: GrpcWebConfig,
+        decoding: Option<ContentDecodeLimits>,
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
         let native = self.registered_unary_handler()?;
+        let metadata_limit = self.config().max_metadata_size;
         Ok(move |request: HttpRequest| -> GrpcWebHandlerFuture {
             let native = native.clone();
             let config = config.clone();
             Box::pin(async move {
                 let version = request.version;
+                let request = if let Some(limits) = decoding {
+                    let mode = match request_modes(&request) {
+                        Ok((_, mode)) => mode,
+                        Err(response) => return response,
+                    };
+                    let Some(cx) = Cx::current() else {
+                        return error_response(
+                            &Status::internal("gRPC-Web HTTP decoding requires a runtime Cx"),
+                            mode,
+                            version,
+                        );
+                    };
+                    let mut request = request;
+                    let source = Bytes::from(std::mem::take(&mut request.body));
+                    match decode_request_body(
+                        &cx, request, source, |never| match never {}, &config,
+                        limits, metadata_limit,
+                    )
+                    .await
+                    {
+                        Ok(request) => request,
+                        Err(response) => return response,
+                    }
+                } else {
+                    request
+                };
                 let (request, mode) = match prepare_request(request, &config) {
                     Ok(prepared) => prepared,
                     Err(response) => return response,
@@ -170,6 +245,56 @@ impl Server {
         + Sync
         + 'static,
     > {
+        self.grpc_web_streaming_handler(wire, streaming, None)
+    }
+
+    /// Decode HTTP request content before native gRPC-Web unary/server streaming.
+    ///
+    /// This opt-in uses the same decoding, metadata, and error policy as
+    /// [`Self::registered_grpc_web_unary_handler_with_http_decoding`], but pulls
+    /// directly from the listener's bounded incoming body. It does not collect
+    /// an encoded upload, spawn a driver, or create another body queue. It
+    /// retains one bounded decoded request plus the source/codec storage
+    /// described by [`ContentDecodeLimits`].
+    ///
+    /// The explicit request `Cx` controls decoding even when a different task
+    /// polls the handler. No service is called and no response producer is
+    /// admitted until the HTTP body and all codec checksums/footers reach clean
+    /// EOF. Dropping or cancelling the handler drops its incoming-body owner;
+    /// the listener remains responsible for its bounded drain-or-close policy.
+    /// Response streaming, backpressure, and message compression keep the
+    /// semantics of [`Self::registered_grpc_web_streaming_handler`].
+    ///
+    /// # Errors
+    /// Returns the same installation errors as
+    /// [`Self::registered_grpc_web_streaming_handler`].
+    pub fn registered_grpc_web_streaming_handler_with_http_decoding(
+        self: &Arc<Self>,
+        wire: GrpcWebConfig,
+        streaming: ServerStreamingConfig,
+        limits: ContentDecodeLimits,
+    ) -> io::Result<
+        impl Fn(Cx, StreamingServerRequest) -> GrpcWebStreamingHandlerFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    > {
+        self.grpc_web_streaming_handler(wire, streaming, Some(limits))
+    }
+
+    fn grpc_web_streaming_handler(
+        self: &Arc<Self>,
+        wire: GrpcWebConfig,
+        streaming: ServerStreamingConfig,
+        decoding: Option<ContentDecodeLimits>,
+    ) -> io::Result<
+        impl Fn(Cx, StreamingServerRequest) -> GrpcWebStreamingHandlerFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    > {
         self.validate_registered_streaming(streaming)?;
         if wire.max_trailer_bytes < 17 {
             return Err(io::Error::new(
@@ -184,7 +309,26 @@ impl Server {
             let native_unary = native_unary.clone();
             let wire = wire.clone();
             Box::pin(async move {
-                let request = match collect_streaming_request(&cx, request, &wire).await {
+                let collected = if let Some(limits) = decoding {
+                    let StreamingServerRequest { head, peer_addr, body, .. } = request;
+                    let request = HttpRequest {
+                        method: head.method,
+                        uri: head.uri,
+                        version: head.version,
+                        headers: head.headers,
+                        body: Vec::new(),
+                        trailers: Vec::new(),
+                        peer_addr,
+                    };
+                    decode_request_body(
+                        &cx, request, body, incoming_body_status, &wire,
+                        limits, server.config().max_metadata_size,
+                    )
+                    .await
+                } else {
+                    collect_streaming_request(&cx, request, &wire).await
+                };
+                let request = match collected {
                     Ok(request) => request,
                     Err(response) => return produced_buffered(response, streaming),
                 };
@@ -310,6 +454,182 @@ async fn collect_streaming_request(
                 )));
             }
         }
+    }
+    Ok(request)
+}
+
+fn request_metadata_remaining(
+    fields: impl IntoIterator<Item = (usize, usize)>,
+    remaining: Option<usize>,
+) -> Result<Option<usize>, Status> {
+    let Some(mut remaining) = remaining else {
+        return Ok(None);
+    };
+    for (name, value) in fields {
+        // Match the native gRPC field allowance, including its per-field
+        // overhead, but count original HTTP bytes before decoding erases any.
+        remaining = name
+            .checked_add(value)
+            .and_then(|bytes| bytes.checked_add(32))
+            .and_then(|bytes| remaining.checked_sub(bytes))
+            .ok_or_else(|| Status::resource_exhausted("gRPC-Web request metadata exceeds limit"))?;
+    }
+    Ok(Some(remaining))
+}
+
+// Reject original HTTP trailers before a content transform can remove their
+// fields. The gRPC-Web request contract admits exactly one DATA message, with
+// no HTTP or gRPC-Web trailer block, for unary and server-streaming calls.
+struct RequestContentSource<B: Body> {
+    body: B,
+    map_error: fn(B::Error) -> Status,
+    metadata_remaining: Option<usize>,
+}
+
+impl<B: Body + Unpin> Body for RequestContentSource<B> {
+    type Data = B::Data;
+    type Error = Status;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        task: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.body).poll_frame(task).map(|frame| {
+            frame.map(|frame| match frame {
+                Ok(Frame::Data(data)) => Ok(Frame::Data(data)),
+                Ok(Frame::Trailers(trailers)) => {
+                    request_metadata_remaining(
+                        trailers.iter().map(|(name, value)| {
+                            (name.as_str().len(), value.as_bytes().len())
+                        }),
+                        this.metadata_remaining,
+                    )?;
+                    Err(Status::invalid_argument(
+                        "gRPC-Web unary request trailers are unsupported",
+                    ))
+                }
+                Err(error) => Err((this.map_error)(error)),
+            })
+        })
+    }
+}
+
+fn request_cancellation_status(kind: CancelKind) -> Status {
+    match kind {
+        CancelKind::Timeout | CancelKind::Deadline => {
+            Status::deadline_exceeded("gRPC-Web request decoding deadline exceeded")
+        }
+        CancelKind::PollQuota | CancelKind::CostBudget => {
+            Status::resource_exhausted("gRPC-Web request decoding budget exhausted")
+        }
+        _ => Status::cancelled("gRPC-Web request decoding cancelled"),
+    }
+}
+
+fn incoming_body_status(error: IncomingBodyError) -> Status {
+    match error {
+        IncomingBodyError::Cancelled { kind } => request_cancellation_status(kind),
+        IncomingBodyError::BodyTooLarge { .. }
+        | IncomingBodyError::QueueFrameTooLarge { .. }
+        | IncomingBodyError::TrailersTooLarge
+        | IncomingBodyError::AccountingOverflow
+        | IncomingBodyError::DrainLimitExceeded { .. } => {
+            Status::resource_exhausted("gRPC-Web HTTP request body exceeds limit")
+        }
+        IncomingBodyError::DrainTimeout => {
+            Status::deadline_exceeded("gRPC-Web HTTP request body timed out")
+        }
+        _ => Status::invalid_argument("invalid gRPC-Web HTTP request body"),
+    }
+}
+
+fn request_decoding_io_status(error: &io::Error) -> Status {
+    if is_limit_error(error) {
+        Status::resource_exhausted("gRPC-Web decoded HTTP request exceeds limit")
+    } else if error.kind() == io::ErrorKind::Unsupported {
+        Status::unimplemented("gRPC-Web HTTP request content codec is unavailable")
+    } else {
+        Status::invalid_argument("invalid gRPC-Web HTTP request content encoding")
+    }
+}
+
+fn request_decoding_status(error: ContentDecodeError<Status>) -> Status {
+    match error {
+        ContentDecodeError::Body(status) => status,
+        ContentDecodeError::Decode(error) => request_decoding_io_status(&error),
+        ContentDecodeError::EncodedLimit { .. } => {
+            Status::resource_exhausted("gRPC-Web encoded HTTP request exceeds limit")
+        }
+        ContentDecodeError::Cancelled { kind } => request_cancellation_status(kind),
+    }
+}
+
+async fn decode_request_body<B: Body + Unpin>(
+    cx: &Cx,
+    mut request: HttpRequest,
+    source: B,
+    map_error: fn(B::Error) -> Status,
+    config: &GrpcWebConfig,
+    limits: ContentDecodeLimits,
+    metadata_limit: usize,
+) -> Result<HttpRequest, HttpResponse> {
+    let (input_mode, output_mode) = request_modes(&request)?;
+    let version = request.version;
+    let reject = |status| error_response(&status, output_mode, version);
+    let metadata_remaining = request_metadata_remaining(
+        request.headers.iter().chain(&request.trailers)
+            .map(|(name, value)| (name.len(), value.len())),
+        (metadata_limit != 0).then_some(metadata_limit),
+    )
+    .map_err(reject)?;
+    if !request.trailers.is_empty() {
+        return Err(reject(Status::invalid_argument(
+            "gRPC-Web unary request trailers are unsupported",
+        )));
+    }
+    let limit = if input_mode.is_text_mode() {
+        config.max_request_bytes.saturating_mul(4)
+    } else {
+        config.max_request_bytes
+    };
+    let coding = ContentDecoder::from_request_fields(request.headers.iter().filter_map(|(key, value)| {
+        key.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
+    }))
+    .map_err(|error| reject(request_decoding_io_status(&error)))?;
+    let transformed = !coding.is_identity();
+    let plan = ContentDecodePlan::new(coding, limits.tightened(limit))
+        .map_err(|error| reject(request_decoding_io_status(&error)))?;
+    let source = RequestContentSource { body: source, map_error, metadata_remaining };
+    let mut decoded = ContentDecodedBody::from_plan(source, plan).with_cx(cx);
+    let mut deadline = cx.budget_deadline_sleep();
+    while let Some(frame) = poll_fn(|task| {
+        // Preserve the explicit owner's budget wake even when another native
+        // task drives this handler. Once a masked deadline fires, retire the
+        // spent timer; the decoder keeps its cancellation token through unmask.
+        if deadline.as_mut().is_some_and(|sleep| Pin::new(sleep).poll_deadline(task).is_ready()) {
+            deadline = None;
+        }
+        Pin::new(&mut decoded).poll_frame(task)
+    })
+    .await
+    {
+        match frame.map_err(|error| reject(request_decoding_status(error)))? {
+            Frame::Data(data) => request.body.extend_from_slice(data.chunk()),
+            Frame::Trailers(_) => {
+                return Err(reject(Status::invalid_argument(
+                    "gRPC-Web unary request trailers are unsupported",
+                )));
+            }
+        }
+    }
+    cx.checkpoint().map_err(|_| {
+        reject(request_cancellation_status(
+            cx.cancel_reason().map_or(CancelKind::User, |reason| reason.kind),
+        ))
+    })?;
+    if transformed {
+        request.headers.retain(|(name, _)| !invalidated_field(name));
     }
     Ok(request)
 }
@@ -554,10 +874,7 @@ fn decode_text(input: &[u8], limit: usize) -> Result<Vec<u8>, Status> {
     Ok(output)
 }
 
-fn prepare_request(
-    mut request: HttpRequest,
-    config: &GrpcWebConfig,
-) -> Result<(HttpRequest, ContentType), HttpResponse> {
+fn request_modes(request: &HttpRequest) -> Result<(ContentType, ContentType), HttpResponse> {
     let version = request.version;
     if request.method != Method::Post {
         return Err(http_error(405, "Method Not Allowed", version).with_header("allow", "POST"));
@@ -575,9 +892,18 @@ fn prepare_request(
     let Some(input_mode) = media_type(content_type) else {
         return Err(http_error(415, "Unsupported Media Type", version));
     };
-    let Some(output_mode) = negotiate(&request, input_mode) else {
+    let Some(output_mode) = negotiate(request, input_mode) else {
         return Err(http_error(406, "Not Acceptable", version));
     };
+    Ok((input_mode, output_mode))
+}
+
+fn prepare_request(
+    mut request: HttpRequest,
+    config: &GrpcWebConfig,
+) -> Result<(HttpRequest, ContentType), HttpResponse> {
+    let version = request.version;
+    let (input_mode, output_mode) = request_modes(&request)?;
     let reject = |status| error_response(&status, output_mode, version);
     if !request.trailers.is_empty() {
         return Err(reject(Status::invalid_argument(

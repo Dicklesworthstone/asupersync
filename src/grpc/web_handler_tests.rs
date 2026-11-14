@@ -1389,3 +1389,709 @@ fn streaming_handler_requires_room_for_bare_terminal_status() {
             .is_err()
     );
 }
+
+mod http_request_decoding {
+    use super::*;
+
+    fn run_decoded(
+        server: &Arc<Server>,
+        request: HttpRequest,
+        wire: GrpcWebConfig,
+        limits: ContentDecodeLimits,
+    ) -> HttpResponse {
+        let handler = server
+            .registered_grpc_web_unary_handler_with_http_decoding(wire, limits)
+            .unwrap();
+        let cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(cx.clone()));
+        let response = futures_lite::future::block_on(handler(request));
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        response
+    }
+
+    fn collect_produced(cx: &Cx, produced: Http1ProducedResponse) -> HttpResponse {
+        let (mut response, producer) = produced.into_parts(cx);
+        let collect = async move {
+            let mut bytes = Vec::new();
+            while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+                match frame.unwrap() {
+                    Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
+                    Frame::Trailers(_) => panic!("gRPC-Web status belongs in the body"),
+                }
+            }
+            let mut reply = HttpResponse::new(response.head.status, response.head.reason, bytes);
+            reply.headers = response.head.headers;
+            reply
+        };
+        let (completion, reply) = futures_lite::future::block_on(
+            futures_lite::future::zip(producer, collect),
+        );
+        assert!(completion.is_ok());
+        reply
+    }
+
+    fn reply_frames(response: &HttpResponse) -> Vec<(u8, Vec<u8>)> {
+        let text = response.header_value("content-type")
+            .is_some_and(|value| value.contains("grpc-web-text"));
+        let bytes = if text {
+            let mut bytes = Vec::new();
+            for quartet in response.body.chunks(4) {
+                bytes.extend(STANDARD.decode(quartet).unwrap());
+            }
+            bytes
+        } else {
+            response.body.clone()
+        };
+        let mut frames = Vec::new();
+        let mut remaining = bytes.as_slice();
+        while !remaining.is_empty() {
+            assert!(remaining.len() >= 5);
+            let length = u32::from_be_bytes(remaining[1..5].try_into().unwrap()) as usize;
+            assert!(remaining.len() >= 5 + length);
+            frames.push((remaining[0], remaining[5..5 + length].to_vec()));
+            remaining = &remaining[5 + length..];
+        }
+        frames
+    }
+
+    fn terminal_code(response: &HttpResponse) -> String {
+        let frames = reply_frames(response);
+        let (flag, payload) = frames.last().expect("terminal gRPC-Web frame");
+        assert_eq!(*flag, 0x80);
+        let block = std::str::from_utf8(payload).unwrap();
+        let statuses: Vec<_> = block.split("\r\n")
+            .filter_map(|line| line.strip_prefix("grpc-status: "))
+            .collect();
+        assert_eq!(statuses.len(), 1);
+        statuses[0].to_owned()
+    }
+
+    #[test]
+    fn http_request_decoding_identity_limits_and_unavailable_codecs_are_typed() {
+        let (server, calls) = server();
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            let reply = run_decoded(
+                &server, request(mode), GrpcWebConfig::default(),
+                ContentDecodeLimits::new(1024, 1024),
+            );
+            assert_eq!(terminal_code(&reply), "0");
+            assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        for (encoding, expected) in [("unknown-codec", "12"), ("gzip;level=1", "3"), ("", "3")] {
+            let mut input = request(ContentType::GrpcWeb);
+            input.headers.push(("content-encoding".to_owned(), encoding.to_owned()));
+            let reply = run_decoded(
+                &server, input, GrpcWebConfig::default(),
+                ContentDecodeLimits::new(1024, 1024),
+            );
+            assert_eq!(terminal_code(&reply), expected);
+        }
+        for limits in [ContentDecodeLimits::new(0, 1024), ContentDecodeLimits::new(1024, 8)] {
+            let reply = run_decoded(&server, request(ContentType::GrpcWeb), GrpcWebConfig::default(), limits);
+            assert_eq!(terminal_code(&reply), "8");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "refused inputs never invoke the service");
+
+        #[cfg(not(feature = "compression"))]
+        {
+            let mut input = request(ContentType::GrpcWeb);
+            input.headers.push(("content-encoding".to_owned(), "gzip".to_owned()));
+            let reply = run_decoded(
+                &server, input, GrpcWebConfig::default(),
+                ContentDecodeLimits::new(1024, 1024),
+            );
+            assert_eq!(terminal_code(&reply), "12");
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[cfg(feature = "compression")]
+    fn encoded_request(mode: ContentType, message_gzip: bool) -> HttpRequest {
+        let mut input = request(mode);
+        let payload = if message_gzip { gzip(b"ping") } else { b"ping".to_vec() };
+        let mut frame = vec![u8::from(message_gzip)];
+        frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let representation = if mode.is_text_mode() {
+            // Independently padded quartets split the five-byte gRPC prefix.
+            frame.chunks(1).map(|byte| STANDARD.encode(byte)).collect::<String>().into_bytes()
+        } else {
+            frame
+        };
+        input.body = gzip(&representation);
+        input.headers.push(("content-encoding".to_owned(), "gzip".to_owned()));
+        input.headers.push(("digest".to_owned(), "encoded-only".to_owned()));
+        if message_gzip {
+            input.headers.push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+        }
+        input
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_precedes_text_and_independent_message_compression() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = Arc::new(Server::builder()
+            .add_service(Echo { calls: Arc::clone(&calls) })
+            .accept_compression(crate::grpc::client::CompressionEncoding::Gzip)
+            .build());
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            for message_gzip in [false, true] {
+                let reply = run_decoded(
+                    &server, encoded_request(mode, message_gzip), GrpcWebConfig::default(),
+                    ContentDecodeLimits::new(4096, 4096).with_chunk_size(NonZeroUsize::new(3).unwrap()),
+                );
+                assert_eq!(terminal_code(&reply), "0");
+                assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        let (identity_server, identity_calls) = super::server();
+        let reply = run_decoded(
+            &identity_server, encoded_request(ContentType::GrpcWeb, true), GrpcWebConfig::default(),
+            ContentDecodeLimits::new(4096, 4096),
+        );
+        assert_eq!(terminal_code(&reply), "12", "HTTP decoding never opts into message gzip");
+        assert_eq!(identity_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_requires_integrity_and_counts_fields_before_erasure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = Arc::new(Server::builder()
+            .add_service(Echo { calls: Arc::clone(&calls) })
+            .max_metadata_size(512)
+            .build());
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            for case in ["crc", "truncated", "encoded", "decoded", "head"] {
+                let mut input = encoded_request(mode, false);
+                let mut limits = ContentDecodeLimits::new(4096, 4096);
+                let expected = match case {
+                    "crc" => {
+                        let last_crc = input.body.len() - 8;
+                        input.body[last_crc] ^= 0xff;
+                        "3"
+                    }
+                    "truncated" => { input.body.truncate(input.body.len() - 4); "3" }
+                    "encoded" => { limits = ContentDecodeLimits::new(8, 4096); "8" }
+                    "decoded" => { limits = ContentDecodeLimits::new(4096, 8); "8" }
+                    "head" => { input.headers.push(("content-digest".to_owned(), "x".repeat(512))); "8" }
+                    _ => unreachable!(),
+                };
+                let reply = run_decoded(&server, input, GrpcWebConfig::default(), limits);
+                assert_eq!(terminal_code(&reply), expected, "{case}, {mode:?}");
+                assert_eq!(reply_frames(&reply).len(), 1, "no provisional success frame");
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn request_with_body(input: HttpRequest, body: IncomingRequestBody) -> StreamingServerRequest {
+        StreamingServerRequest::new(
+            RequestHead {
+                method: input.method,
+                uri: input.uri,
+                version: input.version,
+                headers: input.headers,
+            },
+            body,
+        )
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_stacked_content_codings_enforce_each_stage() {
+        let (server, calls) = server();
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            let mut input = encoded_request(mode, false);
+            let intermediate = input.body.len();
+            input.body = gzip(&input.body);
+            input.headers.push(("Content-Encoding".to_owned(), "gzip".to_owned()));
+            let reply = run_decoded(
+                &server, input.clone(), GrpcWebConfig::default(),
+                ContentDecodeLimits::new(4096, 4096),
+            );
+            assert_eq!(terminal_code(&reply), "0");
+            assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
+            let reply = run_decoded(
+                &server, input, GrpcWebConfig::default(),
+                ContentDecodeLimits::new(4096, intermediate - 1),
+            );
+            assert_eq!(terminal_code(&reply), "8", "an intermediate representation is bounded");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_progresses_under_backpressure_but_waits_for_integrity() {
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            for corrupt in [false, true] {
+                let (server, calls) = server();
+                let cx = Cx::for_testing();
+                let mut input = encoded_request(mode, false);
+                let footer = input.body.len() - 8;
+                if corrupt {
+                    input.body[footer] ^= 0xff;
+                }
+                let encoded = std::mem::take(&mut input.body);
+                let (mut writer, body) = IncomingRequestBody::channel_with_limits(
+                    &cx, BodyKind::ContentLength(encoded.len() as u64), 1, 128,
+                );
+                futures_lite::future::block_on(writer.push_bytes(&cx, &encoded[..3])).unwrap();
+                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(), web_stream_config(),
+                    ContentDecodeLimits::new(4096, 4096)
+                        .with_chunk_size(NonZeroUsize::new(3).unwrap()),
+                ).unwrap();
+                let mut call = handler(cx.clone(), request_with_body(input, body));
+                let mut task = Context::from_waker(Waker::noop());
+                {
+                    let mut push = std::pin::pin!(writer.push_bytes(&cx, &encoded[3..footer]));
+                    assert!(push.as_mut().poll(&mut task).is_pending(), "one-frame queue is full");
+                    assert!(call.as_mut().poll(&mut task).is_pending());
+                    assert!(matches!(push.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+                }
+                // The decoder has the complete compressed DATA payload but
+                // not its footer. No service may observe provisional bytes.
+                assert!(call.as_mut().poll(&mut task).is_pending());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(!writer.consumer_dropped());
+                futures_lite::future::block_on(writer.push_bytes(&cx, &encoded[footer..])).unwrap();
+                writer.finish(&cx).unwrap();
+                let produced = futures_lite::future::block_on(call);
+                let reply = collect_produced(&cx, produced);
+                assert_eq!(terminal_code(&reply), if corrupt { "3" } else { "0" });
+                assert_eq!(calls.load(Ordering::SeqCst), usize::from(!corrupt));
+                assert_eq!(reply_frames(&reply).len(), if corrupt { 1 } else { 2 });
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_refuses_original_trailers_and_combined_metadata() {
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            for exceeds_combined in [false, true] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let server = Arc::new(Server::builder()
+                    .add_service(Echo { calls: Arc::clone(&calls) })
+                    .max_metadata_size(512)
+                    .build());
+                let input = encoded_request(mode, false);
+                let head_bytes: usize = input.headers.iter()
+                    .map(|(name, value)| name.len() + value.len() + 32)
+                    .sum();
+                assert!(head_bytes < 512);
+                let trailer_value = if exceeds_combined {
+                    "x".repeat(512 - head_bytes - ("digest".len() + 32) + 1)
+                } else {
+                    "x".to_owned()
+                };
+                assert!("digest".len() + trailer_value.len() + 32 < 512);
+                let mut raw = format!("{:x}\r\n", input.body.len()).into_bytes();
+                raw.extend_from_slice(&input.body);
+                raw.extend_from_slice(format!("\r\n0\r\nDigest: {trailer_value}\r\n\r\n").as_bytes());
+                let cx = Cx::for_testing();
+                let (mut writer, body) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+                futures_lite::future::block_on(writer.push_bytes(&cx, &raw)).unwrap();
+                writer.finish(&cx).unwrap();
+                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
+                ).unwrap();
+                let produced = futures_lite::future::block_on(handler(cx.clone(), request_with_body(input, body)));
+                let reply = collect_produced(&cx, produced);
+                assert_eq!(terminal_code(&reply), if exceeds_combined { "8" } else { "3" });
+                assert_eq!(reply_frames(&reply).len(), 1);
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "sanitized trailers cannot admit a call");
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn http_request_decoding_cancellation_and_drop_retire_the_pending_source() {
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            for (kind, code) in [
+                (CancelKind::User, "1"), (CancelKind::Shutdown, "1"),
+                (CancelKind::Timeout, "4"), (CancelKind::Deadline, "4"),
+                (CancelKind::PollQuota, "8"), (CancelKind::CostBudget, "8"),
+            ] {
+                let (server, calls) = server();
+                let cx = Cx::for_testing();
+                let input = request(mode);
+                let (writer, body) = IncomingRequestBody::channel_with_limits(
+                    &cx, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+                );
+                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
+                ).unwrap();
+                let mut call = handler(cx.clone(), request_with_body(input, body));
+                assert!(call.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(!cx.inner.read().cancel_waker_registrations.is_empty());
+                cx.cancel_with(kind, Some("pending decoded request"));
+                let produced = futures_lite::future::block_on(call);
+                // A healthy transport context can inspect the typed refusal;
+                // a real cancelled listener may instead close its connection.
+                let reply = collect_produced(&Cx::for_testing(), produced);
+                assert_eq!(terminal_code(&reply), code);
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(writer.consumer_dropped(), "decoder relinquishes the pending HTTP source");
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            }
+
+            let (server, calls) = server();
+            let cx = Cx::for_testing();
+            let input = request(mode);
+            let (writer, body) = IncomingRequestBody::channel_with_limits(
+                &cx, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+            );
+            let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
+            ).unwrap();
+            let mut call = handler(cx.clone(), request_with_body(input, body));
+            assert!(call.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            drop(call);
+            assert!(writer.consumer_dropped());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn http_request_decoding_foreign_owner_deadline_wakes_and_retires_after_mask_exit() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+
+        #[derive(Default)]
+        struct DeadlineWake(AtomicUsize);
+
+        impl std::task::Wake for DeadlineWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for masked in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            // This owner is not assigned to a runtime task. No scheduler
+            // deadline monitor or input frame can provide its wake.
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1), TaskId::new_for_test(1, 0),
+                Budget::INFINITE.with_deadline(Time::from_millis(100)),
+                None, None, None, Some(timer.clone()), None,
+            );
+            let ambient = Cx::for_testing();
+            ambient.cancel_with(CancelKind::User, Some("unrelated polling context"));
+            let current = Cx::set_current(Some(ambient));
+            let (server, calls) = server();
+            let input = request(ContentType::GrpcWeb);
+            let (writer, body) = IncomingRequestBody::channel_with_limits(
+                &owner, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+            );
+            let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
+            ).unwrap();
+            let mut call = handler(owner.clone(), request_with_body(input, body));
+            let counter = Arc::new(DeadlineWake::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            assert!(call.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert!(!owner.inner.read().cancel_waker_registrations.is_empty());
+            counter.0.store(0, Ordering::SeqCst);
+            let mut expire = || {
+                clock.advance_to(Time::from_millis(100));
+                assert_eq!(timer.process_timers(), 1);
+                assert!(counter.0.load(Ordering::SeqCst) > 0, "owner budget wakes without body input");
+                if masked {
+                    assert!(call.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
+                    assert!(timer.is_empty(), "spent deadline timer is retired under the mask");
+                    assert!(!writer.consumer_dropped());
+                    counter.0.store(0, Ordering::SeqCst);
+                    for _ in 0..3 {
+                        assert!(call.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(counter.0.load(Ordering::SeqCst), 0, "masked elapsed budget does not spin");
+                    }
+                }
+            };
+            if masked { owner.masked(expire); } else { expire(); }
+            assert!(counter.0.load(Ordering::SeqCst) > 0, "unmask preserves the owner wake");
+            let produced = match call.as_mut().poll(&mut task) {
+                Poll::Ready(produced) => produced,
+                Poll::Pending => panic!("elapsed owner budget must terminate decoding"),
+            };
+            assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
+            assert!(timer.is_empty());
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(writer.consumer_dropped());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            drop(current);
+            let reply = collect_produced(&Cx::for_testing(), produced);
+            assert_eq!(terminal_code(&reply), "4");
+            assert_eq!(reply_frames(&reply).len(), 1);
+        }
+    }
+
+    fn native_decoding_case<F, T>(
+        server: Arc<Server>,
+        produced: bool,
+        sharded: bool,
+        limits: ContentDecodeLimits,
+        peer: F,
+    ) -> T
+    where
+        F: FnOnce(SocketAddr, sync_mpsc::Receiver<Cx>) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let runtime = if sharded {
+            RuntimeBuilder::multi_thread().worker_threads(2).with_sharded_state(true)
+        } else {
+            RuntimeBuilder::current_thread()
+        }.build().expect("native request-decoding runtime");
+        let result = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native listener owner");
+            let connection = Http1Config::default()
+                .allowed_hosts(Some(vec!["localhost".to_owned()]))
+                .max_body_size(8192)
+                .idle_timeout(Some(Duration::from_secs(5)));
+            let config = Http1ListenerConfig::default().http_config(connection.clone());
+            let (parked, parks) = sync_mpsc::channel();
+            if produced {
+                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(), web_stream_config(), limits,
+                ).unwrap();
+                let observed = move |cx: Cx, request| -> GrpcWebStreamingHandlerFuture {
+                    let mut future = handler(cx.clone(), request);
+                    let parked = parked.clone();
+                    Box::pin(async move {
+                        let mut announced = false;
+                        poll_fn(|task| {
+                            let result = future.as_mut().poll(task);
+                            if result.is_pending() && !announced {
+                                announced = true;
+                                let _ = parked.send(cx.clone());
+                            }
+                            result
+                        }).await
+                    })
+                };
+                let listener = Http1Listener::bind_produced_with_config("127.0.0.1:0", observed, config)
+                    .await.expect("bind produced decoding listener")
+                    .with_streaming_config(crate::http::h1::Http1StreamingConfig::from(connection)
+                        .incoming_body_queue(1, 128));
+                let addr = listener.local_addr().unwrap();
+                let shutdown = listener.shutdown_signal();
+                let thread = std::thread::spawn(move || {
+                    let _stop = WebStopOnDrop(shutdown);
+                    peer(addr, parks)
+                });
+                let served = listener.run_produced_owned_in(&cx).await;
+                let result = thread.join().expect("bounded independent wire peer");
+                served.expect("produced decoding listener shutdown");
+                result
+            } else {
+                let handler = server.registered_grpc_web_unary_handler_with_http_decoding(
+                    GrpcWebConfig::default(), limits,
+                ).unwrap();
+                let listener = Http1Listener::bind_with_config("127.0.0.1:0", handler, config)
+                    .await.expect("bind buffered decoding listener");
+                let addr = listener.local_addr().unwrap();
+                let shutdown = listener.shutdown_signal();
+                let thread = std::thread::spawn(move || {
+                    let _stop = WebStopOnDrop(shutdown);
+                    peer(addr, parks)
+                });
+                let served = listener.run_owned_in(&cx).await;
+                let result = thread.join().expect("bounded independent wire peer");
+                served.expect("buffered decoding listener shutdown");
+                result
+            }
+        }));
+        let drain = runtime.shutdown_drained(Duration::from_secs(3));
+        assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent, "{drain:?}");
+        assert_eq!((drain.live_tasks, drain.live_regions, drain.pending_obligations), (0, 0, 0));
+        assert_eq!((drain.pending_spawns, drain.queued_finalizers), (0, 0));
+        assert!(!drain.has_pending_obligation_posts);
+        assert!(runtime.is_quiescent());
+        result
+    }
+
+    fn connect_request(addr: SocketAddr, input: &HttpRequest) -> TcpStream {
+        let mut socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(socket, "POST {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+            input.uri, input.body.len()).unwrap();
+        for (name, value) in &input.headers {
+            if !["host", "connection", "content-length", "transfer-encoding"].iter()
+                .any(|skip| name.eq_ignore_ascii_case(skip))
+            {
+                write!(socket, "{name}: {value}\r\n").unwrap();
+            }
+        }
+        socket.write_all(b"\r\n").unwrap();
+        socket
+    }
+
+    #[cfg(feature = "compression")]
+    fn read_reply(socket: TcpStream) -> HttpResponse {
+        fn line(reader: &mut BufReader<TcpStream>) -> String {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).expect("bounded HTTP read") > 0);
+            assert!(line.len() <= 8192 && line.ends_with("\r\n"));
+            line
+        }
+        let mut reader = BufReader::new(socket);
+        assert_eq!(line(&mut reader), "HTTP/1.1 200 OK\r\n");
+        let mut headers = Vec::new();
+        let mut header_bytes = 0;
+        loop {
+            let field = line(&mut reader);
+            if field == "\r\n" { break; }
+            header_bytes += field.len();
+            assert!(header_bytes <= 16384);
+            let (name, value) = field.trim_end_matches("\r\n").split_once(':').unwrap();
+            assert!(!name.eq_ignore_ascii_case("grpc-status"), "status is in the gRPC-Web body");
+            headers.push((name.to_owned(), value.trim().to_owned()));
+        }
+        let mut bytes = Vec::new();
+        if headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("transfer-encoding") && value == "chunked") {
+            loop {
+                let length = usize::from_str_radix(line(&mut reader).trim_end_matches("\r\n"), 16).unwrap();
+                if length == 0 {
+                    assert_eq!(line(&mut reader), "\r\n", "gRPC-Web does not require HTTP trailers");
+                    break;
+                }
+                assert!(length <= 7 && bytes.len() + length <= 65536);
+                let start = bytes.len();
+                bytes.resize(start + length, 0);
+                reader.read_exact(&mut bytes[start..]).unwrap();
+                let mut crlf = [0; 2];
+                reader.read_exact(&mut crlf).unwrap();
+                assert_eq!(crlf, *b"\r\n");
+            }
+        } else {
+            let length: usize = headers.iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .expect("bounded response framing").1.parse().unwrap();
+            assert!(length <= 65536);
+            bytes.resize(length, 0);
+            reader.read_exact(&mut bytes).unwrap();
+        }
+        let mut reply = HttpResponse::new(200, "OK", bytes);
+        reply.headers = headers;
+        reply
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_native_binary_and_text_reach_unary_and_server_streams() {
+        for sharded in [false, true] {
+            for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+                for produced in [false, true] {
+                    let (server, calls) = server();
+                    native_decoding_case(server, produced, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, _| {
+                        let input = encoded_request(mode, false);
+                        let mut socket = connect_request(addr, &input);
+                        for byte in input.body.chunks(1) { socket.write_all(byte).unwrap(); }
+                        let reply = read_reply(socket);
+                        assert_eq!(terminal_code(&reply), "0");
+                        assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
+                    });
+                    assert_eq!(calls.load(Ordering::SeqCst), 1);
+                }
+                let (server, probe, _parks, retirements) = web_stream_fixture(WebStreamMode::Values);
+                probe.release();
+                native_decoding_case(server, true, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, _| {
+                    let mut input = encoded_request(mode, false);
+                    input.uri = "/web.Watch/Values".to_owned();
+                    let mut socket = connect_request(addr, &input);
+                    for byte in input.body.chunks(1) { socket.write_all(byte).unwrap(); }
+                    let reply = read_reply(socket);
+                    let frames = reply_frames(&reply);
+                    assert_eq!(frames.len(), 3);
+                    assert_eq!(frames[0], (0, b"first".to_vec()));
+                    assert_eq!(frames[1], (0, b"second".to_vec()));
+                    assert_eq!(terminal_code(&reply), "0");
+                    retirements.recv_timeout(Duration::from_secs(2)).expect("server stream source retired");
+                });
+                assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn http_request_decoding_native_corrupt_footer_never_admits_stream_producer() {
+        for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+            let (server, probe, _parks, _retirements) = web_stream_fixture(WebStreamMode::Values);
+            let observing = Arc::clone(&probe);
+            native_decoding_case(server, true, false, ContentDecodeLimits::new(4096, 4096), move |addr, parks| {
+                let mut input = encoded_request(mode, false);
+                input.uri = "/web.Watch/Values".to_owned();
+                let footer = input.body.len() - 8;
+                input.body[footer] ^= 0xff;
+                let mut socket = connect_request(addr, &input);
+                socket.write_all(&input.body[..footer]).unwrap();
+                let _owner = parks.recv_timeout(Duration::from_secs(2)).expect("native decoder parked on incomplete upload");
+                assert_eq!(observing.calls.load(Ordering::SeqCst), 0);
+                socket.write_all(&input.body[footer..]).unwrap();
+                let reply = read_reply(socket);
+                assert_eq!(terminal_code(&reply), "3");
+                assert_eq!(reply_frames(&reply).len(), 1, "no provisional DATA response");
+            });
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 0, "no response source was constructed");
+        }
+    }
+
+    #[test]
+    fn http_request_decoding_native_cancelled_upload_closes_and_drains() {
+        for sharded in [false, true] {
+            for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
+                let (server, calls) = server();
+                let observing = Arc::clone(&calls);
+                let owner = native_decoding_case(server, true, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, parks| {
+                    let input = request(mode);
+                    let mut socket = connect_request(addr, &input);
+                    socket.write_all(&input.body[..1]).unwrap();
+                    let owner = parks.recv_timeout(Duration::from_secs(2)).expect("native decoder genuinely pending");
+                    assert_eq!(observing.load(Ordering::SeqCst), 0);
+                    owner.cancel_with(CancelKind::User, Some("stop an incomplete decoded upload"));
+                    let mut wire = Vec::new();
+                    match (&mut socket).take(65537).read_to_end(&mut wire) {
+                        Ok(_) => {}
+                        Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => {}
+                        Err(error) => panic!("cancelled request connection did not close: {error}"),
+                    }
+                    assert!(wire.len() <= 65536);
+                    owner
+                });
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::User);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+}
