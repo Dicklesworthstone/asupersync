@@ -722,6 +722,7 @@ pub struct Router {
     routes: Vec<(RoutePattern, MethodRouter)>,
     nested: Vec<(String, Self)>,
     fallback: Option<Box<dyn Handler>>,
+    implicit_not_found: Option<Box<dyn Handler>>,
     extensions: Extensions,
     server_body_policy: Option<RequestBodyPolicy>,
     body_policy: Option<RequestBodyPolicy>,
@@ -3134,6 +3135,7 @@ impl Default for Router {
             routes: Vec::new(),
             nested: Vec::new(),
             fallback: None,
+            implicit_not_found: None,
             extensions: Extensions::new(),
             server_body_policy: None,
             body_policy: None,
@@ -3226,6 +3228,9 @@ impl Router {
         if self.fallback.is_none() {
             self.fallback = other.fallback;
         }
+        if self.implicit_not_found.is_none() {
+            self.implicit_not_found = other.implicit_not_found;
+        }
         self.extensions.extend_from(&other.extensions);
         if self.body_policy.is_none() {
             self.body_policy = other.body_policy;
@@ -3301,6 +3306,10 @@ impl Router {
     /// it. Register routes first, then layers, or interleave deliberately when
     /// some routes should bypass a middleware.
     ///
+    /// Implicit 404 responses are not wrapped by this method. Use
+    /// [`Self::layer_including_not_found`] for each layer that should also see
+    /// requests with no matching route or explicit fallback.
+    ///
     /// Stateful layers (rate limit, circuit breaker, bulkhead, load shed,
     /// request-ID) hold their shared state in the layer value itself, so one
     /// `.layer(...)` call shares a single limiter/breaker/counter across all
@@ -3315,20 +3324,80 @@ impl Router {
     {
         let wrap =
             move |handler: Box<dyn Handler>| -> Box<dyn Handler> { Box::new(layer.layer(handler)) };
-        self.apply_wrap(&wrap);
+        self.apply_wrap(&wrap, false);
         self
     }
 
-    /// Apply a handler wrapper to all routes, the fallback, and nested routers.
-    fn apply_wrap(&mut self, wrap: &dyn Fn(Box<dyn Handler>) -> Box<dyn Handler>) {
+    /// Wrap registered handlers and implicit 404 responses with middleware.
+    ///
+    /// This has the same registration-time scope and onion ordering as
+    /// [`Self::layer`], but also wraps the default not-found handler of this
+    /// router and every currently nested router. This lets CORS, security
+    /// headers, authentication, and shared rate limits cover unknown paths.
+    /// Authentication may therefore answer an unknown path with 401, and a
+    /// limiter may answer it with 429 before the default 404 handler runs.
+    ///
+    /// An explicit fallback still takes precedence. This does not install one:
+    /// [`Self::has_fallback`], route introspection, and nested fallback selection
+    /// are unchanged. A missing path inside a mount uses that child's layered
+    /// 404; it does not fall through to an outer router's fallback. For duplicate
+    /// mounts, the first configured implicit not-found handler is retained, as
+    /// with an explicit fallback.
+    ///
+    /// Routes, mounts, and explicit fallbacks registered later are not wrapped.
+    /// Each layer independently opts in: a later call to [`Self::layer`] still
+    /// excludes implicit 404s, even when an earlier layer opted in here.
+    /// Body-policy admission happens before handler dispatch and is unchanged;
+    /// policy refusals such as 413 are not passed through these handler layers.
+    ///
+    /// ```
+    /// use asupersync::web::{Router, StatusCode};
+    /// use asupersync::web::extract::Request;
+    /// use asupersync::web::middleware::{AuthLayer, AuthPolicy, CorsLayer, CorsPolicy};
+    ///
+    /// let router = Router::new()
+    ///     .nest("/api", Router::new())
+    ///     .layer_including_not_found(AuthLayer::new(AuthPolicy::exact_bearer("token")))
+    ///     .layer_including_not_found(CorsLayer::new(CorsPolicy::default()));
+    /// let response = router.handle(
+    ///     Request::new("GET", "/api/missing").with_header("origin", "https://example.com")
+    /// );
+    /// assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    /// assert_eq!(response.header_value("access-control-allow-origin"), Some("*"));
+    /// assert!(!router.has_fallback());
+    /// ```
+    #[must_use]
+    pub fn layer_including_not_found<L>(mut self, layer: L) -> Self
+    where
+        L: Layer<Box<dyn Handler>>,
+        L::Service: Handler,
+    {
+        let wrap =
+            move |handler: Box<dyn Handler>| -> Box<dyn Handler> { Box::new(layer.layer(handler)) };
+        self.apply_wrap(&wrap, true);
+        self
+    }
+
+    /// Apply one wrapper consistently throughout the currently registered tree.
+    fn apply_wrap(
+        &mut self,
+        wrap: &dyn Fn(Box<dyn Handler>) -> Box<dyn Handler>,
+        include_not_found: bool,
+    ) {
         for (_, method_router) in &mut self.routes {
             method_router.map_handlers(wrap);
         }
         if let Some(fallback) = self.fallback.take() {
             self.fallback = Some(wrap(fallback));
         }
+        if include_not_found {
+            let not_found = self.implicit_not_found.take().unwrap_or_else(|| {
+                Box::new(super::handler::FnHandler::new(|| StatusCode::NOT_FOUND))
+            });
+            self.implicit_not_found = Some(wrap(not_found));
+        }
         for (_, nested) in &mut self.nested {
-            nested.apply_wrap(wrap);
+            nested.apply_wrap(wrap, include_not_found);
         }
     }
 
@@ -4298,6 +4367,9 @@ impl Router {
 
         // Fallback.
         if let Some(handler) = &self.fallback {
+            return handler.call(cx, req).await;
+        }
+        if let Some(handler) = &self.implicit_not_found {
             return handler.call(cx, req).await;
         }
 

@@ -3293,6 +3293,236 @@
             );
         }
 
+        #[test]
+        fn not_found_layering_is_opt_in_and_preserves_route_metadata() {
+            use crate::web::middleware::{
+                AuthLayer, AuthPolicy, HeaderOverwrite, SetResponseHeaderLayer,
+            };
+
+            let legacy = Router::new()
+                .nest("/api", Router::new())
+                .layer(AuthLayer::new(AuthPolicy::exact_bearer("token")));
+            for path in ["/missing", "/api/missing"] {
+                assert_eq!(
+                    legacy.handle(Request::new("GET", path)).status,
+                    StatusCode::NOT_FOUND,
+                );
+            }
+
+            let router = Router::new()
+                .route("/known", get(FnHandler::new(ok_handler)))
+                .nest("/api", Router::new().nest("/v1", Router::new()));
+            let routes = router.routes();
+            let policies = router.route_body_policies();
+            let router = router
+                .layer_including_not_found(AuthLayer::new(AuthPolicy::exact_bearer("token")))
+                .layer_including_not_found(SetResponseHeaderLayer::new(
+                    "x-frame-options",
+                    "DENY",
+                    HeaderOverwrite::Always,
+                ));
+
+            for path in ["/missing", "/api/missing", "/api/v1/missing"] {
+                let unauthorized = router.handle(Request::new("GET", path));
+                assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
+                assert_eq!(unauthorized.header_value("x-frame-options"), Some("DENY"));
+                let authorized = router.handle(
+                    Request::new("GET", path).with_header("authorization", "Bearer token"),
+                );
+                assert_eq!(authorized.status, StatusCode::NOT_FOUND);
+                assert_eq!(authorized.header_value("x-frame-options"), Some("DENY"));
+            }
+            assert_eq!(router.routes(), routes);
+            assert_eq!(router.route_body_policies(), policies);
+            assert_eq!(router.route_count(), 1);
+            assert_eq!(router.nested_router_count(), 1);
+            assert!(!router.has_fallback());
+            assert!(!router.nested[0].1.has_fallback());
+        }
+
+        #[test]
+        fn not_found_layers_keep_onion_order_and_registration_time_scope() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/known", get(FnHandler::new(ok_handler)))
+                .nest("/api", Router::new().nest("/v1", Router::new()))
+                .layer_including_not_found(RecordingLayer::new("inner", Arc::clone(&log)))
+                .layer_including_not_found(RecordingLayer::new("outer", Arc::clone(&log)))
+                .layer(RecordingLayer::new("legacy", Arc::clone(&log)))
+                .route("/late", get(FnHandler::new(ok_handler)))
+                .nest("/later", Router::new());
+
+            for path in ["/missing", "/api/missing", "/api/v1/missing"] {
+                assert_eq!(
+                    router.handle(Request::new("GET", path)).status,
+                    StatusCode::NOT_FOUND,
+                );
+                assert_eq!(
+                    std::mem::take(&mut *log.lock().unwrap()),
+                    ["enter:outer", "enter:inner", "exit:inner", "exit:outer"],
+                    "each applicable layer must run once at the selected not-found handler",
+                );
+            }
+            assert_eq!(
+                router.handle(Request::new("GET", "/known")).status,
+                StatusCode::OK,
+            );
+            assert_eq!(
+                std::mem::take(&mut *log.lock().unwrap()),
+                [
+                    "enter:legacy",
+                    "enter:outer",
+                    "enter:inner",
+                    "exit:inner",
+                    "exit:outer",
+                    "exit:legacy",
+                ],
+            );
+            assert_eq!(
+                router.handle(Request::new("GET", "/late")).status,
+                StatusCode::OK,
+            );
+            assert_eq!(
+                router.handle(Request::new("GET", "/later/missing")).status,
+                StatusCode::NOT_FOUND,
+            );
+            assert!(log.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn not_found_layering_keeps_explicit_and_nested_fallback_selection() {
+            use crate::web::middleware::{HeaderOverwrite, SetResponseHeaderLayer};
+
+            let router = Router::new()
+                .fallback(FnHandler::new(|| "outer fallback"))
+                .nest("/api", Router::new())
+                .nest(
+                    "/custom",
+                    Router::new().fallback(FnHandler::new(|| "inner fallback")),
+                )
+                .layer_including_not_found(SetResponseHeaderLayer::new(
+                    "x-layered",
+                    "yes",
+                    HeaderOverwrite::Always,
+                ));
+            for (path, status, body) in [
+                ("/missing", StatusCode::OK, Some(b"outer fallback".as_slice())),
+                (
+                    "/custom/missing",
+                    StatusCode::OK,
+                    Some(b"inner fallback".as_slice()),
+                ),
+                ("/api/missing", StatusCode::NOT_FOUND, None),
+            ] {
+                let response = router.handle(Request::new("GET", path));
+                assert_eq!(response.status, status);
+                if let Some(body) = body {
+                    assert_eq!(response.body.as_ref(), body);
+                }
+                assert_eq!(response.header_value("x-layered"), Some("yes"));
+            }
+            assert!(router.has_fallback());
+            assert!(!router.nested[0].1.has_fallback());
+            let router = router.fallback(FnHandler::new(|| "late fallback"));
+            let late = router.handle(Request::new("GET", "/missing"));
+            assert_eq!(late.body.as_ref(), b"late fallback");
+            assert_eq!(late.header_value("x-layered"), None);
+        }
+
+        #[test]
+        fn not_found_layering_allows_cors_on_unknown_resources() {
+            use crate::web::middleware::{CorsLayer, CorsPolicy};
+
+            let router = Router::new()
+                .nest("/api", Router::new())
+                .layer_including_not_found(CorsLayer::new(CorsPolicy::default()));
+            for path in ["/missing", "/api/missing"] {
+                let response = router.handle(
+                    Request::new("GET", path).with_header("origin", "https://example.com"),
+                );
+                assert_eq!(response.status, StatusCode::NOT_FOUND);
+                assert_eq!(response.header_value("access-control-allow-origin"), Some("*"));
+                let preflight = router.handle(
+                    Request::new("OPTIONS", path)
+                        .with_header("origin", "https://example.com")
+                        .with_header("access-control-request-method", "POST"),
+                );
+                assert_eq!(preflight.status, StatusCode::NO_CONTENT);
+                assert_eq!(preflight.header_value("access-control-allow-origin"), Some("*"));
+            }
+        }
+
+        #[test]
+        fn not_found_requests_consume_the_same_rate_limit_as_registered_routes() {
+            use crate::combinator::rate_limit::RateLimitPolicy;
+            use crate::web::middleware::RateLimitLayer;
+
+            let layer = RateLimitLayer::with_time_getter(
+                RateLimitPolicy {
+                    rate: 1,
+                    burst: 2,
+                    ..Default::default()
+                },
+                || Time::ZERO,
+            );
+            let limiter = Arc::clone(layer.limiter());
+            let router = Router::new()
+                .route("/known", get(FnHandler::new(ok_handler)))
+                .nest(
+                    "/api",
+                    Router::new().route("/known", get(FnHandler::new(ok_handler))),
+                )
+                .layer_including_not_found(layer);
+            for path in ["/missing", "/api/missing"] {
+                assert_eq!(
+                    router.handle(Request::new("GET", path)).status,
+                    StatusCode::NOT_FOUND,
+                );
+            }
+            for path in ["/known", "/api/known", "/another-missing"] {
+                let response = router.handle(Request::new("GET", path));
+                assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+                assert!(response.header_value("retry-after").is_some());
+            }
+            let metrics = limiter.metrics();
+            assert_eq!(metrics.total_allowed, 2);
+            assert_eq!(metrics.total_rejected, 3);
+        }
+
+        #[test]
+        fn duplicate_mount_merge_retains_first_configured_not_found_layers() {
+            for configured_first in [false, true] {
+                let log = Arc::new(Mutex::new(Vec::new()));
+                let configured = Router::new()
+                    .layer_including_not_found(RecordingLayer::new("inner", Arc::clone(&log)));
+                let empty = Router::new();
+                let (first, second) = if configured_first {
+                    (configured, empty)
+                } else {
+                    (empty, configured)
+                };
+                let router = Router::new()
+                    .nest("/api", first)
+                    .nest("/api", second)
+                    .nest(
+                        "/api",
+                        Router::new().layer_including_not_found(RecordingLayer::new(
+                            "discarded",
+                            Arc::clone(&log),
+                        )),
+                    )
+                    .layer_including_not_found(RecordingLayer::new("outer", Arc::clone(&log)));
+                let response = router.handle(Request::new("GET", "/api/missing"));
+                assert_eq!(response.status, StatusCode::NOT_FOUND);
+                assert_eq!(
+                    *log.lock().unwrap(),
+                    ["enter:outer", "enter:inner", "exit:inner", "exit:outer"],
+                );
+                assert_eq!(router.nested_router_count(), 1);
+                assert!(!router.nested[0].1.has_fallback());
+            }
+        }
+
         // ─── Extension<T> lifecycle ──────────────────────────────────────────
 
         mod extension_lifecycle {
