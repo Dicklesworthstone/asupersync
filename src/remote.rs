@@ -8543,8 +8543,21 @@ impl NativeRemoteShared {
         }
     }
 
-    fn complete(&self, task_id: RemoteTaskId, result: Result<RemoteOutcome, RemoteError>) {
-        let terminal_state = RemoteHandle::terminal_state_for_result(&result);
+    fn complete(
+        &self,
+        task_id: RemoteTaskId,
+        result: Result<RemoteOutcome, RemoteError>,
+        admission: Option<Arc<admission::NativeRemoteCredit>>,
+    ) {
+        // On both normal return and unwind, terminal bytes retire or transfer
+        // before credit, and credit retires before close can observe inactivity.
+        let retirement = NativeRemoteDriverRetirement {
+            shared: self,
+            task_id,
+        };
+        let driver_admission = admission;
+        let terminal_result = result;
+        let terminal_state = RemoteHandle::terminal_state_for_result(&terminal_result);
         let sender = {
             let mut state = self.state.lock();
             state.tasks.get_mut(&task_id).and_then(|entry| {
@@ -8555,19 +8568,26 @@ impl NativeRemoteShared {
                 entry.result.take()
             })
         };
-        let delivered = sender.is_some_and(|sender| sender.send_blocking(result).is_ok());
+        let delivered = sender.is_some_and(|sender| sender.send_blocking(terminal_result).is_ok());
+        if !delivered {
+            self.state.lock().tasks.remove(&task_id);
+        }
+        drop(driver_admission);
+        drop(retirement);
+    }
+
+    fn retire_driver(&self, task_id: RemoteTaskId) {
         let waiters = {
             let mut state = self.state.lock();
             state.active.remove(&task_id);
-            if !delivered {
-                state.tasks.remove(&task_id);
-            }
             if state.active.is_empty() {
                 std::mem::take(&mut state.drain_waiters)
             } else {
                 Vec::new()
             }
         };
+        // Oneshot isolates each receiver wake panic; Notify below completes
+        // its whole fanout before propagating a callback panic.
         for waiter in waiters {
             let _ = waiter.send_blocking(());
         }
@@ -8673,10 +8693,12 @@ struct NativeRemoteDriverGuard {
     shared: Arc<NativeRemoteShared>,
     task_id: RemoteTaskId,
     result: Option<Result<RemoteOutcome, RemoteError>>,
+    admission: Option<Arc<admission::NativeRemoteCredit>>,
 }
 
-// Field order matters: release optional admission credit only after the owned
-// request buffers are gone, including cancellation before the first task poll.
+// Field order matters: the final guard publishes/destroys terminal bytes,
+// releases admission credit and only then marks the driver retired. Earlier
+// fields own all request/control buffers, including before the first task poll.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 struct NativeRemotePublishedRequest {
     wire: RemoteServiceWireRequest,
@@ -8685,16 +8707,46 @@ struct NativeRemotePublishedRequest {
     control: Arc<NativeRemoteControl>,
     control_receiver: mpsc::Receiver<()>,
     guard: NativeRemoteDriverGuard,
-    _admission: Option<Arc<admission::NativeRemoteCredit>>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteDriverRetirement<'a> {
+    shared: &'a NativeRemoteShared,
+    task_id: RemoteTaskId,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Drop for NativeRemoteDriverRetirement<'_> {
+    fn drop(&mut self) {
+        // Credit release and terminal delivery can invoke user wakers. Even
+        // when one panics, retirement cannot strand a native close waiter.
+        let was_panicking = std::thread::panicking();
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.shared.retire_driver(self.task_id);
+        }));
+        if let Err(payload) = retired {
+            if was_panicking {
+                // An arbitrary panic payload can itself panic on destruction.
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl NativeRemoteDriverGuard {
-    fn new(shared: Arc<NativeRemoteShared>, task_id: RemoteTaskId) -> Self {
+    fn new(
+        shared: Arc<NativeRemoteShared>,
+        task_id: RemoteTaskId,
+        admission: Option<Arc<admission::NativeRemoteCredit>>,
+    ) -> Self {
         Self {
             shared,
             task_id,
             result: None,
+            admission,
         }
     }
 
@@ -8714,7 +8766,8 @@ impl Drop for NativeRemoteDriverGuard {
                 "native remote driver ended before terminal publication".to_owned(),
             ))
         });
-        self.shared.complete(self.task_id, result);
+        self.shared
+            .complete(self.task_id, result, self.admission.take());
     }
 }
 
@@ -9394,7 +9447,7 @@ impl NativeRemoteRuntime {
         let shared = Arc::clone(&self.shared);
         // Establish terminal ownership before handing the factory to the
         // scheduler. A discarded factory/unpolled future must retire admission.
-        let guard = NativeRemoteDriverGuard::new(Arc::clone(&shared), task_id);
+        let guard = NativeRemoteDriverGuard::new(Arc::clone(&shared), task_id, admission);
         let control = shared.control(task_id)?;
         let mut published = NativeRemotePublishedRequest {
             wire: wire_request,
@@ -9403,7 +9456,6 @@ impl NativeRemoteRuntime {
             control,
             control_receiver,
             guard,
-            _admission: admission,
         };
         let spawn = self.runtime.try_spawn_with_cx(move |cx| async move {
             published.guard.shared.attach_driver_cx(task_id, cx.clone());

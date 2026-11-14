@@ -626,6 +626,7 @@ impl NativeRemoteReservation {
             handle,
             credit: Some(self.credit),
             frame_bytes: policy.frame_bytes,
+            _domain: self.domain,
         })
     }
 }
@@ -699,11 +700,17 @@ fn count_frame(value: &impl Serialize, limit: usize) -> Result<usize, serde_json
 ///
 /// Like the explicit native adapter, this is caller-owned: call `close` before
 /// leaving a region when remote cancellation/terminal collection is required.
+/// The handle retains its admission domain even when the original adapter and
+/// consumed reservation were its last other owners. Explicit domain drain still
+/// cancels the operation; moving ownership into this handle does not.
 pub struct NativeRemoteAdmittedHandle {
     // Drop the result receiver before releasing its final admission ownership.
     handle: RemoteHandle,
     credit: Option<Arc<NativeRemoteCredit>>,
     frame_bytes: usize,
+    // Keep domain shutdown after handle cancellation/result retirement and
+    // release of the handle's buffer charge (asupersync-96btkn).
+    _domain: Arc<Domain>,
 }
 
 impl fmt::Debug for NativeRemoteAdmittedHandle {

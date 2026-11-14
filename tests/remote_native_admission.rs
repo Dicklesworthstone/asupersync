@@ -137,6 +137,44 @@ async fn start_service(
             ))
         })
         .unwrap();
+    let completion = Arc::clone(&witness);
+    registry
+        .register::<Request, Response, _, _>("release", move |cx, invocation| {
+            let witness = Arc::clone(&completion);
+            async move {
+                let _retire = Retire(Arc::clone(&witness));
+                let mut cancel = std::pin::pin!(cx.cancelled());
+                let mut release = std::pin::pin!(
+                    witness
+                        .changed
+                        .wait_until(|| { witness.released.load(Ordering::Acquire) })
+                );
+                let cancelled = poll_fn(|task| {
+                    if cancel.as_mut().poll(task).is_ready() {
+                        witness.cancelled.store(true, Ordering::Release);
+                        witness.changed.notify_waiters();
+                        return Poll::Ready(true);
+                    }
+                    if release.as_mut().poll(task).is_ready() {
+                        return Poll::Ready(false);
+                    }
+                    if !witness.parked.swap(true, Ordering::AcqRel) {
+                        witness.changed.notify_waiters();
+                    }
+                    Poll::Pending
+                })
+                .await;
+                if cancelled {
+                    let _ = cx.checkpoint();
+                    Ok(RemoteOutcome::Cancelled(cx.cancel_reason().unwrap()))
+                } else {
+                    Ok(RemoteOutcome::Success(
+                        invocation.request().input.data().to_vec(),
+                    ))
+                }
+            }
+        })
+        .unwrap();
     registry
         .register::<Request, Response, _, _>("wait", move |cx, _| {
             let witness = Arc::clone(&witness);
@@ -171,7 +209,7 @@ async fn start_service(
             NodeId::new("origin"),
             CertificatePinSet::new()
                 .with_pin(CertificatePin::compute_spki_sha256(&origin_cert).unwrap()),
-            ["echo", "wait"],
+            ["echo", "wait", "release"],
         )
         .unwrap();
     let hello = policy.hello_for(NodeId::new("origin"));
@@ -367,7 +405,7 @@ fn exercise(workers: usize) {
         assert!(admitted.close(&cx).await.unwrap());
         assert_eq!(admitted.usage().in_flight, 1, "terminal handle remains charged after driver close");
         assert!(matches!(final_handle.try_join().unwrap(), Some(RemoteOutcome::Cancelled(_))));
-        eventually(&cx, || admitted.usage().buffer_bytes == 0).await;
+        assert_eq!(admitted.usage().buffer_bytes, 0, "closed drivers have already released their credit");
         assert_eq!(admitted.usage().waiters, 0);
         assert!(legacy.close(&cx).await);
         let _ = a.operator.begin_drain(); let _ = b.operator.begin_drain();
@@ -484,6 +522,154 @@ fn native_admission_close_can_reenter_synchronous_spawn_metrics() {
         .recv_timeout(Duration::from_secs(15))
         .expect("reentrant close must not deadlock commit");
     thread.join().unwrap();
+}
+
+fn exercise_admitted_domain_lifetime(workers: usize) {
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread().build().unwrap()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
+    };
+    let runtime_handle = runtime.handle();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let witness = Arc::new(Witness::default());
+        let mut serving = start_service(
+            &cx,
+            "peer",
+            include_bytes!("fixtures/tls/server.crt"),
+            include_bytes!("fixtures/tls/server.key"),
+            Arc::clone(&witness),
+        )
+        .await;
+        struct ServiceCleanup {
+            operator: RemoteComputationServiceHandle,
+            witness: Arc<Witness>,
+        }
+        impl Drop for ServiceCleanup {
+            fn drop(&mut self) {
+                self.witness.release();
+                let _ = self.operator.begin_drain();
+            }
+        }
+        // No adapter clone is retained by cleanup: the first reservation really
+        // is the domain's last owner when commit consumes it.
+        let _cleanup = ServiceCleanup {
+            operator: serving.operator.clone(),
+            witness: Arc::clone(&witness),
+        };
+        let charge = 16 * (4096 + 4) + 256 * 1024;
+        let make_domain = || {
+            AdmittedNativeRemoteRuntime::new(
+                runtime_handle.clone(),
+                NodeId::new("origin"),
+                [(
+                    serving.route.clone(),
+                    NativeRemotePeerAdmissionLimits {
+                        max_in_flight: 1,
+                        max_buffer_bytes: charge,
+                        max_input_bytes: 16,
+                    },
+                )],
+                NativeRemoteAdmissionLimits {
+                    max_routes: 1,
+                    max_in_flight: 1,
+                    max_buffer_bytes: charge,
+                    max_waiters: 0,
+                    max_waiters_per_peer: 0,
+                },
+                NativeRemoteRuntimeConfig::new()
+                    .with_max_in_flight(1)
+                    .with_drain_timeout(Duration::from_secs(3)),
+            )
+            .unwrap()
+        };
+        let node = NodeId::new("peer");
+        let wait = Duration::from_secs(5);
+        let lease = Duration::from_secs(30);
+        let admitted = make_domain();
+        let reservation = admitted.reserve(&cx, &node, 3, wait).await.unwrap();
+        drop(admitted);
+        let mut invocation = reservation
+            .commit(&cx, &ComputationName::new("release"), &[4, 2, 1], lease)
+            .unwrap();
+        eventually(&cx, || {
+            witness.parked.load(Ordering::Acquire) && invocation.state() == RemoteTaskState::Running
+        })
+        .await;
+        assert!(
+            !witness.cancelled.load(Ordering::Acquire),
+            "committing the last domain owner must not shut down its invocation"
+        );
+        witness.release();
+        let outcome = asupersync::time::timeout(cx.now(), wait, invocation.join(&cx))
+            .await
+            .expect("released remote computation must complete");
+        assert!(
+            matches!(outcome, Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == [4, 2, 1])
+        );
+        assert!(witness.retired.load(Ordering::Acquire));
+        drop(invocation);
+
+        // With the result handle gone, only the actual driver's captures own
+        // admission. Domain close must wait for that final credit retirement.
+        witness.reset();
+        let admitted = make_domain();
+        let invocation = admitted
+            .reserve(&cx, &node, 0, wait)
+            .await
+            .unwrap()
+            .commit(&cx, &ComputationName::new("wait"), &[], lease)
+            .unwrap();
+        eventually(&cx, || witness.parked.load(Ordering::Acquire)).await;
+        drop(invocation);
+        eventually(&cx, || witness.cancelled.load(Ordering::Acquire)).await;
+        assert_eq!(admitted.usage().in_flight, 1);
+        let mut closing = Box::pin(admitted.close(&cx));
+        poll_fn(|task| {
+            assert!(closing.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(!witness.retired.load(Ordering::Acquire));
+        witness.release();
+        assert!(closing.await.unwrap());
+        assert_eq!(
+            admitted.usage().in_flight,
+            0,
+            "driver close must already include final admission release"
+        );
+        assert_eq!(admitted.usage().buffer_bytes, 0);
+        assert_eq!(admitted.usage().waiters, 0);
+        assert!(witness.retired.load(Ordering::Acquire));
+        let _ = serving.operator.begin_drain();
+        assert!(serving.task.join(&cx).await.unwrap().is_ok());
+        eprintln!(
+            "{}",
+            serde_json::json!({"bead":"asupersync-96btkn", "workers":workers,
+            "last_domain_commit":"success", "remote_retired":true,
+            "close_observed_bytes":admitted.usage().buffer_bytes,
+            "close_observed_operations":admitted.usage().in_flight})
+        );
+    });
+}
+
+#[test]
+fn native_admitted_handles_retain_their_domain_and_close_waits_for_final_credit() {
+    for workers in [1, 2] {
+        let (done, result) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            exercise_admitted_domain_lifetime(workers);
+            done.send(()).unwrap();
+        });
+        result
+            .recv_timeout(Duration::from_secs(30))
+            .expect("admitted ownership and retirement must finish without a wall-clock hang");
+        thread.join().unwrap();
+    }
 }
 
 #[path = "remote_native_admission/owned.rs"]

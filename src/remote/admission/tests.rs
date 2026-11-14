@@ -248,19 +248,19 @@ fn discarded_factory_and_unpolled_driver_retire_native_admission() {
             let (sender, mut receiver) = oneshot::channel();
             shared.register(task, sender);
             let control_receiver = shared.admit(task).unwrap();
-            let guard = NativeRemoteDriverGuard::new(Arc::clone(&shared), task);
             let registry = ComputationSchemaRegistry::new();
             let request = SpawnRequest { remote_task_id: task, computation: ComputationName::new("echo"),
                 input: RemoteInput::new(vec![1, 2, 3]), lease: Duration::from_secs(1), idempotency_key: IdempotencyKey::from_raw(1),
                 budget: None, origin_node: NodeId::new("origin"), origin_region: cx.region_id(), origin_task: cx.task_id() };
             let credit = Arc::new(NativeRemoteCredit { _reservation: executor.reserve(&cx, &peer, 1024,
                 Duration::from_secs(1)).await.unwrap() });
+            let guard = NativeRemoteDriverGuard::new(Arc::clone(&shared), task, Some(credit));
             let publication = NativeRemotePublishedRequest {
                 wire: RemoteServiceWireRequest::from_spawn_request(RemotePeerHello::new(NodeId::new("origin"),
                     RemoteProtocolVersion::V3, registry.fingerprint()), &request).unwrap(),
                 origin: None,
                 client: client.clone(), control: shared.control(task).unwrap(), control_receiver,
-                guard, _admission: Some(credit),
+                guard,
             };
             assert_eq!(shared.state.lock().active.len(), 1);
             assert_eq!(executor.usage().in_flight, 1);
@@ -302,7 +302,7 @@ fn a_handle_dropped_as_its_driver_completes_leaves_no_task_entry() {
             if let RemoteMessage::CancelRequest(request) = envelope.payload {
                 let task = request.remote_task_id;
                 self.0
-                    .complete(task, Ok(RemoteOutcome::Success(Vec::new())));
+                    .complete(task, Ok(RemoteOutcome::Success(Vec::new())), None);
                 let _ = self.0.request_cancel(task, request.reason);
             }
             Ok(())
@@ -372,4 +372,282 @@ fn a_handle_dropped_as_its_driver_completes_leaves_no_task_entry() {
         state.tasks.is_empty(),
         "the dropped handle's task entry was left behind"
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetirementObservation {
+    active: usize,
+    charged: usize,
+    bytes: usize,
+}
+
+struct RetirementWaker {
+    shared: Arc<NativeRemoteShared>,
+    executor: RemoteExecutor,
+    observations: Arc<Mutex<Vec<RetirementObservation>>>,
+    panic_after_observe: bool,
+}
+
+impl RetirementWaker {
+    fn observe(&self) {
+        let active = self
+            .shared
+            .state
+            .try_lock()
+            .expect("retirement callbacks must run outside the native state lock")
+            .active
+            .len();
+        let usage = self.executor.usage();
+        self.observations.lock().push(RetirementObservation {
+            active,
+            charged: usage.in_flight,
+            bytes: usage.input_bytes,
+        });
+        assert!(
+            !self.panic_after_observe,
+            "injected admission-release wake panic"
+        );
+    }
+}
+
+impl std::task::Wake for RetirementWaker {
+    fn wake(self: Arc<Self>) {
+        self.observe();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.observe();
+    }
+}
+
+fn retirement_executor(peer: &NodeId) -> RemoteExecutor {
+    RemoteExecutor::new_queued(
+        RemoteAdmissionLimits {
+            max_peers: 1,
+            max_in_flight: 1,
+            max_input_bytes: 1024,
+        },
+        [(
+            peer.clone(),
+            RemotePeerLimits {
+                max_in_flight: 1,
+                max_input_bytes: 1024,
+                max_request_bytes: 1024,
+            },
+        )],
+        RemoteQueueLimits {
+            max_waiters: 1,
+            max_input_bytes: 1024,
+            max_waiters_per_peer: 1,
+            max_input_bytes_per_peer: 1024,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn terminal_delivery_and_admission_release_precede_driver_retirement() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        for keep_receiver in [false, true] {
+            let peer = NodeId::new("peer");
+            let executor = retirement_executor(&peer);
+            let retired = Arc::new(crate::sync::Notify::new());
+            let shared = Arc::new(NativeRemoteShared {
+                max_in_flight: 1, drain_timeout: Duration::from_secs(1),
+                automatic_lease_renewal: true, state: Mutex::new(NativeRemoteState::new()),
+                retirement_notify: Some(Arc::clone(&retired)),
+            });
+            let task = RemoteTaskId::next();
+            let (sender, receiver) = oneshot::channel();
+            let mut receiver = Some(receiver);
+            shared.register(task, sender);
+            let _control = shared.admit(task).unwrap();
+            let credit = Arc::new(NativeRemoteCredit {
+                _reservation: executor.reserve(&cx, &peer, 1024, Duration::from_secs(1)).await.unwrap(),
+            });
+            let receiver_credit = keep_receiver.then(|| Arc::clone(&credit));
+            if !keep_receiver { drop(receiver.take()); }
+            let delivery = Arc::new(Mutex::new(Vec::new()));
+            let delivery_waker = Waker::from(Arc::new(RetirementWaker {
+                shared: Arc::clone(&shared), executor: executor.clone(),
+                observations: Arc::clone(&delivery), panic_after_observe: false,
+            }));
+            let mut result_wait = receiver.as_mut().map(|receiver| Box::pin(receiver.recv_uninterruptible()));
+            if let Some(waiter) = &mut result_wait {
+                assert!(waiter.as_mut().poll(&mut Context::from_waker(&delivery_waker)).is_pending());
+            }
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let retirement_waker = Waker::from(Arc::new(RetirementWaker {
+                shared: Arc::clone(&shared), executor: executor.clone(),
+                observations: Arc::clone(&observations), panic_after_observe: false,
+            }));
+            let mut retired_wait = Box::pin(retired.notified());
+            assert!(retired_wait.as_mut().poll(&mut Context::from_waker(&retirement_waker)).is_pending());
+            let mut driver = NativeRemoteDriverGuard::new(Arc::clone(&shared), task, Some(credit));
+            driver.finish(Ok(RemoteOutcome::Success(vec![7; 128])));
+            drop(driver);
+            assert_eq!(*observations.lock(), vec![RetirementObservation {
+                active: 0, charged: usize::from(keep_receiver),
+                bytes: if keep_receiver { 1024 } else { 0 },
+            }], "close must never observe a retired driver that still owns credit");
+            if keep_receiver {
+                assert_eq!(*delivery.lock(), vec![RetirementObservation {
+                    active: 1, charged: 1, bytes: 1024,
+                }], "the result is transferred before final driver release");
+            }
+            drop(result_wait);
+            if let Some(receiver) = &mut receiver {
+                assert!(matches!(receiver.try_recv(), Ok(Ok(RemoteOutcome::Success(bytes))) if bytes == [7; 128]));
+            }
+            drop(receiver);
+            drop(receiver_credit);
+            shared.release_dropped_handle(task);
+            assert!(shared.state.lock().tasks.is_empty());
+            assert_eq!(executor.usage().input_bytes, 0);
+            assert_eq!(executor.usage().in_flight, 0);
+            eprintln!("{}", serde_json::json!({"bead":"asupersync-96btkn",
+                "case":"retirement_after_credit", "unread_receiver":keep_receiver,
+                "remaining_bytes":executor.usage().input_bytes,
+                "remaining_active":shared.state.lock().active.len()}));
+        }
+    });
+}
+
+#[test]
+fn a_panicking_credit_release_cannot_strand_native_driver_retirement() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let peer = NodeId::new("peer");
+        let executor = retirement_executor(&peer);
+        let retired = Arc::new(crate::sync::Notify::new());
+        let shared = Arc::new(NativeRemoteShared {
+            max_in_flight: 1,
+            drain_timeout: Duration::from_secs(1),
+            automatic_lease_renewal: true,
+            state: Mutex::new(NativeRemoteState::new()),
+            retirement_notify: Some(Arc::clone(&retired)),
+        });
+        let task = RemoteTaskId::next();
+        let (sender, receiver) = oneshot::channel();
+        shared.register(task, sender);
+        let _control = shared.admit(task).unwrap();
+        drop(receiver);
+        let credit = Arc::new(NativeRemoteCredit {
+            _reservation: executor
+                .reserve(&cx, &peer, 1024, Duration::from_secs(1))
+                .await
+                .unwrap(),
+        });
+        let released = Arc::new(Mutex::new(Vec::new()));
+        let release_waker = Waker::from(Arc::new(RetirementWaker {
+            shared: Arc::clone(&shared),
+            executor: executor.clone(),
+            observations: Arc::clone(&released),
+            panic_after_observe: true,
+        }));
+        let mut queued = Box::pin(executor.reserve(&cx, &peer, 1024, Duration::from_secs(5)));
+        assert!(
+            queued
+                .as_mut()
+                .poll(&mut Context::from_waker(&release_waker))
+                .is_pending()
+        );
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let retirement_waker = Waker::from(Arc::new(RetirementWaker {
+            shared: Arc::clone(&shared),
+            executor: executor.clone(),
+            observations: Arc::clone(&observations),
+            panic_after_observe: false,
+        }));
+        let mut retired_wait = Box::pin(retired.notified());
+        assert!(
+            retired_wait
+                .as_mut()
+                .poll(&mut Context::from_waker(&retirement_waker))
+                .is_pending()
+        );
+        let drained = Arc::new(Mutex::new(Vec::new()));
+        let drain_wakers = [true, false].map(|panic_after_observe| {
+            Waker::from(Arc::new(RetirementWaker {
+                shared: Arc::clone(&shared),
+                executor: executor.clone(),
+                observations: Arc::clone(&drained),
+                panic_after_observe,
+            }))
+        });
+        let mut drains = [
+            shared.begin_drain(true).2.unwrap(),
+            shared.begin_drain(true).2.unwrap(),
+        ];
+        let mut drain_waiters = drains
+            .iter_mut()
+            .map(|receiver| Box::pin(receiver.recv_uninterruptible()))
+            .collect::<Vec<_>>();
+        for (waiter, waker) in drain_waiters.iter_mut().zip(&drain_wakers) {
+            assert!(
+                waiter
+                    .as_mut()
+                    .poll(&mut Context::from_waker(waker))
+                    .is_pending()
+            );
+        }
+        let mut driver = NativeRemoteDriverGuard::new(Arc::clone(&shared), task, Some(credit));
+        driver.finish(Ok(RemoteOutcome::Success(vec![7; 128])));
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(driver)));
+        assert!(
+            unwind.is_err(),
+            "the planted release callback actually panicked"
+        );
+        assert_eq!(
+            *released.lock(),
+            vec![RetirementObservation {
+                active: 1,
+                charged: 0,
+                bytes: 0
+            }]
+        );
+        assert_eq!(
+            *observations.lock(),
+            vec![RetirementObservation {
+                active: 0,
+                charged: 0,
+                bytes: 0
+            }]
+        );
+        assert_eq!(
+            *drained.lock(),
+            vec![
+                RetirementObservation {
+                    active: 0,
+                    charged: 0,
+                    bytes: 0
+                };
+                2
+            ],
+            "a panicking drain receiver must not strand later receivers or the domain notifier"
+        );
+        for (waiter, waker) in drain_waiters.iter_mut().zip(&drain_wakers) {
+            assert!(matches!(
+                waiter.as_mut().poll(&mut Context::from_waker(waker)),
+                std::task::Poll::Ready(Ok(()))
+            ));
+        }
+        assert!(shared.state.lock().active.is_empty());
+        assert!(shared.state.lock().tasks.is_empty());
+        drop(queued);
+        assert_eq!(executor.queue_usage().waiters, 0);
+        assert_eq!(executor.usage().in_flight, 0);
+    });
 }
