@@ -12,7 +12,7 @@
 //! **Important:** Data in the buffer may be lost if the `BufWriter` is dropped
 //! without calling `flush` or `shutdown`.
 
-use super::AsyncWrite;
+use super::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -267,6 +267,28 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
 
         // Shutdown the underlying writer
         Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
+
+// A duplex endpoint may need to receive while its outgoing direction is
+// backpressured. Reads must not implicitly flush or discard the write buffer.
+impl<W: AsyncRead + Unpin> AsyncRead for BufWriter<W> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<W: AsyncBufRead + Unpin> AsyncBufRead for BufWriter<W> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        Pin::new(&mut self.get_mut().inner).poll_fill_buf(cx)
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        Pin::new(&mut self.get_mut().inner).consume(amount);
     }
 }
 

@@ -75,6 +75,7 @@
 pub mod browser_storage;
 pub mod browser_stream;
 mod buf_reader;
+mod buf_stream;
 mod buf_writer;
 pub mod cap;
 #[cfg(test)]
@@ -140,6 +141,7 @@ pub use browser_stream::{
 #[cfg(target_arch = "wasm32")]
 pub use browser_stream::{WasmReadableStreamSource, WasmWritableStreamSink};
 pub use buf_reader::BufReader;
+pub use buf_stream::BufStream;
 pub use buf_writer::BufWriter;
 pub use cap::{
     BrowserEntropyIoCap, BrowserFetchIoCap, BrowserHostApiIoCap, BrowserStorageIoCap,

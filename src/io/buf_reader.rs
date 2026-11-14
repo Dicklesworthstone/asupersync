@@ -10,8 +10,8 @@
 //! - Line-read cancellation guarantees depend on the adapter: see
 //!   [`super::LineReader`] and [`super::read_line`] for partial UTF-8 handling.
 
-use super::{AsyncBufRead, AsyncRead, AsyncSeek, ReadBuf};
-use std::io::{self, SeekFrom};
+use super::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
+use std::io::{self, IoSlice, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -209,6 +209,38 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
     fn consume(self: Pin<&mut Self>, amt: usize) {
         let this = self.get_mut();
         this.pos = this.pos.saturating_add(amt).min(this.cap);
+    }
+}
+
+// Reading and writing a duplex endpoint are independent. Forward writes without
+// disturbing read-ahead or seeking the endpoint back to the logical position.
+impl<R: AsyncWrite + Unpin> AsyncWrite for BufReader<R> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
