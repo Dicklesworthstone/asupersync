@@ -3732,6 +3732,112 @@
         assert!(cookie_header.contains("theme=dark"));
     }
 
+    #[test]
+    fn cookie_less_responses_do_not_exhaust_cookie_host_capacity() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        for index in 0..=MAX_COOKIE_HOSTS {
+            client.store_response_cookies(
+                &format!("no-cookies-{index}.example"),
+                Scheme::Https,
+                &[("Content-Type".to_string(), "text/plain".to_string())],
+            );
+        }
+        assert!(client.cookies.lock().is_empty());
+
+        client.store_response_cookies(
+            "login.example",
+            Scheme::Https,
+            &[("Set-Cookie".to_string(), "session=authenticated".to_string())],
+        );
+        let url = ParsedUrl::parse("https://login.example/account").expect("valid URL");
+        let request = client.build_request(&Method::Get, &url, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie"),
+            Some("session=authenticated".to_string())
+        );
+        assert_eq!(client.cookies.lock().len(), 1);
+    }
+
+    #[test]
+    fn rejected_cookie_headers_do_not_retain_empty_hosts() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        for (case, raw) in [
+            "missing-equals",
+            "=missing-name",
+            "session=; Path=/",
+            "session=rejected; Secure",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for index in 0..=MAX_COOKIE_HOSTS {
+                client.store_response_cookies(
+                    &format!("rejected-{case}-{index}.example"),
+                    Scheme::Http,
+                    &[("Set-Cookie".to_string(), raw.to_string())],
+                );
+            }
+            assert!(client.cookies.lock().is_empty(), "rejected header: {raw}");
+        }
+
+        client.store_response_cookies(
+            "accepted.example",
+            Scheme::Https,
+            &[("Set-Cookie".to_string(), "session=accepted; Secure".to_string())],
+        );
+        assert_eq!(
+            client.cookie_header_for_host("accepted.example", Scheme::Https),
+            Some("session=accepted".to_string())
+        );
+        assert_eq!(
+            client.cookie_header_for_host("accepted.example", Scheme::Http),
+            None
+        );
+    }
+
+    #[test]
+    fn cookie_host_capacity_stays_bounded_and_reuses_deleted_hosts() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        for index in 0..MAX_COOKIE_HOSTS {
+            client.store_response_cookies(
+                &format!("retained-{index}.example"),
+                Scheme::Https,
+                &[("Set-Cookie".to_string(), "session=retained".to_string())],
+            );
+        }
+        let newcomer = [("Set-Cookie".to_string(), "session=new".to_string())];
+        client.store_response_cookies("new.example", Scheme::Https, &newcomer);
+        assert_eq!(client.cookies.lock().len(), MAX_COOKIE_HOSTS);
+        assert_eq!(
+            client.cookie_header_for_host("new.example", Scheme::Https),
+            None
+        );
+
+        // A full jar must still allow its existing hosts to update or delete.
+        client.store_response_cookies(
+            "retained-0.example",
+            Scheme::Https,
+            &[("Set-Cookie".to_string(), "session=updated".to_string())],
+        );
+        assert_eq!(
+            client.cookie_header_for_host("retained-0.example", Scheme::Https),
+            Some("session=updated".to_string())
+        );
+        client.store_response_cookies(
+            "retained-0.example",
+            Scheme::Https,
+            &[("Set-Cookie".to_string(), "session=".to_string())],
+        );
+        assert_eq!(client.cookies.lock().len(), MAX_COOKIE_HOSTS - 1);
+
+        client.store_response_cookies("new.example", Scheme::Https, &newcomer);
+        assert_eq!(client.cookies.lock().len(), MAX_COOKIE_HOSTS);
+        assert_eq!(
+            client.cookie_header_for_host("new.example", Scheme::Https),
+            Some("session=new".to_string())
+        );
+    }
+
     #[derive(Debug)]
     struct ConnectTestIo {
         read_data: Vec<u8>,

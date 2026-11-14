@@ -3375,23 +3375,25 @@ impl HttpClient {
         if !self.config.cookie_store {
             return;
         }
+        let mut set_cookie_headers = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .peekable();
+        if set_cookie_headers.peek().is_none() {
+            return;
+        }
         let secure_response = scheme == Scheme::Https;
 
         let host = canonical_cookie_host(host);
         let mut cookies = self.cookies.lock();
-        // Cap the number of tracked hosts to prevent unbounded growth.
+        // Only hosts with retained cookies consume the bounded host capacity.
         if !cookies.contains_key(&host) && cookies.len() >= MAX_COOKIE_HOSTS {
             return;
         }
-        let mut touched = false;
         {
             let entry = cookies.entry(host.clone()).or_default();
-            for (_, raw) in headers
-                .iter()
-                .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
-            {
+            for (_, raw) in set_cookie_headers {
                 if let Some((name, value)) = parse_set_cookie_pair(raw) {
-                    touched = true;
                     // RFC 6265 section 5.2.5 matches the attribute name;
                     // its value, if supplied, does not disable Secure.
                     let secure = raw.split(';').skip(1).any(|attribute| {
@@ -3431,7 +3433,10 @@ impl HttpClient {
             }
         }
 
-        if touched && cookies.get(&host).is_some_and(Vec::is_empty) {
+        // Rejected or malformed headers must not leave an empty host behind.
+        // Otherwise cookie-less responses can exhaust the jar's host limit
+        // and prevent subsequent authenticated sessions from storing cookies.
+        if cookies.get(&host).is_some_and(Vec::is_empty) {
             cookies.remove(&host);
         }
     }
