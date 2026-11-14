@@ -12,14 +12,14 @@
 //! explicit time authority and cancellation that retains unconsumed values,
 //! use [`DelayQueue::next_expired`] with deadlines from the supplied context.
 
-use crate::cx::{Cx, cap::HasTime};
+use crate::cx::{CancelWakerToken, Cx, cap::HasTime};
 use crate::stream::Stream;
 use crate::time::{Sleep, wall_now};
 use crate::types::{CancelReason, Time};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
@@ -340,7 +340,7 @@ impl<T> DelayQueue<T> {
         let driver = cx
             .timer_driver()
             .ok_or(DelayQueueNextError::TimerUnavailable)?;
-        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut cancellation = ExpiryCancellation { cx, token: None };
 
         loop {
             let now = driver.now();
@@ -371,7 +371,9 @@ impl<T> DelayQueue<T> {
                 .map_or(deadline, |owner| deadline.min(owner));
             let mut timer = std::pin::pin!(Sleep::with_timer_driver(wake_at, driver.clone()));
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                cancellation.token =
+                    Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+                if cx.checkpoint().is_err() {
                     return Poll::Ready(());
                 }
                 if timer.as_mut().poll_deadline(task).is_ready() {
@@ -525,6 +527,21 @@ impl<T: fmt::Debug> fmt::Debug for DelayQueue<T> {
             .field("len", &self.entries.len())
             .field("armed_for", &self.armed_for)
             .finish_non_exhaustive()
+    }
+}
+
+// An observed request may still be masked. Retaining this exact registration
+// lets mask exit wake the owner without waiting for, or consuming, an entry.
+struct ExpiryCancellation<'cx, Caps> {
+    cx: &'cx Cx<Caps>,
+    token: Option<CancelWakerToken>,
+}
+
+impl<Caps> Drop for ExpiryCancellation<'_, Caps> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 

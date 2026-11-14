@@ -191,6 +191,50 @@ fn masked_cancellation_does_not_forfeit_a_fifo_turn() {
 }
 
 #[test]
+fn masked_waiters_retain_and_refresh_only_their_own_unmask_wake() {
+    let cx = Cx::detached_cancel_context();
+    let reason = crate::types::CancelReason::timeout()
+        .with_cause(crate::types::CancelReason::user("masked mutex owner"));
+    let mutex = Mutex::new(17);
+    let held = mutex.try_lock().unwrap();
+    let (old_count, old_waker) = counter();
+    let (new_count, new_waker) = counter();
+    let mut first = Box::pin(mutex.lock(&cx));
+    let mut second = Box::pin(mutex.lock(&cx));
+
+    cx.masked(|| {
+        assert!(poll(first.as_mut(), &old_waker).is_pending());
+        assert!(poll(second.as_mut(), &old_waker).is_pending());
+        cx.set_cancel_reason(reason.clone());
+        assert!(poll(first.as_mut(), &new_waker).is_pending());
+        assert!(poll(second.as_mut(), &old_waker).is_pending());
+        old_count.0.store(0, Ordering::SeqCst);
+        new_count.0.store(0, Ordering::SeqCst);
+        for _ in 0..3 {
+            assert!(poll(first.as_mut(), &new_waker).is_pending());
+            assert_eq!(mutex.waiters(), 2);
+            assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+            assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(new_count.0.load(Ordering::SeqCst), 0);
+        }
+        drop(first);
+        assert_eq!(mutex.waiters(), 1);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+    });
+
+    assert!(old_count.0.load(Ordering::SeqCst) > 0, "unmask wakes the live waiter");
+    assert_eq!(new_count.0.load(Ordering::SeqCst), 0, "the dropped waiter stays retired");
+    assert!(matches!(poll(second.as_mut(), &old_waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert_eq!(cx.cancel_reason(), Some(reason));
+    assert_eq!(mutex.waiters(), 0);
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    assert!(mutex.is_locked(), "cancellation did not need an unlock");
+    assert_eq!(*held, 17);
+    assert_eq!(Arc::strong_count(&old_count), 2);
+    assert_eq!(Arc::strong_count(&new_count), 2);
+}
+
+#[test]
 fn terminal_cancellation_retires_deadline_state_without_waiting_for_deadline() {
     let cx = Cx::for_testing();
     let mutex = Mutex::new(());
@@ -299,6 +343,151 @@ fn explicit_independent_context_wakes_lock_waits_on_native_runtime() {
     runtime.block_on(runtime.handle().spawn(async {
         independent_authority(Cx::current().unwrap()).await;
     }));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
+    use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, CancelReason, RegionId, TaskId};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[derive(Clone, Copy, Debug)]
+    enum LockKind { Borrowed, Owned, Deadline }
+
+    for kind in [LockKind::Borrowed, LockKind::Owned, LockKind::Deadline] {
+        for current_thread in [true, false] {
+            for request_before_first_poll in [false, true] {
+                let driver = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+                let cx = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1), TaskId::new_for_test(0, 0),
+                    Budget::INFINITE, None, None, None, Some(driver.clone()), None,
+                );
+                let reason = CancelReason::timeout()
+                    .with_cause(CancelReason::user("native masked mutex owner"));
+                let mutex = Arc::new(Mutex::new(29));
+                let held = mutex.try_lock().unwrap();
+                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+
+                let (worker, first_park, requested_park) = cx.masked(|| {
+                    if request_before_first_poll {
+                        cx.set_cancel_reason(reason.clone());
+                    }
+                    let worker = std::thread::spawn({
+                        let cx = cx.clone();
+                        let driver = driver.clone();
+                        let mutex = Arc::clone(&mutex);
+                        let saved_waker = Arc::clone(&saved_waker);
+                        move || {
+                            let builder = if current_thread {
+                                RuntimeBuilder::current_thread()
+                            } else {
+                                RuntimeBuilder::multi_thread()
+                                    .worker_threads(2)
+                                    .with_sharded_state(true)
+                            };
+                            let runtime = builder.with_timer_driver(driver.clone()).build().unwrap();
+                            let joined = runtime.block_on(runtime.handle().spawn(async move {
+                                let root = Cx::current().expect("native mutex root");
+                                let mut child = root.spawn(move |_child_cx| async move {
+                                    let mut waiting = std::pin::pin!(async {
+                                        match kind {
+                                            LockKind::Borrowed => mutex.lock(&cx).await.map(drop),
+                                            LockKind::Owned => {
+                                                OwnedMutexGuard::lock(Arc::clone(&mutex), &cx)
+                                                    .await.map(drop)
+                                            }
+                                            LockKind::Deadline => {
+                                                mutex.lock_until(&cx, Time::from_secs(3600))
+                                                    .await.map(drop)
+                                            }
+                                        }
+                                    });
+                                    let mut reported_initial = false;
+                                    let mut reported_requested = false;
+                                    let result = std::future::poll_fn(|task| {
+                                        let result = waiting.as_mut().poll(task);
+                                        if result.is_pending() {
+                                            *saved_waker.lock() = Some(task.waker().clone());
+                                            let requested = cx.is_cancel_requested();
+                                            if !reported_initial || (requested && !reported_requested) {
+                                                reported_initial = true;
+                                                reported_requested |= requested;
+                                                parked_tx.send((
+                                                    requested,
+                                                    mutex.waiters(),
+                                                    cx.inner.read().cancel_waker_registrations.len(),
+                                                    driver.pending_count(),
+                                                )).unwrap();
+                                            }
+                                        }
+                                        result
+                                    }).await;
+                                    assert_eq!(mutex.waiters(), 0);
+                                    assert!(mutex.is_locked(), "holder still owns the mutex");
+                                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                                    assert!(driver.is_empty());
+                                    (result, cx.cancel_reason())
+                                }).expect("spawn masked mutex waiter");
+                                child.join(&root).await
+                            }));
+                            let drain = runtime.shutdown_drained(Duration::from_secs(3));
+                            done_tx.send((joined, drain, runtime.is_quiescent())).unwrap();
+                        }
+                    });
+                    let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
+                    let requested_park = if request_before_first_poll {
+                        None
+                    } else {
+                        cx.set_cancel_reason(reason.clone());
+                        Some(parked_rx.recv_timeout(Duration::from_secs(3)))
+                    };
+                    (worker, first_park, requested_park)
+                });
+
+                let completed = done_rx.recv_timeout(Duration::from_secs(3));
+                let woke_without_rescue = completed.is_ok();
+                if !woke_without_rescue {
+                    let wake = saved_waker.lock().take();
+                    if let Some(wake) = wake { wake.wake(); }
+                }
+                let (joined, drain, quiescent) = completed
+                    .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+                    .expect("masked lock must finish after rescue wake");
+                worker.join().unwrap();
+                let timers = usize::from(matches!(kind, LockKind::Deadline));
+                assert_eq!(first_park.unwrap(), (request_before_first_poll, 1, 1, timers));
+                if let Some(parked) = requested_park {
+                    assert_eq!(parked.unwrap(), (true, 1, 1, timers));
+                }
+                assert!(woke_without_rescue, "{kind:?} missed its unmask wake");
+                assert!(matches!(
+                    &joined,
+                    Ok((Err(LockError::Cancelled), Some(actual))) if actual == &reason
+                ), "native join preserves the lock cancellation: {joined:?}");
+                assert_eq!(*held, 29);
+                assert!(mutex.is_locked());
+                assert_eq!(mutex.waiters(), 0);
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(driver.now(), Time::ZERO);
+                assert!(driver.is_empty());
+                drop(held);
+                assert_eq!(*mutex.try_lock().unwrap(), 29);
+                assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
+                assert_eq!(drain.live_tasks, 0);
+                assert_eq!(drain.live_regions, 0);
+                assert_eq!(drain.pending_spawns, 0);
+                assert_eq!(drain.pending_obligations, 0);
+                assert_eq!(drain.queued_finalizers, 0);
+                assert!(!drain.has_pending_obligation_posts);
+                assert!(quiescent);
+            }
+        }
+    }
 }
 
 /// The deadline of `lock_until` measures time, not the running task's

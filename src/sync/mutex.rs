@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::sync::lock_ordering::{self, LockRank};
 use crate::time::Sleep;
 use crate::types::Time;
@@ -443,7 +443,7 @@ pub struct LockFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx<Caps>,
     /// Installed lazily on contention, separately from the FIFO wakeup.
-    cancelled: Option<crate::cx::Cancelled<'b, Caps>>,
+    cancelled: Option<MutexCancellation<'b, Caps>>,
     /// Slab index of this waiter's `WaiterChain` slot (br-asupersync-wlf0xh).
     waiter_id: Option<crate::sync::waiter::WaiterId>,
     /// Boxed: only `lock_until` sets one, so `lock` carries no inline `Sleep`.
@@ -535,10 +535,10 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
         }
 
         let cx = self.cx;
-        let cancelled = self.cancelled.get_or_insert_with(|| cx.cancelled());
-        if Pin::new(cancelled).poll(context).is_ready() && cx.checkpoint().is_err() {
-            // Cancelled owns the check/register/recheck protocol. In particular
-            // cancellation during a Waker clone or retirement cannot park us.
+        let cancelled = self.cancelled.get_or_insert_with(|| MutexCancellation::new(cx));
+        cancelled.refresh(context.waker());
+        if cx.checkpoint().is_err() {
+            // Recheck after callbacks; masked requests retain their subscription.
             self.completed = true;
             self.cleanup_waiter();
             self.cancelled = None;
@@ -1240,6 +1240,32 @@ fn retire_after_completion<H, R>(helpers: H, result: R) -> R {
         Err(payload) => {
             drop(result);
             std::panic::resume_unwind(payload)
+        }
+    }
+}
+
+// A masked cancellation request is not terminal for a lock wait. Retain its
+// subscription so leaving the mask wakes it even if nobody unlocks the mutex.
+// Keep this guard below the unsafe-ledger locators; it adds no unsafe surface.
+struct MutexCancellation<'cx, Caps> {
+    cx: &'cx Cx<Caps>,
+    token: Option<CancelWakerToken>,
+}
+
+impl<'cx, Caps> MutexCancellation<'cx, Caps> {
+    const fn new(cx: &'cx Cx<Caps>) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl<Caps> Drop for MutexCancellation<'_, Caps> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
         }
     }
 }

@@ -990,11 +990,14 @@ mod async_tick_tests {
         let mut task = Context::from_waker(&waker);
         let mut waiting = Box::pin(interval.tick_async(&cx));
         cx.masked(|| {
-            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            for _ in 0..3 {
+                assert!(waiting.as_mut().poll(&mut task).is_pending());
+                assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+                assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+                assert_eq!(counter.0.load(Ordering::Acquire), 0);
+            }
         });
-        assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
-        assert_eq!(counter.0.load(Ordering::Acquire), 0);
-        // The synchronous mask does not promise a separate wake on exit.
+        assert!(counter.0.load(Ordering::Acquire) > 0, "unmask wakes the pending tick");
         assert!(matches!(
             waiting.as_mut().poll(&mut task),
             Poll::Ready(Err(IntervalTickError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
@@ -1002,6 +1005,57 @@ mod async_tick_tests {
         drop(waiting);
         assert_eq!(interval.deadline(), Time::from_millis(100));
         assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn masked_ticks_refresh_one_subscription_and_drop_without_consuming_ticks() {
+        let (cx, _, driver) = virtual_context(Budget::INFINITE);
+        let old_count = Arc::new(CountWake::default());
+        let old_waker = Waker::from(Arc::clone(&old_count));
+        let new_count = Arc::new(CountWake::default());
+        let new_waker = Waker::from(Arc::clone(&new_count));
+        let mut old_task = Context::from_waker(&old_waker);
+        let mut new_task = Context::from_waker(&new_waker);
+        let mut first_interval = Interval::new(Time::from_secs(3600), Duration::from_secs(1));
+        let mut second_interval = Interval::new(Time::from_secs(7200), Duration::from_secs(1));
+        let mut first = Box::pin(first_interval.tick_async(&cx));
+        let mut second = Box::pin(second_interval.tick_async(&cx));
+        let reason = CancelReason::timeout()
+            .with_cause(CancelReason::user("masked interval owner"));
+
+        cx.masked(|| {
+            assert!(first.as_mut().poll(&mut old_task).is_pending());
+            assert!(second.as_mut().poll(&mut old_task).is_pending());
+            cx.set_cancel_reason(reason.clone());
+            assert!(first.as_mut().poll(&mut new_task).is_pending());
+            assert!(second.as_mut().poll(&mut old_task).is_pending());
+            old_count.0.store(0, Ordering::Release);
+            new_count.0.store(0, Ordering::Release);
+            for _ in 0..3 {
+                assert!(first.as_mut().poll(&mut new_task).is_pending());
+                assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+                assert_eq!(driver.pending_count(), 2);
+                assert_eq!(old_count.0.load(Ordering::Acquire), 0);
+                assert_eq!(new_count.0.load(Ordering::Acquire), 0);
+            }
+            drop(first);
+            assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+            assert_eq!(driver.pending_count(), 1);
+        });
+
+        assert!(old_count.0.load(Ordering::Acquire) > 0);
+        assert_eq!(new_count.0.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            second.as_mut().poll(&mut old_task),
+            Poll::Ready(Err(IntervalTickError::Cancelled(actual))) if actual == reason
+        ));
+        assert!(driver.is_empty());
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(Arc::strong_count(&old_count), 2);
+        assert_eq!(Arc::strong_count(&new_count), 2);
+        drop(second);
+        assert_eq!(first_interval.deadline(), Time::from_secs(3600));
+        assert_eq!(second_interval.deadline(), Time::from_secs(7200));
     }
 
     #[test]
@@ -1126,6 +1180,116 @@ mod async_tick_tests {
                 let deadline = child.join(&cx).await.expect("typed cancellation acknowledgement");
                 assert!(deadline > cx.now());
             });
+        }
+    }
+
+    #[test]
+    fn native_foreign_owner_unmask_wakes_tick_without_consuming_it() {
+        use crate::runtime::RootDrainOutcome;
+
+        for current_thread in [true, false] {
+            for request_before_first_poll in [false, true] {
+                let (cx, _, driver) = virtual_context(Budget::INFINITE);
+                let reason = CancelReason::timeout()
+                    .with_cause(CancelReason::user("native masked interval owner"));
+                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+                let (worker, first_park, requested_park) = cx.masked(|| {
+                    if request_before_first_poll {
+                        cx.set_cancel_reason(reason.clone());
+                    }
+                    let worker = std::thread::spawn({
+                        let cx = cx.clone();
+                        let driver = driver.clone();
+                        let saved_waker = Arc::clone(&saved_waker);
+                        move || {
+                            let builder = if current_thread {
+                                RuntimeBuilder::current_thread()
+                            } else {
+                                RuntimeBuilder::multi_thread()
+                                    .worker_threads(2)
+                                    .with_sharded_state(true)
+                            };
+                            let runtime = builder.with_timer_driver(driver.clone()).build().unwrap();
+                            let joined = runtime.block_on(runtime.handle().spawn(async move {
+                                let root = Cx::current().expect("native masked interval root");
+                                let mut child = root.spawn(move |_child_cx| async move {
+                                    let deadline = Time::from_secs(3600);
+                                    let mut interval = Interval::new(deadline, Duration::from_secs(1));
+                                    let mut waiting = Box::pin(interval.tick_async(&cx));
+                                    let mut reported_initial = false;
+                                    let mut reported_requested = false;
+                                    let result = poll_fn(|task| {
+                                        let result = waiting.as_mut().poll(task);
+                                        if result.is_pending() {
+                                            *saved_waker.lock() = Some(task.waker().clone());
+                                            let requested = cx.is_cancel_requested();
+                                            if !reported_initial || (requested && !reported_requested) {
+                                                reported_initial = true;
+                                                reported_requested |= requested;
+                                                parked_tx.send((
+                                                    requested,
+                                                    driver.pending_count(),
+                                                    cx.inner.read().cancel_waker_registrations.len(),
+                                                )).unwrap();
+                                            }
+                                        }
+                                        result
+                                    }).await;
+                                    assert!(driver.is_empty());
+                                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                                    drop(waiting);
+                                    assert_eq!(interval.deadline(), deadline);
+                                    result
+                                }).expect("spawn masked interval waiter");
+                                child.join(&root).await
+                            }));
+                            let drain = runtime.shutdown_drained(Duration::from_secs(3));
+                            done_tx.send((joined, drain, runtime.is_quiescent())).unwrap();
+                        }
+                    });
+                    let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
+                    let requested_park = if request_before_first_poll {
+                        None
+                    } else {
+                        cx.set_cancel_reason(reason.clone());
+                        Some(parked_rx.recv_timeout(Duration::from_secs(3)))
+                    };
+                    (worker, first_park, requested_park)
+                });
+
+                let completed = done_rx.recv_timeout(Duration::from_secs(3));
+                let woke_without_rescue = completed.is_ok();
+                if !woke_without_rescue {
+                    let wake = saved_waker.lock().take();
+                    if let Some(wake) = wake { wake.wake(); }
+                }
+                let (joined, drain, quiescent) = completed
+                    .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+                    .expect("masked tick must finish after rescue wake");
+                worker.join().unwrap();
+                assert_eq!(first_park.unwrap(), (request_before_first_poll, 1, 1));
+                if let Some(parked) = requested_park {
+                    assert_eq!(parked.unwrap(), (true, 1, 1));
+                }
+                assert!(woke_without_rescue, "native tick missed its unmask wake");
+                assert!(matches!(
+                    &joined,
+                    Ok(Err(IntervalTickError::Cancelled(actual))) if actual == &reason
+                ), "native join preserves the exact tick error: {joined:?}");
+                assert_eq!(driver.now(), Time::ZERO);
+                assert!(driver.is_empty());
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
+                assert_eq!(drain.live_tasks, 0);
+                assert_eq!(drain.live_regions, 0);
+                assert_eq!(drain.pending_spawns, 0);
+                assert_eq!(drain.pending_obligations, 0);
+                assert_eq!(drain.queued_finalizers, 0);
+                assert!(!drain.has_pending_obligation_posts);
+                assert!(quiescent);
+            }
         }
     }
 

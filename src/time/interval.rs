@@ -38,9 +38,9 @@
 //! assert_eq!(t2, Time::from_millis(100));
 //! ```
 
-use crate::cx::{Cx, cap::HasTime};
+use crate::cx::{CancelWakerToken, Cx, cap::HasTime};
 use crate::types::{CancelReason, Time};
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -350,7 +350,7 @@ impl Interval {
         let driver = cx
             .timer_driver()
             .ok_or(IntervalTickError::TimerUnavailable)?;
-        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut cancellation = TickCancellation { cx, token: None };
 
         loop {
             let now = driver.now();
@@ -377,7 +377,9 @@ impl Interval {
                 .map_or(self.deadline, |deadline| self.deadline.min(deadline));
             let mut timer = std::pin::pin!(super::Sleep::with_timer_driver(wake_at, driver.clone()));
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                cancellation.token =
+                    Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+                if cx.checkpoint().is_err() {
                     return Poll::Ready(());
                 }
                 if timer.as_mut().poll_deadline(task).is_ready() {
@@ -590,6 +592,21 @@ pub fn interval(now: Time, period: Duration) -> Interval {
 #[must_use]
 pub fn interval_at(start: Time, period: Duration) -> Interval {
     Interval::new(start, period)
+}
+
+// Keep masked requests subscribed until the tick is consumed or the wait ends.
+// A fused cancellation observer would retire before mask exit can wake it.
+struct TickCancellation<'cx, Caps> {
+    cx: &'cx Cx<Caps>,
+    token: Option<CancelWakerToken>,
+}
+
+impl<Caps> Drop for TickCancellation<'_, Caps> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
 }
 
 #[cfg(test)]

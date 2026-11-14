@@ -587,11 +587,14 @@ mod context_expiry {
                 let waker = Waker::from(Arc::clone(&counter));
                 let mut task = Context::from_waker(&waker);
                 let mut waiting = Box::pin(queue.next_expired(&cx));
-                cx.masked(|| assert!(waiting.as_mut().poll(&mut task).is_pending()));
-                assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
-                assert_eq!(counter.0.load(Ordering::Acquire), 0);
-                // Explicit repoll after the synchronous mask; unmasking does
-                // not itself promise a wakeup.
+                cx.masked(|| {
+                    for _ in 0..3 {
+                        assert!(waiting.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+                        assert_eq!(counter.0.load(Ordering::Acquire), 0);
+                    }
+                });
+                assert!(counter.0.load(Ordering::Acquire) > 0, "unmask wakes the pending expiry");
                 assert!(matches!(
                     waiting.as_mut().poll(&mut task),
                     Poll::Ready(Err(DelayQueueNextError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
@@ -601,6 +604,59 @@ mod context_expiry {
                 assert_eq!(queue.remove(&key).into_inner(), "kept");
             },
         );
+    }
+
+    #[test]
+    fn masked_expiry_waits_refresh_and_retire_only_their_own_wakers() {
+        virtual_scenario(Budget::INFINITE, |cx, _, driver| {
+            let old_count = Arc::new(CountingWaker::default());
+            let old_waker = Waker::from(Arc::clone(&old_count));
+            let new_count = Arc::new(CountingWaker::default());
+            let new_waker = Waker::from(Arc::clone(&new_count));
+            let mut old_task = Context::from_waker(&old_waker);
+            let mut new_task = Context::from_waker(&new_waker);
+            let mut first_queue = DelayQueue::new();
+            let first_key = first_queue.insert_at("first", Time::from_secs(3600));
+            let mut second_queue = DelayQueue::new();
+            let second_key = second_queue.insert_at("second", Time::from_secs(7200));
+            let mut first = Box::pin(first_queue.next_expired(&cx));
+            let mut second = Box::pin(second_queue.next_expired(&cx));
+            let reason = CancelReason::timeout()
+                .with_cause(CancelReason::user("masked expiry owner"));
+
+            cx.masked(|| {
+                assert!(first.as_mut().poll(&mut old_task).is_pending());
+                assert!(second.as_mut().poll(&mut old_task).is_pending());
+                cx.set_cancel_reason(reason.clone());
+                assert!(first.as_mut().poll(&mut new_task).is_pending());
+                assert!(second.as_mut().poll(&mut old_task).is_pending());
+                old_count.0.store(0, Ordering::Release);
+                new_count.0.store(0, Ordering::Release);
+                for _ in 0..3 {
+                    assert!(first.as_mut().poll(&mut new_task).is_pending());
+                    assert_eq!(driver.pending_count(), 2);
+                    assert_eq!(old_count.0.load(Ordering::Acquire), 0);
+                    assert_eq!(new_count.0.load(Ordering::Acquire), 0);
+                }
+                drop(first);
+                assert_eq!(driver.pending_count(), 1);
+            });
+
+            assert!(old_count.0.load(Ordering::Acquire) > 0);
+            assert_eq!(new_count.0.load(Ordering::Acquire), 0);
+            assert!(matches!(
+                second.as_mut().poll(&mut old_task),
+                Poll::Ready(Err(DelayQueueNextError::Cancelled(actual))) if actual == reason
+            ));
+            assert!(driver.is_empty());
+            assert_eq!(Arc::strong_count(&old_count), 2);
+            assert_eq!(Arc::strong_count(&new_count), 2);
+            drop(second);
+            assert_eq!(first_queue.deadline(&first_key), Time::from_secs(3600));
+            assert_eq!(second_queue.deadline(&second_key), Time::from_secs(7200));
+            assert_eq!(first_queue.remove(&first_key).into_inner(), "first");
+            assert_eq!(second_queue.remove(&second_key).into_inner(), "second");
+        });
     }
 
     fn native<F, Fut>(workers: usize, scenario: F)
@@ -701,6 +757,128 @@ mod context_expiry {
                 assert_eq!(drops.load(Ordering::Acquire), 1);
                 assert!(queue.is_empty());
             });
+        }
+    }
+
+    #[test]
+    fn native_foreign_owner_unmask_wakes_expiry_without_consuming_a_value() {
+        use asupersync::runtime::RootDrainOutcome;
+
+        for current_thread in [true, false] {
+            for request_before_first_poll in [false, true] {
+                // Keep a real context alive in another runtime throughout the
+                // consumer's wait. Only its expiry subscription can wake the
+                // consumer when this independently controlled mask exits.
+                virtual_scenario(Budget::INFINITE, move |cx, _, driver| {
+                    let reason = CancelReason::timeout()
+                        .with_cause(CancelReason::user("native masked expiry owner"));
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let saved_waker = Arc::new(Mutex::new(None::<Waker>));
+                    let (parked_tx, parked_rx) = mpsc::channel();
+                    let (done_tx, done_rx) = mpsc::channel();
+                    let (worker, first_park, requested_park) = cx.masked(|| {
+                        if request_before_first_poll {
+                            cx.set_cancel_reason(reason.clone());
+                        }
+                        let worker = std::thread::spawn({
+                            let cx = cx.clone();
+                            let driver = driver.clone();
+                            let drops = Arc::clone(&drops);
+                            let saved_waker = Arc::clone(&saved_waker);
+                            move || {
+                                let builder = if current_thread {
+                                    RuntimeBuilder::current_thread()
+                                } else {
+                                    RuntimeBuilder::multi_thread()
+                                        .worker_threads(2)
+                                        .with_sharded_state(true)
+                                };
+                                let runtime = builder.with_timer_driver(driver.clone()).build().unwrap();
+                                let joined = runtime.block_on(runtime.handle().spawn(async move {
+                                    let root = Cx::current().expect("native masked expiry root");
+                                    let mut child = root.spawn(move |_child_cx| async move {
+                                        let deadline = Time::from_secs(3600);
+                                        let mut queue = DelayQueue::new();
+                                        let key = queue.insert_at(
+                                            Retained { value: 43, drops: Arc::clone(&drops) }, deadline,
+                                        );
+                                        let mut waiting = Box::pin(queue.next_expired(&cx));
+                                        let mut reported_initial = false;
+                                        let mut reported_requested = false;
+                                        let result = poll_fn(|task| {
+                                            let result = waiting.as_mut().poll(task);
+                                            if result.is_pending() {
+                                                *saved_waker.lock() = Some(task.waker().clone());
+                                                let requested = cx.is_cancel_requested();
+                                                if !reported_initial || (requested && !reported_requested) {
+                                                    reported_initial = true;
+                                                    reported_requested |= requested;
+                                                    parked_tx.send((requested, driver.pending_count())).unwrap();
+                                                }
+                                            }
+                                            result
+                                        }).await;
+                                        assert!(driver.is_empty());
+                                        assert_eq!(drops.load(Ordering::Acquire), 0);
+                                        drop(waiting);
+                                        assert!(queue.contains(&key));
+                                        assert_eq!(queue.deadline(&key), deadline);
+                                        let retained = queue.remove(&key).into_inner();
+                                        assert_eq!(retained.value, 43);
+                                        drop(retained);
+                                        assert!(queue.is_empty());
+                                        assert_eq!(drops.load(Ordering::Acquire), 1);
+                                        result.map(|_| ())
+                                    }).expect("spawn masked expiry waiter");
+                                    child.join(&root).await
+                                }));
+                                let drain = runtime.shutdown_drained(Duration::from_secs(3));
+                                done_tx.send((joined, drain, runtime.is_quiescent())).unwrap();
+                            }
+                        });
+                        let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
+                        assert_eq!(drops.load(Ordering::Acquire), 0);
+                        let requested_park = if request_before_first_poll {
+                            None
+                        } else {
+                            cx.set_cancel_reason(reason.clone());
+                            Some(parked_rx.recv_timeout(Duration::from_secs(3)))
+                        };
+                        (worker, first_park, requested_park)
+                    });
+
+                    let completed = done_rx.recv_timeout(Duration::from_secs(3));
+                    let woke_without_rescue = completed.is_ok();
+                    if !woke_without_rescue {
+                        let wake = saved_waker.lock().take();
+                        if let Some(wake) = wake { wake.wake(); }
+                    }
+                    let (joined, drain, quiescent) = completed
+                        .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+                        .expect("masked expiry must finish after rescue wake");
+                    worker.join().unwrap();
+                    assert_eq!(first_park.unwrap(), (request_before_first_poll, 1));
+                    if let Some(parked) = requested_park {
+                        assert_eq!(parked.unwrap(), (true, 1));
+                    }
+                    assert!(woke_without_rescue, "native expiry missed its unmask wake");
+                    assert!(matches!(
+                        &joined,
+                        Ok(Err(DelayQueueNextError::Cancelled(actual))) if actual == &reason
+                    ), "native join preserves the exact expiry error: {joined:?}");
+                    assert_eq!(driver.now(), Time::ZERO);
+                    assert!(driver.is_empty());
+                    assert_eq!(drops.load(Ordering::Acquire), 1);
+                    assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
+                    assert_eq!(drain.live_tasks, 0);
+                    assert_eq!(drain.live_regions, 0);
+                    assert_eq!(drain.pending_spawns, 0);
+                    assert_eq!(drain.pending_obligations, 0);
+                    assert_eq!(drain.queued_finalizers, 0);
+                    assert!(!drain.has_pending_obligation_posts);
+                    assert!(quiescent);
+                });
+            }
         }
     }
 
