@@ -3563,6 +3563,8 @@
             let mut task_cx = TaskContext::from_waker(&waker);
             assert!(conn.poll_open_local_bidi(&cx, &mut task_cx).is_pending());
             assert!(conn.poll_open_local_uni(&cx, &mut task_cx).is_pending());
+            assert!(conn.poll_recv_datagram(&cx, &mut task_cx).is_pending());
+            assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 3);
             match close_path {
                 0 => conn.begin_close(&cx, 10, 7).unwrap(),
                 1 => conn.close_immediately(&cx, 7).unwrap(),
@@ -3576,7 +3578,7 @@
                     ).expect_err("unencodable peer grant closes the connection");
                 }
             }
-            assert_eq!(wakes.count(), 2, "close path {close_path}");
+            assert_eq!(wakes.count(), 3, "close path {close_path}");
             assert!(cx.inner.read().cancel_waker_registrations.is_empty());
             assert!(matches!(
                 conn.poll_open_local_bidi(&cx, &mut task_cx),
@@ -3586,9 +3588,15 @@
                 conn.poll_open_local_uni(&cx, &mut task_cx),
                 Poll::Ready(Err(NativeQuicConnectionError::InvalidState(_)))
             ));
+            assert_eq!(
+                conn.poll_recv_datagram(&cx, &mut task_cx),
+                Poll::Ready(Err(NativeQuicConnectionError::InvalidState(
+                    "connection is closed",
+                )))
+            );
             assert_eq!(conn.streams().len(), 0);
             conn.poll(&cx, 10_000_000).unwrap();
-            assert_eq!(wakes.count(), 2, "drain expiry cannot repeat a wake");
+            assert_eq!(wakes.count(), 3, "drain expiry cannot repeat a wake");
         }
     }
 
@@ -3610,15 +3618,24 @@
         let mut conn = exhausted_stream_connection(StreamRole::Client);
         let bidi_wakes = Arc::new(StreamOpenWake::default());
         let uni_wakes = Arc::new(StreamOpenWake::default());
+        let datagram_wakes = Arc::new(StreamOpenWake::default());
         let bidi_waker = Waker::from(Arc::new(PanickingWake(Arc::clone(&bidi_wakes))));
         let uni_waker = Waker::from(Arc::clone(&uni_wakes));
+        let datagram_waker = Waker::from(Arc::clone(&datagram_wakes));
         assert!(conn.poll_open_local_bidi(&cx, &mut TaskContext::from_waker(&bidi_waker)).is_pending());
         assert!(conn.poll_open_local_uni(&cx, &mut TaskContext::from_waker(&uni_waker)).is_pending());
+        assert!(
+            conn.poll_recv_datagram(&cx, &mut TaskContext::from_waker(&datagram_waker))
+                .is_pending()
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             conn.close_immediately(&cx, 7).unwrap();
         }));
         assert!(result.is_err());
-        assert_eq!((bidi_wakes.count(), uni_wakes.count()), (1, 1));
+        assert_eq!(
+            (bidi_wakes.count(), uni_wakes.count(), datagram_wakes.count()),
+            (1, 1, 1)
+        );
         assert!(cx.inner.read().cancel_waker_registrations.is_empty());
         assert_eq!(conn.state(), QuicConnectionState::Closed);
     }
@@ -4164,6 +4181,127 @@
             assert_eq!(conn.recv_datagram().expect("queued datagram"), expected);
         }
         assert!(conn.recv_datagram().is_none());
+    }
+
+    #[test]
+    fn poll_recv_datagram_replaces_and_releases_owned_cancellation_registrations() {
+        use std::sync::Arc;
+
+        let old_cx = test_cx();
+        let new_cx = test_cx();
+        let driver_cx = test_cx();
+        let old_wakes = Arc::new(StreamOpenWake::default());
+        let new_wakes = Arc::new(StreamOpenWake::default());
+        let old_waker = Waker::from(Arc::clone(&old_wakes));
+        let new_waker = Waker::from(Arc::clone(&new_wakes));
+        let mut old_task_cx = TaskContext::from_waker(&old_waker);
+        let mut new_task_cx = TaskContext::from_waker(&new_waker);
+        let mut conn = established_conn();
+
+        for _ in 0..64 {
+            assert!(conn.poll_recv_datagram(&old_cx, &mut old_task_cx).is_pending());
+            assert_eq!(old_cx.inner.read().cancel_waker_registrations.len(), 1);
+        }
+        // Reusing a Waker does not mean the cancellation owner is unchanged.
+        assert!(conn.poll_recv_datagram(&new_cx, &mut old_task_cx).is_pending());
+        assert!(old_cx.inner.read().cancel_waker_registrations.is_empty());
+        assert_eq!(new_cx.inner.read().cancel_waker_registrations.len(), 1);
+        assert!(conn.poll_recv_datagram(&new_cx, &mut new_task_cx).is_pending());
+        assert_eq!(new_cx.inner.read().cancel_waker_registrations.len(), 1);
+        old_cx.set_cancel_requested(true);
+        assert_eq!(
+            old_wakes.count(),
+            0,
+            "the abandoned receiver was unregistered"
+        );
+        new_cx.set_cancel_requested(true);
+        assert_eq!(new_wakes.count(), 1, "cancellation wakes the active receiver");
+        assert_eq!(
+            conn.poll_recv_datagram(&new_cx, &mut new_task_cx),
+            Poll::Ready(Err(NativeQuicConnectionError::Cancelled))
+        );
+        assert!(new_cx.inner.read().cancel_waker_registrations.is_empty());
+
+        // Cancellation wins without consuming a payload another caller can read.
+        let payload = Bytes::from_static(b"preserved-after-cancellation");
+        conn.process_frame(
+            &driver_cx,
+            &QuicFrame::Datagram {
+                data: payload.clone(),
+            },
+            PacketNumberSpace::ApplicationData,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.poll_recv_datagram(&new_cx, &mut new_task_cx),
+            Poll::Ready(Err(NativeQuicConnectionError::Cancelled))
+        );
+        assert_eq!(conn.pending_datagram_count(), 1);
+        assert_eq!(
+            conn.poll_recv_datagram(&driver_cx, &mut new_task_cx),
+            Poll::Ready(Ok(payload))
+        );
+
+        // Connection clones retain independent tokens, and both drop paths retire them.
+        assert!(
+            conn.poll_recv_datagram(&driver_cx, &mut new_task_cx)
+                .is_pending()
+        );
+        let cloned = conn.clone();
+        assert_eq!(driver_cx.inner.read().cancel_waker_registrations.len(), 2);
+        drop(cloned);
+        assert_eq!(driver_cx.inner.read().cancel_waker_registrations.len(), 1);
+        drop(conn);
+        assert!(driver_cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn poll_recv_datagram_preserves_buffered_fifo_after_connection_close() {
+        use std::sync::Arc;
+
+        for immediate in [false, true] {
+            let cx = test_cx();
+            let mut conn = established_conn();
+            let wakes = Arc::new(StreamOpenWake::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = TaskContext::from_waker(&waker);
+            assert!(conn.poll_recv_datagram(&cx, &mut task_cx).is_pending());
+            assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+            let payloads = [Bytes::from_static(b"first"), Bytes::from_static(b"second")];
+            for payload in &payloads {
+                conn.process_frame(
+                    &cx,
+                    &QuicFrame::Datagram {
+                        data: payload.clone(),
+                    },
+                    PacketNumberSpace::ApplicationData,
+                )
+                .unwrap();
+            }
+            assert_eq!(wakes.count(), 1, "arrival wakes the receiver once");
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            if immediate {
+                conn.close_immediately(&cx, 7).unwrap();
+            } else {
+                conn.begin_close(&cx, 10, 7).unwrap();
+            }
+            for expected in payloads {
+                assert_eq!(
+                    conn.poll_recv_datagram(&cx, &mut task_cx),
+                    Poll::Ready(Ok(expected))
+                );
+            }
+            assert_eq!(
+                conn.poll_recv_datagram(&cx, &mut task_cx),
+                Poll::Ready(Err(NativeQuicConnectionError::InvalidState(
+                    "connection is closed",
+                )))
+            );
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            cx.set_cancel_requested(true);
+            assert_eq!(wakes.count(), 1, "a completed receive owns no cancel wake");
+        }
     }
 
     #[test]

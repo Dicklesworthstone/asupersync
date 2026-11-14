@@ -399,13 +399,13 @@ impl Default for NativeQuicConnectionConfig {
 /// One connection-owned wait. Replacing or retiring it removes exactly its
 /// cancellation registration; repeatedly abandoned polls cannot grow a queue.
 #[derive(Debug)]
-struct LocalStreamOpenWaiter {
+struct ConnectionWaiter {
     cx: Cx,
     token: Option<CancelWakerToken>,
     waker: Waker,
 }
 
-impl LocalStreamOpenWaiter {
+impl ConnectionWaiter {
     fn new(cx: &Cx, waker: &Waker) -> Self {
         let cx = cx.clone();
         let waker = waker.clone();
@@ -425,7 +425,7 @@ impl LocalStreamOpenWaiter {
     }
 }
 
-impl Clone for LocalStreamOpenWaiter {
+impl Clone for ConnectionWaiter {
     fn clone(&self) -> Self {
         // A cloned connection owns a distinct token. Dropping either snapshot
         // must not unregister the other one's wait on the same Cx.
@@ -433,7 +433,7 @@ impl Clone for LocalStreamOpenWaiter {
     }
 }
 
-impl Drop for LocalStreamOpenWaiter {
+impl Drop for ConnectionWaiter {
     fn drop(&mut self) {
         self.clear_registration();
     }
@@ -454,7 +454,7 @@ pub struct NativeQuicConnection {
     transport: QuicTransportMachine,
     streams: StreamTable,
     /// One polling owner per direction, bounded even across abandoned waits.
-    local_stream_open_waiters: [Option<LocalStreamOpenWaiter>; 2],
+    local_stream_open_waiters: [Option<ConnectionWaiter>; 2],
     next_packet_numbers: [u64; 3],
     /// First packet number eligible to use the current updated send key.
     /// A subsequent locally initiated update needs a real ACK at this floor
@@ -511,8 +511,8 @@ pub struct NativeQuicConnection {
     /// Total inbound DATAGRAM payloads dropped before enqueue because the
     /// bounded receive queue was full.
     datagrams_dropped_on_receive: u64,
-    /// Task waiting for the next inbound DATAGRAM payload.
-    inbound_datagram_waker: Option<Waker>,
+    /// One polling owner for DATAGRAM arrival, cancellation, or terminal close.
+    inbound_datagram_waiter: Option<ConnectionWaiter>,
     /// Outbound DATAGRAM payloads queued by `send_datagram`, drained into
     /// `QuicFrame::Datagram` frames by `generate_frames` in 1-RTT packets.
     outbound_datagrams: VecDeque<Bytes>,
@@ -685,7 +685,7 @@ impl NativeQuicConnection {
             inbound_datagrams: VecDeque::new(),
             datagrams_received: 0,
             datagrams_dropped_on_receive: 0,
-            inbound_datagram_waker: None,
+            inbound_datagram_waiter: None,
             outbound_datagrams: VecDeque::new(),
             datagrams_sent: 0,
             datagrams_dropped_on_send: 0,
@@ -1044,7 +1044,7 @@ impl NativeQuicConnection {
         match result {
             Err(StreamTableError::StreamLimitExceeded { limit, .. }) if limit < (1u64 << 60) => {
                 self.local_stream_open_waiters[index] =
-                    Some(LocalStreamOpenWaiter::new(cx, task_cx.waker()));
+                    Some(ConnectionWaiter::new(cx, task_cx.waker()));
                 // Cancellation can arrive between the first check and the
                 // registration. Recheck after arming, before returning Pending.
                 if let Err(error) = checkpoint(cx) {
@@ -1065,10 +1065,11 @@ impl NativeQuicConnection {
         }
     }
 
-    fn wake_local_stream_openers(&mut self) {
-        // Retire both registration owners even if the first arbitrary Waker
+    fn wake_connection_waiters(&mut self) {
+        // Retire all registration owners even if the first arbitrary Waker
         // panics. Dispatch all notifications, then preserve the first panic.
-        let waiters = std::mem::take(&mut self.local_stream_open_waiters);
+        let [bidi, uni] = std::mem::take(&mut self.local_stream_open_waiters);
+        let waiters = [bidi, uni, self.inbound_datagram_waiter.take()];
         let mut first_panic = None;
         for waiter in waiters.into_iter().flatten() {
             if let Err(payload) =
@@ -1846,7 +1847,7 @@ impl NativeQuicConnection {
         if close_was_unattributed {
             self.peer_close_observed = false;
         }
-        self.wake_local_stream_openers();
+        self.wake_connection_waiters();
         Ok(())
     }
 
@@ -1864,7 +1865,7 @@ impl NativeQuicConnection {
             self.peer_close_observed = false;
         }
         self.transport.close_immediately(app_error_code);
-        self.wake_local_stream_openers();
+        self.wake_connection_waiters();
         Ok(())
     }
 
@@ -1894,7 +1895,7 @@ impl NativeQuicConnection {
         {
             self.peer_close_observed = false;
             self.local_close_frame_type = Some(frame_type);
-            self.wake_local_stream_openers();
+            self.wake_connection_waiters();
         }
     }
 
@@ -1951,7 +1952,7 @@ impl NativeQuicConnection {
             self.transport.state(),
             QuicConnectionState::Draining | QuicConnectionState::Closed
         ) {
-            self.wake_local_stream_openers();
+            self.wake_connection_waiters();
         }
         Ok(())
     }
@@ -3238,7 +3239,7 @@ impl NativeQuicConnection {
                 if close_was_unattributed {
                     self.peer_close_observed = true;
                 }
-                self.wake_local_stream_openers();
+                self.wake_connection_waiters();
                 Ok(())
             }
             QuicFrame::HandshakeDone => {
@@ -3356,8 +3357,8 @@ impl NativeQuicConnection {
                 self.datagrams_received,
                 self.datagrams_dropped_on_receive
             );
-            if let Some(waker) = self.inbound_datagram_waker.take() {
-                waker.wake();
+            if let Some(waiter) = self.inbound_datagram_waiter.take() {
+                waiter.wake();
             }
         }
 
@@ -3423,15 +3424,22 @@ impl NativeQuicConnection {
 
     /// Poll for the next decoded DATAGRAM payload without busy-polling.
     ///
-    /// This is the Cx-aware receive surface used by higher-level event-loop
-    /// adapters: cancellation is observed through [`Cx::checkpoint`], an
-    /// available payload returns immediately, and an empty queue registers the
-    /// task waker for the next DATAGRAM arrival.
+    /// Cancellation is checked before consuming a payload. Buffered payloads
+    /// remain available after closing; an empty draining or closed connection
+    /// returns [`NativeQuicConnectionError::InvalidState`].
+    ///
+    /// An empty live connection retains one task waker and one owned `Cx`
+    /// cancellation registration. DATAGRAM arrival, cancellation, and terminal
+    /// close wake the caller. A later poll replaces an abandoned wait; receiving
+    /// a payload, returning an error, or dropping the connection releases it.
+    /// The transport driver must continue receiving packets while the caller
+    /// waits.
     pub fn poll_recv_datagram(
         &mut self,
         cx: &Cx,
         task_cx: &mut TaskContext<'_>,
     ) -> Poll<Result<Bytes, NativeQuicConnectionError>> {
+        self.inbound_datagram_waiter = None;
         if let Err(err) = checkpoint(cx) {
             return Poll::Ready(Err(err));
         }
@@ -3440,12 +3448,21 @@ impl NativeQuicConnection {
             return Poll::Ready(Ok(datagram));
         }
 
-        let should_replace = self
-            .inbound_datagram_waker
-            .as_ref()
-            .is_none_or(|waker| !waker.will_wake(task_cx.waker()));
-        if should_replace {
-            self.inbound_datagram_waker = Some(task_cx.waker().clone());
+        if matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            return Poll::Ready(Err(NativeQuicConnectionError::InvalidState(
+                "connection is closed",
+            )));
+        }
+
+        self.inbound_datagram_waiter = Some(ConnectionWaiter::new(cx, task_cx.waker()));
+        // Cancellation can race the first check and registration. Recheck
+        // after arming so it cannot leave an already-cancelled caller asleep.
+        if let Err(err) = checkpoint(cx) {
+            self.inbound_datagram_waiter = None;
+            return Poll::Ready(Err(err));
         }
         Poll::Pending
     }

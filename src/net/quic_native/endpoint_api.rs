@@ -329,11 +329,13 @@ impl QuicConnection {
 
     /// Cx-aware poll for the next received datagram payload (no busy-poll).
     ///
-    /// Returns [`Poll::Ready`] with the payload when one is buffered, observes
-    /// cancellation through `cx` (returning [`Poll::Ready`] with
-    /// [`NativeQuicConnectionError::Cancelled`]), and otherwise registers
-    /// `task_cx`'s waker for the next datagram arrival and returns
-    /// [`Poll::Pending`].
+    /// Cancellation returns [`NativeQuicConnectionError::Cancelled`] without
+    /// consuming buffered data. Buffered payloads remain readable after closing;
+    /// once empty, a draining or closed connection returns
+    /// [`NativeQuicConnectionError::InvalidState`]. Otherwise this retains one
+    /// owned wait for DATAGRAM arrival, cancellation, or terminal close and
+    /// returns [`Poll::Pending`]. A later poll replaces that wait; completion or
+    /// connection drop releases it.
     pub fn poll_recv_datagram(
         &mut self,
         cx: &Cx,
