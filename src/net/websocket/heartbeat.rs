@@ -201,10 +201,30 @@ where
                 "cancelled",
             ))));
         }
+        // An elapsed deadline still wins over ready transport I/O. Use the
+        // connection's retained clock, including an explicitly chosen wall
+        // clock, without allocating or registering a Sleep for ready traffic.
+        if deadline.as_ref().is_some_and(|deadline| {
+            let now = deadline
+                .clock
+                .as_ref()
+                .map_or_else(crate::time::raw_wall_now, TimerDriverHandle::now);
+            now >= deadline.at
+        }) {
+            return Poll::Ready(Ok(None));
+        }
+        if let Poll::Ready(result) = future.as_mut().poll(task) {
+            // Transport effects may already have committed. As with a timer
+            // checked before I/O, a deadline crossed inside this poll is
+            // observed by the next heartbeat update, not by discarding output.
+            return Poll::Ready(result.map(Some));
+        }
         if let Some(deadline) = deadline.as_ref() {
-            // Initialize only after checking cancellation. A driverless first
-            // receive chose the process wall clock, including its shared timer
-            // pump; neither time reads nor registration may follow a later Cx.
+            // Arm only after Pending, and poll immediately: the deadline may
+            // have passed during transport polling. Sleep's registration and
+            // readiness handshake covers a concurrent timer-driver advance.
+            // A driverless first receive retains the shared wall-clock pump;
+            // neither time reads nor registration may follow a later Cx.
             let timer = timer.get_or_insert_with(|| match deadline.clock.as_ref() {
                 Some(clock) => Sleep::with_timer_driver(deadline.at, clock.clone()),
                 None => Sleep::with_wall_clock(deadline.at),
@@ -213,7 +233,7 @@ where
                 return Poll::Ready(Ok(None));
             }
         }
-        future.as_mut().poll(task).map(|result| result.map(Some))
+        Poll::Pending
     })
     .await
 }
