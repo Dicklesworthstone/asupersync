@@ -78,7 +78,7 @@
 //! structured error log a violation emits
 //! ([`emit_structured_log`](ViolationRecord::emit_structured_log)).
 
-use crate::record::task::TaskState;
+use crate::record::task::{TaskRecord, TaskState};
 use crate::runtime::RuntimeState;
 use crate::types::{
     CancelKind, CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId,
@@ -784,6 +784,45 @@ impl CancellationProtocolOracle {
     pub fn on_cancel_ack(&mut self, task: TaskId, _time: Time) {
         if let Some(record) = self.tasks.get_mut(&task) {
             if let Some(ref mut cancel) = record.cancel_request {
+                cancel.acknowledged = true;
+            }
+        }
+    }
+
+    /// Observe cancellation committed through RuntimeState or a handle command.
+    /// Those paths need not pass through the Lab's explicit injection hooks, and
+    /// waiting for a checkpoint receipt hides a task that never acknowledges.
+    ///
+    /// This is a current-state observation, not a reconstructed transition or
+    /// mask history. Preserve the first observed request time, delivered-poll
+    /// count, and recorded violations across repeated samples and reports.
+    pub(crate) fn observe_runtime_task(&mut self, task: &TaskRecord, now: Time) {
+        let reason = match &task.state {
+            TaskState::CancelRequested { reason, .. }
+            | TaskState::Cancelling { reason, .. }
+            | TaskState::Finalizing { reason, .. }
+            | TaskState::Completed(crate::types::Outcome::Cancelled(reason)) => Some(reason),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            self.on_cancel_request(task.id, reason.clone(), now);
+        } else if !task.state.is_terminal() || !self.has_cancel_request(task.id) {
+            return;
+        }
+
+        self.task_regions.entry(task.id).or_insert(task.owner);
+        let record = self
+            .tasks
+            .get_mut(&task.id)
+            .expect("a cancellation request has an oracle record");
+        record.current_state = TaskStateKind::from_task_state(&task.state);
+        if matches!(
+            task.state,
+            TaskState::Cancelling { .. } | TaskState::Finalizing { .. }
+        ) {
+            // These phases witness acknowledgement, but not its exact mask
+            // instant. Ordered checkpoint observations validate that instant.
+            if let Some(cancel) = record.cancel_request.as_mut() {
                 cancel.acknowledged = true;
             }
         }

@@ -5540,11 +5540,21 @@ impl LabRuntime {
     /// Sample actual record witnesses in the lab only. Terminal snapshots must
     /// precede `task_completed`, which can recycle the task's arena generation.
     fn observe_cancel_correctness(&mut self, task_id: TaskId) {
-        if let Some(record) = self.state.task(task_id)
-            && let Some((from, to)) = self
-                .oracles
-                .cancel_correctness
-                .observe_runtime_task(record, self.virtual_time)
+        let Some(record) = self.state.task(task_id) else {
+            return;
+        };
+        if self.config.has_cancellation_oracle() {
+            // Observe ordinary region/handle requests before counting the next
+            // delivered poll. Waiting for consume_cancel_ack would make a task
+            // that never checkpoints invisible to the protocol oracle.
+            self.oracles
+                .cancellation_protocol
+                .observe_runtime_task(record, self.virtual_time);
+        }
+        if let Some((from, to)) = self
+            .oracles
+            .cancel_correctness
+            .observe_runtime_task(record, self.virtual_time)
         {
             self.oracles.cancellation_protocol.on_transition(
                 task_id,

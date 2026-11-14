@@ -402,10 +402,11 @@ impl OracleSuite {
         // current records too. Completed tasks are observed by the lab before
         // retirement; replaying all historical terminal records is not a feed.
         for (_, task) in state.tasks_iter() {
-            if !task.state.is_terminal()
-                && let Some((from, to)) =
-                    self.cancel_correctness.observe_runtime_task(task, now)
-            {
+            if task.state.is_terminal() {
+                continue;
+            }
+            self.cancellation_protocol.observe_runtime_task(task, now);
+            if let Some((from, to)) = self.cancel_correctness.observe_runtime_task(task, now) {
                 self.cancellation_protocol
                     .on_transition(task.id, &from, &to, now);
             }

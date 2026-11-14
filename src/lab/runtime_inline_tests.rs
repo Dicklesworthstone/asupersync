@@ -2308,6 +2308,198 @@
     }
 
     #[test]
+    fn ordinary_region_cancel_tracks_unacknowledged_delivered_polls() {
+        use crate::lab::oracle::CancellationProtocolViolation;
+        use crate::sync::atomic::{AtomicU32, Ordering};
+
+        let mut runtime = LabRuntime::new(
+            LabConfig::new(0x0c_a110).panic_on_cancellation_violation(false),
+        );
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let polls = Arc::new(AtomicU32::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let (task, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                std::future::poll_fn(move |cx| {
+                    observed_polls.fetch_add(1, Ordering::SeqCst);
+                    cx.waker().wake_by_ref();
+                    Poll::<()>::Pending
+                })
+                .await;
+            })
+            .unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        runtime.advance_time(100);
+        let first_observed = runtime.now();
+        let effects = runtime.state.cancel_request(
+            root,
+            &CancelReason::user("ordinary region cancellation"),
+            None,
+        );
+        runtime.state.defer_cancel_dispatch(effects);
+
+        let delivered = crate::types::MAX_MASK_DEPTH + 2;
+        for _ in 0..delivered {
+            runtime.step_for_test();
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 1 + delivered);
+        assert!(matches!(
+            runtime.oracles.cancellation_protocol.check(),
+            Err(CancellationProtocolViolation::CancelNotAcknowledged {
+                task: observed,
+                requested_at,
+                polls_since_request,
+            }) if observed == task
+                && requested_at == first_observed
+                && polls_since_request == delivered
+        ));
+
+        // A stronger request and a report must not restart the timing window.
+        runtime.advance_time(200);
+        handle.abort_with_reason(CancelReason::shutdown());
+        runtime.step_for_test();
+        let report = runtime.report();
+        assert!(!report.oracle_report.entry("cancellation_protocol").unwrap().passed);
+        assert!(matches!(
+            runtime.oracles.cancellation_protocol.check(),
+            Err(CancellationProtocolViolation::CancelNotAcknowledged {
+                task: observed,
+                requested_at,
+                polls_since_request,
+            }) if observed == task
+                && requested_at == first_observed
+                && polls_since_request == delivered + 1
+        ));
+        assert!(!runtime.oracles.cancellation_protocol.all_violations().iter().any(
+            |violation| matches!(violation, CancellationProtocolViolation::NonMonotonicCancel { .. })
+        ));
+    }
+
+    #[test]
+    fn ordinary_handle_cancel_reports_a_task_that_never_acknowledges() {
+        use crate::lab::oracle::{CancellationProtocolViolation, TaskStateKind};
+
+        let mut runtime = LabRuntime::new(
+            LabConfig::new(0x0c_a111).panic_on_cancellation_violation(false),
+        );
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, std::future::pending::<()>())
+            .unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.step_for_test();
+        assert!(runtime.scheduler.lock().is_empty(), "task is parked before abort");
+
+        handle.abort_with_reason(CancelReason::timeout());
+        runtime.step_for_test();
+        assert!(runtime.scheduler.lock().is_empty(), "cancelled task parked again");
+        let report = runtime.report();
+        assert!(!report.oracle_report.entry("cancellation_protocol").unwrap().passed);
+        assert!(matches!(
+            runtime.oracles.cancellation_protocol.check(),
+            Err(CancellationProtocolViolation::CancelNotCompleted {
+                task: observed,
+                stuck_state: TaskStateKind::CancelRequested,
+                ..
+            }) if observed == task
+        ));
+    }
+
+    #[test]
+    fn report_observes_unpolled_cancel_after_prior_live_events() {
+        use crate::lab::oracle::{CancellationProtocolViolation, TaskStateKind};
+
+        let mut runtime = LabRuntime::new(
+            LabConfig::new(0x0c_a112).panic_on_cancellation_violation(false),
+        );
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (parked, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, std::future::pending::<()>())
+            .unwrap();
+        let (completed, _completed_handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .unwrap();
+        runtime.scheduler.lock().schedule(completed, 0);
+        runtime.run_until_idle();
+        assert!(runtime.oracles.cancellation_protocol.has_observed_events());
+        assert_eq!(runtime.state.task(parked).unwrap().total_polls, 0);
+
+        runtime.advance_time(100);
+        let first_observed = runtime.now();
+        let effects = runtime.state.cancel_request(root, &CancelReason::shutdown(), None);
+        runtime.state.defer_cancel_dispatch(effects);
+        for _ in 0..2 {
+            let report = runtime.report();
+            assert!(!report.oracle_report.entry("cancellation_protocol").unwrap().passed);
+            assert!(matches!(
+                runtime.oracles.cancellation_protocol.check(),
+                Err(CancellationProtocolViolation::CancelNotCompleted {
+                    task,
+                    stuck_state: TaskStateKind::CancelRequested,
+                    requested_at,
+                }) if task == parked && requested_at == first_observed
+            ));
+            assert_eq!(runtime.state.task(parked).unwrap().total_polls, 0);
+            runtime.advance_time(100);
+        }
+    }
+
+    #[test]
+    fn ordinary_cancel_ack_can_park_for_masked_cleanup_then_complete() {
+        use crate::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let mut runtime = LabRuntime::new(LabConfig::new(0x0c_a113));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let release = Arc::new(AtomicBool::new(false));
+        let cleanup_release = Arc::clone(&release);
+        let polls = Arc::new(AtomicU32::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let (task, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                std::future::poll_fn(move |_| {
+                    observed_polls.fetch_add(1, Ordering::SeqCst);
+                    let cx = crate::Cx::current().unwrap();
+                    if cx.checkpoint().is_ok() {
+                        return Poll::Pending;
+                    }
+                    // Snapshot sampling must not move this mask before the
+                    // acknowledgement or invent an acknowledgement under it.
+                    cx.masked(|| {});
+                    if cleanup_release.load(Ordering::SeqCst) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            })
+            .unwrap();
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        handle.abort_with_reason(CancelReason::timeout());
+        runtime.run_until_idle();
+        assert!(runtime.state.task(task).is_some(), "cleanup is still live");
+        assert!(runtime.oracles.cancellation_protocol.has_cancel_request(task));
+        assert_eq!(runtime.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
+
+        release.store(true, Ordering::SeqCst);
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime.run_until_idle();
+        assert!(runtime.state.task(task).is_none(), "cleanup completed");
+        let report = runtime.report();
+        assert!(report.oracle_report.entry("cancellation_protocol").unwrap().passed);
+        assert!(runtime.oracles.cancellation_protocol.all_violations().is_empty());
+    }
+
+    #[test]
     fn report_surfaces_refinement_firewall_violation_from_trace_snapshot() {
         init_test("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
         let mut runtime = LabRuntime::with_seed(33);
