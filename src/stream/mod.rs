@@ -48,6 +48,7 @@
 //! ## Rate Control
 //! - [`Throttle`]: Rate-limits to at most one item per period
 //! - [`Debounce`]: Suppresses rapid bursts, yielding after a quiet period
+//! - [`Timeout`]: Bounds each requested item's wait with explicit time and cancellation
 //!
 //! ## Buffering
 //! - [`Buffered`]: Runs multiple futures while preserving order
@@ -174,6 +175,7 @@ mod stream_map;
 mod take;
 mod then;
 mod throttle;
+mod timeout;
 mod try_buffered;
 mod try_stream;
 mod watch_stream;
@@ -209,6 +211,7 @@ pub use stream_map::StreamMap;
 pub use take::{Take, TakeWhile};
 pub use then::Then;
 pub use throttle::Throttle;
+pub use timeout::{StreamTimeoutError, Timeout};
 pub use try_buffered::TryBuffered;
 pub use try_stream::{TryCollect, TryFold, TryForEach, TryStreamError};
 pub use watch_stream::WatchStream;
@@ -261,6 +264,47 @@ pub trait StreamExt: Stream {
         Self: Unpin,
     {
         Next::new(self)
+    }
+
+    /// Bounds the wait for each requested item using an explicit context.
+    ///
+    /// Each allowance starts when the consumer first polls for that item.
+    /// Consumer processing time between items does not spend the next item's
+    /// allowance. The supplied context must have time authority and a timer
+    /// driver, even for a zero duration or an immediately ready source.
+    ///
+    /// Cancellation observed before polling the source returns its full reason
+    /// without consuming an item. An item obtained by that poll wins over a
+    /// simultaneous timeout or cancellation, so values and source errors are
+    /// not discarded at the boundary. Source errors remain nested in `Ok`.
+    ///
+    /// A timeout, cancellation, or missing timer produces one
+    /// [`StreamTimeoutError`], then the adapter ends. Use [`Timeout::into_inner`]
+    /// to recover the source and explicitly retry. Dropping this adapter drops
+    /// its source; it does not cancel or drain independent source tasks.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, stream::{StreamExt, StreamTimeoutError, iter}};
+    /// use std::time::Duration;
+    ///
+    /// async fn example(cx: &Cx) -> Result<(), StreamTimeoutError> {
+    ///     let mut source = iter([1, 2, 3]).timeout(cx, Duration::from_secs(5));
+    ///     while let Some(item) = source.next().await {
+    ///         println!("{}", item?);
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    fn timeout<Caps>(
+        self,
+        cx: &crate::cx::Cx<Caps>,
+        duration: Duration,
+    ) -> Timeout<'_, Self, Caps>
+    where
+        Self: Sized,
+        Caps: crate::cx::cap::HasTime,
+    {
+        Timeout::new(self, cx, duration)
     }
 
     /// Transforms each item using a closure.
