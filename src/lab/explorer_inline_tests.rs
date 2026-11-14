@@ -328,14 +328,14 @@
             .unwrap();
         if receiver_waits {
             runtime.scheduler.lock().schedule(receiver, 0);
-            runtime.step();
+            runtime.step_for_test();
             assert!(
                 runtime.state.task(receiver).is_some(),
                 "receiver parked before publication"
             );
         }
         runtime.scheduler.lock().schedule(sender, 0);
-        runtime.step();
+        runtime.step_for_test();
         if !receiver_waits {
             runtime.scheduler.lock().schedule(receiver, 0);
         }

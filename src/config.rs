@@ -10,10 +10,13 @@
 //! Note: File parsing is intentionally minimal and deterministic.
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 use crate::http::h1::listener::Http1ListenerConfig;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 use crate::http::h1::server::Http1Config;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
 use crate::security::{AuthKey, AuthMode, SecurityContext};
@@ -22,6 +25,7 @@ use crate::transport::{
 };
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -282,6 +286,7 @@ impl RaptorQConfig {
 /// assert!(config.validate().is_ok());
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Bind address for the HTTP listener.
@@ -299,6 +304,7 @@ pub struct ServerConfig {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl Default for ServerConfig {
     #[inline]
     fn default() -> Self {
@@ -314,6 +320,7 @@ impl Default for ServerConfig {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl ServerConfig {
     /// Create a server config from a deployment profile.
     #[inline]
@@ -425,6 +432,7 @@ impl ServerConfig {
 
 /// Pre-defined server deployment profiles.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerProfile {
     /// Development: localhost only, relaxed limits, fast shutdown.

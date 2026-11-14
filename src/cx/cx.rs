@@ -145,10 +145,12 @@ fn noop_waker() -> Waker {
 /// (`Cx: Send`) stop at `dyn DefaultHttpClient`: the concrete client's pool
 /// holds rustls connection types under `tls`, and walking them from deep inside
 /// a downstream future overflowed stable rustc's default recursion limit (#86).
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 trait DefaultHttpClient: Send + Sync {
     fn client(&self) -> crate::http::h1::HttpClient;
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl DefaultHttpClient for crate::http::h1::HttpClient {
     fn client(&self) -> crate::http::h1::HttpClient {
         self.clone()
@@ -158,10 +160,12 @@ impl DefaultHttpClient for crate::http::h1::HttpClient {
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
 /// refcount operations from ~13 to 1 for this bundle.
 #[derive(Clone)]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 struct DefaultHttpClientSlot {
     inner: Arc<std::sync::OnceLock<Box<dyn DefaultHttpClient>>>,
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl Default for DefaultHttpClientSlot {
     fn default() -> Self {
         Self {
@@ -170,6 +174,7 @@ impl Default for DefaultHttpClientSlot {
     }
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl std::fmt::Debug for DefaultHttpClientSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultHttpClientSlot")
@@ -178,6 +183,7 @@ impl std::fmt::Debug for DefaultHttpClientSlot {
     }
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl DefaultHttpClientSlot {
     fn get_or_init(&self) -> crate::http::h1::HttpClient {
         self.inner
@@ -220,6 +226,7 @@ struct CxHandles {
     /// Explicit provenance survives intentionally stripped gateway handles.
     runtime_obligation_context: bool,
     /// Weak, request-only provenance for registering an external caller.
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     request_runtime: Option<crate::runtime::builder::RequestRuntime>,
     /// Pending obligation-post counter for THIS Cx's region.
     ///
@@ -229,6 +236,7 @@ struct CxHandles {
     pending_obligation_posts: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Runtime-scoped default HTTP client slot. It is lazy so Cx creation does
     /// not allocate a pool unless the high-level HTTP facade is used.
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     default_http_client: DefaultHttpClientSlot,
     #[cfg(feature = "messaging-fabric")]
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
@@ -250,6 +258,7 @@ pub(crate) struct InheritedHandles {
     blocking_pool: Option<BlockingPoolHandle>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     default_http_client: DefaultHttpClientSlot,
     pressure: Option<Arc<SystemPressure>>,
     /// Captured when the spawn is requested, not when its mailbox is drained.
@@ -1246,8 +1255,10 @@ impl<Caps> Cx<Caps> {
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
+                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 request_runtime: None,
                 pending_obligation_posts: None,
+                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1386,8 +1397,10 @@ impl<Caps> Cx<Caps> {
                 obligation_gateway: None,
                 obligation_admission: None,
                 runtime_obligation_context: false,
+                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 request_runtime: None,
                 pending_obligation_posts: None,
+                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1791,6 +1804,7 @@ impl<Caps> Cx<Caps> {
     }
 
     #[must_use]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn with_request_runtime(
         mut self,
         runtime: crate::runtime::builder::RequestRuntime,
@@ -1799,6 +1813,7 @@ impl<Caps> Cx<Caps> {
         self
     }
 
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn request_obligation_owner(
         &self,
     ) -> Result<
@@ -1947,6 +1962,7 @@ impl<Caps> Cx<Caps> {
     /// `Client::default_for_runtime(cx)` remains runtime-scoped while still
     /// constructing the actual pooled client only on first use.
     #[must_use]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn with_default_http_client_slot_from<ParentCaps>(
         mut self,
         parent: &Cx<ParentCaps>,
@@ -1959,6 +1975,7 @@ impl<Caps> Cx<Caps> {
     /// Return the runtime's lazily initialized default HTTP client.
     #[inline]
     #[must_use]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn default_http_client(&self) -> crate::http::h1::HttpClient
     where
         Caps: cap::HasIo,
@@ -3725,6 +3742,7 @@ impl<Caps> Cx<Caps> {
     /// Returns a cloned entropy handle for capability-aware subsystems.
     #[inline]
     #[must_use]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn entropy_handle(&self) -> Arc<dyn EntropySource>
     where
         Caps: cap::HasRandom,
@@ -4286,6 +4304,7 @@ impl<Caps> Cx<Caps> {
     /// another, and deterministic entropy forks keep their admission order.
     /// The caller still forwards parent cancellation and tightens the budget.
     #[must_use]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn derive_request_scope(&self) -> Self {
         let mut request = self.derive_cancel_scope();
         let region = request.region_id();
@@ -6627,6 +6646,7 @@ where
             blocking_pool: self.blocking_pool_handle_for_inheritance(),
             evidence_sink: self.evidence_sink_handle(),
             macaroon: self.macaroon_handle(),
+            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
             default_http_client: self.handles.default_http_client.clone(),
             pressure: self.pressure_handle(),
             task_causality: self.task_causality_snapshot(),
@@ -6648,6 +6668,7 @@ where
             blocking_pool,
             evidence_sink,
             macaroon,
+            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
             default_http_client,
             pressure,
             task_causality: _,
@@ -6659,7 +6680,10 @@ where
         handles.blocking_pool = blocking_pool;
         handles.evidence_sink = evidence_sink;
         handles.macaroon = macaroon;
-        handles.default_http_client = default_http_client;
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+        {
+            handles.default_http_client = default_http_client;
+        }
         if pressure.is_some() {
             handles.pressure = pressure;
         }

@@ -60,6 +60,7 @@ pub(crate) use udp::ReactorRegistration;
 #[cfg(unix)]
 pub mod unix;
 /// WebSocket protocol implementation (RFC 6455).
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod websocket;
 /// MessagePort-based coordination utilities for browser worker runtimes.
 pub mod worker_channel;
@@ -127,6 +128,7 @@ pub use unix::{
     OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf,
     ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use websocket::{
     ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message, Opcode, Role as WsRole,
     ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor, WebSocketConfig, WebSocketRead,

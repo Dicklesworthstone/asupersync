@@ -37,18 +37,23 @@ use crate::types::{Budget, CancelKind, CancelReason, RegionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use managed_execution::{
     ManagedApp, ManagedAppAdapters, ManagedAppAdmission, ManagedAppBindError, ManagedAppBinding,
     ManagedAppGroupReport, ManagedAppHandle, ManagedAppSloBinding, ManagedAppSloDecision,
     ManagedAppTree, ManagedAppTreeHandle, ManagedAppTreeReport, ManagedAppWorkError,
 };
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod resources;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use resources::{
     ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
     ManagedAppResources,
 };
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod observability;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use observability::{
     ManagedAppEvent, ManagedAppEventOutcome, ManagedAppEventPhase, ManagedAppObservabilityBinding,
     ManagedAppObservabilityStats,
@@ -56,6 +61,7 @@ pub use observability::{
 
 /// Executing bindings for the declarative manifest, separate from the legacy
 /// state-threaded lowering so existing application contracts remain intact.
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod managed_execution {
     use super::{
         AppBudgetSpecV1, AppCxCapabilityV1, AppFeatureFlagV1, AppJobTriggerV1,

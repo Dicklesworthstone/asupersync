@@ -296,6 +296,7 @@ fn bounded_scalar_and_vectored_reads_agree_for_every_small_partition() {
 }
 
 #[test]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 fn reader_body_rejects_shifted_storage_for_every_status_and_never_repolls() {
     use crate::http::body::{Body, ReaderBody};
 
@@ -320,6 +321,7 @@ fn reader_body_rejects_shifted_storage_for_every_status_and_never_repolls() {
 }
 
 #[test]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 fn reader_body_accepts_filled_bytes_in_a_shorter_original_prefix() {
     use crate::bytes::Buf;
     use crate::http::body::{Body, Frame, ReaderBody};

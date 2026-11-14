@@ -361,7 +361,7 @@ fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
         for current_thread in [true, false] {
             for request_before_first_poll in [false, true] {
                 let driver = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
-                let cx = Cx::new_with_drivers(
+                let cx: Cx = Cx::new_with_drivers(
                     RegionId::new_for_test(0, 1), TaskId::new_for_test(0, 0),
                     Budget::INFINITE, None, None, None, Some(driver.clone()), None,
                 );

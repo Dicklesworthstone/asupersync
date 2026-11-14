@@ -170,8 +170,8 @@ use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
 use crate::runtime::blocking_pool::{BlockingAdmissionPolicy, BlockingQueuePolicy};
 use crate::runtime::config::{
-    AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, SchedulerPlacementMode,
-    WorkerCohortMapping,
+    AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, RuntimeStorageBounds,
+    SchedulerPlacementMode, WorkerCohortMapping,
 };
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
@@ -2751,6 +2751,7 @@ impl BrowserRuntimeBuilder {
 #[derive(Clone)]
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    storage_bounds: Option<RuntimeStorageBounds>,
     required_spawn_authorization: Option<crate::security::key::AuthKey>,
     scoped_cpu_worker_limit: Option<usize>,
     reactor: Option<Arc<dyn Reactor>>,
@@ -2788,6 +2789,102 @@ pub struct RuntimeBuilder {
 /// The builder's on-demand blocking pool maximum; wasm32 has no pool threads.
 const DEFAULT_BLOCKING_MAX_THREADS: usize = if cfg!(target_arch = "wasm32") { 0 } else { 512 };
 
+#[cfg(test)]
+mod small_storage_tests {
+    use super::*;
+    use crate::runtime::legacy_profile::{LegacyCaps, LegacyProfile};
+
+    fn profile() -> LegacyProfile {
+        LegacyProfile::new(
+            LegacyCaps {
+                worker_threads: 1,
+                thread_stack_bytes: 256 * 1024,
+                blocking_max_threads: 0,
+                blocking_thread_stack_bytes: 0,
+                global_queue_limit: 8,
+                blocking_max_queued: 0,
+            },
+            256 * 1024,
+        )
+        .caller_driven()
+    }
+
+    #[test]
+    fn small_storage_rejects_zero_and_excessive_initial_allocations() {
+        for index in 0..4 {
+            for invalid in [0, RuntimeStorageBounds::MAX_SLOTS + 1, usize::MAX] {
+                let mut counts = [8, 2, 4, 16];
+                counts[index] = invalid;
+                assert!(
+                    RuntimeStorageBounds::new(counts[0], counts[1], counts[2], counts[3]).is_none()
+                );
+            }
+        }
+        assert!(RuntimeStorageBounds::new(1, 1, 1, 1).is_some());
+        let max = RuntimeStorageBounds::MAX_SLOTS;
+        assert!(RuntimeStorageBounds::new(max, max, max, max).is_some());
+    }
+
+    #[test]
+    fn small_storage_changes_actual_initial_arenas_and_bounded_live_trace() {
+        let bounds = RuntimeStorageBounds::new(8, 2, 4, 16).unwrap();
+        let runtime = profile()
+            .with_storage_bounds(bounds)
+            .builder()
+            .unwrap()
+            .enable_platform_reactor(false)
+            .build()
+            .unwrap();
+        {
+            let state = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(state.tasks.capacity(), 8);
+            assert_eq!(state.regions.capacity(), 2);
+            assert_eq!(state.obligations.capacity(), 4);
+        }
+        for value in 0..64 {
+            let joined = runtime
+                .handle()
+                .try_spawn(async move { value + 1 })
+                .unwrap();
+            assert_eq!(runtime.block_on(joined), value + 1);
+        }
+        assert_eq!(runtime.trace_buffer_capacity(), 16);
+        let trace = runtime.trace_snapshot();
+        assert!(!trace.is_empty(), "real task lifecycle emits trace events");
+        assert!(trace.len() <= 16);
+        assert_eq!(
+            runtime.shutdown_drained(Duration::from_secs(1)).outcome,
+            RootDrainOutcome::Quiescent
+        );
+    }
+
+    #[test]
+    fn small_storage_opt_in_leaves_desktop_hint_normalization_unchanged() {
+        let runtime = profile()
+            .builder()
+            .unwrap()
+            .capacity_hints(8, 2, 4)
+            .enable_platform_reactor(false)
+            .build()
+            .unwrap();
+        let expected = RuntimeCapacityHints::default();
+        assert_eq!(runtime.config().resolved_capacity_hints(), expected);
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.tasks.capacity(), expected.task_capacity);
+        assert_eq!(state.regions.capacity(), expected.region_capacity);
+        assert_eq!(state.obligations.capacity(), expected.obligation_capacity);
+        assert_eq!(state.trace_buffer_capacity(), 4096);
+    }
+}
+
 impl RuntimeBuilder {
     /// Create a new builder with default configuration.
     ///
@@ -2801,6 +2898,7 @@ impl RuntimeBuilder {
         config.blocking.max_threads = DEFAULT_BLOCKING_MAX_THREADS;
         Self {
             config,
+            storage_bounds: None,
             required_spawn_authorization: None,
             scoped_cpu_worker_limit: None,
             reactor: None,
@@ -3197,6 +3295,16 @@ impl RuntimeBuilder {
         profile: crate::runtime::config::TraceStorageProfile,
     ) -> Self {
         self.config.trace_storage_profile = profile;
+        self
+    }
+
+    /// Opt into exact small initial table sizes and a bounded hot trace ring.
+    /// This overrides table hints and the profile's hot-ring count only; cold
+    /// collectors constructed separately keep their own explicit configuration.
+    /// Initial capacities are not admission caps or a total heap budget.
+    #[must_use]
+    pub fn storage_bounds(mut self, bounds: RuntimeStorageBounds) -> Self {
+        self.storage_bounds = Some(bounds);
         self
     }
 
@@ -3645,6 +3753,7 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, Error> {
         let Self {
             config,
+            storage_bounds,
             required_spawn_authorization,
             scoped_cpu_worker_limit,
             reactor,
@@ -3732,7 +3841,7 @@ impl RuntimeBuilder {
         if host_services.kind() == RuntimeHostServicesKind::NativeCallerDriven {
             refuse_caller_driven_thread_config(&config, resource_sampling)?;
         }
-        let runtime = Runtime::with_config_and_platform_snapshot(
+        let runtime = Runtime::with_config_and_platform_snapshot_and_storage(
             config,
             reactor,
             io_driver,
@@ -3746,6 +3855,7 @@ impl RuntimeBuilder {
             blocking_queue_policy,
             blocking_admission_policy,
             blocking_thread_stack_size,
+            storage_bounds,
         )?;
         #[cfg(not(target_arch = "wasm32"))]
         let runtime = if background_io_driver {
@@ -4408,7 +4518,7 @@ impl Runtime {
     /// single-worker configuration.
     #[allow(clippy::result_large_err)]
     fn with_config_and_platform_snapshot(
-        mut config: RuntimeConfig,
+        config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
@@ -4422,7 +4532,46 @@ impl Runtime {
         blocking_admission_policy: BlockingAdmissionPolicy,
         blocking_thread_stack_size: Option<usize>,
     ) -> Result<Self, Error> {
+        Self::with_config_and_platform_snapshot_and_storage(
+            config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+            terminal_io_reactor_snapshot,
+            host_services,
+            current_thread,
+            scheduler_evidence_sink,
+            required_spawn_authorization,
+            blocking_queue_policy,
+            blocking_admission_policy,
+            blocking_thread_stack_size,
+            None,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn with_config_and_platform_snapshot_and_storage(
+        mut config: RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
+        terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
+        host_services: &dyn RuntimeHostServices,
+        current_thread: bool,
+        scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+        required_spawn_authorization: Option<crate::security::key::AuthKey>,
+        blocking_queue_policy: BlockingQueuePolicy,
+        blocking_admission_policy: BlockingAdmissionPolicy,
+        blocking_thread_stack_size: Option<usize>,
+        storage_bounds: Option<RuntimeStorageBounds>,
+    ) -> Result<Self, Error> {
         config.normalize();
+        if let Some(bounds) = storage_bounds {
+            // Only this separately selected checked API bypasses legacy floors.
+            config.capacity_hints = Some(bounds.tables());
+        }
         if let Some(monitor) = config.deadline_monitor.as_mut()
             && monitor.check_interval.is_zero()
         {
@@ -4463,6 +4612,7 @@ impl Runtime {
                 blocking_queue_policy,
                 blocking_admission_policy,
                 blocking_thread_stack_size,
+                storage_bounds,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -4489,6 +4639,7 @@ impl Runtime {
                 blocking_queue_policy,
                 blocking_admission_policy,
                 blocking_thread_stack_size,
+                storage_bounds,
             );
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
@@ -6196,6 +6347,7 @@ struct RuntimeInner {
 /// An erased registration boundary keeps request contexts independent of the
 /// runtime's concrete scheduler and state types. The weak pointer still
 /// refers to the same runtime allocation and cannot prolong its lifetime.
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 trait RequestOwnerFactory: Send + Sync {
     fn register(
         self: Arc<Self>,
@@ -6203,6 +6355,7 @@ trait RequestOwnerFactory: Send + Sync {
     ) -> Result<CallerTaskRegistration, SpawnError>;
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl RequestOwnerFactory for RuntimeInner {
     fn register(
         self: Arc<Self>,
@@ -6214,14 +6367,17 @@ impl RequestOwnerFactory for RuntimeInner {
 
 /// Weak provenance carried only by externally constructed request contexts.
 #[derive(Clone)]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub(crate) struct RequestRuntime(std::sync::Weak<dyn RequestOwnerFactory>);
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl std::fmt::Debug for RequestRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RequestRuntime")
     }
 }
 
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 impl RequestRuntime {
     fn new(inner: &Arc<RuntimeInner>) -> Self {
         let weak = Arc::downgrade(inner) as std::sync::Weak<dyn RequestOwnerFactory>;
@@ -6246,6 +6402,7 @@ pub(crate) struct CallerTaskRegistration {
 }
 
 impl CallerTaskRegistration {
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn cx(&self) -> &crate::cx::Cx {
         &self.cx
     }
@@ -6655,10 +6812,9 @@ impl RuntimeInner {
 
     fn notify_revoked_io(&self) {
         if let Some(driver) = &self.io_service
-            && let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.notify_revoked_service();
-                }))
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                driver.notify_revoked_service();
+            }))
         {
             // The driver notifies every detached waiter before re-raising a
             // callback panic. One external waker must not prevent worker and
@@ -6718,6 +6874,7 @@ impl RuntimeInner {
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(test)]
     fn initialize_runtime_state(
         config: &RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
@@ -6726,8 +6883,31 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
     ) -> RuntimeState {
+        Self::initialize_runtime_state_with_storage(
+            config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+            terminal_io_reactor_snapshot,
+            None,
+        )
+    }
+
+    fn initialize_runtime_state_with_storage(
+        config: &RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
+        terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
+        storage_bounds: Option<RuntimeStorageBounds>,
+    ) -> RuntimeState {
         let capacity_hints = config.resolved_capacity_hints();
-        let trace_capacity = config.trace_storage_profile.trace_buffer_capacity();
+        let trace_capacity = storage_bounds.map_or_else(
+            || config.trace_storage_profile.trace_buffer_capacity(),
+            RuntimeStorageBounds::trace_events,
+        );
         let mut runtime_state = reactor.map_or_else(
             || {
                 RuntimeState::with_capacity_hints_and_trace_capacity(
@@ -6824,6 +7004,7 @@ impl RuntimeInner {
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
         blocking_thread_stack_size: Option<usize>,
+        storage_bounds: Option<RuntimeStorageBounds>,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape routes
         // internally below — the Sharded shape constructs a ShardedState
@@ -6835,13 +7016,14 @@ impl RuntimeInner {
         // the unified|sharded replay-fingerprint identity proof and the
         // ShardGuard label-test coverage land (parent ACs 2/3); in-repo
         // proof lanes reach this arm through the internal constructor.
-        let runtime_state = Self::initialize_runtime_state(
+        let runtime_state = Self::initialize_runtime_state_with_storage(
             &config,
             reactor,
             io_driver,
             timer_driver,
             entropy_source,
             terminal_io_reactor_snapshot,
+            storage_bounds,
         );
         let io_service = runtime_state.io_driver_handle();
         let state = Arc::new(crate::sync::ContendedMutex::new(
@@ -8149,8 +8331,9 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     .with_blocking_pool_handle(blocking_pool)
     .with_logical_clock(logical_clock)
     .with_spawn_gateway(spawn_gateway)
-    .with_pending_spawn_counter(pending_spawns)
-    .with_request_runtime(RequestRuntime::new(inner));
+    .with_pending_spawn_counter(pending_spawns);
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    let request_cx = request_cx.with_request_runtime(RequestRuntime::new(inner));
     // While resource sampling runs, the block_on body sees its pressure too.
     let request_cx = match task_pressure {
         Some(pressure) => request_cx.with_pressure(pressure),

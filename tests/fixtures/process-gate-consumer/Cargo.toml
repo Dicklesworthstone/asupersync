@@ -19,8 +19,15 @@ default = []
 slim = ["asupersync/slim-runtime-profile"]
 # Restore the child-process module when `slim` omitted it.
 process = ["asupersync/process"]
+# Restore HTTP/WebSocket/gRPC/server APIs in the no-default runtime graph.
+services = ["asupersync/service-protocols"]
 
-# Two targets, deliberately not gated by `required-features`:
+# The service_consumer binary intentionally has no required-features guard.
+# --no-default-features --features slim must reject its real imports (E0432);
+# --no-default-features --features slim,services must compile them.
+# Neither result substitutes for execution of a network protocol.
+
+# The original process matrix uses two targets, deliberately not gated by `required-features`:
 #   * the library (src/lib.rs) uses core API only and must compile in all three graphs;
 #   * the binary (src/bin/process_consumer.rs) imports asupersync::process
 #     unconditionally and, when it builds, spawns and reaps one bounded host child.
@@ -34,6 +41,6 @@ process = ["asupersync/process"]
 # Central verification runs `cargo check` on the library in every graph and
 # `cargo run` on the binary in the (none) and `slim + process` graphs, plus
 # `cargo check` on the binary in the `slim` graph, and reads the retained
-# compiler logs. Cargo.lock: not produced yet. It is generated once centrally,
-# reviewed and committed (see the .gitignore exception), and then used with
-# --locked.
+# compiler logs. Cargo.lock was generated centrally with Cargo's offline
+# resolver and is committed via the .gitignore exception. Verification uses
+# --locked to retain that reviewed dependency graph.

@@ -35,6 +35,7 @@ const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(50);
 /// Inspect native codes because descriptor exhaustion has no stable
 /// `ErrorKind` variant. Callers must delay retries to avoid busy-spinning.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols", feature = "tls"))]
 pub(crate) fn is_accept_resource_exhaustion(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::OutOfMemory {
         return true;

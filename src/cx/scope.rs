@@ -1552,8 +1552,11 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         .with_remote_cap_handle(remote_cap)
         .with_blocking_pool_handle(blocking_pool)
         .with_evidence_sink(evidence_sink)
-        .with_macaroon_handle(macaroon)
-        .with_default_http_client_slot_from(parent_cx);
+        .with_macaroon_handle(macaroon);
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+        {
+            child_cx = child_cx.with_default_http_client_slot_from(parent_cx);
+        }
         let _ = child_cx.apply_child_capability_budget(
             self.capability_budget,
             CapabilityBudgetRequirements::NONE,

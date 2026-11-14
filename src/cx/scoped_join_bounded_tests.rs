@@ -834,7 +834,7 @@ impl Iterator for AuthorityIter<'_> {
                 Box::pin(async move {
                     assert_eq!(Cx::current().unwrap().task_id(), body.task_id());
                     assert!(require_ambient_io("bounded join factory authority").is_err());
-                    41
+                    41_usize
                 }) as Pin<Box<dyn Future<Output = usize> + Send>>
             }) as RaceFactory<usize>
         })

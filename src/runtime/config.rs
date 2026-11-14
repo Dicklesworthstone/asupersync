@@ -288,6 +288,62 @@ impl Default for RuntimeCapacityHints {
     }
 }
 
+/// Explicit small-runtime initial table sizes and bounded hot trace retention.
+///
+/// Unlike historical capacity hints, these sizes are not raised to desktop
+/// floors. They are initial allocations, not hard limits on live tasks or total
+/// heap use: pair them with region admission limits. No public config struct or
+/// existing trace-profile variant changes when this additive option is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeStorageBounds {
+    tables: RuntimeCapacityHints,
+    trace_events: usize,
+}
+
+impl RuntimeStorageBounds {
+    /// Largest count admitted by this small-runtime API, per table/ring.
+    /// General-purpose larger configurations retain the existing builder API.
+    pub const MAX_SLOTS: usize = 65_536;
+
+    /// Reject zero and excessive initial allocations before construction.
+    /// Counts do not constitute a process-memory or allocator-success promise.
+    #[must_use]
+    pub const fn new(
+        tasks: usize,
+        regions: usize,
+        obligations: usize,
+        trace_events: usize,
+    ) -> Option<Self> {
+        if tasks == 0
+            || tasks > Self::MAX_SLOTS
+            || regions == 0
+            || regions > Self::MAX_SLOTS
+            || obligations == 0
+            || obligations > Self::MAX_SLOTS
+            || trace_events == 0
+            || trace_events > Self::MAX_SLOTS
+        {
+            return None;
+        }
+        Some(Self {
+            tables: RuntimeCapacityHints::new(tasks, regions, obligations),
+            trace_events,
+        })
+    }
+
+    /// The exact initial arena capacities selected by the caller.
+    #[must_use]
+    pub const fn tables(self) -> RuntimeCapacityHints {
+        self.tables
+    }
+
+    /// Maximum retained events in the runtime's hot trace ring.
+    #[must_use]
+    pub const fn trace_events(self) -> usize {
+        self.trace_events
+    }
+}
+
 /// Storage-temperature policy for runtime metadata and retained evidence.
 ///
 /// The policy is reported, not yet applied.

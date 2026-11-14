@@ -100,6 +100,7 @@ pub mod fixtures;
 #[cfg(feature = "benchmark-adapters")]
 pub mod forensics;
 pub mod fuzz;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod http;
 pub mod injection;
 pub mod instrumented_future;
@@ -191,6 +192,7 @@ pub use fuzz::{
     FuzzConfig, FuzzFinding, FuzzHarness, FuzzRegressionCase, FuzzRegressionCorpus, FuzzReport,
     fuzz_quick,
 };
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub use http::{
     RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
 };

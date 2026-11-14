@@ -569,6 +569,7 @@ impl Semaphore {
     /// Reserve one unit before creating its accounting owner. No permit is
     /// returned unless checked obligation admission succeeds. The rollback
     /// guard settles before the owner retires on error or unwind.
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     pub(crate) fn try_acquire_one_checked_with<Caps, T, E>(
         &self,
         cx: &Cx<Caps>,

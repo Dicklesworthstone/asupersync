@@ -140,10 +140,10 @@ include = [
 ]
 
 [features]
-default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime", "process"]
+default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime", "process", "service-protocols"]
 # Opt-in live HTTP/2 request ingress with bounded body queues and
 # consumption-based stream receive credit. Native validation is a separate lane.
-http2-streaming = []
+http2-streaming = ["service-protocols"]
 # Enables the experimental `Try`/residual impls for Outcome while stable Rust
 # call sites are migrated to explicit helpers.
 nightly-outcome-try = []
@@ -172,6 +172,10 @@ deterministic-mode = []
 # Make those edges optional only when the corresponding module gates exist.
 runtime-core = []
 native-runtime = []
+# Restore HTTP, WebSocket, gRPC and HTTP application bindings when another
+# consumer selects the explicit slim profile. Default and bare no-default
+# selections retain their established APIs; only slim opts out of services.
+service-protocols = []
 # The host child-process module (`asupersync::process`: `Command`, `Child`,
 # `Stdio`, ...). Together with the explicit slim profile this is a real module
 # gate. It is on by default, so default and
@@ -184,9 +188,11 @@ native-runtime = []
 # tests/fixtures/process-gate-consumer is the compiler check that the API is
 # absent only in the explicit slim selection, and restored when requested.
 process = []
-# Explicit opt-in to the reduced native module surface. This currently omits
-# only child-process support when `process` is not also selected; it is not a
-# no-thread, no-allocation, minimal-dependency or whole-process memory guarantee.
+# Explicit opt-in to the reduced native module surface. With defaults disabled,
+# this profile omits HTTP/WebSocket/gRPC unless `service-protocols` is selected,
+# and child-process support unless `process` is selected. This is not a
+# no-thread, no-allocation or whole-process
+# memory guarantee; LegacyProfile separately controls runtime topology.
 # Existing selections retain their surface unless another consumer in the same
 # Cargo graph opts into this profile. Build device and host leaves separately,
 # or enable `process` explicitly in the host consumer to restore its APIs.
@@ -195,7 +201,7 @@ slim-runtime-profile = ["runtime-core", "native-runtime"]
 # runtime behavior is structured-concurrency-only; its compatibility feature
 # group is explicit so the selected graph is inspectable and can be reduced by
 # the next upstream factoring step without another API rename.
-desktop-runtime-profile = ["runtime-core", "native-runtime", "process"]
+desktop-runtime-profile = ["runtime-core", "native-runtime", "process", "service-protocols"]
 # Canonical wasm browser profiles (FP-BR-* in the wasm build plan).
 # runtime-core is part of every profile so a consumer can select only the
 # profile under default-features = false. native-runtime stays out: it is
@@ -207,6 +213,7 @@ wasm-browser-minimal = ["wasm-runtime", "runtime-core"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = [
+    "service-protocols",
     "dep:tracing",
     "dep:tracing-log",
     "dep:tracing-subscriber",
@@ -221,7 +228,7 @@ test-internals = [
 # message shapes that have since changed, so they are red on any OS
 # (2026-09-02: 93 failures on Linux with --all-features, the same modules that
 # head the GitHub macOS runner's failure list).
-legacy-internal-test-harnesses = []
+legacy-internal-test-harnesses = ["service-protocols"]
 # Focused proof lane for protocol serialization goldens and messaging
 # conformance rows without compiling the full legacy harness set.
 serialization-golden-harnesses = []
@@ -238,14 +245,14 @@ real-service-e2e = [
 channel-mpsc-select-e2e = []
 # Focused maintained replacement for the dormant cross-subsystem recovery
 # journeys. It reuses the real obligation-cleanup harness for the worker-loss
-# row while keeping the rest of the profile dependency-free.
-cross-subsystem-recovery-e2e = ["obligation-cleanup-e2e", "proc-macros"]
+# row and explicitly enables the HTTP/2 service types used by recovery tests.
+cross-subsystem-recovery-e2e = ["obligation-cleanup-e2e", "proc-macros", "service-protocols"]
 # Focused maintained replacement for the dormant distributed hash-ring and
 # authenticated snapshot recovery journeys. Test-only identifiers are exposed
 # solely to this integration-test profile.
 distributed-hash-snapshot-recovery-e2e = ["test-internals"]
 # Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
-h3-websocket-e2e = []
+h3-websocket-e2e = ["service-protocols"]
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.
 raptorq-roundtrip-e2e = []
 # Focused no-mock obligation cleanup E2E harness for asupersync-9u057b.5.
@@ -253,6 +260,7 @@ obligation-cleanup-e2e = []
 # OpenTelemetry provider bridges for metrics, traces, and logs. The normal
 # dependency graph stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = [
+    "service-protocols",
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:regex",
@@ -303,7 +311,9 @@ tls-native-roots = ["tls", "dep:rustls-native-certs"]
 tls-webpki-roots = ["tls", "dep:webpki-roots"]
 # Enable CLI tooling (trace inspection).
 cli = [
+    "service-protocols",
     "dep:clap",
+    "dep:semver",
     "dep:time",
     "trace-compression",
     "scenario-files",
@@ -331,7 +341,7 @@ mysql = []
 # Native QUIC/HTTP3 rollout surfaces (T4.1).
 # These expose Tokio-free native paths for inventory/build/test contracts.
 quic = []
-http3 = ["quic"]
+http3 = ["quic", "service-protocols"]
 # Enable ATP Tailscale candidate-provider integration points. This intentionally
 # carries no Tailscale crate dependency; callers feed provider output into the
 # ATP path model and ATP still runs native QUIC over the selected address.
@@ -489,7 +499,8 @@ pin-project = "1.1"
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-semver = { version = "1.0", features = ["serde"] }
+# Version parsing is used only by the feature-gated CLI upgrade/config flows.
+semver = { version = "1.0", features = ["serde"], optional = true }
 memchr = "2.8"
 getrandom = "0.4"
 hex = "0.4"

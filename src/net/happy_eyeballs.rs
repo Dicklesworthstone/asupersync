@@ -188,6 +188,7 @@ pub(crate) async fn connect_with_time_getter(
 /// The future is boxed: callers nest it in their own setup futures, and the
 /// race's full type made proving those futures `Send` overflow the trait
 /// solver's recursion limit.
+#[cfg(any(test, not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub(crate) fn connect_resolved<A>(addr: A, timeout: Option<Duration>) -> ConnectFuture
 where
     A: std::net::ToSocketAddrs + Send + 'static,

@@ -209,6 +209,7 @@ pub mod error;
 pub mod evidence;
 pub mod evidence_sink;
 pub mod gen_server;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod http;
 pub mod io;
 pub mod lab;
@@ -247,6 +248,7 @@ pub mod tracing_compat;
 pub mod transport;
 pub mod types;
 pub mod util;
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod web;
 
 #[cfg(test)]
@@ -270,6 +272,7 @@ pub mod tls;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fs;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod grpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod messaging;
@@ -282,6 +285,7 @@ pub mod messaging;
 ))]
 pub mod process;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod signal;

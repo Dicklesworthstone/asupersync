@@ -132,6 +132,7 @@
 //! * The budget is a parameter. This module states no figure for any board; measuring one is not done here.
 
 use crate::error::{Error, ErrorKind};
+use crate::runtime::config::RuntimeStorageBounds;
 use crate::runtime::{
     BlockingAdmissionPolicy, BlockingPoolHandle, Runtime, RuntimeBuilder, RuntimeConfig,
 };
@@ -395,6 +396,7 @@ pub struct LegacyProfile {
     blocking_live_bytes: Option<NonZeroUsize>,
     /// The thread topology. [`Topology::Threaded`] is the profile as it always was.
     topology: Topology,
+    storage_bounds: Option<RuntimeStorageBounds>,
 }
 
 impl LegacyProfile {
@@ -409,7 +411,16 @@ impl LegacyProfile {
             stack_budget_bytes,
             blocking_live_bytes: None,
             topology: Topology::Threaded,
+            storage_bounds: None,
         }
+    }
+
+    /// Select exact small initial runtime tables and hot trace retention.
+    /// This does not cap total heap use or replace task/region admission limits.
+    #[must_use]
+    pub const fn with_storage_bounds(mut self, bounds: RuntimeStorageBounds) -> Self {
+        self.storage_bounds = Some(bounds);
+        self
     }
 
     /// This profile in the caller-driven topology: the runtime it builds starts **no thread**, and the thread that
@@ -427,6 +438,7 @@ impl LegacyProfile {
             stack_budget_bytes: self.stack_budget_bytes,
             blocking_live_bytes: self.blocking_live_bytes,
             topology: Topology::CallerDriven,
+            storage_bounds: self.storage_bounds,
         }
     }
 
@@ -471,6 +483,7 @@ impl LegacyProfile {
             stack_budget_bytes: self.stack_budget_bytes,
             blocking_live_bytes: Some(max_live_bytes),
             topology: self.topology,
+            storage_bounds: self.storage_bounds,
         }
     }
 
@@ -569,6 +582,11 @@ impl LegacyProfile {
             .blocking_admission_policy(policy);
         // A forbidden pool starts no thread, so there is no blocking stack to set. Otherwise the stated figure
         // is passed to the pool, which gives every thread it starts that stack.
+        let builder = if let Some(bounds) = self.storage_bounds {
+            builder.storage_bounds(bounds)
+        } else {
+            builder
+        };
         Ok(if self.caps.blocking_max_threads == 0 {
             builder
         } else {
@@ -592,6 +610,14 @@ impl LegacyProfile {
     pub fn audit(&self, runtime: &Runtime) -> Result<(), Error> {
         self.validate()?;
         self.audit_topology(runtime)?;
+        if let Some(bounds) = self.storage_bounds
+            && (runtime.config().resolved_capacity_hints() != bounds.tables()
+                || runtime.trace_buffer_capacity() != bounds.trace_events())
+        {
+            return Err(Error::new(ErrorKind::ConfigError).with_message(
+                "runtime initial tables or trace ring differ from explicit storage bounds",
+            ));
+        }
         // A profile that forbids blocking is only met by a pool that refuses it. A runtime with no pool at all
         // runs blocking work inline, whatever figures it shows.
         if self.caps.blocking_max_threads == 0
@@ -706,6 +732,25 @@ mod tests {
     const MIB: usize = 1024 * 1024;
     const WAIT: Duration = Duration::from_secs(10);
     const SETTLE: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn small_storage_profile_audits_exact_ring_and_tables() {
+        let bounds = RuntimeStorageBounds::new(8, 2, 4, 16).unwrap();
+        let profile = no_blocking_for_this_process()
+            .caller_driven()
+            .with_storage_bounds(bounds);
+        let runtime = profile
+            .builder()
+            .unwrap()
+            .enable_platform_reactor(false)
+            .build()
+            .unwrap();
+        profile.audit(&runtime).unwrap();
+        assert_eq!(runtime.config().resolved_capacity_hints(), bounds.tables());
+        assert_eq!(runtime.trace_buffer_capacity(), 16);
+        let other = RuntimeStorageBounds::new(16, 2, 4, 32).unwrap();
+        assert!(profile.with_storage_bounds(other).audit(&runtime).is_err());
+    }
 
     /// Caps for a test. The numbers are test values only: they say nothing about any board.
     /// One worker and two blocking threads at `blocking_stack` each, a 2 MiB worker stack (the stock figure,

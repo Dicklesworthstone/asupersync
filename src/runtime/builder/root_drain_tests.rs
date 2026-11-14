@@ -116,6 +116,47 @@ impl Drop for RootFinalizer {
 
 #[test]
 fn finalizer_only_root_closes_after_pending_async_and_sync_cleanup() {
+    finalizer_only_root_cleanup(false);
+}
+
+#[test]
+fn finalizer_only_root_executes_pending_cleanup_with_zero_normal_task_quota() {
+    finalizer_only_root_cleanup(true);
+}
+
+fn assert_normal_quota_exhausted(runtime: &Runtime, limit: usize) {
+    let root = runtime.inner.root_region;
+    {
+        let mut state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.set_region_limits(
+            root,
+            crate::record::region::RegionLimits {
+                max_tasks: Some(limit),
+                ..crate::record::region::RegionLimits::unlimited()
+            },
+        ));
+    }
+    let result = runtime.handle().try_spawn(async {
+        panic!("ordinary task rejected at quota must never execute");
+    });
+    assert!(matches!(
+        result,
+        Err(SpawnError::RegionAtCapacity {
+            region,
+            limit: observed_limit,
+            live,
+        }) if region == root && observed_limit == limit && live == limit
+    ));
+    eprintln!(
+        "{{\"scenario\":\"normal-task-quota-exhausted\",\"limit\":{limit},\"live\":{limit},\"extra_spawn\":\"RegionAtCapacity\"}}"
+    );
+}
+
+fn finalizer_only_root_cleanup(exhaust_normal_quota: bool) {
     for case in 0..4 {
         let runtime = runtime_for(case);
         let root = runtime.inner.root_region;
@@ -151,6 +192,9 @@ fn finalizer_only_root_closes_after_pending_async_and_sync_cleanup() {
             ));
             assert_eq!(state.live_task_count(), 0);
             assert_eq!(state.pending_obligation_count(), 0);
+        }
+        if exhaust_normal_quota {
+            assert_normal_quota_exhausted(&runtime, 0);
         }
         let observer_runtime = runtime.clone();
         let observer_returned = Arc::clone(&returned);
@@ -915,6 +959,15 @@ fn root_drain_contains_a_residual_cancellation_clock_panic() {
 
 #[test]
 fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer() {
+    shutdown_child_obligation_finalizer(false);
+}
+
+#[test]
+fn shutdown_drained_executes_cleanup_after_normal_task_quota_exhaustion() {
+    shutdown_child_obligation_finalizer(true);
+}
+
+fn shutdown_child_obligation_finalizer(exhaust_normal_quota: bool) {
     for case in 0..4 {
         let runtime = runtime_for(case);
         let root = runtime.inner.root_region;
@@ -964,7 +1017,7 @@ fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer()
             },
             "obligation publication must materialize before shutdown",
         );
-        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized = Arc::new(AtomicUsize::new(0));
         let finalizer_flag = Arc::clone(&finalized);
         assert!(
             runtime
@@ -977,9 +1030,12 @@ fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer()
                         settled.load(Ordering::Acquire),
                         "child settled before root finalization"
                     );
-                    finalizer_flag.store(true, Ordering::Release);
+                    finalizer_flag.fetch_add(1, Ordering::AcqRel);
                 })
         );
+        if exhaust_normal_quota {
+            assert_normal_quota_exhausted(&runtime, 1);
+        }
         let report = runtime.shutdown_drained(Duration::from_secs(2));
         assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
         assert_eq!(report.live_tasks, 0);
@@ -988,7 +1044,7 @@ fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer()
         assert_eq!(report.queued_finalizers, 0);
         assert_eq!(report.pending_spawns, 0);
         assert!(!report.has_pending_obligation_posts);
-        assert!(finalized.load(Ordering::Acquire));
+        assert_eq!(finalized.load(Ordering::Acquire), 1);
         let Some(Outcome::Cancelled(reason)) = child
             .try_join()
             .expect("typed child result survives shutdown")
