@@ -122,7 +122,7 @@ pub use seek::AsyncSeek;
 pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
-pub use stream_adapters::{ReaderStream, StreamReader};
+pub use stream_adapters::{ReaderStream, SinkWriter, StreamReader};
 pub use transfer_session::{
     ReadExactSession, ReadExactVectoredSession, WriteAllSession, WriteAllVectoredSession,
 };

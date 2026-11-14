@@ -24,7 +24,8 @@ const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 /// each [`FramedWrite::start_send`]. Readiness flushes once the configured soft
 /// boundary is reached, so at most one encoded frame can take the buffer over
 /// that boundary. Call `poll_flush` to ensure all buffered data reaches the
-/// writer.
+/// writer. It also implements [`crate::stream::Sink`] for every item supported
+/// by its encoder, with the encoder's error type carrying I/O failures.
 ///
 /// # Cancel Safety
 ///
@@ -220,6 +221,32 @@ where
             Poll::Ready(Ok(())) => {}
         }
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+// Generic sink callers share the same encoder, buffer and backpressure state.
+
+impl<W, E, I> crate::stream::Sink<I> for FramedWrite<W, E>
+where
+    W: AsyncWrite + Unpin,
+    E: Encoder<I> + Unpin,
+{
+    type Error = <E as Encoder<I>>::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_ready(self.get_mut(), cx).map_err(Into::into)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: I) -> Result<(), Self::Error> {
+        Self::start_send(self.get_mut(), item)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_flush(self.get_mut(), cx).map_err(Into::into)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_close(self.get_mut(), cx).map_err(Into::into)
     }
 }
 

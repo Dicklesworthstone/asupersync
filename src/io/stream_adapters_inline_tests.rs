@@ -202,3 +202,393 @@
         crate::assert_with_log!(ok, "second poll reads data", true, ok);
         crate::test_complete!("stream_reader_pending_without_buffered_data");
     }
+
+    #[derive(Debug, Default)]
+    struct ControlledByteSink {
+        items: Vec<Vec<u8>>,
+        ready_polls: usize,
+        flush_polls: usize,
+        close_polls: usize,
+        admitted: bool,
+        ready_pending: bool,
+        flush_pending: bool,
+        close_pending: bool,
+        ready_error: Option<io::ErrorKind>,
+        send_error: Option<io::ErrorKind>,
+        flush_error: Option<io::ErrorKind>,
+        close_error: Option<io::ErrorKind>,
+    }
+
+    impl Sink<Vec<u8>> for ControlledByteSink {
+        type Error = io::Error;
+
+        fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.ready_polls += 1;
+            if let Some(kind) = self.ready_error.take() {
+                return Poll::Ready(Err(kind.into()));
+            }
+            if self.ready_pending {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.admitted = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> io::Result<()> {
+            assert!(self.admitted, "submission must follow readiness");
+            self.admitted = false;
+            if let Some(kind) = self.send_error.take() {
+                return Err(kind.into());
+            }
+            self.items.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flush_polls += 1;
+            if let Some(kind) = self.flush_error.take() {
+                return Poll::Ready(Err(kind.into()));
+            }
+            if self.flush_pending {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.close_polls += 1;
+            if let Some(kind) = self.close_error.take() {
+                return Poll::Ready(Err(kind.into()));
+            }
+            if self.close_pending {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[test]
+    fn sink_writer_admits_only_after_readiness_and_bounds_each_chunk() {
+        let mut task = Context::from_waker(Waker::noop());
+        let sink = ControlledByteSink {
+            ready_pending: true,
+            ..ControlledByteSink::default()
+        };
+        let mut writer = SinkWriter::new(sink).with_max_chunk_size(3);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b""),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(writer.get_ref().ready_polls, 0);
+
+        assert!(Pin::new(&mut writer).poll_write(&mut task, b"abcdef").is_pending());
+        assert!(writer.get_ref().items.is_empty());
+        writer.get_mut().ready_pending = false;
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"abcdef"),
+            Poll::Ready(Ok(3))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"def"),
+            Poll::Ready(Ok(3))
+        ));
+        assert_eq!(writer.get_ref().items, [b"abc".to_vec(), b"def".to_vec()]);
+        assert_eq!(writer.get_ref().flush_polls, 0, "writes do not flush");
+        assert_eq!(writer.max_chunk_size(), 3);
+        let sink = writer.into_inner();
+        assert_eq!(sink.items.concat(), b"abcdef");
+
+        let mut one = SinkWriter::new(ControlledByteSink::default()).with_max_chunk_size(0);
+        assert_eq!(one.max_chunk_size(), 1);
+        assert!(matches!(
+            Pin::new(&mut one).poll_write(&mut task, b"xy"),
+            Poll::Ready(Ok(1))
+        ));
+        let mut default = SinkWriter::new(ControlledByteSink::default());
+        let input = vec![7; DEFAULT_CHUNK_SIZE + 1];
+        assert!(matches!(
+            Pin::new(&mut default).poll_write(&mut task, &input),
+            Poll::Ready(Ok(DEFAULT_CHUNK_SIZE))
+        ));
+        assert_eq!(default.get_ref().items[0].len(), DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn sink_writer_forwards_errors_and_only_latches_successful_shutdown() {
+        let mut task = Context::from_waker(Waker::noop());
+        let mut writer = SinkWriter::new(ControlledByteSink::default());
+        writer.get_mut().ready_error = Some(io::ErrorKind::ConnectionReset);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"x"),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert!(writer.get_ref().items.is_empty());
+        writer.get_mut().send_error = Some(io::ErrorKind::InvalidData);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"x"),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert!(writer.get_ref().items.is_empty());
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"x"),
+            Poll::Ready(Ok(1))
+        ));
+
+        writer.get_mut().flush_error = Some(io::ErrorKind::BrokenPipe);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_flush(&mut task),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        writer.get_mut().flush_pending = true;
+        assert!(Pin::new(&mut writer).poll_flush(&mut task).is_pending());
+        writer.get_mut().flush_pending = false;
+        assert!(matches!(
+            Pin::new(&mut writer).poll_flush(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+
+        writer.get_mut().close_error = Some(io::ErrorKind::ConnectionAborted);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_shutdown(&mut task),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::ConnectionAborted
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"y"),
+            Poll::Ready(Ok(1))
+        ));
+        writer.get_mut().close_pending = true;
+        assert!(Pin::new(&mut writer).poll_shutdown(&mut task).is_pending());
+        writer.get_mut().close_pending = false;
+        assert!(matches!(
+            Pin::new(&mut writer).poll_shutdown(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+        let calls = (
+            writer.get_ref().ready_polls,
+            writer.get_ref().flush_polls,
+            writer.get_ref().close_polls,
+        );
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"z"),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b""),
+            Poll::Ready(Ok(0))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_flush(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_shutdown(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(
+            calls,
+            (
+                writer.get_ref().ready_polls,
+                writer.get_ref().flush_polls,
+                writer.get_ref().close_polls,
+            )
+        );
+        assert_eq!(writer.get_ref().items.concat(), b"xy");
+    }
+
+    #[test]
+    fn sink_writer_retains_framed_progress_across_dropped_flush_and_shutdown() {
+        use crate::codec::{BytesCodec, FramedWrite};
+        use crate::io::AsyncWriteExt;
+        use std::future::Future;
+
+        let (local, mut peer) = crate::io::duplex(2);
+        let framed = FramedWrite::new(local, BytesCodec::new()).with_backpressure_boundary(1);
+        let mut writer = SinkWriter::new(framed).with_max_chunk_size(8);
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut task, b"abcdef"),
+            Poll::Ready(Ok(6))
+        ));
+
+        {
+            let mut flush = std::pin::pin!(writer.flush());
+            assert!(flush.as_mut().poll(&mut task).is_pending());
+        }
+        assert_eq!(&writer.get_ref().write_buffer()[..], b"cdef");
+        // Readiness must not admit another chunk while the earlier one is blocked.
+        assert!(Pin::new(&mut writer).poll_write(&mut task, b"XYZ").is_pending());
+        assert_eq!(&writer.get_ref().write_buffer()[..], b"cdef");
+        let mut output = [0; 2];
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(2))));
+        assert_eq!(&output, b"ab");
+
+        {
+            let mut shutdown = std::pin::pin!(writer.shutdown());
+            assert!(shutdown.as_mut().poll(&mut task).is_pending());
+        }
+        assert_eq!(&writer.get_ref().write_buffer()[..], b"ef");
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(2))));
+        assert_eq!(&output, b"cd");
+        assert!(matches!(
+            Pin::new(&mut writer).poll_shutdown(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(writer.get_ref().write_buffer().is_empty());
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(2))));
+        assert_eq!(&output, b"ef");
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(0))));
+    }
+
+    #[test]
+    fn sink_writer_framed_round_trip_under_native_backpressure() {
+        use crate::codec::{BytesCodec, FramedRead, FramedWrite};
+        use crate::io::AsyncWriteExt;
+        use crate::runtime::RuntimeBuilder;
+        use crate::stream::StreamExt;
+        use std::time::Duration;
+
+        for workers in [1, 2] {
+            let runtime = if workers == 1 {
+                RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("current-thread runtime")
+            } else {
+                RuntimeBuilder::multi_thread()
+                    .worker_threads(workers)
+                    .build()
+                    .expect("worker runtime")
+            };
+            runtime.block_on(async {
+                let (local, peer) = crate::io::duplex(3);
+                let framed = FramedWrite::with_capacity(local, BytesCodec::new(), 4);
+                let mut writer = SinkWriter::new(framed).with_max_chunk_size(5);
+                let mut reader = FramedRead::new(peer, BytesCodec::new());
+                let expected = b"bounded chunks cross native backpressure exactly once";
+                let sending = async {
+                    writer.write_all(expected).await.expect("submit all bytes");
+                    writer.shutdown().await.expect("flush and half-close");
+                };
+                let receiving = async {
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = reader.next().await {
+                        bytes.extend_from_slice(&chunk.expect("decode chunk"));
+                    }
+                    bytes
+                };
+                let ((), bytes) = futures_lite::future::zip(sending, receiving).await;
+                assert_eq!(bytes, expected);
+                assert!(writer.get_ref().write_buffer().is_empty());
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn sink_writer_supports_borrowed_boxed_and_pinned_sinks() {
+        use crate::codec::{BytesCodec, Framed, FramedWrite};
+
+        let mut task = Context::from_waker(Waker::noop());
+        let mut framed = FramedWrite::new(Vec::<u8>::new(), BytesCodec::new());
+        {
+            let mut borrowed = SinkWriter::new(&mut framed);
+            assert!(matches!(
+                Pin::new(&mut borrowed).poll_write(&mut task, b"borrowed"),
+                Poll::Ready(Ok(8))
+            ));
+            assert!(matches!(
+                Pin::new(&mut borrowed).poll_flush(&mut task),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        assert_eq!(framed.get_ref(), b"borrowed");
+
+        let boxed: Box<dyn Sink<Vec<u8>, Error = io::Error> + Unpin> =
+            Box::new(Framed::new(Vec::<u8>::new(), BytesCodec::new()));
+        let mut boxed = SinkWriter::new(boxed);
+        assert!(matches!(
+            Pin::new(&mut boxed).poll_write(&mut task, b"boxed"),
+            Poll::Ready(Ok(5))
+        ));
+        assert!(matches!(
+            Pin::new(&mut boxed).poll_shutdown(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+
+        // A pinned, non-Send and !Unpin sink demonstrates that the pointer
+        // forwarding implementation imposes no such bound on its target.
+        struct PinnedByteSink {
+            bytes: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+            _pinned: std::marker::PhantomPinned,
+        }
+        impl Sink<Vec<u8>> for PinnedByteSink {
+            type Error = io::Error;
+
+            fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn start_send(self: Pin<&mut Self>, item: Vec<u8>) -> io::Result<()> {
+                self.as_ref().get_ref().bytes.borrow_mut().extend(item);
+                Ok(())
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        let bytes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = Box::pin(PinnedByteSink {
+            bytes: std::rc::Rc::clone(&bytes),
+            _pinned: std::marker::PhantomPinned,
+        });
+        let mut pinned = SinkWriter::new(sink);
+        assert!(matches!(
+            Pin::new(&mut pinned).poll_write(&mut task, b"pinned"),
+            Poll::Ready(Ok(6))
+        ));
+        assert!(matches!(
+            Pin::new(&mut pinned).poll_shutdown(&mut task),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(&*bytes.borrow(), b"pinned");
+    }
+
+    #[test]
+    fn framed_sink_preserves_inbound_frames_while_writing() {
+        use crate::codec::{BytesCodec, Framed};
+        let (local, mut peer) = crate::io::duplex(8);
+        let mut framed = Framed::new(local, BytesCodec::new());
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut peer).poll_write(&mut task, b"inbound"),
+            Poll::Ready(Ok(7))
+        ));
+        assert!(matches!(
+            Sink::<Vec<u8>>::poll_ready(Pin::new(&mut framed), &mut task),
+            Poll::Ready(Ok(()))
+        ));
+        Sink::<Vec<u8>>::start_send(Pin::new(&mut framed), b"outbound".to_vec())
+            .expect("encode outbound");
+        assert!(matches!(
+            Sink::<Vec<u8>>::poll_flush(Pin::new(&mut framed), &mut task),
+            Poll::Ready(Ok(()))
+        ));
+        let mut output = [0; 8];
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(8))));
+        assert_eq!(&output, b"outbound");
+        match Pin::new(&mut framed).poll_next(&mut task) {
+            Poll::Ready(Some(Ok(bytes))) => assert_eq!(&bytes[..], b"inbound"),
+            other => panic!("expected inbound frame, got {other:?}"),
+        }
+        assert!(matches!(
+            Sink::<Vec<u8>>::poll_close(Pin::new(&mut framed), &mut task),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(poll_read(&mut peer, &mut output), Poll::Ready(Ok(0))));
+    }

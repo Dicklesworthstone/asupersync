@@ -1,14 +1,15 @@
 //! Async stream processing primitives.
 //!
-//! This module provides the [`Stream`] trait and related combinators for
-//! processing asynchronous sequences of values.
+//! This module provides the [`Stream`] and [`Sink`] traits and related
+//! combinators for processing asynchronous sequences of values.
 //!
 //! # Core Traits
 //!
 //! - [`Stream`]: The async equivalent of [`Iterator`], producing values over time
 //! - [`StreamExt`]: Extension trait providing combinator methods
+//! - [`Sink`]: A backpressured destination for owned items
 //!
-//! Neither trait adds a global `Send`, `Sync`, `Unpin`, or `'static` bound.
+//! These traits add no global `Send`, `Sync`, `Unpin`, or `'static` bound.
 //! Individual operations state the bounds they need. In particular,
 //! [`StreamExt::next`] requires `Unpin`; address-sensitive streams can instead
 //! be held behind a pinned pointer and polled through [`Stream::poll_next`].
@@ -218,7 +219,125 @@ pub use watch_stream::WatchStream;
 pub use zip::Zip;
 
 use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+/// An asynchronous destination for a sequence of owned items.
+///
+/// Sending is a two-step protocol: wait for [`Self::poll_ready`] to return
+/// `Ready(Ok(()))`, then transfer one item with [`Self::start_send`]. The
+/// readiness check lets the destination apply backpressure before the caller
+/// allocates or relinquishes its next item. Accepted items may remain buffered;
+/// [`Self::poll_flush`] drives them to the sink's documented completion boundary,
+/// and [`Self::poll_close`] flushes them before closing the sending side.
+///
+/// A `Pending` readiness, flush, or close poll must arrange to wake the current
+/// task when progress is possible. Readiness permits one `start_send`; callers
+/// must check it again for each subsequent item. Polls may advance earlier
+/// accepted items even when they return `Pending` or an error. Errors and drop
+/// do not imply rollback or durability: those guarantees belong to the concrete
+/// sink. Keep the sink alive to resume its retained work after dropping a wait.
+///
+/// The trait adds no `Send`, `Sync`, `Unpin`, or `'static` requirement.
+/// `Pin<P>` forwards to a pinned target without requiring that target to be
+/// `Unpin`; `Box<S>` and `&mut S` forward when `S: Unpin`.
+pub trait Sink<Item> {
+    /// Error returned by admission, sending, flushing, or closing.
+    type Error;
+
+    /// Waits until one more item can be accepted.
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+
+    /// Transfers one item after a successful readiness check.
+    ///
+    /// Success means the sink accepted ownership, not that it flushed the item.
+    /// An error does not promise that implementation-specific side effects were
+    /// rolled back.
+    fn start_send(self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error>;
+
+    /// Drives all previously accepted items to the sink's completion boundary.
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+
+    /// Flushes previously accepted items and closes the sending side.
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
+}
+
+impl<Item, P> Sink<Item> for Pin<P>
+where
+    P: std::ops::DerefMut + Unpin,
+    P::Target: Sink<Item>,
+{
+    type Error = <P::Target as Sink<Item>>::Error;
+
+    #[inline]
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().as_mut().poll_ready(cx)
+    }
+
+    #[inline]
+    fn start_send(self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        self.get_mut().as_mut().start_send(item)
+    }
+
+    #[inline]
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().as_mut().poll_flush(cx)
+    }
+
+    #[inline]
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().as_mut().poll_close(cx)
+    }
+}
+
+impl<Item, S: Sink<Item> + Unpin + ?Sized> Sink<Item> for Box<S> {
+    type Error = S::Error;
+
+    #[inline]
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_ready(cx)
+    }
+
+    #[inline]
+    fn start_send(mut self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        Pin::new(&mut **self).start_send(item)
+    }
+
+    #[inline]
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_flush(cx)
+    }
+
+    #[inline]
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_close(cx)
+    }
+}
+
+impl<Item, S: Sink<Item> + Unpin + ?Sized> Sink<Item> for &mut S {
+    type Error = S::Error;
+
+    #[inline]
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_ready(cx)
+    }
+
+    #[inline]
+    fn start_send(mut self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        Pin::new(&mut **self).start_send(item)
+    }
+
+    #[inline]
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_flush(cx)
+    }
+
+    #[inline]
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut **self).poll_close(cx)
+    }
+}
 
 /// Extension trait providing combinator methods for streams.
 ///

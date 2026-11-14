@@ -33,7 +33,8 @@ const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 /// implements both `Decoder` and `Encoder`. The read half implements
 /// `Stream` for receiving decoded frames. The write half provides
 /// `poll_ready`/`start_send`/`poll_flush`/`poll_close` for sending encoded
-/// frames with bounded producer backpressure.
+/// frames with bounded producer backpressure. Those operations also implement
+/// [`crate::stream::Sink`] for generic producers and byte-writer adapters.
 ///
 /// # Cancel Safety
 ///
@@ -445,6 +446,32 @@ where
             Poll::Ready(Ok(())) => {}
         }
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+// The sink half does not require AsyncRead or Decoder support.
+
+impl<T, U, I> crate::stream::Sink<I> for Framed<T, U>
+where
+    T: AsyncWrite + Unpin,
+    U: Encoder<I> + Unpin,
+{
+    type Error = <U as Encoder<I>>::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_ready(self.get_mut(), cx).map_err(Into::into)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: I) -> Result<(), Self::Error> {
+        Self::start_send(self.get_mut(), item)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_flush(self.get_mut(), cx).map_err(Into::into)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Self::poll_close(self.get_mut(), cx).map_err(Into::into)
     }
 }
 
