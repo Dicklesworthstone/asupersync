@@ -63,6 +63,10 @@ pub use tls_options::{PgTlsOptions, PgTlsVerification};
 mod cursor;
 pub use cursor::{PgCursor, PgCursorComplete, PgCursorConfig};
 
+#[path = "postgres/array.rs"]
+mod array;
+pub use array::{PgArray, PgArrayDimension};
+
 /// Logical replication protocol messages produced by PostgreSQL's pgoutput plugin.
 #[path = "postgres/pgoutput.rs"]
 pub mod pgoutput;
@@ -1001,6 +1005,8 @@ impl FromSql for String {
             oid,
             oid::TEXT
                 | oid::VARCHAR
+                | oid::BPCHAR
+                | oid::NAME
                 | oid::CHAR
                 | oid::JSON
                 | oid::JSONB
@@ -1378,7 +1384,7 @@ impl FromSql for serde_json::Value {
 
 // ---- One-dimensional arrays ----
 
-/// A Rust type that binds as an element of a one-dimensional PostgreSQL array.
+/// A Rust type that binds as an element of a PostgreSQL array.
 ///
 /// `Vec<T>` and `[T]` of these types bind as the matching array type, so a
 /// batch lookup such as `WHERE id = ANY($1)` takes a `Vec<i64>`, and
@@ -1389,6 +1395,8 @@ impl FromSql for serde_json::Value {
 /// types (`text`, `varchar`, `bpchar`, `json`), whose text is their binary
 /// form. Decoding goes through `Vec<T>`'s [`FromSql`] implementation, for any
 /// element type `T` that implements [`FromSql`].
+/// [`PgArray<T>`] uses the same element contract while retaining multiple
+/// dimensions and nondefault lower bounds.
 pub trait PgArrayElement: ToSql {
     /// The array type a `[Self]` binds as.
     const ARRAY_OID: u32;

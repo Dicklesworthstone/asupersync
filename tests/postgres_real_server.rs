@@ -1622,6 +1622,103 @@ fn pg_real_arrays_bind_and_decode() {
     });
 }
 
+/// Shape and lower bounds survive real parameter binding and row decoding,
+/// including prepared text-family coercion and a three-dimensional literal.
+#[test]
+fn pg_real_shaped_arrays_bind_and_decode() {
+    use asupersync::database::postgres::{PgArray, PgArrayDimension, ToSql};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_shaped_arrays_bind_and_decode") {
+        return;
+    }
+    let log = PgTestLogger::new("postgres_real", "pg_real_shaped_arrays_bind_and_decode");
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        let matrix = PgArray::new(
+            vec![
+                PgArrayDimension::new(2, 0).unwrap(),
+                PgArrayDimension::new(2, -1).unwrap(),
+            ],
+            vec![Some(1_i32), None, Some(3), Some(4)],
+        )
+        .unwrap();
+        let empty = PgArray::<i32>::empty();
+        log.phase("shaped_parameter_round_trip");
+        let params: &[&dyn ToSql] = &[&matrix, &empty];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT $1 AS matrix, array_dims($1) AS dimensions, $2 AS empty, \
+             cardinality($2) AS empty_count",
+                params,
+            )
+            .await,
+            &log,
+            "shaped parameters",
+        );
+        assert_eq!(
+            rows[0].get_typed::<PgArray<Option<i32>>>("matrix").unwrap(),
+            matrix
+        );
+        assert_eq!(
+            rows[0].get_typed::<String>("dimensions").unwrap(),
+            "[0:1][-1:0]"
+        );
+        assert_eq!(rows[0].get_typed::<PgArray<i32>>("empty").unwrap(), empty);
+        assert_eq!(rows[0].get_i32("empty_count").unwrap(), 0);
+
+        log.phase("prepared_shaped_varchar");
+        let statement = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "SELECT $1::varchar[] AS names, array_dims($1::varchar[]) AS dimensions",
+            )
+            .await,
+            &log,
+            "prepare shaped varchar",
+        );
+        let names = PgArray::new(
+            vec![
+                PgArrayDimension::new(1, -3).unwrap(),
+                PgArrayDimension::new(2, 0).unwrap(),
+            ],
+            vec!["quoted\"name".to_owned(), "back\\slash".to_owned()],
+        )
+        .unwrap();
+        let params: &[&dyn ToSql] = &[&names];
+        let rows = unwrap_pg(
+            conn.query_prepared(&cx, &statement, params).await,
+            &log,
+            "prepared array",
+        );
+        assert_eq!(
+            rows[0].get_typed::<PgArray<String>>("names").unwrap(),
+            names
+        );
+        assert_eq!(
+            rows[0].get_typed::<String>("dimensions").unwrap(),
+            "[-3:-3][0:1]"
+        );
+
+        log.phase("three_dimensional_server_literal");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT '[0:1][-2:-1][5:6]={{{0,1},{2,3}},{{4,5},{6,7}}}'::int4[] AS cube",
+            )
+            .await,
+            &log,
+            "server cube",
+        );
+        let cube = rows[0].get_typed::<PgArray<i32>>("cube").unwrap();
+        assert_eq!(cube.rank(), 3);
+        assert_eq!(cube.elements(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(cube.get(&[1, -1, 6]), Some(&7));
+        log.end("pass");
+    });
+}
+
 /// `SystemTime` and `serde_json::Value` round-trip through a real server: a
 /// `SystemTime` binds into `timestamptz` and `timestamp` columns (on the
 /// unprepared and the prepared path, and as a `timestamptz[]`), decodes back
