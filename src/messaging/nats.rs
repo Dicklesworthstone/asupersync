@@ -20,6 +20,7 @@ use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::runtime::TaskHandle;
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::tracing_compat::warn;
@@ -36,13 +37,60 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
 const REQUEST_TIMEOUT_MESSAGE: &str = "request timeout";
 const CONNECT_TIMEOUT_MESSAGE: &str = "connection attempt timed out";
+
+/// Transfer timeout authority from the caller's queue wait to the wire
+/// operation exactly once. A queued timeout and dispatch cannot both win.
+#[derive(Debug)]
+struct NatsRequestDeadline {
+    at: Time,
+    state: AtomicU8,
+}
+
+impl NatsRequestDeadline {
+    const QUEUED: u8 = 0;
+    const RUNNING: u8 = 1;
+    const EXPIRED: u8 = 2;
+
+    fn new(at: Time) -> Self {
+        Self {
+            at,
+            state: AtomicU8::new(Self::QUEUED),
+        }
+    }
+
+    fn try_start(&self) -> bool {
+        self.state
+            .compare_exchange(
+                Self::QUEUED,
+                Self::RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn is_running(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Self::RUNNING
+    }
+
+    fn expire_queued(&self) -> bool {
+        matches!(
+            self.state.compare_exchange(
+                Self::QUEUED,
+                Self::EXPIRED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ),
+            Ok(_) | Err(Self::EXPIRED)
+        )
+    }
+}
 
 fn timeout_now(cx: &Cx) -> Time {
     cx.timer_driver()
@@ -84,6 +132,18 @@ async fn nats_channel_wait<T>(
     cx: &Cx,
     future: impl Future<Output = Result<T, NatsError>>,
 ) -> Result<T, NatsError> {
+    nats_channel_wait_until(cx, None, future).await
+}
+
+/// Bound a queued request without discarding an already committed reply.
+/// Once dispatched, the wire operation owns the same absolute deadline,
+/// including cleanup of a reply it has parsed but not yet published.
+async fn nats_channel_wait_until<T>(
+    cx: &Cx,
+    deadline: Option<&NatsRequestDeadline>,
+    future: impl Future<Output = Result<T, NatsError>>,
+) -> Result<T, NatsError> {
+    let mut timer = deadline.map(|deadline| nats_deadline_timer(cx, deadline.at));
     let mut future = std::pin::pin!(future);
     let mut cancellation = std::pin::pin!(nats_io(
         cx,
@@ -98,7 +158,33 @@ async fn nats_channel_wait<T>(
             // The owner frame has been restored before observing the ambient
             // task. A parked channel still has both cancellation wake sources.
             Poll::Pending => match cancellation.as_mut().poll(task_cx) {
-                Poll::Pending => Poll::Pending,
+                Poll::Pending => {
+                    if deadline.is_some_and(NatsRequestDeadline::is_running) {
+                        timer = None;
+                    }
+                    if timer
+                        .as_mut()
+                        .is_some_and(|timer| Pin::new(timer).poll_deadline(task_cx).is_ready())
+                    {
+                        // Publication or dispatch can race timer registration.
+                        // A running operation must finish its bounded cleanup:
+                        // its already parsed reply may not be published yet.
+                        match nats_poll_channel(cx, future.as_mut(), task_cx) {
+                            Poll::Ready(result) => Poll::Ready(result),
+                            Poll::Pending
+                                if deadline.is_some_and(NatsRequestDeadline::expire_queued) =>
+                            {
+                                Poll::Ready(Err(request_timeout_error()))
+                            }
+                            Poll::Pending => {
+                                timer = None;
+                                Poll::Pending
+                            }
+                        }
+                    } else {
+                        Poll::Pending
+                    }
+                }
                 Poll::Ready(cancelled) => {
                     // A reply can commit while the cancellation watcher
                     // refreshes its wakers. Give the channel its terminal
@@ -3689,6 +3775,7 @@ enum NatsSupervisorCommand {
     },
     RequestWithHeaders {
         cx: Cx,
+        deadline: Arc<NatsRequestDeadline>,
         subject: String,
         headers: Vec<(String, Vec<u8>)>,
         payload: Vec<u8>,
@@ -3696,6 +3783,7 @@ enum NatsSupervisorCommand {
     },
     Request {
         cx: Cx,
+        deadline: Arc<NatsRequestDeadline>,
         subject: String,
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<Message, NatsError>>,
@@ -3767,9 +3855,18 @@ impl NatsSupervisor {
         cx: &Cx,
         build: impl FnOnce(Cx, oneshot::Sender<Result<T, NatsError>>) -> NatsSupervisorCommand,
     ) -> Result<T, NatsError> {
+        self.request_until(cx, None, build).await
+    }
+
+    async fn request_until<T>(
+        &self,
+        cx: &Cx,
+        deadline: Option<Arc<NatsRequestDeadline>>,
+        build: impl FnOnce(Cx, oneshot::Sender<Result<T, NatsError>>) -> NatsSupervisorCommand,
+    ) -> Result<T, NatsError> {
         let (reply, mut response) = oneshot::channel();
         let mut send = std::pin::pin!(self.commands.send(cx, build(cx.clone(), reply)));
-        nats_channel_wait(
+        let admission = nats_channel_wait(
             cx,
             std::future::poll_fn(|task_cx| {
                 send.as_mut().poll(task_cx).map_err(|error| match error {
@@ -3777,11 +3874,17 @@ impl NatsSupervisor {
                     mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => NatsError::Closed,
                 })
             }),
-        )
-        .await?;
+        );
+        if let Some(deadline) = deadline.as_ref() {
+            // Admission and dispatch spend the original request budget.
+            nats_timeout_at(cx, deadline.at, request_timeout_error, admission).await?;
+        } else {
+            admission.await?;
+        }
         let mut receive = std::pin::pin!(response.recv(cx));
-        nats_channel_wait(
+        nats_channel_wait_until(
             cx,
+            deadline.as_deref(),
             std::future::poll_fn(|task_cx| {
                 receive.as_mut().poll(task_cx).map_err(|error| match error {
                     oneshot::RecvError::Cancelled => NatsError::Cancelled,
@@ -3981,6 +4084,9 @@ impl NatsClient {
     }
 
     /// Request/reply pattern with NATS v1 headers.
+    ///
+    /// The request timeout covers supervisor admission and the complete wire
+    /// exchange. An already committed reply wins over an expired wait.
     pub async fn request_with_headers(
         &mut self,
         cx: &Cx,
@@ -3988,6 +4094,7 @@ impl NatsClient {
         headers: &[(&str, &[u8])],
         payload: &[u8],
     ) -> Result<Message, NatsError> {
+        let deadline = timeout_now(cx) + self.config.request_timeout;
         match &mut self.mode {
             NatsClientMode::Direct(connection) => {
                 connection
@@ -4001,10 +4108,12 @@ impl NatsClient {
                     .map(|(name, value)| ((*name).to_string(), (*value).to_vec()))
                     .collect();
                 let payload = payload.to_vec();
+                let deadline = Arc::new(NatsRequestDeadline::new(deadline));
                 supervisor
-                    .request(cx, move |cx, reply| {
+                    .request_until(cx, Some(Arc::clone(&deadline)), move |cx, reply| {
                         NatsSupervisorCommand::RequestWithHeaders {
                             cx,
+                            deadline,
                             subject,
                             headers,
                             payload,
@@ -4017,23 +4126,32 @@ impl NatsClient {
     }
 
     /// Request/reply pattern: publish and wait for a single response.
+    ///
+    /// The request timeout covers supervisor admission and the complete wire
+    /// exchange. Queueing and transport progress never restart that deadline.
+    /// An already committed reply remains authoritative when the caller resumes.
     pub async fn request(
         &mut self,
         cx: &Cx,
         subject: &str,
         payload: &[u8],
     ) -> Result<Message, NatsError> {
+        let deadline = timeout_now(cx) + self.config.request_timeout;
         match &mut self.mode {
             NatsClientMode::Direct(connection) => connection.request(cx, subject, payload).await,
             NatsClientMode::Supervised(supervisor) => {
                 let subject = subject.to_string();
                 let payload = payload.to_vec();
+                let deadline = Arc::new(NatsRequestDeadline::new(deadline));
                 supervisor
-                    .request(cx, move |cx, reply| NatsSupervisorCommand::Request {
-                        cx,
-                        subject,
-                        payload,
-                        reply,
+                    .request_until(cx, Some(Arc::clone(&deadline)), move |cx, reply| {
+                        NatsSupervisorCommand::Request {
+                            cx,
+                            deadline,
+                            subject,
+                            payload,
+                            reply,
+                        }
                     })
                     .await
             }
@@ -4613,28 +4731,48 @@ async fn handle_supervisor_command(
         }
         NatsSupervisorCommand::RequestWithHeaders {
             cx,
+            deadline,
             subject,
             headers,
             payload,
             reply,
         } => {
-            let headers = headers
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_slice()))
-                .collect::<Vec<_>>();
-            complete_supervisor_command(
-                reply,
-                connection.request_with_headers(&cx, &subject, &headers, &payload),
-            )
-            .await;
+            if deadline.try_start() {
+                let headers = headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_slice()))
+                    .collect::<Vec<_>>();
+                complete_supervisor_command(
+                    reply,
+                    connection.request_with_deadline(
+                        &cx,
+                        &subject,
+                        Some(&headers),
+                        &payload,
+                        deadline.at,
+                    ),
+                )
+                .await;
+            } else {
+                let _ = reply.send_blocking(Err(request_timeout_error()));
+            }
         }
         NatsSupervisorCommand::Request {
             cx,
+            deadline,
             subject,
             payload,
             reply,
         } => {
-            complete_supervisor_command(reply, connection.request(&cx, &subject, &payload)).await;
+            if deadline.try_start() {
+                complete_supervisor_command(
+                    reply,
+                    connection.request_with_deadline(&cx, &subject, None, &payload, deadline.at),
+                )
+                .await;
+            } else {
+                let _ = reply.send_blocking(Err(request_timeout_error()));
+            }
         }
         NatsSupervisorCommand::Subscribe {
             cx,

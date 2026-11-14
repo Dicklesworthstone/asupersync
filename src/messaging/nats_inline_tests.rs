@@ -1474,6 +1474,361 @@
     }
 
     #[test]
+    fn nats_request_deadline_covers_supervisor_admission_on_the_owner_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        for headers in [false, true] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let foreign_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10_000)));
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock.clone());
+            let make_cx = |task, driver| {
+                Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(task, 0),
+                    Budget::new(),
+                    None,
+                    None,
+                    None,
+                    Some(driver),
+                    None,
+                )
+            };
+            let owner = make_cx(1, timer.clone());
+            let driver = make_cx(2, foreign_timer.clone());
+            let _current = Cx::set_current(Some(driver.clone()));
+            let (commands, mut queued) = mpsc::channel(1);
+            let (prior_reply, _prior_response) = oneshot::channel();
+            assert!(
+                commands
+                    .try_send(NatsSupervisorCommand::Ping {
+                        cx: owner.clone(),
+                        reply: prior_reply,
+                    })
+                    .is_ok()
+            );
+            let mut client = NatsClient {
+                config: NatsConfig {
+                    request_timeout: Duration::from_millis(100),
+                    ..NatsConfig::default()
+                },
+                state: Arc::new(SharedState::new()),
+                mode: NatsClientMode::Supervised(NatsSupervisor {
+                    commands,
+                    task: None,
+                }),
+            };
+            let mut request = Box::pin(async {
+                if headers {
+                    client
+                        .request_with_headers(&owner, "service.echo", &[], b"body")
+                        .await
+                } else {
+                    client.request(&owner, "service.echo", b"body").await
+                }
+            });
+            let mut task_cx = std::task::Context::from_waker(Waker::noop());
+            assert!(request.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+            foreign_clock.advance(1_000_000_000);
+            let _ = foreign_timer.process_timers();
+            assert!(request.as_mut().poll(&mut task_cx).is_pending());
+
+            clock.advance(100_000_000);
+            let _ = timer.process_timers();
+            let Poll::Ready(Err(NatsError::Io(error))) = request.as_mut().poll(&mut task_cx) else {
+                panic!("a full supervisor queue must consume the request deadline");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert_eq!(error.to_string(), REQUEST_TIMEOUT_MESSAGE);
+            drop(request);
+            assert!(matches!(
+                queued.try_recv(),
+                Ok(NatsSupervisorCommand::Ping { .. })
+            ));
+            assert!(matches!(queued.try_recv(), Err(mpsc::RecvError::Empty)));
+            assert!(!owner.is_cancel_requested());
+            assert!(!driver.is_cancel_requested());
+            assert_eq!(timer.pending_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn nats_request_deadline_survives_queueing_and_preserves_committed_replies() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        for headers in [false, true] {
+            for commit_reply in [false, true] {
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
+                let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+                let owner = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(1, 0),
+                    Budget::new(),
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let _current = Cx::set_current(Some(owner.clone()));
+                let (commands, mut queued) = mpsc::channel(1);
+                let (prior_reply, _prior_response) = oneshot::channel();
+                assert!(
+                    commands
+                        .try_send(NatsSupervisorCommand::Ping {
+                            cx: owner.clone(),
+                            reply: prior_reply,
+                        })
+                        .is_ok()
+                );
+                let mut client = NatsClient {
+                    config: NatsConfig {
+                        request_timeout: Duration::from_millis(100),
+                        ..NatsConfig::default()
+                    },
+                    state: Arc::new(SharedState::new()),
+                    mode: NatsClientMode::Supervised(NatsSupervisor {
+                        commands,
+                        task: None,
+                    }),
+                };
+                let mut request = Box::pin(async {
+                    if headers {
+                        client
+                            .request_with_headers(&owner, "service.echo", &[], b"body")
+                            .await
+                    } else {
+                        client.request(&owner, "service.echo", b"body").await
+                    }
+                });
+                let mut task_cx = std::task::Context::from_waker(Waker::noop());
+                assert!(request.as_mut().poll(&mut task_cx).is_pending());
+                clock.advance(75_000_000);
+                drop(queued.try_recv().expect("release prior command capacity"));
+                assert!(request.as_mut().poll(&mut task_cx).is_pending());
+                let command = queued.try_recv().expect("request admitted after queue wait");
+                let (deadline, reply) = match command {
+                    NatsSupervisorCommand::Request { deadline, reply, .. }
+                    | NatsSupervisorCommand::RequestWithHeaders { deadline, reply, .. } => {
+                        (deadline, reply)
+                    }
+                    _ => panic!("unexpected supervisor command"),
+                };
+                assert_eq!(
+                    deadline.at,
+                    Time::from_secs(100) + Duration::from_millis(100)
+                );
+                assert_eq!(timer.pending_count(), 1);
+
+                clock.advance(25_000_001);
+                let _ = timer.process_timers();
+                if commit_reply {
+                    reply
+                        .send_blocking(Ok(subscription_event_message(42)))
+                        .expect("commit request reply before caller resumes");
+                    owner.cancel_with(crate::types::CancelKind::User, Some("after reply commit"));
+                    let Poll::Ready(Ok(message)) = request.as_mut().poll(&mut task_cx) else {
+                        panic!("a committed reply must survive deadline and cancellation");
+                    };
+                    assert_eq!(message.payload, vec![42]);
+                } else {
+                    let Poll::Ready(Err(NatsError::Io(error))) =
+                        request.as_mut().poll(&mut task_cx)
+                    else {
+                        panic!("reply wait must use the original request deadline");
+                    };
+                    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                    assert_eq!(error.to_string(), REQUEST_TIMEOUT_MESSAGE);
+                    assert!(reply.is_closed());
+                    assert!(
+                        !deadline.try_start(),
+                        "expired commands cannot begin wire I/O"
+                    );
+                    assert!(!owner.is_cancel_requested());
+                }
+                drop(request);
+                assert_eq!(timer.pending_count(), 0);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn nats_running_request_preserves_parsed_reply_when_cleanup_reaches_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        struct CountWakes(AtomicU64);
+        impl std::task::Wake for CountWakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for with_headers in [false, true] {
+            for no_responders in [false, true] {
+                let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+                let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+                let owner = Cx::new_with_drivers(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(1, 0),
+                    Budget::new(),
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let driver = Cx::for_testing();
+                let _current = Cx::set_current(Some(driver.clone()));
+                let (mut connection, subscription) = subscription_event_fixture(1);
+                let state = Arc::clone(&connection.state);
+                state.supervised.store(true, Ordering::Release);
+                state.connected.store(true, Ordering::Release);
+                let (commands, mut queued) = mpsc::channel(1);
+                let mut client = NatsClient {
+                    config: NatsConfig {
+                        request_timeout: Duration::from_millis(100),
+                        ..NatsConfig::default()
+                    },
+                    state: Arc::clone(&state),
+                    mode: NatsClientMode::Supervised(NatsSupervisor {
+                        commands,
+                        task: None,
+                    }),
+                };
+                let mut call = Box::pin(async {
+                    if with_headers {
+                        client
+                            .request_with_headers(&owner, "service.reply", &[], b"ping")
+                            .await
+                    } else {
+                        client.request(&owner, "service.reply", b"ping").await
+                    }
+                });
+                let mut caller_cx = std::task::Context::from_waker(Waker::noop());
+                assert!(call.as_mut().poll(&mut caller_cx).is_pending());
+                let (command_cx, deadline, reply) = match queued.try_recv().expect("admitted request") {
+                    NatsSupervisorCommand::Request {
+                        cx,
+                        deadline,
+                        reply,
+                        ..
+                    } if !with_headers => (cx, deadline, reply),
+                    NatsSupervisorCommand::RequestWithHeaders {
+                        cx,
+                        deadline,
+                        reply,
+                        ..
+                    } if with_headers => (cx, deadline, reply),
+                    _ => panic!("unexpected supervisor command"),
+                };
+                assert_eq!(command_cx.task_id(), owner.task_id());
+                assert_eq!(deadline.at, Time::ZERO + Duration::from_millis(100));
+                assert!(deadline.try_start());
+                assert!(deadline.is_running());
+
+                if no_responders {
+                    let headers = b"NATS/1.0 503\r\n\r\n";
+                    let frame = format!("HMSG events 1 {} {}\r\n", headers.len(), headers.len());
+                    connection
+                        .read_buf
+                        .extend(frame.as_bytes())
+                        .expect("buffer HMSG");
+                    connection.read_buf.extend(headers).expect("buffer status");
+                    connection
+                        .read_buf
+                        .extend(b"\r\n")
+                        .expect("buffer terminator");
+                } else {
+                    connection
+                        .read_buf
+                        .extend(b"MSG events 1 9\r\ncompleted\r\n")
+                        .expect("buffer reply");
+                }
+                let NatsMessage::Msg(parsed_reply) = connection
+                    .try_parse_message()
+                    .expect("parse reply")
+                    .expect("complete reply")
+                else {
+                    panic!("expected parsed request reply");
+                };
+                let sid = subscription.sid();
+                // Model an UNSUB cleanup write parked until its original wire
+                // deadline. The reply is already parsed; only its delivery is
+                // held. After the barrier, use the real finalizer on the existing
+                // Closed transport fixture, whose cleanup fails immediately.
+                let mut complete = Box::pin(complete_supervisor_command(reply, async {
+                    let mut cleanup_deadline =
+                        std::pin::pin!(nats_deadline_timer(&command_cx, deadline.at));
+                    std::future::poll_fn(|task_cx| {
+                        cleanup_deadline.as_mut().poll_deadline(task_cx)
+                    })
+                    .await;
+                    connection
+                        .finalize_request_reply(&command_cx, sid, parsed_reply, deadline.at)
+                        .await
+                }));
+                let cleanup_wakes = Arc::new(CountWakes(AtomicU64::new(0)));
+                let cleanup_waker = Waker::from(Arc::clone(&cleanup_wakes));
+                let mut supervisor_cx = std::task::Context::from_waker(&cleanup_waker);
+                assert!(complete.as_mut().poll(&mut supervisor_cx).is_pending());
+                assert!(
+                    timer.pending_count() > 0,
+                    "wire cleanup deadline must be armed"
+                );
+                let wakes_before = cleanup_wakes.0.load(Ordering::SeqCst);
+                clock.advance(100_000_001);
+                assert_eq!(timeout_now(&owner), deadline.at + Duration::from_nanos(1));
+                let _ = timer.process_timers();
+                assert!(cleanup_wakes.0.load(Ordering::SeqCst) > wakes_before);
+
+                // The caller deliberately runs before the awakened supervisor.
+                // Its admission timer must not discard an already running reply.
+                assert!(call.as_mut().poll(&mut caller_cx).is_pending());
+                assert!(deadline.is_running());
+                assert!(matches!(
+                    complete.as_mut().poll(&mut supervisor_cx),
+                    Poll::Ready(())
+                ));
+                drop(complete);
+                let Poll::Ready(result) = call.as_mut().poll(&mut caller_cx) else {
+                    panic!("completed supervisor reply must wake the caller");
+                };
+                if no_responders {
+                    match result {
+                        Err(NatsError::Server(message)) => {
+                            assert_eq!(message, "status 503: No Responders");
+                        }
+                        other => panic!("parsed status must survive cleanup expiry: {other:?}"),
+                    }
+                } else {
+                    let message = result.expect("parsed success must survive cleanup expiry");
+                    assert_eq!(message.payload, b"completed");
+                    assert_eq!(message.subject, "events");
+                    assert_eq!(message.sid, sid);
+                }
+                drop(call);
+                assert!(state.subscriptions.lock().is_empty());
+                assert!(!connection.connected);
+                drop(subscription);
+                assert!(state.dropped_sids.lock().is_empty());
+                assert!(!owner.is_cancel_requested());
+                assert!(!driver.is_cancel_requested());
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(timer.pending_count(), 0);
+            }
+        }
+    }
+
+    #[test]
     fn nats_channel_wait_rechecks_a_reply_committed_during_cancellation_handoff() {
         for cancel_owner in [false, true] {
             let (owner, driver, _) = driverless_nats_owner_and_foreign_driver();
