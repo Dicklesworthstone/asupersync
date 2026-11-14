@@ -29,7 +29,8 @@ use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    HttpError, find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line,
+    CHUNK_METADATA_ALLOWANCE_BYTES, HttpError, chunk_size_line_metadata_bytes,
+    find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line,
     parse_header_line, require_transfer_encoding_chunked, trim_ows, validate_header_field,
 };
 use crate::types::CancelKind;
@@ -46,8 +47,6 @@ use obligation::IncomingBodyObligation;
 ))]
 pub(crate) use obligation::FramedIncomingBodyGuard;
 
-/// Chunk-extension bytes a request body may carry beyond its data bytes.
-const CHUNK_EXTENSION_ALLOWANCE_BYTES: u64 = 16 * 1024;
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
 const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
@@ -1818,9 +1817,9 @@ pub struct IncomingRequestBodyWriter {
     max_trailers_size: usize,
     max_buffered_bytes: usize,
     total_bytes: u64,
-    /// Chunk-extension bytes received so far, bounded by `total_bytes` plus
-    /// `CHUNK_EXTENSION_ALLOWANCE_BYTES`.
-    chunk_extension_bytes: u64,
+    /// Extension and redundant size-padding bytes, bounded by `total_bytes`
+    /// plus `CHUNK_METADATA_ALLOWANCE_BYTES`.
+    chunk_metadata_bytes: u64,
     discarded_frames: u64,
     discarded_bytes: u64,
 }
@@ -1868,7 +1867,7 @@ impl IncomingRequestBodyWriter {
             max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
             total_bytes: 0,
-            chunk_extension_bytes: 0,
+            chunk_metadata_bytes: 0,
             discarded_frames: 0,
             discarded_bytes: 0,
         };
@@ -2309,21 +2308,16 @@ impl IncomingRequestBodyWriter {
                     // intermediary (nginx/envoy) frames the same body differently
                     // (br-asupersync-usvn1p / -8dl9j7).
                     let chunk_size = parse_chunk_size_line(line)?;
-                    // Extensions carry no body bytes, so the body limit never
-                    // sees them. Bound them by the data received so far plus a
-                    // fixed allowance, or each body byte could cost a client's
-                    // peer a whole line of extensions (CVE-2024-22019).
-                    let extension = line
-                        .iter()
-                        .position(|&byte| byte == b';')
-                        .map_or(0, |start| line_end - start);
-                    self.chunk_extension_bytes = self
-                        .chunk_extension_bytes
-                        .saturating_add(u64::try_from(extension).unwrap_or(u64::MAX));
-                    if self.chunk_extension_bytes
+                    // Extensions and padded size digits carry no body bytes.
+                    // Share the buffered decoder's accounting so either form
+                    // cannot amplify each payload byte into a full size line.
+                    self.chunk_metadata_bytes = self
+                        .chunk_metadata_bytes
+                        .saturating_add(chunk_size_line_metadata_bytes(line));
+                    if self.chunk_metadata_bytes
                         > self
                             .total_bytes
-                            .saturating_add(CHUNK_EXTENSION_ALLOWANCE_BYTES)
+                            .saturating_add(CHUNK_METADATA_ALLOWANCE_BYTES)
                     {
                         return Err(HttpError::BadChunkedEncoding);
                     }
