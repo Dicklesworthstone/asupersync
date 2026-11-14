@@ -19,6 +19,225 @@ mod tests {
         conn
     }
 
+    async fn receive_terminal_proof_test_flight(
+        cx: &Cx,
+        link: &mut QuicLink,
+        count: usize,
+    ) -> Vec<ReceivedPacket> {
+        let mut packets = Vec::with_capacity(count);
+        while packets.len() < count {
+            let batch = crate::time::timeout(
+                crate::time::wall_now(),
+                Duration::from_secs(5),
+                link.endpoint.receive_batch(cx, count - packets.len()),
+            )
+            .await
+            .expect("terminal Proof test UDP flight timed out")
+            .expect("terminal Proof test UDP receive");
+            assert!(!batch.is_empty(), "an emitted flight must reach the peer socket");
+            packets.extend(batch);
+        }
+        packets
+    }
+
+    // The split writes deliberately create two flush flights. The eight-packet
+    // control-priority allowance is not a hard flush cap, so payload size alone
+    // would not witness the old one-flush snapshot missing later offsets.
+    #[allow(clippy::too_many_lines)]
+    async fn exercise_terminal_proof_flight_recovery(dropped_acknowledgements: usize) {
+        use crate::net::quic_native::handshake_driver::tests::{
+            CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
+        };
+        use crate::net::quic_native::handshake_driver::{client_config, server_config};
+        use futures_lite::future::zip;
+
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = endpoint.local_addr();
+        let client_tls = QuicClientTls {
+            server_name: ServerName::try_from("localhost").unwrap(),
+            config: client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
+        };
+        let server_tls = QuicServerTls {
+            config: server_config(
+                vec![parse_one_cert(LEAF_CERT_PEM)],
+                leaf_key(),
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
+        };
+        let (client, server) = zip(
+            connect(&cx, address, &client_tls, &config),
+            accept(&cx, endpoint, &server_tls, &config),
+        )
+        .await;
+        let mut client = client.unwrap();
+        let (mut server, early) = server.unwrap();
+        server.ingest_packets(&cx, early).unwrap();
+        let mut control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
+        let stream = control.stream;
+        server.conn.accept_remote_stream(&cx, stream).unwrap();
+
+        let receipt = ReceiveReceipt {
+            committed: true,
+            bytes_received: 1024,
+            files: 1024,
+            sha_ok: true,
+            merkle_ok: true,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
+            decode_count: 0,
+            decode_micros: 0,
+            reason: None,
+            committed_paths: (0..1024)
+                .map(|index| format!("file-{index:04}-{}.bin", "p".repeat(192)))
+                .collect(),
+        };
+        let proof = super::super::json_frame(FrameType::Proof, &receipt).unwrap();
+        let wire = proof.to_wire_bytes().unwrap();
+        let split = wire.len() / 2;
+        let split_offset = u64::try_from(split).unwrap();
+        let wire_end = u64::try_from(wire.len()).unwrap();
+        let suffix_bytes = wire_end - split_offset;
+
+        server
+            .conn
+            .write_stream_bytes(&cx, stream, Bytes::copy_from_slice(&wire[..split]), false)
+            .unwrap();
+        let prefix_packets = server.flush(&cx).await.unwrap();
+        assert!(
+            prefix_packets > QUIC_CONTROL_STREAM_PACKETS_PER_FLUSH,
+            "fixture must exceed one control-priority burst"
+        );
+        let prefix_snapshot = server.last_flushed_stream_frames();
+        assert_eq!(
+            prefix_snapshot.iter().map(|frame| frame.offset + frame.len).max(),
+            Some(split_offset)
+        );
+        assert!(!server.conn.has_pending_stream_frames_for(stream));
+        let prefix = receive_terminal_proof_test_flight(&cx, &mut client, prefix_packets).await;
+        client.ingest_packets(&cx, prefix).unwrap();
+        assert_eq!(
+            control.try_recv(&cx, &mut client.conn).unwrap(),
+            None,
+            "the peer has only an incomplete Proof prefix"
+        );
+        let prefix_acks = client.flush(&cx).await.unwrap();
+        assert!(prefix_acks > 0, "the received prefix must generate an ACK");
+        let acks = receive_terminal_proof_test_flight(&cx, &mut server, prefix_acks).await;
+        server.ingest_packets(&cx, acks).unwrap();
+        assert!(server.in_flight_stream_frames.is_empty());
+        assert_eq!(server.stream_unacked_bytes, 0);
+
+        server
+            .conn
+            .write_stream_bytes(&cx, stream, Bytes::copy_from_slice(&wire[split..]), false)
+            .unwrap();
+        let suffix_packets = server.flush(&cx).await.unwrap();
+        assert!(suffix_packets > 0);
+        assert!(!server.conn.has_pending_stream_frames_for(stream));
+        let suffix_snapshot = server.last_flushed_stream_frames();
+        assert!(
+            suffix_snapshot.iter().all(|frame| frame.offset >= split_offset),
+            "the later flight is absent from the saved prefix snapshot"
+        );
+        assert_eq!(server.stream_unacked_bytes, suffix_bytes);
+        // Consume the actual protected UDP datagrams without admitting them to
+        // the client's connection: loss is explicit, not a scheduling guess.
+        let lost = receive_terminal_proof_test_flight(&cx, &mut client, suffix_packets).await;
+        assert_eq!(lost.len(), suffix_packets);
+        drop(lost);
+        assert_eq!(control.try_recv(&cx, &mut client.conn).unwrap(), None);
+
+        for retry in 0..=dropped_acknowledgements {
+            let old_packet_numbers: Vec<_> =
+                server.in_flight_stream_frames.keys().copied().collect();
+            assert!(!old_packet_numbers.is_empty());
+            let packets = server
+                .retransmit_terminal_proof(&cx, "terminal_proof_native_recovery_test")
+                .await
+                .unwrap();
+            assert!(packets > 0, "retry must emit the missing later flight");
+            assert!(
+                old_packet_numbers.iter().all(|number| {
+                    !server.in_flight_stream_frames.contains_key(number)
+                }),
+                "retry must retire old packet accounting before tracking replacements"
+            );
+            assert_eq!(
+                server.stream_unacked_bytes,
+                suffix_bytes,
+                "ACK loss must not accumulate duplicate in-flight byte charges"
+            );
+            let emitted = server.last_flushed_stream_frames();
+            let mut next = split_offset;
+            for frame in &emitted {
+                assert_eq!(frame.stream, stream);
+                assert_eq!(frame.offset, next, "retry must cover the exact missing suffix");
+                next += frame.len;
+            }
+            assert_eq!(next, wire_end, "retry must regenerate every later-flight byte");
+            let delivered = receive_terminal_proof_test_flight(&cx, &mut client, packets).await;
+            client.ingest_packets(&cx, delivered).unwrap();
+            let received = control.try_recv(&cx, &mut client.conn).unwrap();
+            if retry == 0 {
+                assert_eq!(received, Some(proof.clone()), "the full Proof must be exact");
+            } else {
+                assert_eq!(
+                    received, None,
+                    "retransmitted offsets must not append a second application Proof"
+                );
+            }
+
+            let ack_packets = client.flush(&cx).await.unwrap();
+            assert!(ack_packets > 0, "fresh packet numbers must be acknowledged");
+            let acks = receive_terminal_proof_test_flight(&cx, &mut server, ack_packets).await;
+            if retry < dropped_acknowledgements {
+                drop(acks);
+                assert_eq!(server.stream_unacked_bytes, suffix_bytes);
+            } else {
+                server.ingest_packets(&cx, acks).unwrap();
+            }
+        }
+        assert!(server.in_flight_stream_frames.is_empty());
+        assert_eq!(server.stream_unacked_bytes, 0);
+        assert!(!server.conn.has_pending_stream_frames_for(stream));
+        assert_eq!(control.try_recv(&cx, &mut client.conn).unwrap(), None);
+    }
+
+    #[test]
+    fn terminal_proof_recovers_a_lost_later_flight_over_real_udp() {
+        futures_lite::future::block_on(async {
+            crate::time::timeout(
+                crate::time::wall_now(),
+                Duration::from_secs(30),
+                exercise_terminal_proof_flight_recovery(0),
+            )
+            .await
+            .expect("terminal Proof later-flight recovery exceeded watchdog");
+        });
+    }
+
+    #[test]
+    fn terminal_proof_retries_retire_previous_flights_after_ack_loss() {
+        futures_lite::future::block_on(async {
+            crate::time::timeout(
+                crate::time::wall_now(),
+                Duration::from_secs(30),
+                exercise_terminal_proof_flight_recovery(3),
+            )
+            .await
+            .expect("terminal Proof ACK-loss recovery exceeded watchdog");
+        });
+    }
+
     #[test]
     fn peer_close_ignores_tail_and_shed_datagram_ack_over_real_udp() {
         use crate::net::atp::protocol::varint::VarInt;

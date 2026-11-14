@@ -1554,12 +1554,11 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
     let proof_frame = super::json_frame(FrameType::Proof, proof)?;
     control.send(cx, &mut link.conn, &proof_frame)?;
     let proof_packets = link.flush(cx).await?;
-    let proof_frames = link.last_flushed_stream_frames();
     // Happy path of every transfer: trace-gated, since `wait_diagnostics`
     // reads /proc and this would otherwise print to stderr on each run.
     quic_rqtrace!(
         "receiver: proof_sent packets={proof_packets} stream_frames={} {}",
-        proof_frames.len(),
+        link.last_flushed_stream_frames.len(),
         link.wait_diagnostics()
     );
 
@@ -1610,13 +1609,12 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
             } else {
                 "terminal_proof_pto"
             };
-            link.retransmit_stream_frames(cx, &proof_frames, reason)
-                .await?;
+            let retransmitted_packets = link.retransmit_terminal_proof(cx, reason).await?;
             recovery.note_retransmit(started.elapsed());
             quic_rqtrace!(
-                "receiver: Proof PTO retransmit attempt={} stream_frames={} committed={} feedback_rounds={} symbols_accepted={}",
+                "receiver: Proof PTO retransmit attempt={} packets={} committed={} feedback_rounds={} symbols_accepted={}",
                 recovery.retransmit_attempts,
-                proof_frames.len(),
+                retransmitted_packets,
                 receipt.committed,
                 receipt.feedback_rounds,
                 receipt.symbols_accepted,
@@ -5209,6 +5207,22 @@ impl QuicLink {
 
     fn has_pending_fountain_feedback(&self) -> bool {
         self.pending_fountain_feedback_count() > 0
+    }
+
+    /// Recover terminal control bytes from every outstanding flight.
+    ///
+    /// A Proof can span more than one flush. The initial flush snapshot is
+    /// neither a complete replay set nor current ACK state. Drain the live
+    /// ledger so later fragments are included, acknowledged offsets stay
+    /// retired, and a retry replaces its old packet accounting instead of
+    /// accumulating another copy of the same unacknowledged bytes.
+    async fn retransmit_terminal_proof(
+        &mut self,
+        cx: &Cx,
+        reason: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        let frames = self.drain_in_flight_stream_frames_for_retransmit();
+        self.retransmit_stream_frames(cx, &frames, reason).await
     }
 
     /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
