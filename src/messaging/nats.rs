@@ -2418,9 +2418,36 @@ impl NatsConnection {
         nats_timeout_at(cx, deadline, request_timeout_error, self.read_more(cx)).await
     }
 
-    async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, _reason: &str) {
-        if let Err(_err) = self.unsubscribe(cx, sid).await {
-            // tracing could go here, but for now we ignore
+    async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, deadline: Time) {
+        // Retire the inbox even when cancellation or an expired deadline
+        // prevents the first UNSUB poll. Its Drop must not enqueue another,
+        // unbounded cleanup after this bounded attempt has finished.
+        self.remove_local_subscription(sid);
+        let result = {
+            let mut cleanup = std::pin::pin!(self.unsubscribe(cx, sid));
+            let mut timer = std::pin::pin!(nats_deadline_timer(cx, deadline));
+            std::future::poll_fn(|task_cx| {
+                // A ready UNSUB may still cleanly retire a timed-out request.
+                // Once it blocks, however, cleanup has only the original
+                // request's remaining time; it never receives a new budget.
+                if let Poll::Ready(result) = cleanup.as_mut().poll(task_cx) {
+                    return Poll::Ready(result);
+                }
+                timer
+                    .as_mut()
+                    .poll_deadline(task_cx)
+                    .map(|()| Err(request_timeout_error()))
+            })
+            .await
+        };
+        if result.is_err() {
+            // A pending/failed UNSUB may have written a prefix. Closing the
+            // transport retires the remote inbox and prevents the next command
+            // from completing that partial frame.
+            self.connected = false;
+            self.state.connected.store(false, Ordering::Release);
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            self.stream = NatsStream::Closed;
         }
     }
 
@@ -2435,9 +2462,9 @@ impl NatsConnection {
         cx: &Cx,
         sid: u64,
         message: Message,
+        deadline: Time,
     ) -> Result<Message, NatsError> {
-        self.cleanup_request_subscription(cx, sid, "reply_received")
-            .await;
+        self.cleanup_request_subscription(cx, sid, deadline).await;
         if let Some(err) = Self::reply_status_error(&message) {
             Err(err)
         } else {
@@ -2920,100 +2947,9 @@ impl NatsConnection {
         headers: &[(&str, &[u8])],
         payload: &[u8],
     ) -> Result<Message, NatsError> {
-        nats_checkpoint(cx)?;
-
-        if !self.connected {
-            return Err(NatsError::NotConnected);
-        }
-        validate_nats_publish_subject(subject, "subject")?;
-
-        let inbox = format!(
-            "_INBOX.{}.{}",
-            self.next_sid.load(Ordering::Relaxed),
-            random_suffix(cx)
-        );
-
-        let mut sub = self.subscribe(cx, &inbox).await?;
-
-        if let Err(err) = self
-            .publish_request_with_headers(cx, subject, &inbox, headers, payload)
-            .await
-        {
-            self.cleanup_request_subscription(cx, sub.sid(), "publish_request_with_headers_failed")
-                .await;
-            return Err(err);
-        }
-
-        // Wait for response with timeout. Mirror of the loop in `request`;
-        // a future refactor (br-asupersync-byc2d1 follow-up) should fold
-        // both into a private await_request_reply helper.
         let deadline = timeout_now(cx) + self.config.request_timeout;
-
-        loop {
-            nats_checkpoint(cx)?;
-
-            let mut processed_any = false;
-            loop {
-                let message = match self.try_parse_message() {
-                    Ok(message) => message,
-                    Err(err) => {
-                        self.cleanup_request_subscription(cx, sub.sid(), "parse_failed")
-                            .await;
-                        return Err(err);
-                    }
-                };
-
-                match message {
-                    Some(NatsMessage::Ping) => {
-                        if let Err(err) = self.send_server_pong(cx).await {
-                            self.cleanup_request_subscription(
-                                cx,
-                                sub.sid(),
-                                "server_ping_write_failed",
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                        processed_any = true;
-                    }
-                    Some(NatsMessage::Msg(m)) => {
-                        if m.sid == sub.sid() {
-                            return self.finalize_request_reply(cx, sub.sid(), m).await;
-                        }
-                        self.dispatch_message(m);
-                        processed_any = true;
-                    }
-                    Some(NatsMessage::Err(e)) => {
-                        self.cleanup_request_subscription(cx, sub.sid(), "server_error")
-                            .await;
-                        return Err(NatsError::Server(e));
-                    }
-                    Some(_) => {
-                        processed_any = true;
-                    }
-                    None => {
-                        if processed_any {
-                            break;
-                        }
-
-                        if let Err(err) = self.read_more_until(cx, deadline).await {
-                            self.cleanup_request_subscription(
-                                cx,
-                                sub.sid(),
-                                REQUEST_TIMEOUT_MESSAGE,
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                        processed_any = true;
-                    }
-                }
-            }
-
-            if let Some(msg) = sub.try_next() {
-                return self.finalize_request_reply(cx, sub.sid(), msg).await;
-            }
-        }
+        self.request_with_deadline(cx, subject, Some(headers), payload, deadline)
+            .await
     }
 
     /// Request/reply pattern: publish and wait for a single response.
@@ -3026,6 +2962,21 @@ impl NatsConnection {
         subject: &str,
         payload: &[u8],
     ) -> Result<Message, NatsError> {
+        let deadline = timeout_now(cx) + self.config.request_timeout;
+        self.request_with_deadline(cx, subject, None, payload, deadline)
+            .await
+    }
+
+    /// One request budget covers SUB, PUB/HPUB, the reply and inbox cleanup.
+    /// Progress and unrelated inbound traffic never reset that deadline.
+    async fn request_with_deadline(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        headers: Option<&[(&str, &[u8])]>,
+        payload: &[u8],
+        deadline: Time,
+    ) -> Result<Message, NatsError> {
         nats_checkpoint(cx)?;
 
         if !self.connected {
@@ -3033,93 +2984,113 @@ impl NatsConnection {
         }
         validate_nats_publish_subject(subject, "subject")?;
 
-        // Generate unique inbox subject
         let inbox = format!(
             "_INBOX.{}.{}",
             self.next_sid.load(Ordering::Relaxed),
             random_suffix(cx)
         );
 
-        // Subscribe to inbox
-        let mut sub = self.subscribe(cx, &inbox).await?;
+        let subscribed =
+            nats_timeout_at(cx, deadline, request_timeout_error, self.subscribe(cx, &inbox)).await;
+        let mut sub = match subscribed {
+            Ok(sub) => sub,
+            Err(error) => {
+                // SubscribeGuard retires the local SID on a partial SUB.
+                // Retire the remote half too, even for a driverless client
+                // whose caller never starts another operation.
+                if !self.connected {
+                    self.state.connected.store(false, Ordering::Release);
+                    let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                    self.stream = NatsStream::Closed;
+                }
+                return Err(error);
+            }
+        };
 
-        // Publish request with reply-to inbox
-        if let Err(err) = self.publish_request(cx, subject, &inbox, payload).await {
-            self.cleanup_request_subscription(cx, sub.sid(), "publish_request_failed")
-                .await;
-            return Err(err);
+        let result = async {
+            let publish = async {
+                match headers {
+                    Some(headers) => {
+                        self.publish_request_with_headers(cx, subject, &inbox, headers, payload)
+                            .await
+                    }
+                    None => self.publish_request(cx, subject, &inbox, payload).await,
+                }
+            };
+            nats_timeout_at(cx, deadline, request_timeout_error, publish).await?;
+            self.await_request_reply(cx, subject, &mut sub, deadline)
+                .await
         }
+        .await;
 
-        // Wait for response with timeout
-        let deadline = timeout_now(cx) + self.config.request_timeout;
+        match result {
+            // The reply is committed before cleanup. A stalled UNSUB must not
+            // turn a completed service operation into a retryable timeout.
+            Ok(message) => {
+                self.finalize_request_reply(cx, sub.sid(), message, deadline)
+                    .await
+            }
+            Err(error) => {
+                self.cleanup_request_subscription(cx, sub.sid(), deadline)
+                    .await;
+                Err(error)
+            }
+        }
+    }
 
+    /// Shared reply pump for ordinary and header-bearing requests.
+    async fn await_request_reply(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        sub: &mut Subscription,
+        deadline: Time,
+    ) -> Result<Message, NatsError> {
         loop {
             nats_checkpoint(cx)?;
-
-            let mut processed_any = false;
-            // Process messages looking for our reply
-            loop {
-                let message = match self.try_parse_message() {
-                    Ok(message) => message,
-                    Err(err) => {
-                        self.cleanup_request_subscription(cx, sub.sid(), "parse_failed")
-                            .await;
-                        return Err(err);
-                    }
-                };
-
-                match message {
-                    Some(NatsMessage::Ping) => {
-                        if let Err(err) = self.send_server_pong(cx).await {
-                            self.cleanup_request_subscription(
-                                cx,
-                                sub.sid(),
-                                "server_ping_write_failed",
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                        processed_any = true;
-                    }
-                    Some(NatsMessage::Msg(m)) => {
-                        if m.sid == sub.sid() {
-                            // This is our reply - clean up and return
-                            return self.finalize_request_reply(cx, sub.sid(), m).await;
-                        }
-                        // Dispatch to other subscriptions
-                        self.dispatch_message(m);
-                        processed_any = true;
-                    }
-                    Some(NatsMessage::Err(e)) => {
-                        self.cleanup_request_subscription(cx, sub.sid(), "server_error")
-                            .await;
-                        return Err(NatsError::Server(e));
-                    }
-                    Some(_) => {
-                        processed_any = true;
-                    }
-                    None => {
-                        if processed_any {
-                            break;
-                        }
-
-                        if let Err(err) = self.read_more_until(cx, deadline).await {
-                            self.cleanup_request_subscription(
-                                cx,
-                                sub.sid(),
-                                REQUEST_TIMEOUT_MESSAGE,
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                        processed_any = true;
-                    }
-                }
+            // Check even while frames are buffered: a peer sending unrelated
+            // messages or PINGs must not keep the request alive indefinitely.
+            if timeout_now(cx) > deadline {
+                return Err(request_timeout_error());
+            }
+            if let Some(message) = sub.try_next() {
+                return Ok(message);
             }
 
-            // Also check the subscription channel in case message was already dispatched
-            if let Some(msg) = sub.try_next() {
-                return self.finalize_request_reply(cx, sub.sid(), msg).await;
+            match self.try_parse_message()? {
+                Some(NatsMessage::Ping) => {
+                    nats_timeout_at(
+                        cx,
+                        deadline,
+                        request_timeout_error,
+                        self.send_server_pong(cx),
+                    )
+                    .await?;
+                }
+                Some(NatsMessage::Msg(message)) if message.sid == sub.sid() => {
+                    return Ok(message);
+                }
+                Some(NatsMessage::Msg(message)) => self.dispatch_message(message),
+                Some(NatsMessage::Err(error))
+                    if request_error_is_unrelated(&error, subject, sub.subject()) =>
+                {
+                    cx.trace(&format!(
+                        "nats: server reported an unrelated permission error during request: {error:?}"
+                    ));
+                }
+                Some(NatsMessage::Err(error)) => {
+                    if !server_error_keeps_connection(&error) {
+                        self.connected = false;
+                        self.state.connected.store(false, Ordering::Release);
+                        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    return Err(NatsError::Server(error));
+                }
+                Some(NatsMessage::Info(info)) => {
+                    *self.state.server_info.lock() = Some(info);
+                }
+                Some(NatsMessage::Ok | NatsMessage::Pong) => {}
+                None => self.read_more_until(cx, deadline).await?,
             }
         }
     }
@@ -4475,6 +4446,32 @@ fn server_error_keeps_connection(error: &str) -> bool {
         || error.starts_with("maximum subscriptions exceeded")
         || error == "invalid subject"
         || error == "invalid publish subject"
+}
+
+/// A permission error names the command's subject but carries no request ID.
+/// Ignore it only when the quoted subject proves it belongs to another
+/// operation. A matching subject, an unquoted/ambiguous error, or an error
+/// without a subject keeps the existing `NatsError::Server` behavior.
+fn request_error_is_unrelated(error: &str, subject: &str, inbox: &str) -> bool {
+    [
+        ("Permissions Violation for Publish to \"", subject),
+        ("Permissions Violation for Subscription to \"", inbox),
+    ]
+    .into_iter()
+    .any(|(prefix, expected)| {
+        if !error
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        {
+            return false;
+        }
+        error
+            .get(prefix.len()..)
+            .and_then(|tail| tail.strip_suffix('"'))
+            .is_some_and(|actual| {
+                !actual.is_empty() && !actual.contains('"') && actual != expected
+            })
+    })
 }
 
 async fn recover_supervisor_connection(

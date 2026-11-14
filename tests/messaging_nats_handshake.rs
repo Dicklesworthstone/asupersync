@@ -1482,6 +1482,192 @@ fn nats_ping_after_a_denied_publish_succeeds_without_reconnecting() {
     assert!(drained, "flush runtime did not drain");
 }
 
+/// An earlier asynchronous PUB refusal belongs to that subject, not to the
+/// request whose inbox is now waiting. The peer sends the refusal and reply
+/// together only after witnessing the entire new request on the wire.
+#[test]
+fn nats_request_ignores_an_earlier_unrelated_publish_refusal() {
+    for workers in [1, 2] {
+        for with_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind request-refusal peer");
+            let addr = listener.local_addr().expect("request-refusal address");
+            let server = thread::spawn(move || {
+                let mut stream = accept_within(&listener, Duration::from_secs(5))
+                    .expect("accept request-refusal client");
+                stream
+                    .write_all(b"INFO {\"server_id\":\"request-refusal\",\"headers\":true,\"max_payload\":1048576}\r\n")
+                    .expect("send headers-capable INFO");
+                let mut reader = BufReader::new(stream);
+                assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+                assert_eq!(read_nats_line(&mut reader), "PUB events.denied 1");
+                assert_eq!(read_nats_line(&mut reader), "x");
+
+                let subscription = read_nats_line(&mut reader);
+                let subscription = subscription.split_whitespace().collect::<Vec<_>>();
+                assert_eq!(subscription.len(), 3);
+                assert_eq!(subscription[0], "SUB");
+                assert!(subscription[1].starts_with("_INBOX."));
+                let inbox = subscription[1].to_string();
+                let sid = subscription[2].to_string();
+                let command = read_nats_line(&mut reader);
+                let fields = command.split_whitespace().collect::<Vec<_>>();
+                assert_eq!(fields[0], if with_headers { "HPUB" } else { "PUB" });
+                assert_eq!(fields[1], "service.allowed");
+                assert_eq!(fields[2], inbox);
+                let total: usize = fields.last().unwrap().parse().expect("request byte count");
+                let mut payload = vec![0_u8; total + 2];
+                reader.read_exact(&mut payload).expect("complete request witness");
+                assert!(payload.ends_with(b"query\r\n"));
+                if with_headers {
+                    assert!(payload.starts_with(b"NATS/1.0\r\nX-Request: allowed\r\n\r\n"));
+                } else {
+                    assert_eq!(payload, b"query\r\n");
+                }
+
+                let response = format!(
+                    "-ERR 'Permissions Violation for Publish to \"events.denied\"'\r\nMSG {inbox} {sid} 5\r\nreply\r\n"
+                );
+                reader.get_mut().write_all(response.as_bytes()).expect("send refusal and reply");
+                reader.get_mut().flush().expect("flush refusal and reply");
+                let (commands, closed) = lines_until_closed(&mut reader, true, Duration::from_secs(5));
+                (commands, closed, sid)
+            });
+
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("build request-refusal runtime");
+            let (done_tx, done_rx) = mpsc::channel();
+            let task = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native request owner");
+                let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
+                config.auto_reconnect = false;
+                config.request_timeout = Duration::from_secs(2);
+                let mut client = NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                    .await
+                    .expect("connect request-refusal client");
+                client.publish(&cx, "events.denied", b"x").await.expect("write earlier PUB");
+                let response = if with_headers {
+                    client.request_with_headers(
+                        &cx, "service.allowed", &[("X-Request", b"allowed".as_slice())], b"query",
+                    ).await
+                } else {
+                    client.request(&cx, "service.allowed", b"query").await
+                };
+                let ping_succeeded = response.is_ok() && client.ping(&cx).await.is_ok();
+                let close_succeeded = client.close(&cx).await.is_ok();
+                let _ = done_tx.send((response.map(|message| message.payload), ping_succeeded, close_succeeded));
+            });
+
+            let completed = done_rx.recv_timeout(Duration::from_secs(6));
+            drop(task);
+            let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+            let (commands, closed, sid) = server.join().expect("request-refusal peer joined");
+            let (response, ping_succeeded, close_succeeded) = completed.expect("request client finished");
+            assert_eq!(response.expect("unrelated PUB refusal must not replace the reply"), b"reply");
+            assert!(ping_succeeded, "same-connection PING did not complete");
+            assert!(close_succeeded && closed, "request connection did not close");
+            assert_eq!(commands, vec![format!("UNSUB {sid}"), "PING".to_string()]);
+            assert!(drained, "request-refusal runtime did not drain: workers={workers} headers={with_headers}");
+        }
+    }
+}
+
+/// A request that cannot finish writing its payload still consumes its request
+/// deadline. The peer exposes a real partial-frame witness, then deliberately
+/// withholds receive capacity; failure cleanup cannot supply the wakeup used
+/// to satisfy the completion assertion.
+#[test]
+fn nats_request_timeout_bounds_a_backpressured_publication() {
+    const PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+    for workers in [1, 2] {
+        for with_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind backpressured request peer");
+            // A small receive window and a payload far larger than the native
+            // socket buffers make this an outbound-I/O wait, not a reply wait.
+            socket2::SockRef::from(&listener).set_recv_buffer_size(4096).expect("bound receive window");
+            let addr = listener.local_addr().expect("backpressured request address");
+            let (published_tx, published_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut stream = accept_within(&listener, Duration::from_secs(5))
+                    .expect("accept backpressured client");
+                stream.write_all(format!(
+                    "INFO {{\"server_id\":\"request-backpressure\",\"headers\":true,\"max_payload\":{}}}\r\n",
+                    PAYLOAD_BYTES + 1024,
+                ).as_bytes()).expect("send large-payload INFO");
+                let mut reader = BufReader::new(stream);
+                assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+                let subscription = read_nats_line(&mut reader);
+                assert!(subscription.starts_with("SUB _INBOX."), "{subscription}");
+                let command = read_nats_line(&mut reader);
+                let fields = command.split_whitespace().collect::<Vec<_>>();
+                assert_eq!(fields[0], if with_headers { "HPUB" } else { "PUB" });
+                assert_eq!(fields[1], "service.backpressured");
+                let total: usize = fields.last().unwrap().parse().expect("publication byte count");
+                assert!(total >= PAYLOAD_BYTES);
+                let mut first = [0_u8; 1];
+                reader.read_exact(&mut first).expect("witness publication payload start");
+                published_tx.send(reader.get_ref().try_clone().expect("clone failure-cleanup socket"))
+                    .expect("publish partial-frame witness");
+                // No reading, writing or disconnect is allowed until after the
+                // test has captured whether the request's own timer completed.
+                let released = release_rx.recv_timeout(Duration::from_secs(8)).is_ok();
+                (released, total)
+            });
+
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .expect("build backpressured request runtime");
+            let (done_tx, done_rx) = mpsc::channel();
+            let task = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native request owner");
+                let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
+                config.auto_reconnect = false;
+                config.max_payload = PAYLOAD_BYTES + 1024;
+                config.request_timeout = Duration::from_millis(500);
+                let mut client = NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                    .await
+                    .expect("connect backpressured request client");
+                let payload = vec![b'x'; PAYLOAD_BYTES];
+                let response = if with_headers {
+                    client.request_with_headers(
+                        &cx, "service.backpressured", &[("X-Request", b"bounded".as_slice())], &payload,
+                    ).await
+                } else {
+                    client.request(&cx, "service.backpressured", &payload).await
+                };
+                let owner_cancelled = cx.is_cancel_requested();
+                drop(client);
+                let _ = done_tx.send((response, owner_cancelled));
+            });
+
+            let published = published_rx.recv_timeout(Duration::from_secs(3));
+            let completed = done_rx.recv_timeout(Duration::from_secs(3));
+            if let Ok(stream) = &published {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            let _ = release_tx.send(());
+            drop(task);
+            let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+            let (released, total) = server.join().expect("backpressured request peer joined");
+            assert!(published.is_ok(), "request never entered the partial-write state: {published:?}");
+            let (response, owner_cancelled) = completed.expect("request timeout must finish before peer cleanup");
+            match response {
+                Err(NatsError::Io(error)) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+                    assert_eq!(error.to_string(), "request timeout");
+                }
+                other => panic!("expected request write timeout, got {other:?}"),
+            }
+            assert!(!owner_cancelled, "request deadline cancelled its enclosing owner");
+            assert!(released && total >= PAYLOAD_BYTES);
+            assert!(drained, "backpressured request runtime did not drain: workers={workers} headers={with_headers}");
+        }
+    }
+}
+
 #[test]
 fn nats_supervisor_backs_off_across_connections_the_server_refuses_after_connect() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind refusing listener");

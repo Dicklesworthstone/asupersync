@@ -3004,6 +3004,37 @@
     }
 
     #[test]
+    fn request_permission_errors_are_ignored_only_for_unrelated_quoted_subjects() {
+        for error in [
+            "Permissions Violation for Publish to \"events.denied\"",
+            "Permissions Violation for Subscription to \"events.denied\"",
+            "permissions violation for publish to \"svc.other\"",
+        ] {
+            assert!(
+                request_error_is_unrelated(error, "svc.echo", "_INBOX.reply"),
+                "unrelated permission denial must not fail the request: {error}"
+            );
+        }
+        for error in [
+            "Permissions Violation for Publish to \"svc.echo\"",
+            "Permissions Violation for Subscription to \"_INBOX.reply\"",
+            "Permissions Violation for Publish to svc.other",
+            "Permissions Violation for Publish to \"svc.other\" trailing",
+            "Permissions Violation for Publish to \"\"",
+            "Permissions Violation for Publish to \"svc.\"quoted\"\"",
+            "Maximum Subscriptions Exceeded",
+            "Invalid Subject",
+            "Authorization Violation",
+            "Authentication Timeout",
+        ] {
+            assert!(
+                !request_error_is_unrelated(error, "svc.echo", "_INBOX.reply"),
+                "matching, ambiguous and fatal refusals must remain errors: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn request_enforces_timeout_while_socket_reads_are_pending() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
@@ -3257,7 +3288,7 @@
             };
 
             let reply = client
-                .finalize_request_reply(&cx, sid, message)
+                .finalize_request_reply(&cx, sid, message, timeout_now(&cx))
                 .await
                 .expect("cleanup failure must not replace a completed reply");
             assert_eq!(reply.payload, b"completed");
