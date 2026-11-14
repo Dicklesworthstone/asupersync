@@ -82,6 +82,7 @@ use std::task::{Context, Poll, Waker};
 use super::waiter::{WaiterChain, WaiterId};
 use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
+use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 
 /// br-asupersync-4j40bb: maximum gap, in queued-writer hand-offs, between
 /// forced FIFO reader turns while readers and further writers remain queued.
@@ -176,6 +177,8 @@ struct State {
     /// the queue while readers were also queued. Reset to 0 whenever a
     /// reader admission runs (a forced turn or a natural batch).
     consecutive_writers_served: usize,
+    /// Allocated only after a release from an opt-in task-causality runtime.
+    causality: Option<Box<RwLockCausality>>,
 }
 
 /// A cancel-aware read-write lock with bounded writer-preference fairness.
@@ -283,10 +286,11 @@ impl<T> RwLock<T> {
     /// Tries to acquire a read guard without waiting.
     #[inline]
     pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryReadError> {
-        let lock_order = self.try_acquire_read_state()?;
+        let (lock_order, causal_owner) = self.try_acquire_read_state()?;
         Ok(RwLockReadGuard {
             lock: self,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -308,10 +312,11 @@ impl<T> RwLock<T> {
     /// Tries to acquire a write guard without waiting.
     #[inline]
     pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryWriteError> {
-        let lock_order = self.try_acquire_write_state()?;
+        let (lock_order, causal_owner) = self.try_acquire_write_state()?;
         Ok(RwLockWriteGuard {
             lock: self,
             lock_order,
+            causal_owner,
             panicking_at_acquire: std::thread::panicking(),
         })
     }
@@ -328,7 +333,9 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn try_acquire_read_state(&self) -> Result<lock_ordering::GuardLockOrder, TryReadError> {
+    fn try_acquire_read_state(
+        &self,
+    ) -> Result<(lock_ordering::GuardLockOrder, Option<RwLockCausalOwner>), TryReadError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -346,15 +353,22 @@ impl<T> RwLock<T> {
             lock_ordering::check_acquire(self.name, rank);
         }
 
+        let causal_owner =
+            state.acquire_read_causality(Cx::with_current(RwLockCausalOwner::from_cx).flatten());
         state.readers += 1;
         drop(state);
 
         // Record lock acquisition for ordering tracking
-        Ok(lock_ordering::record_guard_acquire(self.name, self.rank))
+        Ok((
+            lock_ordering::record_guard_acquire(self.name, self.rank),
+            causal_owner,
+        ))
     }
 
     #[inline]
-    fn try_acquire_write_state(&self) -> Result<lock_ordering::GuardLockOrder, TryWriteError> {
+    fn try_acquire_write_state(
+        &self,
+    ) -> Result<(lock_ordering::GuardLockOrder, Option<RwLockCausalOwner>), TryWriteError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -372,11 +386,16 @@ impl<T> RwLock<T> {
             lock_ordering::check_acquire(self.name, rank);
         }
 
+        let causal_owner =
+            state.acquire_write_causality(Cx::with_current(RwLockCausalOwner::from_cx).flatten());
         state.writer_active = true;
         drop(state);
 
         // Record lock acquisition for ordering tracking
-        Ok(lock_ordering::record_guard_acquire(self.name, self.rank))
+        Ok((
+            lock_ordering::record_guard_acquire(self.name, self.rank),
+            causal_owner,
+        ))
     }
 
     #[inline]
@@ -497,9 +516,11 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn release_reader(&self) {
+    fn release_reader(&self, causal_owner: Option<RwLockCausalOwner>) {
+        let causal_owner = RwLockCausalOwner::for_release(causal_owner);
         let waker = {
             let mut state = self.state.lock();
+            state.release_read_causality(causal_owner.as_ref());
             state.readers = state.readers.saturating_sub(1);
             if state.readers == 0 && state.writer_waiters > 0 {
                 let waker = Self::pop_writer_waiter(&mut state);
@@ -526,9 +547,11 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn release_writer(&self) {
+    fn release_writer(&self, causal_owner: Option<RwLockCausalOwner>) {
+        let causal_owner = RwLockCausalOwner::for_release(causal_owner);
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
+            state.release_write_causality(causal_owner.as_ref());
             state.writer_active = false;
 
             if self.is_poisoned() {
@@ -815,14 +838,19 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
                         }
+                        let causal_owner = this
+                            .lock
+                            .state
+                            .lock()
+                            .acquire_read_causality(RwLockCausalOwner::for_acquire(this.cx));
                         let lock_order =
                             lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
-
                         this.waiter_id = None;
                         this.completed = true;
                         return Poll::Ready(Ok(RwLockReadGuard {
                             lock: this.lock,
                             lock_order,
+                            causal_owner,
                         }));
                     }
                 }
@@ -834,6 +862,8 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
                     lock_ordering::check_acquire(this.lock.name, rank);
                 }
 
+                let causal_owner =
+                    state.acquire_read_causality(RwLockCausalOwner::for_acquire(this.cx));
                 state.readers += 1;
                 drop(state);
 
@@ -845,6 +875,7 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
                 return Poll::Ready(Ok(RwLockReadGuard {
                     lock: this.lock,
                     lock_order,
+                    causal_owner,
                 }));
             }
 
@@ -935,10 +966,11 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
                         }
+                        let mut state = this.lock.state.lock();
+                        let causal_owner =
+                            state.acquire_write_causality(RwLockCausalOwner::for_acquire(this.cx));
                         let lock_order =
                             lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
-
-                        let mut state = this.lock.state.lock();
                         this.waiter_id = None;
                         if this.counted {
                             state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -949,6 +981,7 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                         return Poll::Ready(Ok(RwLockWriteGuard {
                             lock: this.lock,
                             lock_order,
+                            causal_owner,
                             panicking_at_acquire: std::thread::panicking(),
                         }));
                     }
@@ -964,6 +997,8 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                     lock_ordering::check_acquire(this.lock.name, rank);
                 }
 
+                let causal_owner =
+                    state.acquire_write_causality(RwLockCausalOwner::for_acquire(this.cx));
                 state.writer_active = true;
                 // Only count as waiting writer if we actually queue
                 drop(state);
@@ -976,6 +1011,7 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                 return Poll::Ready(Ok(RwLockWriteGuard {
                     lock: this.lock,
                     lock_order,
+                    causal_owner,
                     panicking_at_acquire: std::thread::panicking(),
                 }));
             }
@@ -1016,6 +1052,7 @@ impl<T, Caps> Drop for WriteFuture<'_, '_, T, Caps> {
 pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<RwLockCausalOwner>,
 }
 
 unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}
@@ -1041,7 +1078,7 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
         // End diagnostic ownership before release_reader can invoke a user-controlled Waker that panics.
         lock_ordering::record_guard_release(&mut self.lock_order);
-        self.lock.release_reader();
+        self.lock.release_reader(self.causal_owner.take());
     }
 }
 
@@ -1050,6 +1087,7 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<RwLockCausalOwner>,
     panicking_at_acquire: bool,
 }
 
@@ -1087,7 +1125,7 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         lock_ordering::record_guard_release(&mut self.lock_order);
-        self.lock.release_writer();
+        self.lock.release_writer(self.causal_owner.take());
     }
 }
 
@@ -1109,10 +1147,12 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
     /// ```
     pub fn downgrade(mut self) -> RwLockReadGuard<'a, T> {
         let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
+        let causal_owner = RwLockCausalOwner::for_release(self.causal_owner.take());
         let md = std::mem::ManuallyDrop::new(self);
         let read_guard = RwLockReadGuard {
             lock: md.lock,
             lock_order,
+            causal_owner,
         };
 
         // Atomically transition from writer to reader
@@ -1121,6 +1161,7 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
 
             // Atomic transition: writer_active -> reader
             debug_assert!(state.writer_active, "downgrade called but no active writer");
+            state.release_write_causality(read_guard.causal_owner.as_ref());
             state.writer_active = false;
             state.readers = 1; // This downgraded reader
 
@@ -1148,6 +1189,7 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
 pub struct OwnedRwLockReadGuard<T> {
     lock: Arc<RwLock<T>>,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<RwLockCausalOwner>,
 }
 
 impl<T> OwnedRwLockReadGuard<T> {
@@ -1163,8 +1205,12 @@ impl<T> OwnedRwLockReadGuard<T> {
 
     /// Tries to acquire an owned read guard without waiting.
     pub fn try_read(lock: Arc<RwLock<T>>) -> Result<Self, TryReadError> {
-        let lock_order = lock.try_acquire_read_state()?;
-        Ok(Self { lock, lock_order })
+        let (lock_order, causal_owner) = lock.try_acquire_read_state()?;
+        Ok(Self {
+            lock,
+            lock_order,
+            causal_owner,
+        })
     }
 
     /// Executes a closure with shared access to the data.
@@ -1194,7 +1240,7 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
         lock_ordering::record_guard_release(&mut self.lock_order);
-        self.lock.release_reader();
+        self.lock.release_reader(self.causal_owner.take());
     }
 }
 
@@ -1203,6 +1249,7 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
 pub struct OwnedRwLockWriteGuard<T> {
     lock: Arc<RwLock<T>>,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<RwLockCausalOwner>,
     panicking_at_acquire: bool,
 }
 
@@ -1220,10 +1267,11 @@ impl<T> OwnedRwLockWriteGuard<T> {
 
     /// Tries to acquire an owned write guard without waiting.
     pub fn try_write(lock: Arc<RwLock<T>>) -> Result<Self, TryWriteError> {
-        let lock_order = lock.try_acquire_write_state()?;
+        let (lock_order, causal_owner) = lock.try_acquire_write_state()?;
         Ok(Self {
             lock,
             lock_order,
+            causal_owner,
             panicking_at_acquire: std::thread::panicking(),
         })
     }
@@ -1264,7 +1312,7 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         lock_ordering::record_guard_release(&mut self.lock_order);
-        self.lock.release_writer();
+        self.lock.release_writer(self.causal_owner.take());
     }
 }
 
@@ -1286,10 +1334,15 @@ impl<T> OwnedRwLockWriteGuard<T> {
     /// ```
     pub fn downgrade(mut self) -> OwnedRwLockReadGuard<T> {
         let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
+        let causal_owner = RwLockCausalOwner::for_release(self.causal_owner.take());
         let md = std::mem::ManuallyDrop::new(self);
         let lock = unsafe { std::ptr::read(&md.lock) };
 
-        let read_guard = OwnedRwLockReadGuard { lock, lock_order };
+        let read_guard = OwnedRwLockReadGuard {
+            lock,
+            lock_order,
+            causal_owner,
+        };
 
         // Atomically transition from writer to reader
         let reader_wakers = {
@@ -1297,6 +1350,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
 
             // Atomic transition: writer_active -> reader
             debug_assert!(state.writer_active, "downgrade called but no active writer");
+            state.release_write_causality(read_guard.causal_owner.as_ref());
             state.writer_active = false;
             state.readers = 1; // This downgraded reader
 
@@ -1382,14 +1436,19 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
                         }
+                        let causal_owner = this
+                            .lock
+                            .state
+                            .lock()
+                            .acquire_read_causality(RwLockCausalOwner::for_acquire(this.cx));
                         let lock_order =
                             lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
-
                         this.waiter_id = None;
                         this.completed = true;
                         return Poll::Ready(Ok(OwnedRwLockReadGuard {
                             lock: Arc::clone(&this.lock),
                             lock_order,
+                            causal_owner,
                         }));
                     }
                 }
@@ -1401,6 +1460,8 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
                     lock_ordering::check_acquire(this.lock.name, rank);
                 }
 
+                let causal_owner =
+                    state.acquire_read_causality(RwLockCausalOwner::for_acquire(this.cx));
                 state.readers += 1;
                 drop(state);
 
@@ -1412,6 +1473,7 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
                 return Poll::Ready(Ok(OwnedRwLockReadGuard {
                     lock: Arc::clone(&this.lock),
                     lock_order,
+                    causal_owner,
                 }));
             }
 
@@ -1508,10 +1570,11 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
                         }
+                        let mut state = this.lock.state.lock();
+                        let causal_owner =
+                            state.acquire_write_causality(RwLockCausalOwner::for_acquire(this.cx));
                         let lock_order =
                             lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
-
-                        let mut state = this.lock.state.lock();
                         this.waiter_id = None;
                         if this.counted {
                             state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -1522,6 +1585,7 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                         return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                             lock: Arc::clone(&this.lock),
                             lock_order,
+                            causal_owner,
                             panicking_at_acquire: std::thread::panicking(),
                         }));
                     }
@@ -1537,6 +1601,8 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                     lock_ordering::check_acquire(this.lock.name, rank);
                 }
 
+                let causal_owner =
+                    state.acquire_write_causality(RwLockCausalOwner::for_acquire(this.cx));
                 state.writer_active = true;
                 // Only count as waiting writer if we actually queue
                 drop(state);
@@ -1549,6 +1615,7 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                 return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                     lock: Arc::clone(&this.lock),
                     lock_order,
+                    causal_owner,
                     panicking_at_acquire: std::thread::panicking(),
                 }));
             }
@@ -1584,6 +1651,125 @@ impl<T, Caps> Drop for OwnedWriteFuture<'_, T, Caps> {
     fn drop(&mut self) {
         self.lock
             .abandon_write_waiter(&mut self.waiter_id, &mut self.counted);
+    }
+}
+
+/// Evidence for the optional task-vector lab mode (asupersync-bi2462.97).
+/// Readers observe only the last writer; their releases are joined separately
+/// for the next writer, without imposing an order on sibling readers.
+#[derive(Debug, Clone, Default)]
+struct RwLockCausality {
+    writer_released: Option<(u64, LogicalTime)>,
+    readers_released: Option<(u64, LogicalTime)>,
+}
+
+#[derive(Debug)]
+struct RwLockCausalOwner {
+    runtime: u64,
+    clock: LogicalClockHandle,
+    allow_host_fallback: bool,
+}
+
+impl RwLockCausalOwner {
+    fn from_cx<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        cx.task_causality_runtime().map(|runtime| Self {
+            runtime,
+            clock: cx.logical_clock_handle(),
+            allow_host_fallback: false,
+        })
+    }
+
+    fn for_acquire<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        // A future can be moved: the actual poller owns the critical section.
+        // Only an explicitly host-driven acquisition may use its Cx on drop.
+        Cx::with_current(Self::from_cx).unwrap_or_else(|| {
+            Self::from_cx(cx).map(|mut owner| {
+                owner.allow_host_fallback = true;
+                owner
+            })
+        })
+    }
+
+    fn for_release(owner: Option<Self>) -> Option<Self> {
+        // An untracked ambient task is still an authoritative dropper. Never
+        // sample a former task's live clock after its guard has moved away.
+        Cx::with_current(Self::from_cx)
+            .unwrap_or_else(|| owner.filter(|owner| owner.allow_host_fallback))
+    }
+
+    fn observe(&self, released: Option<&(u64, LogicalTime)>) {
+        if let Some((runtime, time)) = released
+            && *runtime == self.runtime
+        {
+            let _ = self.clock.receive(time);
+        }
+    }
+}
+
+impl State {
+    fn acquire_read_causality(
+        &self,
+        owner: Option<RwLockCausalOwner>,
+    ) -> Option<RwLockCausalOwner> {
+        if let Some(owner) = &owner {
+            owner.observe(
+                self.causality
+                    .as_ref()
+                    .and_then(|causality| causality.writer_released.as_ref()),
+            );
+        }
+        owner
+    }
+
+    fn acquire_write_causality(
+        &mut self,
+        owner: Option<RwLockCausalOwner>,
+    ) -> Option<RwLockCausalOwner> {
+        if let Some(causality) = &mut self.causality {
+            if let Some(owner) = &owner {
+                owner.observe(causality.writer_released.as_ref());
+                owner.observe(causality.readers_released.as_ref());
+            }
+            // Only an actual acquisition retires the reader cohort. A
+            // cancelled or abandoned pre-grant must leave its evidence intact.
+            causality.readers_released = None;
+        }
+        owner
+    }
+
+    fn release_read_causality(&mut self, owner: Option<&RwLockCausalOwner>) {
+        let Some(owner) = owner else {
+            return;
+        };
+        // Freeze evidence before making this reader's release visible. No
+        // tick here: overflowing a task counter must not panic in guard Drop.
+        let released = owner.clock.now();
+        let causality = self.causality.get_or_insert_with(Default::default);
+        if let Some((runtime, LogicalTime::Vector(readers))) = &mut causality.readers_released
+            && *runtime == owner.runtime
+            && let LogicalTime::Vector(reader) = &released
+        {
+            readers.merge_in(reader);
+        } else {
+            // Keep one joined snapshot, not an unbounded list of readers or
+            // runtimes. Foreign-runtime evidence is conservatively replaced,
+            // never merged into matching task IDs from another runtime.
+            causality.readers_released = Some((owner.runtime, released));
+        }
+    }
+
+    fn release_write_causality(&mut self, owner: Option<&RwLockCausalOwner>) {
+        if let Some(owner) = owner {
+            let released = (owner.runtime, owner.clock.now());
+            let causality = self.causality.get_or_insert_with(Default::default);
+            causality.writer_released = Some(released);
+            causality.readers_released = None;
+        } else if let Some(causality) = &mut self.causality {
+            // Unknown ownership cannot republish a previous writer's evidence
+            // as though it described this critical section.
+            causality.writer_released = None;
+            causality.readers_released = None;
+        }
     }
 }
 

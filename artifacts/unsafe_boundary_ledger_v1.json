@@ -5202,77 +5202,77 @@
         },
         {
           "kind": "unsafe_block",
-        "line": 1029,
+          "line": 1066,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1066,
+          "line": 1104,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1073,
+          "line": 1111,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1176,
+          "line": 1222,
           "pattern": "f(unsafe { &*self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-        "line": 1185,
+          "line": 1231,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1234,
+          "line": 1282,
           "pattern": "f(unsafe { &mut *self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-        "line": 1243,
+          "line": 1291,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1250,
+          "line": 1298,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-        "line": 1290,
+          "line": 1339,
           "pattern": "let lock = unsafe { std::ptr::read(&md.lock) };"
         },
         {
           "kind": "unsafe_impl",
-          "line": 222,
+          "line": 225,
           "pattern": "unsafe impl<T: Send> Send for RwLock<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 223,
+          "line": 226,
           "pattern": "unsafe impl<T: Send + Sync> Sync for RwLock<T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1021,
+          "line": 1058,
           "pattern": "unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1022,
+          "line": 1059,
           "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockReadGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1056,
+          "line": 1094,
           "pattern": "unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-        "line": 1059,
+          "line": 1097,
           "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockWriteGuard<'_, T> {}"
         }
       ]

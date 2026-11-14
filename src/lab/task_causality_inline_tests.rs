@@ -1392,3 +1392,156 @@ fn watch_modify_observes_before_user_code_and_preserves_publication_on_panic() {
     }
 }
 
+fn rwlock_writer_handoff_trace(receiver_waits: bool, receiver_reads: bool) -> Vec<TraceEvent> {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let lock = Arc::new(crate::sync::RwLock::new(0_u32));
+    let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+    let writer_lock = Arc::clone(&lock);
+    let (writer, _writer_join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            let mut held = crate::sync::OwnedRwLockWriteGuard::write(writer_lock, &cx)
+                .await
+                .unwrap();
+            if receiver_waits {
+                gate.recv(&cx).await.unwrap();
+            }
+            *held = 41;
+            cx.trace("rwlock-writer-before-unlock");
+            drop(held);
+            cx.trace("rwlock-writer-after-unlock");
+        })
+        .unwrap();
+    let receiver_lock = Arc::clone(&lock);
+    let (receiver, _receiver_join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            if receiver_reads {
+                let held = receiver_lock.read(&cx).await.unwrap();
+                assert_eq!(*held, 41);
+                cx.trace("rwlock-receiver-acquired");
+            } else {
+                let held = receiver_lock.write(&cx).await.unwrap();
+                assert_eq!(*held, 41);
+                cx.trace("rwlock-receiver-acquired");
+            }
+        })
+        .unwrap();
+    lab.scheduler.lock().schedule(writer, 0);
+    lab.step();
+    if receiver_waits {
+        assert!(lock.try_read().is_err());
+        lab.scheduler.lock().schedule(receiver, 0);
+        lab.step();
+        assert!(
+            lab.state.task(receiver).is_some(),
+            "receiver is parked behind the writer"
+        );
+        release.send_blocking(()).unwrap();
+    } else {
+        lab.scheduler.lock().schedule(receiver, 0);
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    assert_eq!(*lock.try_write().unwrap(), 41);
+    lab.trace().snapshot()
+}
+
+#[test]
+fn rwlock_writer_release_orders_readers_and_writers_with_and_without_wakes() {
+    for receiver_waits in [false, true] {
+        for receiver_reads in [false, true] {
+            let events = rwlock_writer_handoff_trace(receiver_waits, receiver_reads);
+            let acquired = message_time(&events, "rwlock-receiver-acquired");
+            assert_eq!(
+                message_time(&events, "rwlock-writer-before-unlock").causal_order(&acquired),
+                CausalOrder::Before
+            );
+            assert_eq!(
+                message_time(&events, "rwlock-writer-after-unlock").causal_order(&acquired),
+                CausalOrder::Concurrent
+            );
+            let repeated = rwlock_writer_handoff_trace(receiver_waits, receiver_reads);
+            assert_eq!(
+                acquired,
+                message_time(&repeated, "rwlock-receiver-acquired")
+            );
+        }
+    }
+}
+
+fn rwlock_reader_handoff_trace(writer_waits: bool) -> Vec<TraceEvent> {
+    let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let lock = Arc::new(crate::sync::RwLock::new(41_u32));
+    let mut releases = Vec::new();
+    for (before, after) in [
+        ("rwlock-left-before-unlock", "rwlock-left-after-unlock"),
+        ("rwlock-right-before-unlock", "rwlock-right-after-unlock"),
+    ] {
+        let reader_lock = Arc::clone(&lock);
+        let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+        releases.push(release);
+        run_channel_task(&mut lab, root, async move {
+            let cx = Cx::current().unwrap();
+            let held = crate::sync::OwnedRwLockReadGuard::read(reader_lock, &cx)
+                .await
+                .unwrap();
+            assert_eq!(*held, 41);
+            if writer_waits {
+                gate.recv(&cx).await.unwrap();
+            }
+            cx.trace(before);
+            drop(held);
+            cx.trace(after);
+        });
+    }
+    let writer_lock = Arc::clone(&lock);
+    run_channel_task(&mut lab, root, async move {
+        let cx = Cx::current().unwrap();
+        let held = writer_lock.write(&cx).await.unwrap();
+        assert_eq!(*held, 41);
+        cx.trace("rwlock-after-readers");
+    });
+    if writer_waits {
+        // The first reader cannot wake the writer while the second still
+        // owns the lock. Its edge must come from the accumulated releases.
+        for release in releases {
+            release.send_blocking(()).unwrap();
+            lab.step();
+        }
+    }
+    lab.run_until_idle();
+    assert!(lab.is_quiescent());
+    assert_eq!(*lock.try_write().unwrap(), 41);
+    lab.trace().snapshot()
+}
+
+#[test]
+fn rwlock_all_readers_precede_the_next_writer_without_ordering_each_other() {
+    for writer_waits in [false, true] {
+        let events = rwlock_reader_handoff_trace(writer_waits);
+        let left = message_time(&events, "rwlock-left-before-unlock");
+        let right = message_time(&events, "rwlock-right-before-unlock");
+        let acquired = message_time(&events, "rwlock-after-readers");
+        assert_eq!(left.causal_order(&right), CausalOrder::Concurrent);
+        assert_eq!(left.causal_order(&acquired), CausalOrder::Before);
+        assert_eq!(right.causal_order(&acquired), CausalOrder::Before);
+        for after in ["rwlock-left-after-unlock", "rwlock-right-after-unlock"] {
+            assert_eq!(
+                message_time(&events, after).causal_order(&acquired),
+                CausalOrder::Concurrent
+            );
+        }
+        assert_eq!(
+            acquired,
+            message_time(
+                &rwlock_reader_handoff_trace(writer_waits),
+                "rwlock-after-readers"
+            )
+        );
+    }
+}

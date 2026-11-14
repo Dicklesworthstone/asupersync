@@ -2248,3 +2248,581 @@
         );
         crate::test_complete!("writer_panic_wakes_all_queued_waiters_without_pregranting_slots");
     }
+
+fn causal_context(runtime: u64, node: &str) -> Cx {
+    Cx::for_testing()
+        .with_logical_clock(
+            crate::trace::distributed::LogicalClockMode::Vector {
+                node: crate::remote::NodeId::new(node),
+            }
+            .build_handle(None),
+        )
+        .with_task_causality_runtime(Some(runtime))
+}
+
+#[test]
+fn causality_all_guard_forms_publish_fixed_release_snapshots() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    for api in 0..8 {
+        let source = causal_context(97, "source");
+        let observer = causal_context(97, "observer");
+        let lock = Arc::new(RwLock::new(41_u32));
+        let released = {
+            let _current = Cx::set_current(Some(source.clone()));
+            match api {
+                0 => {
+                    let held = write_blocking(&lock, &source);
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                1 => {
+                    let held = lock.try_write().unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                2 => {
+                    let held =
+                        poll_until_ready(OwnedRwLockWriteGuard::write(Arc::clone(&lock), &source))
+                            .unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                3 => {
+                    let held = OwnedRwLockWriteGuard::try_write(Arc::clone(&lock)).unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                4 => {
+                    let held = read_blocking(&lock, &source);
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                5 => {
+                    let held = lock.try_read().unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                6 => {
+                    let held =
+                        poll_until_ready(OwnedRwLockReadGuard::read(Arc::clone(&lock), &source))
+                            .unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+                _ => {
+                    let held = OwnedRwLockReadGuard::try_read(Arc::clone(&lock)).unwrap();
+                    let before = source.logical_tick();
+                    drop(held);
+                    before
+                }
+            }
+        };
+        let later = source.logical_tick();
+        let observed = {
+            let _current = Cx::set_current(Some(observer.clone()));
+            match api % 4 {
+                0 => drop(write_blocking(&lock, &observer)),
+                1 => drop(lock.try_write().unwrap()),
+                2 => drop(
+                    poll_until_ready(OwnedRwLockWriteGuard::write(Arc::clone(&lock), &observer))
+                        .unwrap(),
+                ),
+                _ => drop(OwnedRwLockWriteGuard::try_write(Arc::clone(&lock)).unwrap()),
+            }
+            observer.logical_now()
+        };
+        assert_eq!(
+            released.causal_order(&observed),
+            CausalOrder::Before,
+            "api={api}"
+        );
+        assert_eq!(
+            later.causal_order(&observed),
+            CausalOrder::Concurrent,
+            "api={api}"
+        );
+        let state = lock.debug_state();
+        assert!(!state.writer_active && state.readers == 0);
+        assert_eq!(state.writer_waiters, 0);
+    }
+}
+
+#[test]
+fn causality_writer_reaches_readers_without_ordering_sibling_readers() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    let source = causal_context(97, "writer");
+    let left = causal_context(97, "left");
+    let middle = causal_context(97, "middle");
+    let right = causal_context(97, "right");
+    let follower = causal_context(97, "follower");
+    let lock = Arc::new(RwLock::new(()));
+    let held = write_blocking(&lock, &source);
+    let written = source.logical_tick();
+    drop(held);
+    let writer_later = source.logical_tick();
+    let left_guard = read_blocking(&lock, &left);
+    let middle_guard =
+        poll_until_ready(OwnedRwLockReadGuard::read(Arc::clone(&lock), &middle)).unwrap();
+    let left_read = left.logical_tick();
+    let middle_read = middle.logical_tick();
+    drop(left_guard);
+    let left_later = left.logical_tick();
+    // This reader joins after another reader has already released. Importing
+    // the reader aggregate here would invent a reader-to-reader dependency.
+    let right_read = {
+        let _current = Cx::set_current(Some(right.clone()));
+        let held = OwnedRwLockReadGuard::try_read(Arc::clone(&lock)).unwrap();
+        let read = right.logical_tick();
+        drop(held);
+        read
+    };
+    assert_eq!(left_read.causal_order(&right_read), CausalOrder::Concurrent);
+    assert_eq!(
+        middle_read.causal_order(&right_read),
+        CausalOrder::Concurrent
+    );
+    for read in [&left_read, &middle_read, &right_read] {
+        assert_eq!(written.causal_order(read), CausalOrder::Before);
+        assert_eq!(writer_later.causal_order(read), CausalOrder::Concurrent);
+    }
+    drop(middle_guard);
+    let middle_later = middle.logical_tick();
+    let right_later = right.logical_tick();
+    let held = write_blocking(&lock, &follower);
+    let acquired = follower.logical_now();
+    for read in [&left_read, &middle_read, &right_read] {
+        assert_eq!(read.causal_order(&acquired), CausalOrder::Before);
+    }
+    for later in [&left_later, &middle_later, &right_later, &writer_later] {
+        assert_eq!(later.causal_order(&acquired), CausalOrder::Concurrent);
+    }
+    assert!(
+        lock.state
+            .lock()
+            .causality
+            .as_ref()
+            .unwrap()
+            .readers_released
+            .is_none()
+    );
+    drop(held);
+}
+
+#[test]
+fn causality_downgrade_publishes_the_write_before_the_read_phase() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    for owned in [false, true] {
+        let source = causal_context(97, "writer");
+        let reader = causal_context(97, "reader");
+        let follower = causal_context(97, "follower");
+        let lock = Arc::new(RwLock::new(0_u32));
+        // Erase only the guard's concrete type in this test so both public
+        // downgrade operations exercise the same ownership schedule.
+        let (downgraded, written): (Box<dyn Deref<Target = u32> + '_>, _) = if owned {
+            let mut held =
+                poll_until_ready(OwnedRwLockWriteGuard::write(Arc::clone(&lock), &source)).unwrap();
+            *held = 41;
+            let written = source.logical_tick();
+            (Box::new(held.downgrade()), written)
+        } else {
+            let mut held = write_blocking(&lock, &source);
+            *held = 41;
+            let written = source.logical_tick();
+            (Box::new(held.downgrade()), written)
+        };
+        let source_read = source.logical_tick();
+        let reader_time = {
+            let _current = Cx::set_current(Some(reader.clone()));
+            let held = lock.try_read().unwrap();
+            assert_eq!(*held, 41);
+            let time = reader.logical_tick();
+            drop(held);
+            time
+        };
+        assert_eq!(written.causal_order(&reader_time), CausalOrder::Before);
+        assert_eq!(
+            source_read.causal_order(&reader_time),
+            CausalOrder::Concurrent
+        );
+        drop(downgraded);
+        let source_later = source.logical_tick();
+        let held = write_blocking(&lock, &follower);
+        let acquired = follower.logical_now();
+        assert_eq!(source_read.causal_order(&acquired), CausalOrder::Before);
+        assert_eq!(reader_time.causal_order(&acquired), CausalOrder::Before);
+        assert_eq!(
+            source_later.causal_order(&acquired),
+            CausalOrder::Concurrent
+        );
+        drop(held);
+    }
+}
+
+#[test]
+fn causality_cancelled_and_abandoned_pregrants_preserve_predecessor_evidence() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    for api in 0..4 {
+        for cancel in [false, true] {
+            let source = causal_context(97, "source");
+            let refused = causal_context(97, "refused");
+            let follower = causal_context(97, "follower");
+            let lock = Arc::new(RwLock::new(41_u32));
+            let held = write_blocking(&lock, &source);
+            let refused_before = refused.logical_tick();
+            let mut first: Pin<Box<dyn Future<Output = Result<(), RwLockError>> + '_>> = match api {
+                0 => Box::pin(async { lock.read(&refused).await.map(drop) }),
+                1 => Box::pin(async { lock.write(&refused).await.map(drop) }),
+                2 => Box::pin(async {
+                    OwnedRwLockReadGuard::read(Arc::clone(&lock), &refused)
+                        .await
+                        .map(drop)
+                }),
+                _ => Box::pin(async {
+                    OwnedRwLockWriteGuard::write(Arc::clone(&lock), &refused)
+                        .await
+                        .map(drop)
+                }),
+            };
+            let mut next = lock.write(&follower);
+            assert!(poll_once(&mut first).is_none());
+            assert!(poll_once(&mut next).is_none());
+            let released = source.logical_tick();
+            drop(held);
+            let source_later = source.logical_tick();
+            if cancel {
+                refused.cancel_fast(crate::types::CancelKind::User);
+                assert!(matches!(
+                    poll_once(&mut first),
+                    Some(Err(RwLockError::Cancelled))
+                ));
+            }
+            drop(first);
+            assert_eq!(refused.logical_now(), refused_before);
+            let acquired = poll_once(&mut next).unwrap().unwrap();
+            assert_eq!(*acquired, 41);
+            let observed = follower.logical_now();
+            assert_eq!(
+                released.causal_order(&observed),
+                CausalOrder::Before,
+                "api={api}, cancel={cancel}"
+            );
+            assert_eq!(
+                source_later.causal_order(&observed),
+                CausalOrder::Concurrent
+            );
+            assert_eq!(
+                refused_before.causal_order(&observed),
+                CausalOrder::Concurrent
+            );
+            drop(acquired);
+            let state = lock.debug_state();
+            assert!(!state.writer_active && state.readers == 0);
+            assert!(state.reader_waiters.is_empty() && state.writer_queue.is_empty());
+            assert_eq!(state.writer_waiters, 0);
+        }
+    }
+}
+
+#[test]
+fn causality_cancelled_writer_keeps_the_released_reader_cohort() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    let reader = causal_context(97, "reader");
+    let refused = causal_context(97, "refused");
+    let follower = causal_context(97, "follower");
+    let lock = RwLock::new(());
+    let held = read_blocking(&lock, &reader);
+    let mut first = lock.write(&refused);
+    let mut next = lock.write(&follower);
+    assert!(poll_once(&mut first).is_none());
+    assert!(poll_once(&mut next).is_none());
+    let released = reader.logical_tick();
+    drop(held);
+    refused.cancel_fast(crate::types::CancelKind::User);
+    assert!(matches!(
+        poll_once(&mut first),
+        Some(Err(RwLockError::Cancelled))
+    ));
+    let acquired = poll_once(&mut next).unwrap().unwrap();
+    assert_eq!(
+        released.causal_order(&follower.logical_now()),
+        CausalOrder::Before
+    );
+    drop(acquired);
+}
+
+#[test]
+fn causality_uses_the_actual_poller_and_checks_runtime_provenance() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    for owned in [false, true] {
+        for poller_kind in 0..3 {
+            let source = causal_context(97, "source");
+            let argument = causal_context(97, "argument");
+            let poller = match poller_kind {
+                0 => causal_context(97, "poller"),
+                1 => causal_context(98, "poller"),
+                _ => Cx::for_testing(),
+            };
+            let lock = Arc::new(RwLock::new(()));
+            let held = write_blocking(&lock, &source);
+            let released = source.logical_tick();
+            drop(held);
+            let argument_before = argument.logical_now();
+            let poller_before = poller.logical_now();
+            {
+                let _current = Cx::set_current(Some(poller.clone()));
+                if owned {
+                    drop(
+                        poll_until_ready(OwnedRwLockReadGuard::read(Arc::clone(&lock), &argument))
+                            .unwrap(),
+                    );
+                } else {
+                    drop(read_blocking(&lock, &argument));
+                }
+            }
+            assert_eq!(argument.logical_now(), argument_before);
+            if poller_kind == 0 {
+                assert_eq!(
+                    released.causal_order(&poller.logical_now()),
+                    CausalOrder::Before
+                );
+            } else {
+                assert_eq!(poller.logical_now(), poller_before);
+            }
+        }
+    }
+}
+
+#[test]
+fn causality_moved_guards_publish_only_the_actual_droppers_past() {
+    use crate::trace::distributed::CausalOrder;
+
+    let _host = Cx::set_current(None);
+    for write in [false, true] {
+        for dropper_kind in 0..4 {
+            let source = causal_context(97, "source");
+            let dropper = match dropper_kind {
+                0 => Some(causal_context(97, "dropper")),
+                1 => Some(causal_context(98, "dropper")),
+                2 => Some(Cx::for_testing()),
+                _ => None,
+            };
+            let observer = causal_context(97, "observer");
+            let lock = Arc::new(RwLock::new(()));
+            let held: Box<dyn Deref<Target = ()>> = {
+                // Ambient droppers override even an explicit host fallback.
+                // The no-dropper case instead moves a task-owned guard to the
+                // host, which must not sample that former task's live clock.
+                let _current = Cx::set_current(if dropper_kind == 3 {
+                    Some(source.clone())
+                } else {
+                    None
+                });
+                if write {
+                    Box::new(
+                        poll_until_ready(OwnedRwLockWriteGuard::write(Arc::clone(&lock), &source))
+                            .unwrap(),
+                    )
+                } else {
+                    Box::new(
+                        poll_until_ready(OwnedRwLockReadGuard::read(Arc::clone(&lock), &source))
+                            .unwrap(),
+                    )
+                }
+            };
+            let source_later = source.logical_tick();
+            let dropped_at = dropper.as_ref().map(Cx::logical_tick);
+            {
+                let _current = Cx::set_current(dropper);
+                drop(held);
+            }
+            let before = observer.logical_now();
+            let held = write_blocking(&lock, &observer);
+            let acquired = observer.logical_now();
+            if dropper_kind == 0 {
+                assert_eq!(
+                    dropped_at.unwrap().causal_order(&acquired),
+                    CausalOrder::Before
+                );
+            } else {
+                assert_eq!(acquired, before);
+            }
+            assert_ne!(source_later.causal_order(&acquired), CausalOrder::Before);
+            drop(held);
+        }
+    }
+}
+
+#[test]
+fn causality_failed_attempts_and_legacy_operations_do_not_import_evidence() {
+    let _host = Cx::set_current(None);
+    let source = causal_context(97, "source");
+    let observer = causal_context(97, "observer");
+    let lock = Arc::new(RwLock::new(()));
+    let held = write_blocking(&lock, &source);
+    let before = observer.logical_now();
+    {
+        let _current = Cx::set_current(Some(observer.clone()));
+        assert!(matches!(lock.try_read(), Err(TryReadError::Locked)));
+        assert!(matches!(lock.try_write(), Err(TryWriteError::Locked)));
+        assert!(matches!(
+            OwnedRwLockReadGuard::try_read(Arc::clone(&lock)),
+            Err(TryReadError::Locked)
+        ));
+        assert!(matches!(
+            OwnedRwLockWriteGuard::try_write(Arc::clone(&lock)),
+            Err(TryWriteError::Locked)
+        ));
+    }
+    assert_eq!(observer.logical_now(), before);
+    let _ = source.logical_tick();
+    drop(held);
+    observer.cancel_fast(crate::types::CancelKind::User);
+    assert!(matches!(
+        poll_once(&mut lock.read(&observer)),
+        Some(Err(RwLockError::Cancelled))
+    ));
+    assert!(matches!(
+        poll_once(&mut lock.write(&observer)),
+        Some(Err(RwLockError::Cancelled))
+    ));
+    assert_eq!(observer.logical_now(), before);
+    // An untracked writer retires prior tracked evidence. Unknown host
+    // ownership cannot be attributed to the last known task.
+    drop(lock.try_write().unwrap());
+    let fresh = causal_context(97, "fresh");
+    let before = fresh.logical_now();
+    drop(read_blocking(&lock, &fresh));
+    assert_eq!(fresh.logical_now(), before);
+
+    let legacy = Cx::for_testing();
+    let legacy_lock = Arc::new(RwLock::new(()));
+    let before = legacy.logical_now();
+    {
+        let _current = Cx::set_current(Some(legacy.clone()));
+        drop(read_blocking(&legacy_lock, &legacy));
+        drop(write_blocking(&legacy_lock, &legacy).downgrade());
+        drop(legacy_lock.try_read().unwrap());
+        drop(legacy_lock.try_write().unwrap());
+        drop(
+            poll_until_ready(OwnedRwLockReadGuard::read(
+                Arc::clone(&legacy_lock),
+                &legacy,
+            ))
+            .unwrap(),
+        );
+        drop(
+            poll_until_ready(OwnedRwLockWriteGuard::write(
+                Arc::clone(&legacy_lock),
+                &legacy,
+            ))
+            .unwrap()
+            .downgrade(),
+        );
+        drop(OwnedRwLockReadGuard::try_read(Arc::clone(&legacy_lock)).unwrap());
+        drop(OwnedRwLockWriteGuard::try_write(Arc::clone(&legacy_lock)).unwrap());
+    }
+    assert!(legacy_lock.state.lock().causality.is_none());
+    assert_eq!(legacy.logical_now(), before);
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[test]
+fn causality_overflow_during_handoff_releases_reservations_and_diagnostic_ownership() {
+    let _host = Cx::set_current(None);
+    for api in 0..4 {
+        let source = causal_context(97, "source");
+        let refused = causal_context(97, "refused");
+        let mut near_overflow = crate::trace::distributed::VectorClock::new();
+        near_overflow.set(&crate::remote::NodeId::new("refused"), u64::MAX - 1);
+        let _ = refused.logical_receive(&LogicalTime::Vector(near_overflow));
+        let baseline = lock_ordering::current_held_ranks();
+        let lock = Arc::new(RwLock::with_name("tasks", ()));
+        let held = write_blocking(&lock, &source);
+        let mut first: Pin<Box<dyn Future<Output = Result<(), RwLockError>> + '_>> = match api {
+            0 => Box::pin(async { lock.read(&refused).await.map(drop) }),
+            1 => Box::pin(async { lock.write(&refused).await.map(drop) }),
+            2 => Box::pin(async {
+                OwnedRwLockReadGuard::read(Arc::clone(&lock), &refused)
+                    .await
+                    .map(drop)
+            }),
+            _ => Box::pin(async {
+                OwnedRwLockWriteGuard::write(Arc::clone(&lock), &refused)
+                    .await
+                    .map(drop)
+            }),
+        };
+        assert!(poll_once(&mut first).is_none());
+        let _ = source.logical_tick();
+        drop(held);
+        let failed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll_once(&mut first)));
+        assert!(failed.is_err(), "api={api}");
+        drop(first);
+        assert_eq!(lock_ordering::current_held_ranks(), baseline, "api={api}");
+        drop(
+            lock.try_write()
+                .expect("failed causal import must return the reservation"),
+        );
+        let state = lock.debug_state();
+        assert!(!state.writer_active && state.readers == 0);
+        assert_eq!(state.writer_waiters, 0);
+    }
+}
+
+#[test]
+fn causality_preserves_rwlock_auto_trait_surface() {
+    fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+    fn assert_unwind_safe<T: std::panic::UnwindSafe>() {}
+    assert_send_sync_unpin::<RwLock<()>>();
+    assert_send_sync_unpin::<RwLockReadGuard<'static, ()>>();
+    assert_send_sync_unpin::<RwLockWriteGuard<'static, ()>>();
+    assert_send_sync_unpin::<OwnedRwLockReadGuard<()>>();
+    assert_send_sync_unpin::<OwnedRwLockWriteGuard<()>>();
+    assert_send_sync_unpin::<ReadFuture<'static, 'static, ()>>();
+    assert_send_sync_unpin::<WriteFuture<'static, 'static, ()>>();
+    assert_send_sync_unpin::<OwnedReadFuture<'static, ()>>();
+    assert_send_sync_unpin::<OwnedWriteFuture<'static, ()>>();
+    // Cell is UnwindSafe but not RefUnwindSafe: retain the original bound.
+    assert_unwind_safe::<RwLock<std::cell::Cell<()>>>();
+
+    macro_rules! assert_not_unwind_safe {
+        ($ty:ty) => {{
+            trait AmbiguousIfUnwindSafe<A> { fn check() {} }
+            impl<T: ?Sized> AmbiguousIfUnwindSafe<()> for T {}
+            struct WouldChangeTheSurface;
+            impl<T: ?Sized + std::panic::UnwindSafe> AmbiguousIfUnwindSafe<WouldChangeTheSurface> for T {}
+            let _ = <$ty as AmbiguousIfUnwindSafe<_>>::check;
+        }};
+    }
+    // The guards and futures already contain references to UnsafeCell data;
+    // do not broaden their unwind contract to hide an instrumentation change.
+    assert_not_unwind_safe!(&'static RwLock<()>);
+    assert_not_unwind_safe!(RwLockReadGuard<'static, ()>);
+    assert_not_unwind_safe!(RwLockWriteGuard<'static, ()>);
+    assert_not_unwind_safe!(OwnedRwLockReadGuard<()>);
+    assert_not_unwind_safe!(OwnedRwLockWriteGuard<()>);
+    assert_not_unwind_safe!(ReadFuture<'static, 'static, ()>);
+    assert_not_unwind_safe!(WriteFuture<'static, 'static, ()>);
+    assert_not_unwind_safe!(OwnedReadFuture<'static, ()>);
+    assert_not_unwind_safe!(OwnedWriteFuture<'static, ()>);
+}
