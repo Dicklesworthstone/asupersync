@@ -3,6 +3,7 @@
 use super::{Cancellation, POISONED, POLL_BUDGET};
 use crate::cx::Cx;
 use crate::io::AsyncReadVectored;
+use crate::types::Time;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{self, IoSliceMut};
@@ -148,6 +149,28 @@ impl<'a, 'buf, R> ReadExactVectoredSession<'a, 'buf, R> {
 }
 
 impl<R: AsyncReadVectored + Unpin> ReadExactVectoredSession<'_, '_, R> {
+    /// Resume scatter reads under one absolute deadline on `cx`'s clock.
+    ///
+    /// Expiry returns `TimedOut`; acknowledged owner cancellation, including an
+    /// earlier owner budget, returns `Interrupted`. Partial reads and descriptor
+    /// windows never extend the deadline. Masks defer owner cancellation but
+    /// not explicit expiry. Already-complete sessions return their cached count
+    /// without time or cancellation checks and perform no I/O.
+    ///
+    /// The boundary is checked before each poll of [`Self::run`]. Ready I/O
+    /// results, including original errors, win if synchronous provider work
+    /// crosses the deadline; such work cannot be preempted. Timeout,
+    /// cancellation, and dropping this future preserve the destination plan and
+    /// its filled-prefix cursor. Resume with a later deadline or [`Self::run`]
+    /// and a live context. This run's timers and cancellation registrations are
+    /// removed before return or on drop.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<usize> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        super::run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Fill or resume the destination plan, returning cumulative filled bytes.
     ///
     /// Explicit cancellation wakes a parked reader and returns `Interrupted`.

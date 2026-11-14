@@ -21,6 +21,7 @@
 
 use super::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::cx::{CancelWakerToken, Cx};
+use crate::types::Time;
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
@@ -338,6 +339,31 @@ impl<R, W> CopySession<R, W> {
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> CopySession<R, W> {
+    /// Resume copying and its final flush before one absolute owner deadline.
+    ///
+    /// `deadline` uses `cx`'s clock, independently of the polling context. An
+    /// active run returns `TimedOut` on explicit expiry or `Interrupted` on
+    /// acknowledged owner cancellation, including an earlier owner budget.
+    /// Partial reads, writes, and flushes never restart the deadline. Masks
+    /// defer cancellation but do not suppress explicit expiry.
+    ///
+    /// Already-complete sessions return their cached count without I/O, time,
+    /// or cancellation checks. Otherwise the boundary is checked before each
+    /// poll of [`Self::run`]. A ready result or original I/O error wins if
+    /// synchronous provider work crosses the deadline during that poll; a
+    /// blocking provider poll cannot be preempted.
+    ///
+    /// Timeout, cancellation, or dropping this future retains read-ahead and
+    /// all completed progress. Resume this session with a later deadline or
+    /// [`Self::run`] and a live context. The stopped run leaves no owned timer
+    /// or cancellation registration behind, and never drops either endpoint.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<u64> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        super::transfer_session::run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Drive or resume copying using explicit cancellation authority.
     ///
     /// Returns cumulative accepted-write bytes, not just this invocation's delta.

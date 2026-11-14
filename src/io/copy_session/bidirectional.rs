@@ -5,6 +5,7 @@ use super::{
 };
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite};
+use crate::types::Time;
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
@@ -130,6 +131,32 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Resume both forwarding directions and half-closes under one deadline.
+    ///
+    /// The absolute deadline uses `cx`'s clock and is shared by both directions;
+    /// progress and partial half-closes never restart it. An active run returns
+    /// `TimedOut` on explicit expiry or `Interrupted` on acknowledged owner
+    /// cancellation, including an earlier owner budget. Cancellation masks
+    /// defer owner cancellation but leave explicit expiry enforced.
+    ///
+    /// Complete sessions return their cached counters without boundary checks
+    /// or I/O. Otherwise the boundary is checked before each poll of
+    /// [`Self::run`]. Ready results and original I/O errors are preserved if
+    /// synchronous provider work crosses the deadline during that poll; a
+    /// provider poll cannot be preempted.
+    ///
+    /// Timeout, cancellation, and dropping this future retain BOTH read-ahead
+    /// buffers and all write, flush, and half-close progress. Resume with a
+    /// later deadline or [`Self::run`] and a live context; completed half-closes
+    /// are not repeated. Timers and owned cancellation registrations retire
+    /// before return or on drop, without shutting down or dropping endpoints.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<(u64, u64)> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        crate::io::transfer_session::run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Resume forwarding until BOTH half-closes complete, or return the original I/O error.
     ///
     /// Returns cumulative `(a_to_b, b_to_a)` accepted-write byte counts. A

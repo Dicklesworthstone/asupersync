@@ -3,6 +3,7 @@
 use super::{Cancellation, POISONED, POLL_BUDGET};
 use crate::cx::Cx;
 use crate::io::AsyncWrite;
+use crate::types::Time;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{self, IoSlice};
@@ -134,6 +135,28 @@ impl<'a, W> WriteAllVectoredSession<'a, W> {
 }
 
 impl<W: AsyncWrite + Unpin> WriteAllVectoredSession<'_, W> {
+    /// Resume scatter/gather writes under one absolute owner-clock deadline.
+    ///
+    /// Expiry returns `TimedOut`; acknowledged owner cancellation, including an
+    /// earlier owner budget, returns `Interrupted`. Neither partial writes nor
+    /// descriptor windows extend the deadline. Masks defer owner cancellation
+    /// but not explicit expiry. Already-complete sessions return their cached
+    /// count without checking time or cancellation and perform no I/O.
+    ///
+    /// The boundary is checked before each poll of [`Self::run`]. Ready I/O
+    /// results and errors are preserved even if synchronous provider work
+    /// crosses the deadline; a provider poll cannot be preempted. Timeout,
+    /// cancellation, and dropping the borrowing future retain every accepted
+    /// byte and slice offset. Resume this session with a later deadline or
+    /// [`Self::run`] and a live context; timers and cancellation registrations
+    /// from the stopped run have already retired.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<usize> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        super::run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Write or resume all slices, returning cumulative accepted-write bytes.
     ///
     /// Cancellation is a wake source even while the writer is parked. It returns

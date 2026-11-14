@@ -13,8 +13,9 @@
 
 use super::{AsyncRead, ReadBuf};
 use crate::cx::{CancelWakerToken, Cx};
+use crate::types::Time;
 use std::fmt;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -54,6 +55,56 @@ impl Drop for Cancellation<'_> {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
             self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+/// One owner-clock boundary shared by all resumable I/O sessions. The run
+/// future borrows its session, so retiring this boundary never discards the
+/// session's buffers, progress, or half-close state.
+pub(super) async fn run_with_deadline<T>(
+    cx: &Cx,
+    deadline: Time,
+    operation: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    let mut operation = std::pin::pin!(operation);
+    let mut cancellation = Cancellation { cx, token: None };
+    loop {
+        let now = cx.now();
+        cancellation.check()?;
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "I/O session deadline elapsed",
+            ));
+        }
+
+        // An owner budget needs its own wake even when this future is polled
+        // by a different context. Once that budget expires under a mask, use
+        // the explicit deadline instead of repeatedly polling a ready timer.
+        let wake_at = cx
+            .budget()
+            .deadline
+            .filter(|owner_deadline| *owner_deadline > now)
+            .map_or(deadline, |owner_deadline| deadline.min(owner_deadline));
+        let mut timer = std::pin::pin!(cx.sleep_until_on_clock(wake_at));
+        let result = poll_fn(|task| {
+            // Retain this registration through masked requests: unmasking
+            // must still wake a parked run owned by a foreign context.
+            cancellation.register(task);
+            if let Err(error) = cancellation.check() {
+                return Poll::Ready(Some(Err(error)));
+            }
+            if timer.as_mut().poll_deadline(task).is_ready() {
+                return Poll::Ready(None);
+            }
+            // Preserve a ready provider result, including its original error,
+            // even if synchronous provider work crossed the deadline.
+            operation.as_mut().poll(task).map(Some)
+        })
+        .await;
+        if let Some(result) = result {
+            return result;
         }
     }
 }
@@ -150,6 +201,33 @@ impl<'a, R> ReadExactSession<'a, R> {
 }
 
 impl<R: AsyncRead + Unpin> ReadExactSession<'_, R> {
+    /// Fill or resume the destination before an absolute owner-clock deadline.
+    ///
+    /// The deadline covers this entire run and is not extended by partial
+    /// progress. An active run returns `TimedOut` on explicit expiry, or
+    /// `Interrupted` when `cx` acknowledges cancellation, including an earlier
+    /// owner budget. The supplied context provides the clock and cancellation
+    /// authority even when another context polls the future.
+    ///
+    /// Cancellation masks defer owner cancellation, but not the explicit
+    /// deadline. An already-complete session returns its cached count without
+    /// checking either boundary or polling the reader. Otherwise cancellation
+    /// and expiry are checked before each poll of [`Self::run`]. A ready I/O
+    /// result retains its original value, including errors, if synchronous
+    /// provider work crosses the deadline during that poll; such work cannot
+    /// be preempted.
+    ///
+    /// Expiry, cancellation, and dropping this future retain the filled prefix
+    /// in the session. Resume this same session with [`Self::run`] or a later
+    /// deadline and a live context. No timer or cancellation registration owned
+    /// by this run remains after it completes or is dropped.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<usize> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Fill the remaining suffix, returning the cumulative filled-prefix length.
     ///
     /// Dropping this future retains all reported bytes and the resume offset in
@@ -232,3 +310,6 @@ pub use read_vectored::ReadExactVectoredSession;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod deadline_tests;

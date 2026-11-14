@@ -1,6 +1,7 @@
 use super::{Cancellation, POISONED, POLL_BUDGET};
 use crate::cx::Cx;
 use crate::io::AsyncWrite;
+use crate::types::Time;
 use std::fmt;
 use std::future::poll_fn;
 use std::io;
@@ -108,6 +109,28 @@ impl<'a, W> WriteAllSession<'a, W> {
 }
 
 impl<W: AsyncWrite + Unpin> WriteAllSession<'_, W> {
+    /// Write or resume the source under one absolute deadline on `cx`'s clock.
+    ///
+    /// Expiry returns `TimedOut` and acknowledged owner cancellation returns
+    /// `Interrupted`, including an earlier owner budget. Partial writes never
+    /// extend the deadline. Cancellation masks defer owner cancellation but
+    /// leave the explicit deadline active. An already-complete session returns
+    /// its cached count without checking either boundary or polling the writer.
+    ///
+    /// The boundary is checked before each poll of [`Self::run`]. A ready I/O
+    /// result, including its original error, wins if synchronous provider work
+    /// crosses the deadline during that poll; such work cannot be preempted.
+    /// Timeout, cancellation, and dropping this future retain the accepted
+    /// prefix and pending suffix in the session. Resume with a live context and
+    /// a later deadline or [`Self::run`]; no bytes are replayed automatically.
+    /// This run's timers and cancellation registrations retire before return.
+    pub async fn run_until(&mut self, cx: &Cx, deadline: Time) -> io::Result<usize> {
+        if self.is_complete() {
+            return self.run(cx).await;
+        }
+        super::run_with_deadline(cx, deadline, self.run(cx)).await
+    }
+
     /// Write or resume the source, returning cumulative accepted-write bytes.
     ///
     /// Cooperative cancellation wakes even when the writer is parked and returns
