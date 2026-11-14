@@ -561,6 +561,486 @@
         .with_cause(CancelReason::shutdown().with_message("service shutdown"))
     }
 
+    mod acquisition_deadline_tests {
+        use super::*;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{CancelKind, RegionId, TaskId};
+        use std::future::Future;
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Entry {
+            Anonymous,
+            Client,
+            Retry,
+        }
+
+        const ENTRIES: [Entry; 3] = [Entry::Anonymous, Entry::Client, Entry::Retry];
+
+        fn virtual_owner(budget: Budget) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+            let clock = Arc::new(VirtualClock::new());
+            let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                budget,
+                None,
+                None,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            (cx, clock, driver)
+        }
+
+        async fn acquire<'a, M: AsyncConnectionManager>(
+            pool: &'a AsyncDbPool<M>,
+            cx: &Cx,
+            entry: Entry,
+            deadline: Time,
+        ) -> Outcome<AsyncPooledConnection<'a, M>, DbPoolError<M::Error>> {
+            match entry {
+                Entry::Anonymous => pool.get_with_deadline_outcome(cx, deadline).await,
+                Entry::Client => {
+                    pool.get_for_client_with_deadline_outcome(cx, "client", deadline)
+                        .await
+                }
+                Entry::Retry => {
+                    pool.get_with_retry_and_deadline_outcome(
+                        cx,
+                        &RetryPolicy::immediate(3),
+                        deadline,
+                    )
+                    .await
+                }
+            }
+        }
+
+        fn assert_retired<M: AsyncConnectionManager>(pool: &AsyncDbPool<M>, cx: &Cx) {
+            let stats = pool.stats();
+            assert_eq!(
+                (stats.total, stats.active, stats.idle, stats.pending_waiters),
+                (0, 0, 0, 0)
+            );
+            assert!(pool.inner.lock().client_connections.is_empty());
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        }
+
+        #[derive(Default)]
+        struct CountWake(AtomicUsize);
+
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct ReadyBoundaryManager {
+            inner: ControlledAsyncPoolManager,
+            clock: Arc<VirtualClock>,
+            cancellation: Option<CancelReason>,
+        }
+
+        impl AsyncConnectionManager for ReadyBoundaryManager {
+            type Connection = TestConnection;
+            type Error = TestError;
+
+            async fn connect(&self, cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+                let connection = self.inner.connect(cx).await;
+                if let Some(reason) = &self.cancellation {
+                    cx.cancel_with_reason(reason.clone());
+                } else {
+                    self.clock.advance_to(Time::from_millis(101));
+                }
+                connection
+            }
+
+            async fn is_valid(&self, cx: &Cx, connection: &mut Self::Connection) -> bool {
+                self.inner.is_valid(cx, connection).await
+            }
+
+            fn disconnect(&self, connection: Self::Connection) {
+                self.inner.disconnect(connection);
+            }
+        }
+
+        #[test]
+        fn ready_manager_crossing_deadline_or_cancellation_discards_before_handoff() {
+            for entry in ENTRIES {
+                for cancel in [false, true] {
+                    let (cx, clock, driver) = virtual_owner(Budget::INFINITE);
+                    let reason = attributed_pool_cancel_reason();
+                    let pool = AsyncDbPool::new(
+                        ReadyBoundaryManager {
+                            inner: ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                            clock,
+                            cancellation: cancel.then(|| reason.clone()),
+                        },
+                        DbPoolConfig::with_max_size(1),
+                    );
+                    let mut acquisition =
+                        Box::pin(acquire(&pool, &cx, entry, Time::from_millis(100)));
+                    let mut task = Context::from_waker(Waker::noop());
+                    match (acquisition.as_mut().poll(&mut task), cancel) {
+                        (Poll::Ready(Outcome::Cancelled(actual)), true) => {
+                            assert_eq!(actual, reason);
+                        }
+                        (Poll::Ready(Outcome::Err(DbPoolError::AcquireTimeout)), false) => {}
+                        (actual, _) => panic!("{entry:?} handed off a late connection: {actual:?}"),
+                    }
+                    assert_eq!(pool.manager.inner.connect_calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(pool.manager.inner.disconnects.load(Ordering::SeqCst), 1);
+                    assert_eq!(pool.stats().total_discards, 1);
+                    assert_eq!(pool.stats().total_timeouts, u64::from(!cancel));
+                    assert_retired(&pool, &cx);
+                    assert!(driver.is_empty());
+                    // Even a retained completed future owns no connection.
+                }
+            }
+        }
+
+        #[test]
+        fn expired_deadline_never_starts_work_and_preserves_legacy_zero_wait() {
+            for entry in ENTRIES {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1).connection_timeout(Duration::ZERO),
+                );
+                let (cx, _, driver) = virtual_owner(Budget::INFINITE);
+                assert!(matches!(
+                    block_on(acquire(&pool, &cx, entry, Time::ZERO)),
+                    Outcome::Err(DbPoolError::AcquireTimeout)
+                ));
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(pool.stats().total_timeouts, 1);
+                assert_retired(&pool, &cx);
+                assert!(driver.is_empty());
+
+                // A zero legacy wait budget still permits immediate creation.
+                block_on(pool.get(&cx)).expect("legacy zero-wait checkout").discard();
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+                assert_retired(&pool, &cx);
+            }
+        }
+
+        #[test]
+        fn parked_connect_uses_the_owner_clock_and_cleans_up_before_returning() {
+            for entry in ENTRIES {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1),
+                );
+                pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                let (cx, clock, driver) = virtual_owner(Budget::INFINITE);
+                let (ambient, ambient_clock, ambient_driver) = virtual_owner(Budget::INFINITE);
+                ambient_clock.advance_to(Time::from_secs(100));
+                ambient.cancel_fast(CancelKind::User);
+                let _current = Cx::set_current(Some(ambient));
+                let counter = Arc::new(CountWake::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let mut acquisition = Box::pin(acquire(&pool, &cx, entry, Time::from_millis(100)));
+
+                assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(pool.stats().active, 1);
+                assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+                assert!(ambient_driver.is_empty());
+                clock.advance_to(Time::from_millis(100));
+                assert_eq!(driver.process_timers(), 1);
+                assert!(counter.0.load(Ordering::SeqCst) > 0);
+                assert!(matches!(
+                    acquisition.as_mut().poll(&mut task),
+                    Poll::Ready(Outcome::Err(DbPoolError::AcquireTimeout))
+                ));
+                assert_eq!(pool.stats().total_timeouts, 1);
+                assert_retired(&pool, &cx);
+                assert!(driver.is_empty());
+                assert!(ambient_driver.is_empty());
+                // The completed future remains alive through these assertions.
+            }
+        }
+
+        #[test]
+        fn fifo_validation_replacement_and_connect_share_the_original_deadline() {
+            for entry in ENTRIES {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1),
+                );
+                let (cx, clock, driver) = virtual_owner(Budget::INFINITE);
+                let holder = block_on(pool.get(&cx)).expect("occupy the only slot");
+                let (ambient, ambient_clock, ambient_driver) = virtual_owner(Budget::INFINITE);
+                ambient_clock.advance_to(Time::from_secs(100));
+                let _current = Cx::set_current(Some(ambient));
+                let mut task = Context::from_waker(Waker::noop());
+                let mut acquisition = Box::pin(acquire(&pool, &cx, entry, Time::from_millis(100)));
+                assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                assert_eq!(pool.stats().pending_waiters, 1);
+                assert!(ambient_driver.is_empty(), "FIFO timers belong to the owner");
+
+                clock.advance_to(Time::from_millis(40));
+                holder.valid.store(false, Ordering::SeqCst);
+                holder.return_to_pool();
+                pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                assert_eq!(pool.manager.validation_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+                assert_eq!(pool.stats().pending_waiters, 0);
+                assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+
+                clock.advance_to(Time::from_millis(100));
+                assert_eq!(driver.process_timers(), 1);
+                assert!(matches!(
+                    acquisition.as_mut().poll(&mut task),
+                    Poll::Ready(Outcome::Err(DbPoolError::AcquireTimeout))
+                ));
+                assert_retired(&pool, &cx);
+                assert_eq!(pool.stats().total_timeouts, 1);
+                assert!(driver.is_empty());
+                assert!(ambient_driver.is_empty());
+            }
+        }
+
+        #[test]
+        fn owner_budget_cancels_without_becoming_an_acquisition_timeout() {
+            let pool = AsyncDbPool::new(
+                ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                DbPoolConfig::with_max_size(1),
+            );
+            pool.manager.pause_connect.store(true, Ordering::SeqCst);
+            let (cx, clock, driver) =
+                virtual_owner(Budget::new().with_deadline(Time::from_millis(10)));
+            let mut task = Context::from_waker(Waker::noop());
+            let mut acquisition = Box::pin(acquire(
+                &pool,
+                &cx,
+                Entry::Client,
+                Time::from_millis(100),
+            ));
+            assert!(acquisition.as_mut().poll(&mut task).is_pending());
+            clock.advance_to(Time::from_millis(10));
+            assert_eq!(driver.process_timers(), 1);
+            match acquisition.as_mut().poll(&mut task) {
+                Poll::Ready(Outcome::Cancelled(reason)) => {
+                    assert_eq!(reason.kind, CancelKind::Deadline);
+                    assert_eq!(Some(reason), cx.cancel_reason());
+                }
+                other => panic!("owner budget must preserve cancellation: {other:?}"),
+            }
+            assert_eq!(pool.stats().total_timeouts, 0);
+            assert_retired(&pool, &cx);
+            assert!(driver.is_empty());
+        }
+
+        #[test]
+        fn masked_owner_deadline_rearms_once_and_explicit_deadline_still_expires() {
+            for already_expired in [false, true] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1),
+                );
+                pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                let (cx, clock, driver) =
+                    virtual_owner(Budget::new().with_deadline(Time::from_millis(10)));
+                if already_expired {
+                    clock.advance_to(Time::from_millis(20));
+                }
+                let counter = Arc::new(CountWake::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let mut acquisition = Box::pin(acquire(
+                    &pool,
+                    &cx,
+                    Entry::Client,
+                    Time::from_millis(100),
+                ));
+                cx.masked(|| {
+                    assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                    if !already_expired {
+                        clock.advance_to(Time::from_millis(10));
+                        assert_eq!(driver.process_timers(), 1);
+                        assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                    }
+                    let wakes = counter.0.load(Ordering::SeqCst);
+                    for _ in 0..3 {
+                        assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(driver.next_deadline(), Some(Time::from_millis(100)));
+                        assert_eq!(driver.pending_count(), 1);
+                        assert_eq!(driver.process_timers(), 0);
+                        assert_eq!(counter.0.load(Ordering::SeqCst), wakes);
+                    }
+                    clock.advance_to(Time::from_millis(100));
+                    assert_eq!(driver.process_timers(), 1);
+                    assert!(matches!(
+                        acquisition.as_mut().poll(&mut task),
+                        Poll::Ready(Outcome::Err(DbPoolError::AcquireTimeout))
+                    ));
+                });
+                assert_eq!(pool.stats().total_timeouts, 1);
+                assert_retired(&pool, &cx);
+                assert!(driver.is_empty());
+            }
+        }
+
+        #[test]
+        fn masked_cancellation_keeps_the_owner_subscription_through_unmask() {
+            for (entry, backoff) in [
+                (Entry::Anonymous, false),
+                (Entry::Client, false),
+                (Entry::Retry, false),
+                (Entry::Retry, true),
+            ] {
+                let terminal = if backoff {
+                    Outcome::Err("retry while masked")
+                } else {
+                    Outcome::Ok(())
+                };
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(terminal),
+                    DbPoolConfig::with_max_size(1),
+                );
+                pool.manager.pause_connect.store(!backoff, Ordering::SeqCst);
+                let (cx, _, driver) = virtual_owner(Budget::INFINITE);
+                let (ambient, ambient_clock, ambient_driver) = virtual_owner(Budget::INFINITE);
+                ambient_clock.advance_to(Time::from_secs(100));
+                let _current = Cx::set_current(Some(ambient));
+                let counter = Arc::new(CountWake::default());
+                let waker = Waker::from(Arc::clone(&counter));
+                let mut task = Context::from_waker(&waker);
+                let policy = RetryPolicy::fixed_delay(Duration::from_secs(1), 3);
+                let mut acquisition = Box::pin(async {
+                    if matches!(entry, Entry::Retry) {
+                        pool.get_with_retry_and_deadline_outcome(
+                            &cx,
+                            &policy,
+                            Time::from_millis(100),
+                        )
+                        .await
+                    } else {
+                        acquire(&pool, &cx, entry, Time::from_millis(100)).await
+                    }
+                });
+                let reason = attributed_pool_cancel_reason();
+
+                let masked_wakes = cx.masked(|| {
+                    assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                    if backoff {
+                        // Advance past the between-attempt yield into the
+                        // backoff timer, without advancing either clock.
+                        assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                    }
+                    cx.cancel_with_reason(reason.clone());
+                    assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                    assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+                    let wakes = counter.0.load(Ordering::SeqCst);
+                    for _ in 0..3 {
+                        assert!(acquisition.as_mut().poll(&mut task).is_pending());
+                        assert_eq!(counter.0.load(Ordering::SeqCst), wakes);
+                    }
+                    wakes
+                });
+
+                assert!(counter.0.load(Ordering::SeqCst) > masked_wakes);
+                assert_eq!(cx.now(), Time::ZERO, "unmask must not need timer expiry");
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+                match acquisition.as_mut().poll(&mut task) {
+                    Poll::Ready(Outcome::Cancelled(actual)) => assert_eq!(actual, reason),
+                    other => panic!("unmask must wake parked {entry:?}: {other:?}"),
+                }
+                assert_eq!(pool.stats().total_timeouts, 0);
+                assert_retired(&pool, &cx);
+                assert!(driver.is_empty());
+                assert!(ambient_driver.is_empty());
+            }
+        }
+
+        #[test]
+        fn deadline_acquisition_preserves_manager_terminals_and_retry_policy() {
+            for terminal in [
+                Outcome::Err("connect refused"),
+                Outcome::Cancelled(attributed_pool_cancel_reason()),
+                Outcome::Panicked(crate::types::PanicPayload::new("bounded connect panic")),
+            ] {
+                for entry in ENTRIES {
+                    let pool = AsyncDbPool::new(
+                        ControlledAsyncPoolManager::new(terminal.clone()),
+                        DbPoolConfig::with_max_size(1),
+                    );
+                    let (cx, _, driver) = virtual_owner(Budget::INFINITE);
+                    let actual = block_on(acquire(&pool, &cx, entry, Time::from_millis(100)));
+                    match (actual, &terminal) {
+                        (Outcome::Err(DbPoolError::Connect(actual)), Outcome::Err(expected)) => {
+                            assert_eq!(actual.0, *expected);
+                        }
+                        (Outcome::Cancelled(actual), Outcome::Cancelled(expected)) => {
+                            assert_eq!(&actual, expected);
+                        }
+                        (Outcome::Panicked(actual), Outcome::Panicked(expected)) => {
+                            assert_eq!(&actual, expected);
+                        }
+                        (actual, expected) => {
+                            panic!("{entry:?}: {actual:?}, expected {expected:?}");
+                        }
+                    }
+                    let attempts = if matches!(entry, Entry::Retry)
+                        && matches!(terminal, Outcome::Err(_))
+                    {
+                        3
+                    } else {
+                        1
+                    };
+                    assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), attempts);
+                    assert_eq!(pool.stats().total_timeouts, 0);
+                    assert_retired(&pool, &cx);
+                    assert!(driver.is_empty());
+                }
+            }
+        }
+
+        #[test]
+        fn retries_and_backoff_do_not_renew_the_deadline() {
+            let pool = AsyncDbPool::new(
+                ControlledAsyncPoolManager::new(Outcome::Err("retry me")),
+                DbPoolConfig::with_max_size(1),
+            );
+            let (cx, clock, driver) = virtual_owner(Budget::INFINITE);
+            let policy = RetryPolicy::fixed_delay(Duration::from_millis(30), 10);
+            let mut acquisition = Box::pin(pool.get_with_retry_and_deadline_outcome(
+                &cx,
+                &policy,
+                Time::from_millis(50),
+            ));
+            let mut task = Context::from_waker(Waker::noop());
+            // The first pending poll yields between attempts; the next arms
+            // backoff without another connect.
+            assert!(acquisition.as_mut().poll(&mut task).is_pending());
+            assert!(acquisition.as_mut().poll(&mut task).is_pending());
+            assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+            clock.advance_to(Time::from_millis(30));
+            assert_eq!(driver.process_timers(), 1);
+            assert!(acquisition.as_mut().poll(&mut task).is_pending());
+            assert!(acquisition.as_mut().poll(&mut task).is_pending());
+            assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 2);
+
+            clock.advance_to(Time::from_millis(50));
+            let _ = driver.process_timers();
+            assert!(matches!(
+                acquisition.as_mut().poll(&mut task),
+                Poll::Ready(Outcome::Err(DbPoolError::AcquireTimeout))
+            ));
+            assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(pool.stats().total_timeouts, 1);
+            assert_retired(&pool, &cx);
+            assert!(driver.is_empty());
+        }
+    }
+
     /// Counts the release-time hooks; its reset can fail or never finish.
     struct ResettingAsyncManager {
         keep_on_check: bool,

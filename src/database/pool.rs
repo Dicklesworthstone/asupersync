@@ -1817,7 +1817,7 @@ impl<M: ConnectionManager> fmt::Debug for PooledConnection<'_, M> {
 
 // ─── AsyncConnectionManager ─────────────────────────────────────────────────
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::types::{CancelReason, Outcome, PanicPayload};
 
 /// Internal acquisition result shared by the legacy and four-valued APIs.
@@ -2082,6 +2082,22 @@ impl<M: AsyncConnectionManager> Drop for AsyncWaiterGuard<'_, M> {
     fn drop(&mut self) {
         if let Some(waiter) = self.slot.take() {
             self.pool.cancel_async_pool_waiter(&waiter);
+        }
+    }
+}
+
+/// Keeps the acquisition subscribed when a cancellation request is masked.
+/// Unlike a fused `Cancelled` observer, this registration survives the first
+/// request so leaving the mask can wake a foreign context's parked caller.
+struct AsyncAcquireCancellation<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl Drop for AsyncAcquireCancellation<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
         }
     }
 }
@@ -2377,6 +2393,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
         client_scope: &'static str,
         deadline: Time,
+        owner_clock: bool,
     ) -> Result<(), AsyncAcquireFailure<M::Error>> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -2441,7 +2458,25 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 return Err(DbPoolError::AcquireTimeout.into());
             }
             let chunk = remaining.min(CANCEL_POLL_INTERVAL);
-            let _ = crate::time::timeout(cx.now(), chunk, waiter.notify.notified()).await;
+            if owner_clock {
+                use std::future::{Future, poll_fn};
+                use std::task::Poll;
+
+                let mut notified = std::pin::pin!(waiter.notify.notified());
+                let mut timer = std::pin::pin!(cx.sleep_until_on_clock(cx.now() + chunk));
+                poll_fn(|task| {
+                    if notified.as_mut().poll(task).is_ready()
+                        || timer.as_mut().poll_deadline(task).is_ready()
+                    {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            } else {
+                let _ = crate::time::timeout(cx.now(), chunk, waiter.notify.notified()).await;
+            }
         }
     }
 
@@ -2495,9 +2530,126 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    /// Acquire a connection before an absolute deadline on `cx`'s clock.
+    ///
+    /// The deadline covers FIFO admission, connection establishment, validation,
+    /// and replacement of unusable idle connections. It is never restarted by
+    /// one of those steps. The configured connection wait timeout still applies
+    /// while waiting for pool capacity.
+    ///
+    /// Expiry returns [`DbPoolError::AcquireTimeout`], including when the
+    /// deadline has already elapsed before the first poll. Caller cancellation
+    /// and an earlier caller budget deadline retain their exact cancellation
+    /// reason. Cancellation masks are respected; the explicit acquisition
+    /// deadline remains enforced under a mask.
+    ///
+    /// Cancellation or expiry drops the pending manager future, releases its
+    /// waiter and reserved capacity, and discards a connection whose validation
+    /// was interrupted. Managers must make their futures safe to drop; this
+    /// method cannot interrupt synchronous work inside a manager's poll.
+    /// Manager errors and explicit panic outcomes retain their original values.
+    pub async fn get_with_deadline_outcome(
+        &self,
+        cx: &Cx,
+        deadline: Time,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        match self
+            .acquire_before(cx, deadline, "anonymous", self.acquire_on_clock(cx, true))
+            .await
+        {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
+    /// One owner-clock boundary around the existing acquisition state machine.
+    /// Its local futures are dropped before publishing any terminal result, so
+    /// all of the acquisition's ownership guards settle before returning.
+    async fn acquire_before<'a>(
+        &'a self,
+        cx: &Cx,
+        deadline: Time,
+        client_scope: &'static str,
+        acquisition: impl std::future::Future<
+            Output = Result<AsyncPooledConnection<'a, M>, AsyncAcquireFailure<M::Error>>,
+        >,
+    ) -> Result<AsyncPooledConnection<'a, M>, AsyncAcquireFailure<M::Error>> {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let mut acquisition = std::pin::pin!(acquisition);
+        let mut cancellation = AsyncAcquireCancellation { cx, token: None };
+        loop {
+            let now = cx.now();
+            if cx.checkpoint().is_err() {
+                return Err(AsyncAcquireFailure::cancelled(cx));
+            }
+            if now >= deadline {
+                return Err(self.acquisition_deadline_elapsed(cx, client_scope));
+            }
+
+            // As in sleep_cx, an owner deadline wakes the checkpoint. If it
+            // elapsed while masked, retire that timer and park on the explicit
+            // deadline instead of repeatedly polling a ready owner timer.
+            let wake_at = cx
+                .budget()
+                .deadline
+                .filter(|owner_deadline| *owner_deadline > now)
+                .map_or(deadline, |owner_deadline| deadline.min(owner_deadline));
+            let mut timer = std::pin::pin!(cx.sleep_until_on_clock(wake_at));
+            let result = poll_fn(|task| {
+                cancellation.token =
+                    Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Some(Err(AsyncAcquireFailure::cancelled(cx))));
+                }
+                if timer.as_mut().poll_deadline(task).is_ready() {
+                    return Poll::Ready(None);
+                }
+                acquisition.as_mut().poll(task).map(Some)
+            })
+            .await;
+
+            if let Some(result) = result {
+                // Preserve manager errors, cancellation, and panic outcomes.
+                let connection = result?;
+                // A ready manager can cross the deadline during its poll. Do
+                // not hand that connection to a caller that has already left.
+                let now = cx.now();
+                if cx.checkpoint().is_err() {
+                    connection.discard();
+                    return Err(AsyncAcquireFailure::cancelled(cx));
+                }
+                if now >= deadline {
+                    connection.discard();
+                    return Err(self.acquisition_deadline_elapsed(cx, client_scope));
+                }
+                return Ok(connection);
+            }
+        }
+    }
+
+    fn acquisition_deadline_elapsed(
+        &self,
+        cx: &Cx,
+        client_scope: &'static str,
+    ) -> AsyncAcquireFailure<M::Error> {
+        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+        trace_async_pool_event(cx, "acquire", "deadline", client_scope);
+        DbPoolError::AcquireTimeout.into()
+    }
+
     async fn acquire(
         &self,
         cx: &Cx,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
+        self.acquire_on_clock(cx, false).await
+    }
+
+    async fn acquire_on_clock(
+        &self,
+        cx: &Cx,
+        owner_clock: bool,
     ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "anonymous");
         let wait_deadline = cx.now() + self.config.connection_timeout;
@@ -2546,6 +2698,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         &mut waiter_guard.slot,
                         "anonymous",
                         wait_deadline,
+                        owner_clock,
                     )
                     .await?;
                     continue;
@@ -2719,15 +2872,51 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    /// Acquire for a client with one absolute deadline for the whole operation.
+    ///
+    /// Uses the same quota and authentication checks as
+    /// [`Self::get_for_client_outcome`] and the owner-clock deadline,
+    /// cancellation, and cleanup rules of [`Self::get_with_deadline_outcome`].
+    /// Expiry or cancellation releases only this acquisition's client quota;
+    /// another checkout for the same client retains its quota and connection.
+    pub async fn get_for_client_with_deadline_outcome(
+        &self,
+        cx: &Cx,
+        client_id: &str,
+        deadline: Time,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        match self
+            .acquire_before(
+                cx,
+                deadline,
+                "client",
+                self.acquire_for_client_on_clock(cx, client_id, true),
+            )
+            .await
+        {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
     async fn acquire_for_client(
         &self,
         cx: &Cx,
         client_id: &str,
     ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
+        self.acquire_for_client_on_clock(cx, client_id, false).await
+    }
+
+    async fn acquire_for_client_on_clock(
+        &self,
+        cx: &Cx,
+        client_id: &str,
+        owner_clock: bool,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "client");
         // If client quotas are disabled, delegate to regular get()
         if !self.config.enforce_client_quotas {
-            return self.acquire(cx).await.map(|mut conn| {
+            return self.acquire_on_clock(cx, owner_clock).await.map(|mut conn| {
                 conn.client_id = Some(client_id.to_string());
                 conn
             });
@@ -2849,6 +3038,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         &mut waiter_guard.slot,
                         "client",
                         wait_deadline,
+                        owner_clock,
                     )
                     .await?;
                     continue;
@@ -3060,6 +3250,72 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         policy: &RetryPolicy,
     ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         match self.acquire_with_retry(cx, policy).await {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
+    /// Acquire with retry under one absolute deadline on the caller's clock.
+    ///
+    /// The deadline covers every attempt and backoff, as well as each
+    /// attempt's FIFO wait, connect, and validation. Only connection and
+    /// capacity errors are retried, up to `policy.max_attempts` (at least one
+    /// attempt), as with [`Self::get_with_retry_outcome`]. Per-attempt pool wait
+    /// limits still apply; the supplied deadline replaces the legacy retry
+    /// method's overall wall-clock allowance.
+    ///
+    /// Cancellation, masking, terminal outcomes, and resource cleanup follow
+    /// [`Self::get_with_deadline_outcome`]. Expiry returns
+    /// [`DbPoolError::AcquireTimeout`] and never starts another retry.
+    pub async fn get_with_retry_and_deadline_outcome(
+        &self,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        deadline: Time,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let acquisition = async {
+            let mut attempt = 0u32;
+            loop {
+                if cx.checkpoint().is_err() {
+                    return Err(AsyncAcquireFailure::cancelled(cx));
+                }
+                if cx.now() >= deadline {
+                    return Err(self.acquisition_deadline_elapsed(cx, "anonymous"));
+                }
+                attempt += 1;
+                match self.acquire_on_clock(cx, true).await {
+                    Err(AsyncAcquireFailure::Pool(error))
+                        if matches!(error, DbPoolError::Connect(_) | DbPoolError::Full)
+                            && attempt < policy.max_attempts => {}
+                    result => return result,
+                }
+
+                let backoff_deadline =
+                    deadline.min(cx.now() + calculate_delay(policy, attempt, None));
+                // Even an immediate-retry policy must let a native owner or
+                // virtual clock advance instead of exhausting every attempt
+                // in one poll while its manager keeps failing synchronously.
+                crate::runtime::yield_now().await;
+                while cx.now() < backoff_deadline {
+                    if self.is_closed() {
+                        return Err(DbPoolError::Closed.into());
+                    }
+                    if cx.checkpoint().is_err() {
+                        return Err(AsyncAcquireFailure::cancelled(cx));
+                    }
+                    // Keep the established close-response bound, but bind
+                    // backoff to the supplied context rather than the poller.
+                    let wake_at =
+                        backoff_deadline.min(cx.now() + Duration::from_millis(10));
+                    let mut timer = std::pin::pin!(cx.sleep_until_on_clock(wake_at));
+                    std::future::poll_fn(|task| timer.as_mut().poll_deadline(task)).await;
+                }
+            }
+        };
+        match self
+            .acquire_before(cx, deadline, "anonymous", acquisition)
+            .await
+        {
             Ok(connection) => Outcome::Ok(connection),
             Err(failure) => failure.into_outcome(),
         }
