@@ -94,6 +94,35 @@ impl Drop for TerminationTally {
     }
 }
 
+// Admission waits defer a masked request rather than completing on its first
+// observation. Keep their wake subscription until the acquisition settles so
+// unmasking can wake a caller even when no capacity or timer event follows.
+struct AdmissionCancellation<'cx, Caps> {
+    cx: &'cx crate::cx::Cx<Caps>,
+    token: Option<crate::cx::CancelWakerToken>,
+}
+
+impl<'cx, Caps> AdmissionCancellation<'cx, Caps> {
+    fn new(cx: &'cx crate::cx::Cx<Caps>) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn register(&mut self, waker: &std::task::Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl<Caps> Drop for AdmissionCancellation<'_, Caps> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod admission_cancel_tests;
+
 /// Adaptive latency-hedging controllers.
 pub mod adaptive_hedge;
 #[cfg(test)]

@@ -942,7 +942,7 @@ impl Bulkhead {
         let driver = driver.ok_or(BulkheadAcquireError::TimerUnavailable)?;
         let mut queued = self.acquire_queued(weight, now)?;
         queued.timer_driver = Some(driver.clone());
-        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut cancellation = super::AdmissionCancellation::new(cx);
 
         loop {
             let mut changed = std::pin::pin!(self.changed.notified());
@@ -981,7 +981,8 @@ impl Bulkhead {
             let mut timer =
                 std::pin::pin!(crate::time::Sleep::with_timer_driver(wake_at, driver.clone()));
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                cancellation.register(task.waker());
+                if cx.checkpoint().is_err() {
                     return Poll::Ready(());
                 }
                 if changed.as_mut().poll(task).is_ready()

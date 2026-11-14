@@ -2981,14 +2981,19 @@ mod async_admission_tests {
         let limiter = stalled(1);
         let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
         let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
-        let mut task = Context::from_waker(Waker::noop());
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
         clock.advance_to(Time::from_millis(2));
         cx.masked(|| {
-            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            for _ in 0..3 {
+                assert!(waiting.as_mut().poll(&mut task).is_pending());
+                assert_eq!(counter.0.load(Ordering::Acquire), 0);
+                assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+            }
         });
         assert_eq!(limiter.changed.waiter_count(), 1);
-        // Explicitly repoll after the synchronous mask; masks do not promise
-        // a separate wakeup, and the expired timer must not drive a hot loop.
+        assert!(counter.0.load(Ordering::Acquire) > 0, "unmask wakes the queued owner");
         assert!(matches!(
             waiting.as_mut().poll(&mut task),
             Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))

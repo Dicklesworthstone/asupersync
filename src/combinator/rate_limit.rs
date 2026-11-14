@@ -1898,7 +1898,7 @@ impl FixedWindowRateLimiter {
             }
             FixedWindowAdmission::Queued(owner) => owner,
         };
-        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut cancellation = super::AdmissionCancellation::new(cx);
 
         loop {
             let mut changed = std::pin::pin!(self.changed.notified());
@@ -1926,7 +1926,8 @@ impl FixedWindowRateLimiter {
                 wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
             );
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                cancellation.register(task.waker());
+                if cx.checkpoint().is_err() {
                     return Poll::Ready(());
                 }
                 if changed.as_mut().poll(task).is_ready() {
@@ -2119,7 +2120,7 @@ impl RateLimiter {
             .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
         let mut queued = self.acquire_queued_bounded(cost, now, max_queued)?;
         queued.drop_timer = Some(driver.clone());
-        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut cancellation = super::AdmissionCancellation::new(cx);
 
         loop {
             let mut changed = std::pin::pin!(self.changed.notified());
@@ -2152,7 +2153,8 @@ impl RateLimiter {
                 wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
             );
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                cancellation.register(task.waker());
+                if cx.checkpoint().is_err() {
                     return Poll::Ready(());
                 }
                 if changed.as_mut().poll(task).is_ready() {
