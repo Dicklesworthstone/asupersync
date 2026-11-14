@@ -2576,18 +2576,21 @@ impl LabRuntime {
     /// spawns with a caller context, scoped spawns, and queued spawns inherit
     /// the parent's clock at the spawn request. Completed poll boundaries carry
     /// those clocks, and an actual task-to-task wake merges the waking task's
-    /// clock into the task being awakened. Oneshot and MPSC message
-    /// consumption also merges the sender's message clock, including buffered
-    /// receives that need no wake. Retirement-gated joins merge the child's
-    /// terminal clock only after its finalization and retirement barrier.
+    /// clock into the task being awakened. Oneshot, MPSC, watch, and broadcast
+    /// consumption merge the published message clock, including buffered
+    /// receives that need no wake. Mutex acquisition imports the previous
+    /// owner's release clock. Retirement-gated joins merge the child's terminal
+    /// clock only after its finalization and retirement barrier.
     ///
     /// A wake without an active task from this runtime has an unknown source
-    /// and contributes no cross-task edge. Watch/broadcast consumption,
-    /// arbitrary shared-memory access, and external I/O remain partially or
-    /// wholly uninstrumented; use [`crate::Cx::logical_receive`] when the
+    /// and contributes no cross-task edge. Arbitrary shared-memory access and
+    /// external I/O remain partially or wholly uninstrumented; use
+    /// [`crate::Cx::logical_receive`] when the
     /// application can supply an explicit synchronization timestamp. Missing
     /// evidence may produce conservative extra races. This does not make the
-    /// explorer an exhaustive DPOR implementation.
+    /// explorer an exhaustive DPOR implementation. To use this policy for
+    /// every explored seed, construct
+    /// [`crate::lab::DporExplorer::new_with_task_causality`].
     ///
     /// [`Self::new`] retains its legacy Lamport clocks and trace event stream.
     #[must_use]

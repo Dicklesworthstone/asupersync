@@ -46,7 +46,7 @@ use crate::lab::exploration_budget::{
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
 use crate::trace::boundary::SquareComplex;
 use crate::trace::canonicalize::{TraceMonoid, trace_fingerprint};
-use crate::trace::dpor::detect_races;
+use crate::trace::dpor::{RaceAnalysis, RaceDetector, detect_races};
 use crate::trace::event::TraceEvent;
 use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
@@ -805,10 +805,17 @@ impl ScheduleExplorer {
 /// certified optimal-DPOR engine: it does not prove that every reachable class
 /// is explored, nor does it claim no false negatives for deeply nested race
 /// chains without additional iterative-deepening proof machinery.
+///
+/// [`Self::new`] preserves the legacy Lamport-clock trace policy. Use
+/// [`Self::new_with_task_causality`] to give every task its own vector-clock
+/// component and exclude causally ordered conflicts from seed guidance.
+/// Neither mode changes this guided, non-exhaustive coverage boundary.
 pub struct DporExplorer {
     config: ExplorerConfig,
     trace_capacity: usize,
     incomplete_capture: bool,
+    task_causality: bool,
+    invalid_task_causality: bool,
     /// Seeds pending exploration (derived from backtrack points).
     work_queue: VecDeque<u64>,
     /// Seeds already queued for exploration.
@@ -845,7 +852,8 @@ pub struct DporExplorer {
 pub struct DporCoverageMetrics {
     /// Base coverage metrics.
     pub base: CoverageMetrics,
-    /// Total races detected across all runs (immediate, O(n³)).
+    /// Total immediate conflicts detected across all runs (O(n³)). The
+    /// task-causality mode excludes pairs ordered by happens-before.
     pub total_races: usize,
     /// Total HB-races detected across all runs (vector-clock based).
     pub total_hb_races: usize,
@@ -863,7 +871,7 @@ pub struct DporCoverageMetrics {
 }
 
 impl DporExplorer {
-    /// Create a new DPOR explorer with the given configuration.
+    /// Create a new DPOR explorer with the legacy Lamport-clock trace policy.
     #[must_use]
     pub fn new(config: ExplorerConfig) -> Self {
         let trace_capacity = LabConfig::new(config.base_seed).trace_capacity;
@@ -875,6 +883,8 @@ impl DporExplorer {
             config,
             trace_capacity,
             incomplete_capture: false,
+            task_causality: false,
+            invalid_task_causality: false,
             work_queue,
             pending_seeds,
             explored_seeds: BTreeSet::new(),
@@ -889,6 +899,31 @@ impl DporExplorer {
             sleep_pruned: 0,
             sleep_set: crate::trace::dpor::SleepSet::new(),
             per_run_estimated_classes: Vec::new(),
+        }
+    }
+
+    /// Explore seeded schedules using task-level vector-clock causality.
+    ///
+    /// Every initial and derived seed uses
+    /// [`LabRuntime::new_with_task_causality`], independently of replay
+    /// recording. Immediate conflict candidates whose predecessors are
+    /// ordered by the trace's happens-before evidence are not targeted for
+    /// reversal; concurrent conflicts retain their original trace indices.
+    ///
+    /// Only instrumented synchronization contributes cross-task edges.
+    /// Arbitrary shared memory and external I/O are not fully instrumented,
+    /// so missing evidence can produce conservative extra candidates. This
+    /// is guided seed exploration, not exhaustive or optimal DPOR, and does
+    /// not establish absence of application races.
+    ///
+    /// The workload must keep the supplied runtime and its task-causality
+    /// clock policy. Replacing either makes [`Self::explore`] panic before
+    /// accepting that run's coverage; the explorer then refuses reuse.
+    #[must_use]
+    pub fn new_with_task_causality(config: ExplorerConfig) -> Self {
+        Self {
+            task_causality: true,
+            ..Self::new(config)
         }
     }
 
@@ -916,11 +951,18 @@ impl DporExplorer {
     /// The test closure is not re-run to recover evicted events.
     /// An explorer that previously lost events also panics on reuse; construct
     /// a new instance instead of skipping the failed seed.
+    /// In task-causality mode, replacing the supplied runtime or its logical
+    /// clock policy likewise rejects the run and prevents further exploration.
     pub fn explore<F>(&mut self, test: F) -> ExplorationReport
     where
         F: Fn(&mut LabRuntime),
     {
         assert_exploration_ready(self.incomplete_capture, "dpor");
+        assert!(
+            !self.invalid_task_causality,
+            "cannot resume exploration after unsupported task-causality capture; \
+             create a new explorer and retain its runtime and clock policy"
+        );
         while self.results.len() < self.config.max_runs {
             let Some(seed) = self.work_queue.pop_front() else {
                 break;
@@ -936,13 +978,11 @@ impl DporExplorer {
             if trace_events.is_empty() {
                 self.per_run_estimated_classes.push(1);
             } else {
-                let analysis = detect_races(&trace_events);
+                let (analysis, hb_races) = self.analyze_races(&trace_events);
                 self.total_races += analysis.race_count();
                 self.total_backtrack_points += analysis.backtrack_points.len();
 
-                // Also run HB-race detection for coverage metrics.
-                let hb_report = crate::trace::dpor::detect_hb_races(&trace_events);
-                self.total_hb_races += hb_report.race_count();
+                self.total_hb_races += hb_races;
 
                 // Record per-run estimated class count.
                 let est = crate::trace::dpor::estimated_classes(&trace_events);
@@ -990,6 +1030,24 @@ impl DporExplorer {
         self.build_report()
     }
 
+    /// Reuse the metric detector's HB graph when filtering opt-in guidance.
+    /// Retaining the original candidates preserves their trace-index meaning;
+    /// this does not assert that any derived seed realizes a reversal.
+    fn analyze_races(&self, trace_events: &[TraceEvent]) -> (RaceAnalysis, usize) {
+        let mut analysis = detect_races(trace_events);
+        let detector = RaceDetector::from_trace(trace_events);
+        if self.task_causality {
+            let hb = detector.hb_graph();
+            analysis
+                .races
+                .retain(|race| !hb.happens_before(race.earlier, race.later));
+            analysis
+                .backtrack_points
+                .retain(|point| !hb.happens_before(point.race.earlier, point.race.later));
+        }
+        (analysis, detector.races().len())
+    }
+
     /// Run a single schedule and return (trace_events, run_result).
     fn run_once<F>(&mut self, seed: u64, test: &F) -> (Vec<TraceEvent>, RunResult)
     where
@@ -1004,8 +1062,24 @@ impl DporExplorer {
             lab_config = lab_config.with_default_replay_recording();
         }
 
-        let mut runtime = LabRuntime::new(lab_config);
+        let mut runtime = if self.task_causality {
+            LabRuntime::new_with_task_causality(lab_config)
+        } else {
+            LabRuntime::new(lab_config)
+        };
+        let causality_runtime = runtime.state.task_causality_runtime();
         test(&mut runtime);
+        if self.task_causality
+            && (causality_runtime.is_none()
+                || runtime.state.task_causality_runtime() != causality_runtime)
+        {
+            self.invalid_task_causality = true;
+            panic!(
+                "unsupported task-causality capture: phase=dpor seed={seed}; \
+                 the workload replaced its runtime or task clock policy; \
+                 no coverage was accepted and the test closure was not re-run"
+            );
+        }
 
         let steps = runtime.steps();
         let trace_events = complete_trace(&runtime, seed, "dpor", &mut self.incomplete_capture);

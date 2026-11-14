@@ -304,6 +304,294 @@
 
     // ── DPOR Explorer tests ─────────────────────────────────────────────
 
+    fn dpor_channel_trace(runtime: &mut LabRuntime, receiver_waits: bool) -> Vec<TraceEvent> {
+        use crate::cx::Cx;
+
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (tx, mut rx) = crate::channel::oneshot::channel::<()>();
+        let (receiver, _receiver_join) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                rx.recv(&cx).await.unwrap();
+                cx.trace("dpor-received");
+            })
+            .unwrap();
+        let (sender, _sender_join) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                cx.trace("dpor-before-send");
+                tx.send(&cx, ()).unwrap();
+                cx.trace("dpor-after-send");
+            })
+            .unwrap();
+        if receiver_waits {
+            runtime.scheduler.lock().schedule(receiver, 0);
+            runtime.step();
+            assert!(
+                runtime.state.task(receiver).is_some(),
+                "receiver parked before publication"
+            );
+        }
+        runtime.scheduler.lock().schedule(sender, 0);
+        runtime.step();
+        if !receiver_waits {
+            runtime.scheduler.lock().schedule(receiver, 0);
+        }
+        runtime.run_until_idle();
+        assert!(runtime.is_quiescent());
+        runtime.trace().snapshot()
+    }
+
+    fn dpor_message_time(
+        events: &[TraceEvent],
+        message: &str,
+    ) -> (usize, crate::trace::distributed::LogicalTime) {
+        events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| {
+                if matches!(&event.data, TraceData::Message(text) if text == message) {
+                    event.logical_time.clone().map(|time| (index, time))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("missing logical timestamp for {message}"))
+    }
+
+    #[test]
+    fn dpor_default_preserves_legacy_clocks_and_event_stream() {
+        use crate::trace::distributed::{CausalOrder, LogicalClockKind};
+
+        for record_traces in [false, true] {
+            let config = ExplorerConfig {
+                record_traces,
+                ..ExplorerConfig::new(97, 1)
+            };
+            let mut explorer = DporExplorer::new(config);
+            let report = explorer.explore(|runtime| {
+                assert_eq!(runtime.has_replay_recording(), record_traces);
+                let events = dpor_channel_trace(runtime, false);
+                let (_, before) = dpor_message_time(&events, "dpor-before-send");
+                let (_, received) = dpor_message_time(&events, "dpor-received");
+                assert_eq!(before.kind(), LogicalClockKind::Lamport);
+                assert_eq!(received.kind(), LogicalClockKind::Lamport);
+                assert_eq!(before.causal_order(&received), CausalOrder::Concurrent);
+                assert!(!events.iter().any(|event| event.kind == TraceEventKind::Poll));
+            });
+            assert_eq!(report.total_runs, 1);
+            assert!(!report.has_violations());
+        }
+    }
+
+    #[test]
+    fn dpor_task_causality_applies_to_every_seed_and_replay_configuration() {
+        use crate::trace::distributed::{CausalOrder, LogicalClockKind};
+        use crate::trace::dpor::HappensBeforeGraph;
+        use std::cell::RefCell;
+
+        for base_seed in [0, 97] {
+            for worker_count in [1, 2] {
+                for record_traces in [false, true] {
+                    for receiver_waits in [false, true] {
+                        let config = ExplorerConfig {
+                            base_seed,
+                            max_runs: 3,
+                            max_steps_per_run: 128,
+                            worker_count,
+                            record_traces,
+                        };
+                        let mut explorer = DporExplorer::new_with_task_causality(config)
+                            .with_trace_capacity(512);
+                        // Exercise later seeds even if this workload produces no
+                        // further candidates after causal filtering.
+                        assert!(explorer.enqueue_seed_back(base_seed + 1_000));
+                        assert!(explorer.enqueue_seed_back(base_seed + 2_000));
+                        let observed_seeds = RefCell::new(BTreeSet::new());
+                        let report = explorer.explore(|runtime| {
+                            assert_eq!(runtime.has_replay_recording(), record_traces);
+                            assert_eq!(runtime.config().worker_count, worker_count);
+                            assert_eq!(runtime.config().max_steps, Some(128));
+                            assert_eq!(runtime.config().trace_capacity, 512);
+                            assert!(observed_seeds.borrow_mut().insert(runtime.config().seed));
+                            let events = dpor_channel_trace(runtime, receiver_waits);
+                            let (before_index, before) =
+                                dpor_message_time(&events, "dpor-before-send");
+                            let (after_index, after) =
+                                dpor_message_time(&events, "dpor-after-send");
+                            let (received_index, received) =
+                                dpor_message_time(&events, "dpor-received");
+                            assert_eq!(before.kind(), LogicalClockKind::Vector);
+                            assert_eq!(received.kind(), LogicalClockKind::Vector);
+                            assert_eq!(before.causal_order(&received), CausalOrder::Before);
+                            assert_eq!(after.causal_order(&received), CausalOrder::Concurrent);
+                            let hb = HappensBeforeGraph::from_trace(&events);
+                            assert!(hb.happens_before(before_index, received_index));
+                            assert!(!hb.happens_before(after_index, received_index));
+                            let polls: Vec<_> = events
+                                .iter()
+                                .filter(|event| event.kind == TraceEventKind::Poll)
+                                .collect();
+                            assert_eq!(polls.len(), if receiver_waits { 3 } else { 2 });
+                            assert!(polls.iter().all(|event| event.logical_time.as_ref()
+                                .is_some_and(|time| time.kind() == LogicalClockKind::Vector)));
+                            eprintln!(
+                                "dpor_task_causality seed={} workers={worker_count} replay={record_traces} parked={receiver_waits} before={before_index} after={after_index} received={received_index} hb=true later_concurrent=true",
+                                runtime.config().seed
+                            );
+                        });
+                        assert_eq!(report.total_runs, 3);
+                        assert_eq!(report.runs[0].seed, base_seed);
+                        assert_eq!(observed_seeds.borrow().len(), 3);
+                        assert!(!report.has_violations());
+                        assert_eq!(explorer.dpor_coverage().total_hb_races, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dpor_causal_guidance_keeps_concurrent_conflicts_and_excludes_predecessors() {
+        use crate::types::CancelReason;
+        use std::cell::RefCell;
+
+        for receiver_waits in [false, true] {
+            let mut explorer = DporExplorer::new_with_task_causality(ExplorerConfig::new(97, 1));
+            let captured = RefCell::new(Vec::new());
+            explorer.explore(|runtime| {
+                *captured.borrow_mut() = dpor_channel_trace(runtime, receiver_waits);
+            });
+            let events = captured.into_inner();
+            let (_, received) = dpor_message_time(&events, "dpor-received");
+            for (source, expected_candidates) in [("dpor-before-send", 0), ("dpor-after-send", 1)] {
+                let (_, published) = dpor_message_time(&events, source);
+                // Project actual channel clocks onto the existing region-write
+                // conflict model. These are planted conflicts, not a claim that
+                // the channel workload performed cancellation or memory writes.
+                let mut conflicts = vec![
+                    TraceEvent::cancel_request(
+                        1,
+                        Time::ZERO,
+                        TaskId::new_for_test(1, 0),
+                        RegionId::new_for_test(0, 0),
+                        CancelReason::user("model-source"),
+                    )
+                    .with_logical_time(published),
+                    TraceEvent::cancel_request(
+                        2,
+                        Time::ZERO,
+                        TaskId::new_for_test(0, 0),
+                        RegionId::new_for_test(0, 0),
+                        CancelReason::user("model-receiver"),
+                    )
+                    .with_logical_time(received.clone()),
+                ];
+                let (analysis, hb_races) = explorer.analyze_races(&conflicts);
+                assert_eq!(analysis.race_count(), expected_candidates);
+                assert_eq!(analysis.backtrack_points.len(), expected_candidates);
+                assert_eq!(hb_races, expected_candidates);
+                if let Some(point) = analysis.backtrack_points.first() {
+                    assert_eq!(
+                        (point.race.earlier, point.race.later, point.divergence_index),
+                        (0, 1, 0)
+                    );
+                }
+                let legacy = DporExplorer::new(ExplorerConfig::new(97, 1));
+                assert_eq!(
+                    legacy.analyze_races(&conflicts).0.race_count(),
+                    1,
+                    "legacy structural guidance must not change"
+                );
+                // Missing-edge control: removing the producer evidence must
+                // restore the candidate rather than inventing synchronization.
+                for event in &mut conflicts {
+                    event.logical_time = None;
+                }
+                assert_eq!(explorer.analyze_races(&conflicts).0.race_count(), 1);
+                eprintln!(
+                    "dpor_guidance parked={receiver_waits} source={source} candidates={expected_candidates} missing_edge_candidates=1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dpor_task_causality_repeats_seed_guidance_and_certificates() {
+        let campaign = || {
+            let mut explorer = DporExplorer::new_with_task_causality(
+                ExplorerConfig::new(97, 4).worker_count(2).max_steps(128),
+            )
+            .with_trace_capacity(512);
+            assert!(explorer.enqueue_seed_back(98));
+            assert!(explorer.enqueue_seed_back(99));
+            assert!(explorer.enqueue_seed_back(100));
+            let report = explorer.explore(|runtime| {
+                dpor_channel_trace(runtime, true);
+            });
+            assert_eq!(report.total_runs, 4);
+            (
+                report.to_json_string().unwrap(),
+                serde_json::to_value(explorer.dpor_coverage()).unwrap(),
+            )
+        };
+        assert_eq!(
+            campaign(),
+            campaign(),
+            "runtime instance IDs must not change seeded guidance"
+        );
+    }
+
+    #[test]
+    fn dpor_task_causality_refuses_replaced_clocks_without_publishing_coverage() {
+        use crate::remote::NodeId;
+        use crate::trace::distributed::LogicalClockMode;
+        use std::cell::Cell;
+
+        for replacement in [
+            Some(LogicalClockMode::Lamport),
+            Some(LogicalClockMode::Vector {
+                node: NodeId::new("shared-node"),
+            }),
+            None,
+        ] {
+            let calls = Cell::new(0);
+            let mut explorer = DporExplorer::new_with_task_causality(ExplorerConfig::new(97, 3));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                explorer.explore(|runtime| {
+                    calls.set(calls.get() + 1);
+                    if let Some(mode) = &replacement {
+                        runtime.state.set_logical_clock_mode(mode.clone());
+                    } else {
+                        *runtime = LabRuntime::new_with_task_causality(runtime.config().clone());
+                    }
+                    dpor_channel_trace(runtime, false);
+                })
+            }));
+            let panic = result.expect_err("an unsupported clock discipline must reject the run");
+            let diagnostic = panic.downcast_ref::<String>().unwrap();
+            assert!(diagnostic.contains("unsupported task-causality capture"));
+            assert!(diagnostic.contains("seed=97"));
+            let metrics = explorer.dpor_coverage();
+            assert_eq!(metrics.base.total_runs, 0);
+            assert_eq!(metrics.base.equivalence_classes, 0);
+            assert_eq!(metrics.total_races, 0);
+            assert_eq!(metrics.total_hb_races, 0);
+            assert_eq!(metrics.total_backtrack_points, 0);
+            assert!(metrics.estimated_class_trend.is_empty());
+            let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                explorer.explore(|_| calls.set(calls.get() + 1))
+            }));
+            assert!(
+                retry.is_err(),
+                "a consumed seed cannot be skipped after catching the refusal"
+            );
+            assert_eq!(calls.get(), 1, "the workload must not be retried");
+        }
+    }
+
     #[test]
     fn dpor_explore_single_task_no_violations() {
         let mut explorer = DporExplorer::new(ExplorerConfig::new(42, 10));
