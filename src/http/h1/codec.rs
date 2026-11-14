@@ -1180,6 +1180,9 @@ impl<'a> Iterator for PreviewHeaderIter<'a> {
 
 const MAX_CHUNK_LINE_LEN: usize = 1024;
 
+/// Extension bytes and redundant size padding allowed beyond decoded data.
+pub(super) const CHUNK_METADATA_ALLOWANCE_BYTES: u64 = 16 * 1024;
+
 type ChunkedDecoded = (Vec<u8>, Vec<(String, String)>);
 
 #[derive(Debug)]
@@ -1194,6 +1197,7 @@ enum ChunkPhase {
 pub(super) struct ChunkedBodyDecoder {
     phase: ChunkPhase,
     body: Vec<u8>,
+    chunk_metadata_bytes: u64,
     trailers: Vec<(String, String)>,
     trailers_bytes: usize,
     max_body_size: usize,
@@ -1205,6 +1209,7 @@ impl ChunkedBodyDecoder {
         Self {
             phase: ChunkPhase::SizeLine,
             body: Vec::new(),
+            chunk_metadata_bytes: 0,
             trailers: Vec::new(),
             trailers_bytes: 0,
             max_body_size,
@@ -1223,6 +1228,18 @@ impl ChunkedBodyDecoder {
                         return Ok(None);
                     };
                     let size = parse_chunk_size_line(line.as_ref())?;
+                    // Per-line and body limits alone permit a near-1 KiB
+                    // extension or zero-padded size for every one-byte chunk.
+                    // Charge only data already received, never a declared size.
+                    self.chunk_metadata_bytes = self
+                        .chunk_metadata_bytes
+                        .saturating_add(chunk_size_line_metadata_bytes(line.as_ref()));
+                    let body_bytes = u64::try_from(self.body.len()).unwrap_or(u64::MAX);
+                    if self.chunk_metadata_bytes
+                        > body_bytes.saturating_add(CHUNK_METADATA_ALLOWANCE_BYTES)
+                    {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
                     if size == 0 {
                         self.phase = ChunkPhase::Trailers;
                         continue;
@@ -1262,6 +1279,7 @@ impl ChunkedBodyDecoder {
 
                     if line.is_empty() {
                         self.phase = ChunkPhase::SizeLine;
+                        self.chunk_metadata_bytes = 0;
                         self.trailers_bytes = 0;
                         return Ok(Some((
                             std::mem::take(&mut self.body),
@@ -1296,7 +1314,11 @@ impl ChunkedBodyDecoder {
 
 fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut>, HttpError> {
     let Some(line_end) = find_crlf(src.as_ref()) else {
-        if src.len() > max_len {
+        // A full-length line may arrive separately from the final LF. Keep
+        // exactly one trailing CR without admitting another byte of line data.
+        let incomplete_delimiter = src.last() == Some(&b'\r')
+            && src.len().saturating_sub(1) == max_len;
+        if src.len() > max_len && !incomplete_delimiter {
             return Err(HttpError::BadChunkedEncoding);
         }
         return Ok(None);
@@ -1322,6 +1344,28 @@ pub(super) fn find_chunk_size_line_end(buf: &[u8]) -> Result<Option<usize>, Http
         None if buf.len() >= MAX_CHUNK_LINE_LEN + 2 => Err(HttpError::BadChunkedEncoding),
         None => Ok(None),
     }
+}
+
+/// Cost of a validated chunk-size line beyond its canonical hexadecimal size.
+/// Extensions include their leading semicolon. Leading zeroes are padding,
+/// except for the one zero needed to represent a terminal chunk. Ordinary
+/// framing and significant size digits do not spend this allowance.
+pub(super) fn chunk_size_line_metadata_bytes(line: &[u8]) -> u64 {
+    let size_end = line
+        .iter()
+        .position(|&byte| byte == b';')
+        .unwrap_or(line.len());
+    let leading_zeroes = line[..size_end]
+        .iter()
+        .take_while(|&&byte| byte == b'0')
+        .count();
+    let padding = if leading_zeroes == size_end {
+        leading_zeroes.saturating_sub(1)
+    } else {
+        leading_zeroes
+    };
+    let extension = line.len() - size_end;
+    u64::try_from(padding.saturating_add(extension)).unwrap_or(u64::MAX)
 }
 
 pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
@@ -1947,3 +1991,7 @@ impl Encoder<Response> for Http1Codec {
 #[cfg(test)]
 #[path = "codec_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chunk_metadata_budget_tests.rs"]
+mod chunk_metadata_budget_tests;

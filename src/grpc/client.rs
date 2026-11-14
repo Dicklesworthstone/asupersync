@@ -47,7 +47,11 @@ use super::streaming::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+mod balance;
+#[cfg(not(target_arch = "wasm32"))]
 mod legacy_native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use balance::{BalancedChannel, BalancedGrpcClient, MAX_BALANCED_ENDPOINTS};
 #[cfg(not(target_arch = "wasm32"))]
 mod proxy;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1052,9 +1056,44 @@ impl<C: Codec> GrpcClient<C> {
         request: &Request<Req>,
         path: &str,
     ) -> Result<Metadata, Status> {
+        self.build_outbound_metadata_inner(request, path, |client, request| {
+            client.apply_client_interceptors(request)
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn build_admitted_metadata<Req>(
+        &self,
+        cx: &crate::cx::Cx,
+        request: &Request<Req>,
+        path: &str,
+        deadline: &mut CallDeadline,
+    ) -> Result<Metadata, Status> {
+        self.build_outbound_metadata_inner(request, path, |client, request| {
+            for interceptor in &client.client_interceptors {
+                super::native_stream::check_cancellation(cx)?;
+                deadline.check()?;
+                let result = interceptor.intercept(request);
+                super::native_stream::check_cancellation(cx)?;
+                deadline.check()?;
+                result?;
+                deadline.tighten(request.metadata())?;
+                deadline.apply_remaining(request.metadata_mut())?;
+            }
+            super::native_stream::check_cancellation(cx)?;
+            deadline.check()
+        })
+    }
+
+    fn build_outbound_metadata_inner<Req>(
+        &self,
+        request: &Request<Req>,
+        path: &str,
+        intercept: impl FnOnce(&Self, &mut Request<Bytes>) -> Result<(), Status>,
+    ) -> Result<Metadata, Status> {
         let mut metadata_request = Request::with_metadata(Bytes::new(), request.metadata().clone());
         self.apply_channel_metadata_defaults(metadata_request.metadata_mut());
-        self.apply_client_interceptors(&mut metadata_request)?;
+        intercept(self, &mut metadata_request)?;
 
         let mut metadata = metadata_request.metadata().clone();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1235,7 +1274,19 @@ impl<C: Codec> GrpcClient<C> {
         request: Request<C::Encode>,
     ) -> Result<NativeServerStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
     {
-        let setup = self.prepare_native_stream(cx, path, &request)?;
+        self.native_server_streaming_admitted(cx, path, request, None)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn native_server_streaming_admitted(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<C::Encode>,
+        admitted: Option<CallDeadline>,
+    ) -> Result<NativeServerStream<NativeH2Io, C>, Status> {
+        let setup = self.prepare_native_stream_admitted(cx, path, &request, admitted)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata(request.into_inner(), setup.metadata);
         let stream = setup.endpoint.connect_with_dial(
@@ -1317,7 +1368,18 @@ impl<C: Codec> GrpcClient<C> {
         request: Request<()>,
     ) -> Result<NativeDuplexStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
     {
-        let setup = self.prepare_native_stream(cx, path, &request)?;
+        self.native_duplex_admitted(cx, path, request, None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn native_duplex_admitted(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<()>,
+        admitted: Option<CallDeadline>,
+    ) -> Result<NativeDuplexStream<NativeH2Io, C>, Status> {
+        let setup = self.prepare_native_stream_admitted(cx, path, &request, admitted)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata((), setup.metadata);
         let stream = setup.endpoint.connect_duplex_with_dial(
@@ -1344,6 +1406,17 @@ impl<C: Codec> GrpcClient<C> {
         path: &str,
         request: &Request<T>,
     ) -> Result<NativeClientSetup, Status> {
+        self.prepare_native_stream_admitted(cx, path, request, None)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn prepare_native_stream_admitted<T>(
+        &self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: &Request<T>,
+        admitted: Option<CallDeadline>,
+    ) -> Result<NativeClientSetup, Status> {
         // Metadata defaults and application interceptors use the same context
         // that the native owner installs for every subsequent I/O poll.
         let _ambient = crate::cx::Cx::set_current(Some(cx.clone()));
@@ -1356,7 +1429,11 @@ impl<C: Codec> GrpcClient<C> {
             ));
         }
         let config = self.channel.config();
-        let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
+        let previously_admitted = admitted.is_some();
+        let mut deadline = match admitted {
+            Some(deadline) => deadline,
+            None => CallDeadline::capture(cx, request.metadata(), config.timeout)?,
+        };
         let keepalive = self.channel.native_keepalive_policy(cx)?;
         let target = NativeH2Target::from_channel(&self.channel)?;
         #[cfg(not(feature = "tls"))]
@@ -1390,7 +1467,15 @@ impl<C: Codec> GrpcClient<C> {
             accept_gzip: config.accept_compression.contains(&CompressionEncoding::Gzip),
             ..NativeStreamConfig::default()
         };
-        let mut metadata = self.build_outbound_metadata(request, path)?;
+        let mut metadata = if previously_admitted {
+            self.build_admitted_metadata(cx, request, path, &mut deadline)?
+        } else {
+            self.build_outbound_metadata(request, path)?
+        };
+        if previously_admitted {
+            deadline.tighten(&metadata)?;
+            deadline.apply_remaining(&mut metadata)?;
+        }
         // The native owner generates compression fields from its codec policy.
         // Admit the channel's exact defaults, then remove only those fields so
         // they are emitted once. A request/interceptor may not select a codec
@@ -1496,44 +1581,76 @@ impl<C: Codec> GrpcClient<C> {
                 Box::new(request.into_inner()),
                 "native HTTP/2 unary request encoding",
             )?;
-            let mut framed_request = BytesMut::new();
-            self.codec
-                .encode_message(&typed_request, &mut framed_request)
-                .map_err(GrpcError::into_status)?;
-
-            let wire_response =
-                native_h2_unary(&self.channel, path, metadata, framed_request.freeze()).await?;
-
-            if let Some(encoding) = wire_response.grpc_encoding.as_deref() {
-                let selected = CompressionEncoding::from_header_value(encoding)
-                    .ok_or_else(|| Status::internal("unsupported gRPC response encoding"))?;
-                if selected != CompressionEncoding::Identity
-                    && !effective_accept_compressions(&self.channel.config).contains(&selected)
-                {
-                    return Err(Status::internal("gRPC response encoding was not accepted"));
-                }
-            }
-
-            let mut framed_response = BytesMut::from(wire_response.body.as_ref());
-            let decoded = self
-                .codec
-                .decode_message_with_negotiated_encoding(
-                    &mut framed_response,
-                    wire_response.grpc_encoding.as_deref(),
-                )
-                .map_err(GrpcError::into_status)?
-                .ok_or_else(|| Status::internal("gRPC unary response contained no message"))?;
-            if !framed_response.is_empty() {
-                return Err(Status::internal(
-                    "gRPC unary response contained multiple or trailing message bytes",
-                ));
-            }
-            let payload = downcast_boxed_message::<Resp>(
-                Box::new(decoded),
-                "native HTTP/2 unary response decoding",
-            )?;
-            Ok(Response::with_metadata(payload, wire_response.metadata))
+            self.native_unary(path, metadata, typed_request, None).await
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn native_unary<Resp: Send + 'static>(
+        &mut self,
+        path: &str,
+        mut metadata: Metadata,
+        request: C::Encode,
+        mut admitted: Option<CallDeadline>,
+    ) -> Result<Response<Resp>, Status> {
+        if let Some(deadline) = &mut admitted {
+            super::native_stream::check_cancellation(&legacy_native_cx()?)?;
+            deadline.tighten(&metadata)?;
+            deadline.apply_remaining(&mut metadata)?;
+        }
+        let mut framed_request = BytesMut::new();
+        let encoded = self.codec.encode_message(&request, &mut framed_request);
+        if let Some(deadline) = &admitted {
+            super::native_stream::check_cancellation(&legacy_native_cx()?)?;
+            deadline.apply_remaining(&mut metadata)?;
+        }
+        encoded.map_err(GrpcError::into_status)?;
+
+        let wire_response = native_h2_unary(
+            &self.channel,
+            path,
+            metadata,
+            framed_request.freeze(),
+            admitted.as_ref(),
+        )
+        .await?;
+
+        if let Some(encoding) = wire_response.grpc_encoding.as_deref() {
+            let selected = CompressionEncoding::from_header_value(encoding)
+                .ok_or_else(|| Status::internal("unsupported gRPC response encoding"))?;
+            if selected != CompressionEncoding::Identity
+                && !effective_accept_compressions(&self.channel.config).contains(&selected)
+            {
+                return Err(Status::internal("gRPC response encoding was not accepted"));
+            }
+        }
+
+        let mut framed_response = BytesMut::from(wire_response.body.as_ref());
+        if let Some(deadline) = &admitted {
+            super::native_stream::check_cancellation(&legacy_native_cx()?)?;
+            deadline.check()?;
+        }
+        let decoded = self.codec.decode_message_with_negotiated_encoding(
+            &mut framed_response,
+            wire_response.grpc_encoding.as_deref(),
+        );
+        if let Some(deadline) = &admitted {
+            super::native_stream::check_cancellation(&legacy_native_cx()?)?;
+            deadline.check()?;
+        }
+        let decoded = decoded
+            .map_err(GrpcError::into_status)?
+            .ok_or_else(|| Status::internal("gRPC unary response contained no message"))?;
+        if !framed_response.is_empty() {
+            return Err(Status::internal(
+                "gRPC unary response contained multiple or trailing message bytes",
+            ));
+        }
+        let payload = downcast_boxed_message::<Resp>(
+            Box::new(decoded),
+            "native HTTP/2 unary response decoding",
+        )?;
+        Ok(Response::with_metadata(payload, wire_response.metadata))
     }
 
     /// Start a server streaming RPC call.
@@ -2101,6 +2218,7 @@ async fn native_h2_unary(
     path: &str,
     metadata: Metadata,
     body: Bytes,
+    admitted: Option<&CallDeadline>,
 ) -> Result<NativeUnaryWireResponse, Status> {
     let cx = crate::cx::Cx::current().ok_or_else(|| {
         Status::failed_precondition(
@@ -2137,7 +2255,9 @@ async fn native_h2_unary(
             // request already carries the pre-queue `grpc-timeout`, and a
             // second entry would follow it onto the wire.
             let mut metadata = metadata;
-            if let Some(timeout) = timeout {
+            if let Some(deadline) = admitted {
+                deadline.apply_remaining(&mut metadata)?;
+            } else if let Some(timeout) = timeout {
                 let elapsed = Duration::from_nanos(native_now().duration_since(now));
                 let remaining = timeout.saturating_sub(elapsed);
                 if remaining.is_zero() {
@@ -2152,9 +2272,16 @@ async fn native_h2_unary(
             );
             AdmittedUnary::new(io, permit).await
         } else {
+            let mut metadata = metadata;
+            if let Some(deadline) = admitted {
+                deadline.apply_remaining(&mut metadata)?;
+            }
             native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body).await
         }
     };
+    if let Some(deadline) = admitted {
+        return deadline.run(io).await;
+    }
     let Some(timeout) = timeout else {
         return io.await;
     };

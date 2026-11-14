@@ -45,7 +45,7 @@ pub mod h3 {
     #[cfg(feature = "tls")]
     pub use super::h3_client::{
         NativeH3Client, NativeH3ClientConfig, NativeH3ClientError, NativeH3ClientResponse,
-        NativeH3ClientResponseSummary,
+        NativeH3ClientResponseSummary, NativeH3Tunnel, NativeH3TunnelError, NativeH3TunnelEvent,
     };
     pub use super::h3_native::{
         H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame,

@@ -6396,6 +6396,120 @@ mod tests {
     }
 
     #[test]
+    fn pg_row_binary_rendered_scalars_redecode_with_their_effective_text_format() {
+        let conn = make_test_connection();
+        let mut interval = (-1_250_000_i64).to_be_bytes().to_vec();
+        interval.extend_from_slice(&2_i32.to_be_bytes());
+        interval.extend_from_slice(&(-3_i32).to_be_bytes());
+        let cases = [
+            (
+                oid::UUID,
+                b"0123456789abcdef".to_vec(),
+                "30313233-3435-3637-3839-616263646566",
+            ),
+            (oid::DATE, i32::MIN.to_be_bytes().to_vec(), "-infinity"),
+            (oid::DATE, 0_i32.to_be_bytes().to_vec(), "2000-01-01"),
+            (
+                oid::TIMESTAMP,
+                (-1_i64).to_be_bytes().to_vec(),
+                "1999-12-31 23:59:59.999999",
+            ),
+            (oid::INTERVAL, interval, "-3 mons 2 days -00:00:01.25"),
+            // NUMERIC was already rendered before this fix. Its typed text
+            // view must remain usable even though String::accepts is narrower.
+            (oid::NUMERIC, vec![0, 1, 0, 0, 0, 0, 0, 0, 0, 7], "7"),
+        ];
+        let columns = Arc::new(
+            cases
+                .iter()
+                .enumerate()
+                .map(|(index, (type_oid, _, _))| PgColumn {
+                    name: format!("field_{index}"),
+                    table_oid: 0,
+                    column_id: 0,
+                    type_oid: *type_oid,
+                    type_size: -1,
+                    type_modifier: -1,
+                    format_code: 1,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let indices = Arc::new(
+            columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| (column.name.clone(), index))
+                .collect(),
+        );
+        let mut data = i16::try_from(cases.len()).unwrap().to_be_bytes().to_vec();
+        for (_, payload, _) in &cases {
+            data.extend_from_slice(&i32::try_from(payload.len()).unwrap().to_be_bytes());
+            data.extend_from_slice(payload);
+        }
+        let values = conn
+            .parse_data_row(&data, &columns)
+            .expect("binary DataRow");
+        let row = PgRow {
+            columns,
+            column_indices: indices,
+            values,
+        };
+        for (index, (_, _, expected)) in cases.iter().enumerate() {
+            let name = format!("field_{index}");
+            assert_eq!(row.get_str(&name).unwrap(), *expected);
+            assert_eq!(row.get_typed::<String>(&name).unwrap(), *expected);
+            assert_eq!(row.get_typed_idx::<String>(index).unwrap(), *expected);
+            assert_eq!(row.columns()[index].format_code, 1);
+        }
+    }
+
+    #[test]
+    fn pg_row_binary_timestamptz_keeps_raw_bytes_for_string_and_system_time() {
+        let conn = make_test_connection();
+        let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+        for (micros, text, instant) in [
+            (0_i64, "2000-01-01 00:00:00+00", epoch),
+            (
+                -1_i64,
+                "1999-12-31 23:59:59.999999+00",
+                epoch - std::time::Duration::from_micros(1),
+            ),
+        ] {
+            let columns = Arc::new(vec![PgColumn {
+                name: "instant".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::TIMESTAMPTZ,
+                type_size: 8,
+                type_modifier: -1,
+                format_code: 1,
+            }]);
+            let mut data = 1_i16.to_be_bytes().to_vec();
+            data.extend_from_slice(&8_i32.to_be_bytes());
+            data.extend_from_slice(&micros.to_be_bytes());
+            let values = conn.parse_data_row(&data, &columns).unwrap();
+            // Eight NUL bytes are valid UTF-8, while a negative timestamp's
+            // raw bytes are not. Neither storage representation is rendered.
+            assert_eq!(matches!(&values[0], PgValue::Text(_)), micros == 0);
+            let row = PgRow {
+                columns,
+                column_indices: Arc::new(BTreeMap::from([("instant".to_string(), 0)])),
+                values,
+            };
+            assert_eq!(row.get_typed::<String>("instant").unwrap(), text);
+            assert_eq!(row.get_typed_idx::<String>(0).unwrap(), text);
+            assert_eq!(
+                row.get_typed::<std::time::SystemTime>("instant").unwrap(),
+                instant
+            );
+            assert_eq!(
+                row.get_typed_idx::<std::time::SystemTime>(0).unwrap(),
+                instant
+            );
+        }
+    }
+
+    #[test]
     fn pg_row_get_typed_column_not_found() {
         let columns = Arc::new(vec![]);
         let row = PgRow {

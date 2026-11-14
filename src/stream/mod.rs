@@ -170,6 +170,7 @@ mod partition;
 mod peekable;
 mod receiver_stream;
 mod scan;
+mod sink_forward;
 mod skip;
 mod stream;
 mod stream_map;
@@ -206,6 +207,9 @@ pub use partition::{Partition, partition};
 pub use peekable::Peekable;
 pub use receiver_stream::ReceiverStream;
 pub use scan::Scan;
+pub use sink_forward::{
+    SinkForwardError, SinkForwardProgress, SinkForwardSession, SinkForwardStage,
+};
 pub use skip::{Skip, SkipWhile};
 pub use stream::Stream;
 pub use stream_map::StreamMap;

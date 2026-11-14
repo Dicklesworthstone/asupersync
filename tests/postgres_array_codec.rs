@@ -1,12 +1,12 @@
-//! PostgreSQL one-dimensional arrays through the public `ToSql` / `FromSql`
-//! codecs, without a server: `Vec<T>` binds as PostgreSQL's binary array
-//! format and decodes from both the text output (`{1,"a b",NULL}`) and the
-//! binary format. `tests/postgres_real_server.rs` round-trips the same values
-//! through a real server.
+//! PostgreSQL arrays through the public `ToSql` / `FromSql` codecs, without a
+//! server. `Vec<T>` retains its one-dimensional behavior; `PgArray<T>` preserves
+//! rectangular shapes and SQL lower bounds. Both bind in binary and decode
+//! text or binary results. `tests/postgres_real_server.rs` exercises their
+//! parameter, prepared-statement, and result paths against a real server.
 #![cfg(feature = "postgres")]
 
 use asupersync::database::postgres::{
-    Format, FromSql, IsNull, PgArrayElement, PgError, ToSql, oid,
+    Format, FromSql, IsNull, PgArray, PgArrayDimension, PgArrayElement, PgError, ToSql, oid,
 };
 
 fn encode(value: &dyn ToSql) -> Vec<u8> {
@@ -212,4 +212,308 @@ fn a_binary_array_refuses_an_element_that_encodes_itself_as_text() {
     expected.push(b'a');
     assert_eq!(encode(&vec!["a".to_owned()]), expected);
     assert_eq!(encode(&vec!["a"]), expected);
+}
+
+fn dimension(length: usize, lower: i32) -> PgArrayDimension {
+    PgArrayDimension::new(length, lower).expect("valid dimension")
+}
+
+#[test]
+fn shaped_arrays_preserve_two_dimensions_bounds_and_null_elements() {
+    let values = PgArray::new(
+        vec![dimension(2, 0), dimension(2, -1)],
+        vec![Some(1_i32), None, Some(3), Some(4)],
+    )
+    .unwrap();
+    let mut expected = be(&[2, 1, oid::INT4.cast_signed(), 2, 0, 2, -1]);
+    expected.extend(be(&[4, 1, -1, 4, 3, 4, 4]));
+    assert_eq!(values.type_oid(), oid::INT4_ARRAY);
+    assert_eq!(values.format(), Format::Binary);
+    assert_eq!(encode(&values), expected);
+    let binary =
+        PgArray::<Option<i32>>::from_sql(&expected, oid::INT4_ARRAY, Format::Binary).unwrap();
+    let text = PgArray::<Option<i32>>::from_sql(
+        b"[0:1][-1:0]={{1,NULL},{3,4}}",
+        oid::INT4_ARRAY,
+        Format::Text,
+    )
+    .unwrap();
+    assert_eq!(binary, values);
+    assert_eq!(text, values);
+    assert_eq!(values.get(&[0, 0]), Some(&None));
+    assert_eq!(values.get(&[1, -1]), Some(&Some(3)));
+    assert_eq!(values.dimensions()[0].lower_bound(), 0);
+    assert_eq!(values.dimensions()[0].upper_bound(), 1);
+    assert_eq!(values.dimensions()[1].length(), 2);
+    // The established Vec API still refuses multidimensional input.
+    assert!(Vec::<Option<i32>>::from_sql(&expected, oid::INT4_ARRAY, Format::Binary).is_err());
+    assert!(
+        Vec::<Option<i32>>::from_sql(b"{{1,NULL},{3,4}}", oid::INT4_ARRAY, Format::Text).is_err()
+    );
+}
+
+#[test]
+fn shaped_arrays_index_three_dimensions_in_row_major_order() {
+    let mut values = PgArray::new(
+        vec![dimension(2, -2), dimension(2, 0), dimension(2, 5)],
+        (0_i32..8).collect(),
+    )
+    .unwrap();
+    let decoded = PgArray::<i32>::from_sql(
+        b" [ -2 : -1 ][0:1][5:6] = {{{0,1},{2,3}},{{4,5},{6,7}}} ",
+        oid::INT4_ARRAY,
+        Format::Text,
+    )
+    .unwrap();
+    assert_eq!(decoded, values);
+    assert_eq!(values.rank(), 3);
+    assert_eq!(values.len(), 8);
+    assert!(!values.is_empty());
+    assert_eq!(values.get(&[-1, 0, 6]), Some(&5));
+    for indexes in [&[-3, 0, 5][..], &[-1, 2, 5], &[-1, 0], &[-1, 0, 5, 1]] {
+        assert_eq!(values.get(indexes), None);
+    }
+    *values.get_mut(&[-1, 1, 6]).unwrap() = 70;
+    values.elements_mut()[0] = -10;
+    assert_eq!(
+        PgArray::<i32>::from_sql(&encode(&values), oid::INT4_ARRAY, Format::Binary).unwrap(),
+        values
+    );
+    let (dimensions, elements) = values.into_parts();
+    assert_eq!(
+        dimensions,
+        [dimension(2, -2), dimension(2, 0), dimension(2, 5)]
+    );
+    assert_eq!(elements, [-10, 1, 2, 3, 4, 5, 6, 70]);
+}
+
+#[test]
+fn shaped_arrays_parse_escaped_text_without_confusing_null_or_array_syntax() {
+    let text = br#"[0:1][-1:1]={{"NULL",NULL,""},{a\,b, N\ULL, "q\"\\x"}}"#;
+    let array = PgArray::<Option<String>>::from_sql(text, oid::TEXT_ARRAY, Format::Text).unwrap();
+    assert_eq!(array.dimensions(), [dimension(2, 0), dimension(3, -1)]);
+    assert_eq!(
+        array.elements(),
+        &[
+            Some("NULL".into()),
+            None,
+            Some(String::new()),
+            Some("a,b".into()),
+            Some("NULL".into()),
+            Some("q\"\\x".into()),
+        ]
+    );
+    assert_eq!(
+        PgArray::<Option<String>>::from_sql(&encode(&array), oid::TEXT_ARRAY, Format::Binary)
+            .unwrap(),
+        array
+    );
+    let spaced = PgArray::<String>::from_sql(
+        br#"{  plain words  ,"  quoted  ",\ leading,trailing\ }"#,
+        oid::TEXT_ARRAY,
+        Format::Text,
+    )
+    .unwrap();
+    assert_eq!(
+        spaced.elements(),
+        ["plain words", "  quoted  ", " leading", "trailing "]
+    );
+}
+
+#[test]
+fn shaped_arrays_distinguish_empty_arrays_null_arrays_and_null_elements() {
+    let empty = PgArray::<i32>::empty();
+    assert_eq!(empty.rank(), 0);
+    assert_eq!(empty.get(&[]), None);
+    assert_eq!(encode(&empty), be(&[0, 0, oid::INT4.cast_signed()]));
+    assert_eq!(PgArray::from_vec(Vec::<i32>::new()).unwrap(), empty);
+    assert_eq!(PgArray::new(Vec::new(), Vec::<i32>::new()).unwrap(), empty);
+    assert_eq!(
+        PgArray::<i32>::from_sql(b" { } ", oid::INT4_ARRAY, Format::Text).unwrap(),
+        empty
+    );
+    assert_eq!(
+        PgArray::<i32>::from_sql(&encode(&empty), oid::INT4_ARRAY, Format::Binary).unwrap(),
+        empty
+    );
+    assert!(PgArray::<i32>::from_sql_null().is_err());
+    assert_eq!(Option::<PgArray<i32>>::from_sql_null().unwrap(), None);
+    let null = PgArray::from_vec(vec![None::<i32>]).unwrap();
+    assert_eq!(null.rank(), 1);
+    assert_eq!(null.len(), 1);
+    assert_eq!(
+        PgArray::<Option<i32>>::from_sql(b"{NULL}", oid::INT4_ARRAY, Format::Text).unwrap(),
+        null
+    );
+    assert!(PgArray::<i32>::from_sql(&encode(&null), oid::INT4_ARRAY, Format::Binary).is_err());
+}
+
+#[test]
+fn shaped_array_construction_checks_rank_bounds_and_wire_size_without_allocating_values() {
+    assert!(PgArrayDimension::new(0, 1).is_err());
+    assert!(PgArrayDimension::new(usize::MAX, 1).is_err());
+    assert!(PgArrayDimension::new(1, i32::MAX).is_err());
+    assert!(PgArrayDimension::new(2, i32::MAX - 1).is_err());
+    assert_eq!(dimension(1, i32::MIN).upper_bound(), i32::MIN);
+    assert_eq!(dimension(1, i32::MAX - 1).upper_bound(), i32::MAX - 1);
+    assert!(PgArray::new(Vec::new(), vec![1_i32]).is_err());
+    assert!(PgArray::new(vec![dimension(2, 1), dimension(2, 1)], vec![1_i32; 3]).is_err());
+    assert!(PgArray::new(vec![dimension(1, 1); 7], vec![1_i32]).is_err());
+    assert!(PgArray::new(vec![dimension(50_000, 1); 2], Vec::<i32>::new()).is_err());
+    assert!(PgArray::new(vec![dimension(i32::MAX as usize, -1); 6], Vec::<i32>::new()).is_err());
+    let six = PgArray::new(vec![dimension(1, 1); 6], vec![9_i32]).unwrap();
+    assert_eq!(
+        PgArray::<i32>::from_sql(b"{{{{{{9}}}}}}", oid::INT4_ARRAY, Format::Text).unwrap(),
+        six
+    );
+    assert_eq!(
+        PgArray::<i32>::from_sql(&encode(&six), oid::INT4_ARRAY, Format::Binary).unwrap(),
+        six
+    );
+}
+
+// A malformed outer frame/shape must be rejected before invoking downstream
+// element decoders, which may allocate or perform their own side effects.
+#[derive(Debug)]
+struct UnreachableArrayDecoder;
+
+impl FromSql for UnreachableArrayDecoder {
+    fn from_sql(_: &[u8], _: u32, _: Format) -> Result<Self, PgError> {
+        panic!("malformed array reached the element decoder")
+    }
+    fn from_sql_null() -> Result<Self, PgError> {
+        panic!("malformed array reached the NULL decoder")
+    }
+    fn accepts(_: u32) -> bool {
+        true
+    }
+}
+
+#[test]
+fn shaped_arrays_reject_malformed_text_before_decoding_elements() {
+    let malformed: &[&[u8]] = &[
+        b"{{1,2},{3}}",
+        b"{1,{2}}",
+        b"{{1},2}",
+        b"{{1}{2}}",
+        b"{{}}",
+        b"[1:2][1:2]={{1,2},{3}}",
+        b"[1:2]={1}",
+        b"[1:1][1:1]={1}",
+        b"[2:1]={}",
+        b"[2147483647:2147483647]={1}",
+        b"[0:2147483647]={1}",
+        b"[1:2]{1,2}",
+        b"[x:2]={1,2}",
+        b"[1:2]={1,2}tail",
+        b"{1,}",
+        b"{,1}",
+        b"{1,,2}",
+        b"{1}x",
+        b"{\"a\"b}",
+        b"{a\\",
+        b"{a\0}",
+        b"{{{{{{{1}}}}}}}",
+        b"{1,2",
+        b"\"1\"",
+        b"",
+    ];
+    for &text in malformed {
+        assert!(
+            PgArray::<UnreachableArrayDecoder>::from_sql(text, oid::INT4_ARRAY, Format::Text)
+                .is_err(),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn shaped_arrays_reject_malformed_binary_before_decoding_elements() {
+    let valid = encode(&PgArray::from_vec(vec![7_i32]).unwrap());
+    for length in 0..valid.len() {
+        assert!(
+            PgArray::<UnreachableArrayDecoder>::from_sql(
+                &valid[..length],
+                oid::INT4_ARRAY,
+                Format::Binary
+            )
+            .is_err(),
+            "truncation at {length}"
+        );
+    }
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    let cases = [
+        be(&[-1, 0, 23]),
+        be(&[7, 0, 23]),
+        be(&[0, 2, 23]),
+        be(&[0, 0, 20]),
+        be(&[1, 0, 23, -1, 1]),
+        be(&[1, 0, 23, 0, 1]),
+        be(&[1, 0, 23, 1, i32::MAX, 4, 7]),
+        be(&[1, 0, 23, i32::MAX, -1]),
+        be(&[2, 0, 23, i32::MAX, -1, i32::MAX, -1]),
+        be(&[1, 0, 23, 1, 1, -2]),
+        be(&[1, 0, 23, 1, 1, -1]),
+        be(&[1, 0, 23, 1, 1, i32::MAX]),
+        be(&[1, 0, 23, 1, 1, 8, 7, 8]),
+        trailing,
+    ];
+    for bytes in cases {
+        assert!(
+            PgArray::<UnreachableArrayDecoder>::from_sql(&bytes, oid::INT4_ARRAY, Format::Binary)
+                .is_err(),
+            "{bytes:?}"
+        );
+    }
+    assert!(PgArray::<i32>::from_sql(&valid, oid::INT4, Format::Binary).is_err());
+    assert!(PgArray::<i64>::from_sql(&valid, oid::INT4_ARRAY, Format::Binary).is_err());
+    assert!(!PgArray::<i32>::accepts(oid::INT4));
+    assert!(PgArray::<i32>::accepts(oid::INT4_ARRAY));
+}
+
+#[test]
+fn shaped_array_encode_errors_preserve_the_output_prefix() {
+    let values = PgArray::new(vec![dimension(1, 0)], vec![UserId(1234)]).unwrap();
+    let mut output = vec![0xaa, 0xbb];
+    assert!(values.to_sql(&mut output).is_err());
+    assert_eq!(output, [0xaa, 0xbb]);
+    let nulls = PgArray::from_vec(vec![None::<UserId>]).unwrap();
+    assert_eq!(
+        encode(&nulls),
+        be(&[1, 1, oid::INT4.cast_signed(), 1, 1, -1])
+    );
+    let names = PgArray::new(
+        vec![dimension(1, 0), dimension(2, -1)],
+        vec![Ident("pg_proc"), Ident("pg_class")],
+    )
+    .unwrap();
+    let decoded =
+        PgArray::<String>::from_sql(&encode(&names), oid::NAME_ARRAY, Format::Binary).unwrap();
+    assert_eq!(decoded.dimensions(), [dimension(1, 0), dimension(2, -1)]);
+    assert_eq!(decoded.elements(), ["pg_proc", "pg_class"]);
+}
+
+#[test]
+fn shaped_text_family_arrays_are_accepted_by_typed_row_decoders() {
+    assert!(String::accepts(oid::NAME));
+    assert!(String::accepts(oid::BPCHAR));
+    for array_oid in [oid::NAME_ARRAY, oid::BPCHAR_ARRAY, oid::VARCHAR_ARRAY] {
+        assert!(PgArray::<String>::accepts(array_oid));
+        let mut wire = be(&[
+            1,
+            0,
+            oid::array_element(array_oid).unwrap().cast_signed(),
+            1,
+            -2,
+            3,
+        ]);
+        wire.extend_from_slice(b"ab ");
+        let binary = PgArray::<String>::from_sql(&wire, array_oid, Format::Binary).unwrap();
+        let text =
+            PgArray::<String>::from_sql(b"[-2:-2]={\"ab \"}", array_oid, Format::Text).unwrap();
+        assert_eq!(binary, text);
+        assert_eq!(binary.elements(), ["ab "]);
+        assert_eq!(binary.dimensions(), [dimension(1, -2)]);
+    }
 }

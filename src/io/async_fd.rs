@@ -31,11 +31,11 @@
 
 use crate::net::{Armed, ReactorRegistration};
 use crate::runtime::reactor::Interest;
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::fmt;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 const READ: u8 = 1;
@@ -71,6 +71,8 @@ impl AsRawFd for RawSource {
 /// registration's waker.
 #[derive(Default)]
 struct FdReadiness {
+    /// Avoid locking an unregistered descriptor just to check for source errors.
+    registered: AtomicBool,
     /// Directions reported ready since a guard last cleared them.
     ready: AtomicU8,
     /// Directions armed with the reactor since its last event. The reactor
@@ -442,7 +444,13 @@ impl<T: AsRawFd> AsyncFd<T> {
         if crate::cx::Cx::with_current(|current| current.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        // Acquire cached readiness before checking registration presence. A
+        // first arm publishes that presence before it can publish readiness.
         let ready = self.readiness.ready.load(Ordering::Acquire) & wanted;
+        if let Some(error) = self.take_source_error() {
+            self.readiness.wake_others(cx.waker());
+            return Poll::Ready(Err(error));
+        }
         if ready != 0 {
             return Poll::Ready(Ok(ready));
         }
@@ -454,6 +462,10 @@ impl<T: AsRawFd> AsyncFd<T> {
         let source = RawSource(self.get_ref().as_raw_fd());
         let armed = {
             let mut registration = self.registration.lock();
+            // A backend may publish readiness during its first registration.
+            // Make concurrent ready pollers wait for that registration before
+            // querying errors instead of skipping the query via this flag.
+            self.readiness.registered.store(true, Ordering::Release);
             // A different poller can move this registration to another
             // runtime. Preserve every direction still waiting for an event,
             // including the opposite direction requested by an earlier poll.
@@ -463,11 +475,20 @@ impl<T: AsRawFd> AsyncFd<T> {
             // A concurrent fire may consume this snapshot, but it publishes
             // those bits to ready and wakes the waiters. Re-arming that older
             // union can only produce another readiness hint.
-            registration.arm(&source, bits_interest(pending), &dispatch)
+            let armed =
+                registration.arm_after_error_check(&source, bits_interest(pending), &dispatch);
+            self.readiness
+                .registered
+                .store(registration.error_source().is_some(), Ordering::Release);
+            armed
         };
         match armed {
             Ok(Armed::Parked) => {
                 // An event may have landed between the first check and arming.
+                if let Some(error) = self.take_source_error() {
+                    self.readiness.wake_others(cx.waker());
+                    return Poll::Ready(Err(error));
+                }
                 let ready = self.readiness.ready.load(Ordering::Acquire) & wanted;
                 if ready == 0 {
                     Poll::Pending
@@ -489,6 +510,14 @@ impl<T: AsRawFd> AsyncFd<T> {
                 Poll::Ready(Err(err))
             }
         }
+    }
+
+    fn take_source_error(&self) -> Option<io::Error> {
+        if !self.readiness.registered.load(Ordering::Acquire) {
+            return None;
+        }
+        let source = self.registration.lock().error_source();
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
     }
 
     /// A waiter identity for one `ready` future, removed when it is dropped.
@@ -604,7 +633,12 @@ impl<'a, T: AsRawFd> AsyncFdReadyGuard<'a, T> {
         &mut self,
         io: impl FnOnce(&'a AsyncFd<T>) -> io::Result<R>,
     ) -> Result<io::Result<R>, TryIoError> {
-        match io(self.async_fd) {
+        let result = if let Some(error) = self.async_fd.take_source_error() {
+            Err(error)
+        } else {
+            io(self.async_fd)
+        };
+        match result {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 self.clear_ready();
                 Err(TryIoError(()))
@@ -684,7 +718,12 @@ impl<T: AsRawFd> AsyncFdReadyMutGuard<'_, T> {
         &mut self,
         io: impl FnOnce(&mut AsyncFd<T>) -> io::Result<R>,
     ) -> Result<io::Result<R>, TryIoError> {
-        match io(self.async_fd) {
+        let result = if let Some(error) = self.async_fd.take_source_error() {
+            Err(error)
+        } else {
+            io(self.async_fd)
+        };
+        match result {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 self.clear_ready();
                 Err(TryIoError(()))

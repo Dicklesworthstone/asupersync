@@ -337,6 +337,11 @@ impl TcpListener {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(error) = self.take_source_error() {
+            self.accept_waiters.wake_others(cx.waker());
+            return Poll::Ready(Err(error));
+        }
         match self.inner.accept() {
             Ok((stream, addr)) => {
                 self.reset_accept_storm();
@@ -360,6 +365,11 @@ impl TcpListener {
                 // registration becoming effective. If a client arrived during
                 // that window, consume it immediately instead of sleeping until
                 // another connection retriggers readiness.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(error) = self.take_source_error() {
+                    self.accept_waiters.wake_others(cx.waker());
+                    return Poll::Ready(Err(error));
+                }
                 match self.inner.accept() {
                     Ok((stream, addr)) => {
                         self.reset_accept_storm();
@@ -444,15 +454,25 @@ impl TcpListener {
     /// does the caller fall back to the timer-clocked accept retry.
     #[cfg(not(target_arch = "wasm32"))]
     fn register_interest(&self) -> io::Result<InterestRegistrationMode> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         let accept_waker = Waker::from(Arc::clone(&self.accept_waiters));
-        let armed = self
-            .registration
-            .lock()
-            .arm(&self.inner, Interest::READABLE, &accept_waker)?;
+        let armed = self.registration.lock().arm_after_error_check(
+            &self.inner,
+            Interest::READABLE,
+            &accept_waker,
+        )?;
         Ok(match armed {
             Armed::Parked => InterestRegistrationMode::ReactorArmed,
             Armed::SelfWake => InterestRegistrationMode::FallbackPoll,
         })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_source_error(&self) -> Option<io::Error> {
+        let source = self.registration.lock().error_source();
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
     }
 
     /// The browser target has no reactor: every accept poll is a fallback

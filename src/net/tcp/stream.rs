@@ -524,7 +524,12 @@ impl TcpStream {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        self.inner.shutdown(how)
+        {
+            if let Some(error) = self.registration.take_error() {
+                return Err(error);
+            }
+            self.inner.shutdown(how)
+        }
     }
 
     /// br-asupersync-1wygbs: returns a reference to the underlying
@@ -616,7 +621,12 @@ impl TcpStream {
         { (ReadHalf::unsupported(), WriteHalf::unsupported()) }
 
         #[cfg(not(target_arch = "wasm32"))]
-        { (ReadHalf::new(&self.inner), WriteHalf::new(&self.inner)) }
+        {
+            (
+                ReadHalf::with_registration(&self.inner, &self.registration),
+                WriteHalf::with_registration(&self.inner, &self.registration),
+            )
+        }
     }
 
     /// Split into owned halves.
@@ -699,6 +709,9 @@ impl TcpStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         match self.inner.peek(buf.unfilled()) {
             Ok(n) => {
                 buf.advance(n);
@@ -731,22 +744,34 @@ impl TcpStream {
     /// Reads what is available without waiting, or fails with
     /// [`io::ErrorKind::WouldBlock`]. Returns `0` at end-of-stream.
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         (&*self.inner).read(buf)
     }
 
     /// Vectored form of [`Self::try_read`].
     pub fn try_read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         (&*self.inner).read_vectored(bufs)
     }
 
     /// Writes what the socket accepts without waiting, or fails with
     /// [`io::ErrorKind::WouldBlock`].
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         (&*self.inner).write(buf)
     }
 
     /// Vectored form of [`Self::try_write`].
     pub fn try_write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         (&*self.inner).write_vectored(bufs)
     }
 
@@ -786,6 +811,9 @@ impl TcpStream {
 
     /// Takes the socket's pending error (`SO_ERROR`), if any.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        if let Some(error) = self.registration.take_error() {
+            return Ok(Some(error));
+        }
         self.inner.take_error()
     }
 
@@ -796,6 +824,9 @@ impl TcpStream {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             if flag.ready.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 return Poll::Ready(Ok(()));
@@ -1121,6 +1152,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
+        if let Some(error) = registration.as_ref().and_then(IoRegistration::take_error) {
+            return Poll::Ready(Err(error));
+        }
+
         match poll_connect_complete(socket) {
             Ok(true) => Poll::Ready(Ok(())),
             Ok(false) => {
@@ -1204,6 +1239,9 @@ fn rearm_connect_registration(
     registration: &mut Option<IoRegistration>,
     cx: &Context<'_>,
 ) -> io::Result<()> {
+    if let Some(error) = registration.as_ref().and_then(IoRegistration::take_error) {
+        return Err(error);
+    }
     if registration
         .as_ref()
         .is_some_and(|existing| crate::net::udp::registration_needs_migration(existing, false))
@@ -1298,6 +1336,9 @@ impl AsyncRead for TcpStream {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::TcpStream = &this.inner;
         // std::net::TcpStream implements Read for &TcpStream
         match (&*inner).read(buf.unfilled()) {
@@ -1359,6 +1400,9 @@ impl AsyncReadVectored for TcpStream {
         }
 
         let this = self.get_mut();
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).read_vectored(bufs) {
             Ok(n) => {
@@ -1417,6 +1461,9 @@ impl AsyncWrite for TcpStream {
         }
 
         let this = self.get_mut();
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write(buf) {
             Ok(n) => {
@@ -1462,6 +1509,9 @@ impl AsyncWrite for TcpStream {
         }
 
         let this = self.get_mut();
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write_vectored(bufs) {
             Ok(n) => {
@@ -1504,6 +1554,9 @@ impl AsyncWrite for TcpStream {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -1521,6 +1574,9 @@ impl AsyncWrite for TcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
         }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),

@@ -5,6 +5,7 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
+use crate::net::udp::ReactorRegistration;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use parking_lot::Mutex;
@@ -24,6 +25,13 @@ fn fallback_pending<T>(cx: &Context<'_>) -> Poll<io::Result<T>> {
     Poll::Pending
 }
 
+fn take_borrowed_source_error(
+    registration: Option<&Mutex<ReactorRegistration>>,
+) -> Option<io::Error> {
+    let source = registration?.lock().error_source();
+    source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
+}
+
 /// Borrowed read half of a [`UnixStream`](super::UnixStream).
 ///
 /// Created by [`UnixStream::split`](super::UnixStream::split).
@@ -32,14 +40,31 @@ fn fallback_pending<T>(cx: &Context<'_>) -> Poll<io::Result<T>> {
 /// `WouldBlock` by waking immediately. For proper async I/O with reactor
 /// integration, use the owned split via
 /// [`UnixStream::into_split`](crate::net::unix::UnixStream::into_split).
+/// Pending source errors from the parent stream's existing registration are
+/// still delivered by this half.
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
     inner: &'a net::UnixStream,
+    registration: Option<&'a Mutex<ReactorRegistration>>,
 }
 
 impl<'a> ReadHalf<'a> {
+    #[cfg(test)]
     pub(crate) fn new(inner: &'a net::UnixStream) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            registration: None,
+        }
+    }
+
+    pub(crate) fn with_registration(
+        inner: &'a net::UnixStream,
+        registration: &'a Mutex<ReactorRegistration>,
+    ) -> Self {
+        Self {
+            inner,
+            registration: Some(registration),
+        }
     }
 }
 
@@ -51,6 +76,9 @@ impl AsyncRead for ReadHalf<'_> {
     ) -> Poll<io::Result<()>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
+        }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
         }
         let mut inner = self.inner;
         match inner.read(buf.unfilled()) {
@@ -73,6 +101,9 @@ impl AsyncReadVectored for ReadHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -90,14 +121,31 @@ impl AsyncReadVectored for ReadHalf<'_> {
 /// `WouldBlock` by waking immediately. For proper async I/O with reactor
 /// integration, use the owned split via
 /// [`UnixStream::into_split`](crate::net::unix::UnixStream::into_split).
+/// Pending source errors from the parent stream's existing registration are
+/// still delivered by this half.
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
     inner: &'a net::UnixStream,
+    registration: Option<&'a Mutex<ReactorRegistration>>,
 }
 
 impl<'a> WriteHalf<'a> {
+    #[cfg(test)]
     pub(crate) fn new(inner: &'a net::UnixStream) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            registration: None,
+        }
+    }
+
+    pub(crate) fn with_registration(
+        inner: &'a net::UnixStream,
+        registration: &'a Mutex<ReactorRegistration>,
+    ) -> Self {
+        Self {
+            inner,
+            registration: Some(registration),
+        }
     }
 }
 
@@ -109,6 +157,9 @@ impl AsyncWrite for WriteHalf<'_> {
     ) -> Poll<io::Result<usize>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
+        }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
         }
         let mut inner = self.inner;
         match inner.write(buf) {
@@ -126,6 +177,9 @@ impl AsyncWrite for WriteHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -142,6 +196,9 @@ impl AsyncWrite for WriteHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -153,6 +210,9 @@ impl AsyncWrite for WriteHalf<'_> {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
+        }
+        if let Some(error) = take_borrowed_source_error(self.registration) {
+            return Poll::Ready(Err(error));
         }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
@@ -441,6 +501,16 @@ impl std::fmt::Debug for UnixStreamInner {
 }
 
 impl UnixStreamInner {
+    fn take_source_error(&self) -> Option<io::Error> {
+        let source = self
+            .state
+            .lock()
+            .registration
+            .as_ref()
+            .and_then(IoRegistration::error_source);
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
+    }
+
     /// Completes a registration-removal transition by consuming every waiter
     /// that arrived while the old registration was being physically dropped.
     /// The returned wakers must be invoked after this method releases the lock.
@@ -456,6 +526,9 @@ impl UnixStreamInner {
 
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<WaiterTokens> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         // RawWaker::clone is arbitrary user code. Clone before taking the
         // split-state lock so a custom waker cannot re-enter this state.
         let mut prepared_waiters = prepare_waiters(interest, cx.waker());
@@ -797,6 +870,9 @@ impl AsyncRead for OwnedReadHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).read(buf.unfilled());
         match result {
             Ok(n) => {
@@ -818,6 +894,9 @@ impl AsyncReadVectored for OwnedReadHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         let result = (&*this.inner.stream).read_vectored(bufs);
         match result {
@@ -850,6 +929,11 @@ impl OwnedWriteHalf {
     /// This is equivalent to calling `shutdown(Shutdown::Write)` on the
     /// original stream.
     pub fn shutdown(&self) -> io::Result<()> {
+        if let Some(error) = self.inner.take_source_error() {
+            self.inner
+                .retire_waiter(Interest::WRITABLE, self.last_waiter);
+            return Err(error);
+        }
         let result = self.inner.stream.shutdown(Shutdown::Write);
         self.inner
             .retire_waiter(Interest::WRITABLE, self.last_waiter);
@@ -890,6 +974,9 @@ impl AsyncWrite for OwnedWriteHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).write(buf);
         match result {
             Ok(n) => this.finish_poll(Ok(n)),
@@ -906,6 +993,9 @@ impl AsyncWrite for OwnedWriteHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         let result = (&*this.inner.stream).write_vectored(bufs);
         match result {
@@ -924,6 +1014,9 @@ impl AsyncWrite for OwnedWriteHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).flush();
         match result {
             Ok(()) => this.finish_poll(Ok(())),
@@ -936,6 +1029,9 @@ impl AsyncWrite for OwnedWriteHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         match this.inner.stream.shutdown(Shutdown::Write) {
             Ok(()) => this.finish_poll(Ok(())),

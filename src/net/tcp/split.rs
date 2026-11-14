@@ -9,6 +9,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::net::udp::ReactorRegistration;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use parking_lot::Mutex;
@@ -40,18 +42,36 @@ fn browser_tcp_unsupported_result<T>(op: &str) -> io::Result<T> {
 /// This half does not participate in reactor registration - it uses
 /// busy-loop polling on WouldBlock. For proper async I/O with reactor
 /// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
+/// Pending source errors from the parent stream's existing registration are
+/// still delivered by this half.
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     inner: &'a net::TcpStream,
+    #[cfg(not(target_arch = "wasm32"))]
+    registration: Option<&'a ReactorRegistration>,
     #[cfg(target_arch = "wasm32")]
     _marker: PhantomData<&'a ()>,
 }
 
-impl ReadHalf<'_> {
+impl<'a> ReadHalf<'a> {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
+        Self {
+            inner,
+            registration: None,
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new(inner: &net::TcpStream) -> ReadHalf<'_> {
-        ReadHalf { inner }
+    pub(crate) fn with_registration(
+        inner: &'a net::TcpStream,
+        registration: &'a ReactorRegistration,
+    ) -> Self {
+        Self {
+            inner,
+            registration: Some(registration),
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -71,6 +91,9 @@ impl AsyncRead for ReadHalf<'_> {
     ) -> Poll<io::Result<()>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
         }
         let mut inner = self.inner;
         match inner.read(buf.unfilled()) {
@@ -111,6 +134,9 @@ impl AsyncReadVectored for ReadHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -140,18 +166,36 @@ impl AsyncReadVectored for ReadHalf<'_> {
 /// This half does not participate in reactor registration - it uses
 /// busy-loop polling on WouldBlock. For proper async I/O with reactor
 /// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
+/// Pending source errors from the parent stream's existing registration are
+/// still delivered by this half.
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
     #[cfg(not(target_arch = "wasm32"))]
     inner: &'a net::TcpStream,
+    #[cfg(not(target_arch = "wasm32"))]
+    registration: Option<&'a ReactorRegistration>,
     #[cfg(target_arch = "wasm32")]
     _marker: PhantomData<&'a ()>,
 }
 
-impl WriteHalf<'_> {
+impl<'a> WriteHalf<'a> {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
+        Self {
+            inner,
+            registration: None,
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new(inner: &net::TcpStream) -> WriteHalf<'_> {
-        WriteHalf { inner }
+    pub(crate) fn with_registration(
+        inner: &'a net::TcpStream,
+        registration: &'a ReactorRegistration,
+    ) -> Self {
+        Self {
+            inner,
+            registration: Some(registration),
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -172,6 +216,9 @@ impl AsyncWrite for WriteHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -190,6 +237,9 @@ impl AsyncWrite for WriteHalf<'_> {
     ) -> Poll<io::Result<usize>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
         }
         let mut inner = self.inner;
         match inner.write_vectored(bufs) {
@@ -210,6 +260,9 @@ impl AsyncWrite for WriteHalf<'_> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
+        }
         let mut inner = self.inner;
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -224,6 +277,9 @@ impl AsyncWrite for WriteHalf<'_> {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = self.registration.and_then(ReactorRegistration::take_error) {
+            return Poll::Ready(Err(error));
         }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
@@ -550,6 +606,17 @@ impl std::fmt::Debug for TcpStreamInner {
 }
 
 impl TcpStreamInner {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_source_error(&self) -> Option<io::Error> {
+        let source = self
+            .state
+            .lock()
+            .registration
+            .as_ref()
+            .and_then(IoRegistration::error_source);
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
+    }
+
     fn drain_registration_transition(&self) -> DirectionWakers {
         let mut guard = self.state.lock();
         debug_assert!(guard.registration_transition);
@@ -625,6 +692,9 @@ impl TcpStreamInner {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(error) = self.take_source_error() {
+                return Err(error);
+            }
             // RawWaker::clone is arbitrary user code. Clone before taking the
             // split-state lock so a custom waker cannot re-enter this state.
             let mut prepared_waiters = prepare_waiters(interest, cx.waker());
@@ -995,6 +1065,9 @@ impl AsyncRead for OwnedReadHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).read(buf.unfilled());
         match result {
             Ok(n) => {
@@ -1029,6 +1102,9 @@ impl AsyncReadVectored for OwnedReadHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         let result = (&*this.inner.stream).read_vectored(bufs);
         match result {
@@ -1127,6 +1203,9 @@ impl AsyncWrite for OwnedWriteHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).write(buf);
         match result {
             Ok(n) => this.finish_poll(Ok(n)),
@@ -1143,6 +1222,9 @@ impl AsyncWrite for OwnedWriteHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         let result = (&*this.inner.stream).write_vectored(bufs);
         match result {
@@ -1161,6 +1243,9 @@ impl AsyncWrite for OwnedWriteHalf {
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
+        }
         let result = (&*this.inner.stream).flush();
         match result {
             Ok(()) => this.finish_poll(Ok(())),
@@ -1173,6 +1258,9 @@ impl AsyncWrite for OwnedWriteHalf {
         let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        if let Some(error) = this.inner.take_source_error() {
+            return this.finish_poll(Err(error));
         }
         match this.inner.stream.shutdown(Shutdown::Write) {
             Ok(()) => this.finish_poll(Ok(())),

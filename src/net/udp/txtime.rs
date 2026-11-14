@@ -557,6 +557,9 @@ impl UdpSocket {
         if checkpoint_cancelled() {
             return Poll::Ready(Err(cancelled()));
         }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         match sendmsg_with_txtime(self.inner.as_raw_fd(), buf, target, launch_time_ns) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -605,6 +608,9 @@ impl UdpSocket {
         if checkpoint_cancelled() {
             return Poll::Ready(Err(cancelled()));
         }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         match recv_error_once(self.inner.as_raw_fd(), buf) {
             Ok(report) => Poll::Ready(Ok(report)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -645,6 +651,9 @@ impl UdpSocket {
     /// Reads one report from the error queue without waiting; `Ok(None)`
     /// when the queue is empty (Linux only).
     pub fn try_recv_error(&self, buf: &mut [u8]) -> io::Result<Option<UdpErrorReport>> {
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         match recv_error_once(self.inner.as_raw_fd(), buf) {
             Ok(report) => Ok(Some(report)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),

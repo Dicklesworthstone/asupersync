@@ -1622,6 +1622,103 @@ fn pg_real_arrays_bind_and_decode() {
     });
 }
 
+/// Shape and lower bounds survive real parameter binding and row decoding,
+/// including prepared text-family coercion and a three-dimensional literal.
+#[test]
+fn pg_real_shaped_arrays_bind_and_decode() {
+    use asupersync::database::postgres::{PgArray, PgArrayDimension, ToSql};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_shaped_arrays_bind_and_decode") {
+        return;
+    }
+    let log = PgTestLogger::new("postgres_real", "pg_real_shaped_arrays_bind_and_decode");
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        let matrix = PgArray::new(
+            vec![
+                PgArrayDimension::new(2, 0).unwrap(),
+                PgArrayDimension::new(2, -1).unwrap(),
+            ],
+            vec![Some(1_i32), None, Some(3), Some(4)],
+        )
+        .unwrap();
+        let empty = PgArray::<i32>::empty();
+        log.phase("shaped_parameter_round_trip");
+        let params: &[&dyn ToSql] = &[&matrix, &empty];
+        let rows = unwrap_pg(
+            conn.query_params(
+                &cx,
+                "SELECT $1 AS matrix, array_dims($1) AS dimensions, $2 AS empty, \
+             cardinality($2) AS empty_count",
+                params,
+            )
+            .await,
+            &log,
+            "shaped parameters",
+        );
+        assert_eq!(
+            rows[0].get_typed::<PgArray<Option<i32>>>("matrix").unwrap(),
+            matrix
+        );
+        assert_eq!(
+            rows[0].get_typed::<String>("dimensions").unwrap(),
+            "[0:1][-1:0]"
+        );
+        assert_eq!(rows[0].get_typed::<PgArray<i32>>("empty").unwrap(), empty);
+        assert_eq!(rows[0].get_i32("empty_count").unwrap(), 0);
+
+        log.phase("prepared_shaped_varchar");
+        let statement = unwrap_pg(
+            conn.prepare(
+                &cx,
+                "SELECT $1::varchar[] AS names, array_dims($1::varchar[]) AS dimensions",
+            )
+            .await,
+            &log,
+            "prepare shaped varchar",
+        );
+        let names = PgArray::new(
+            vec![
+                PgArrayDimension::new(1, -3).unwrap(),
+                PgArrayDimension::new(2, 0).unwrap(),
+            ],
+            vec!["quoted\"name".to_owned(), "back\\slash".to_owned()],
+        )
+        .unwrap();
+        let params: &[&dyn ToSql] = &[&names];
+        let rows = unwrap_pg(
+            conn.query_prepared(&cx, &statement, params).await,
+            &log,
+            "prepared array",
+        );
+        assert_eq!(
+            rows[0].get_typed::<PgArray<String>>("names").unwrap(),
+            names
+        );
+        assert_eq!(
+            rows[0].get_typed::<String>("dimensions").unwrap(),
+            "[-3:-3][0:1]"
+        );
+
+        log.phase("three_dimensional_server_literal");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT '[0:1][-2:-1][5:6]={{{0,1},{2,3}},{{4,5},{6,7}}}'::int4[] AS cube",
+            )
+            .await,
+            &log,
+            "server cube",
+        );
+        let cube = rows[0].get_typed::<PgArray<i32>>("cube").unwrap();
+        assert_eq!(cube.rank(), 3);
+        assert_eq!(cube.elements(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(cube.get(&[1, -1, 6]), Some(&7));
+        log.end("pass");
+    });
+}
+
 /// `SystemTime` and `serde_json::Value` round-trip through a real server: a
 /// `SystemTime` binds into `timestamptz` and `timestamp` columns (on the
 /// unprepared and the prepared path, and as a `timestamptz[]`), decodes back
@@ -1801,6 +1898,100 @@ fn pg_real_timestamps_and_json_bind_and_decode() {
             "infinity",
         );
         assert!(rows[0].get_typed::<SystemTime>("forever").is_err());
+        log.end("pass");
+    });
+}
+
+/// Obtain binary codec fixtures from PostgreSQL itself. Ordinary query result
+/// negotiation stays text: the backend send functions return their wire bytes
+/// as bytea, which are then passed to the public binary decoders.
+#[test]
+fn pg_real_binary_string_scalars_and_arrays() {
+    use asupersync::database::postgres::{FromSql, PgArray, oid};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_binary_string_scalars_and_arrays") {
+        return;
+    }
+    let log = PgTestLogger::new("postgres_real", "pg_real_binary_string_scalars_and_arrays");
+
+    run_test_with_cx(|cx| async move {
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        unwrap_pg(
+            conn.execute_unchecked(&cx, "SET TimeZone = 'Asia/Kolkata'")
+                .await,
+            &log,
+            "set_timezone",
+        );
+        log.phase("server_binary_fixtures");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT uuid_send('30313233-3435-3637-3839-616263646566'::uuid) AS id, \
+                 date_send('0001-01-01 BC'::date) AS day, \
+                 date_send('-infinity'::date) AS forever, \
+                 timestamp_send('1999-12-31 23:59:59.999999'::timestamp) AS local, \
+                 timestamptz_send('2000-01-01 00:00:00+00'::timestamptz) AS instant, \
+                 interval_send('2 mons -3 days 01:02:03.004'::interval) AS span, \
+                 array_send('[0:1][3:3]={{30313233-3435-3637-3839-616263646566},{NULL}}'::uuid[]) AS ids, \
+                 array_send(ARRAY['2000-01-01'::date,NULL,'infinity'::date]) AS days, \
+                 array_send(ARRAY['2000-01-01 00:00:00+00'::timestamptz,NULL]) AS instants",
+            ).await,
+            &log,
+            "binary_values",
+        );
+        let row = &rows[0];
+        for (name, type_oid, expected) in [
+            ("id", oid::UUID, "30313233-3435-3637-3839-616263646566"),
+            ("day", oid::DATE, "0001-01-01 BC"),
+            ("forever", oid::DATE, "-infinity"),
+            ("local", oid::TIMESTAMP, "1999-12-31 23:59:59.999999"),
+            ("instant", oid::TIMESTAMPTZ, "2000-01-01 00:00:00+00"),
+            ("span", oid::INTERVAL, "2 mons -3 days 01:02:03.004"),
+        ] {
+            let wire = row
+                .get_typed::<Vec<u8>>(name)
+                .expect("backend binary scalar");
+            assert_eq!(
+                String::from_sql(&wire, type_oid, Format::Binary).unwrap(),
+                expected
+            );
+        }
+        let ids = row.get_typed::<Vec<u8>>("ids").unwrap();
+        let ids = PgArray::<Option<String>>::from_sql(&ids, oid::UUID_ARRAY, Format::Binary)
+            .expect("backend binary UUID matrix");
+        assert_eq!(ids.rank(), 2);
+        assert_eq!(ids.dimensions()[0].lower_bound(), 0);
+        assert_eq!(ids.dimensions()[1].lower_bound(), 3);
+        assert_eq!(
+            ids.elements(),
+            [
+                Some("30313233-3435-3637-3839-616263646566".to_string()),
+                None
+            ]
+        );
+        for (name, type_oid, expected) in [
+            (
+                "days",
+                oid::DATE_ARRAY,
+                vec![
+                    Some("2000-01-01".to_string()),
+                    None,
+                    Some("infinity".to_string()),
+                ],
+            ),
+            (
+                "instants",
+                oid::TIMESTAMPTZ_ARRAY,
+                vec![Some("2000-01-01 00:00:00+00".to_string()), None],
+            ),
+        ] {
+            let wire = row.get_typed::<Vec<u8>>(name).unwrap();
+            assert_eq!(
+                Vec::<Option<String>>::from_sql(&wire, type_oid, Format::Binary).unwrap(),
+                expected
+            );
+        }
         log.end("pass");
     });
 }

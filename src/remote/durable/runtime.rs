@@ -1,8 +1,9 @@
 //! Explicit, caller-owned execution over a durable idempotency journal.
 
 use super::{
-    DurableRemoteAdmission, DurableRemoteCompactionReport, DurableRemoteError, DurableRemoteJournal,
-    DurableRemoteJournalStatus, DurableRemoteLimits, DurableRemoteReconciliation,
+    DurableRemoteAdmission, DurableRemoteCompactionReport, DurableRemoteError,
+    DurableRemoteJournal, DurableRemoteJournalStatus, DurableRemoteLimits,
+    DurableRemoteReconciliation, DurableRemoteRecoveryReport,
 };
 use crate::cx::Cx;
 use crate::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry, HasSchema};
@@ -346,14 +347,17 @@ impl DurableRemoteComputation {
         if cx.checkpoint().is_err() || cx.blocking_pool_handle().is_none() {
             return Err(DurableRemoteError::Unavailable);
         }
-        let mut job = self.take_journal()?;
+        let job = JournalReplacementJob {
+            publish,
+            replacement,
+            owner: self.take_journal()?,
+        };
         let mut compaction = cx
             .spawn_blocking_drained(move |worker| {
-                if worker.checkpoint().is_err() {
-                    return Err(DurableRemoteError::Unavailable);
-                }
-                let now = (job.owner.clock)();
-                job.journal_mut().compact(replacement, now, publish)
+                job.run(worker, |owner, replacement, publish| {
+                    let now = (owner.owner.clock)();
+                    owner.journal_mut().compact(replacement, now, publish)
+                })
             })
             .map_err(|_| DurableRemoteError::Unavailable)?;
         let result = compaction
@@ -363,7 +367,56 @@ impl DurableRemoteComputation {
         if cx.is_cancel_requested() {
             let _ = cx.checkpoint();
         }
-        result
+        result.result
+    }
+
+    /// Restore a read-only authenticated prefix on an explicitly owned blocking worker.
+    ///
+    /// Uses [`DurableRemoteJournal::recover_tail`] with its complete exclusive
+    /// ownership, replacement-file and durable publication contract. The current
+    /// journal must have been reopened into `ReadOnlyTail`; poisoned owners are
+    /// never repaired in place. No clock callback, handler or resolver is run,
+    /// and every unresolved request remains an in-doubt fence.
+    ///
+    /// Recovery occupies the same exclusive slot as execution, reconciliation
+    /// and compaction. Cancellation before the worker claims the job leaves both
+    /// files unchanged. After claim, verification and publication form one
+    /// non-preemptible boundary. Dropping the caller cannot release the journal
+    /// or replacement before the queued/running worker actually retires. A
+    /// successful publication survives late cancellation; failed or panicking
+    /// publication returns a poisoned owner that must be reopened.
+    pub async fn recover_tail<P>(
+        self: &Arc<Self>,
+        cx: &Cx,
+        replacement: File,
+        publish: P,
+    ) -> Result<DurableRemoteRecoveryReport, DurableRemoteError>
+    where
+        P: FnOnce() -> io::Result<()> + Send + 'static,
+    {
+        if cx.checkpoint().is_err() || cx.blocking_pool_handle().is_none() {
+            return Err(DurableRemoteError::Unavailable);
+        }
+        let job = JournalReplacementJob {
+            publish,
+            replacement,
+            owner: self.take_journal()?,
+        };
+        let mut recovery = cx
+            .spawn_blocking_drained(move |worker| {
+                job.run(worker, |owner, replacement, publish| {
+                    owner.journal_mut().recover_tail(replacement, publish)
+                })
+            })
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        let result = recovery
+            .join()
+            .await
+            .map_err(|_| DurableRemoteError::Unavailable)?;
+        if cx.is_cancel_requested() {
+            let _ = cx.checkpoint();
+        }
+        result.result
     }
 
     fn take_journal(self: &Arc<Self>) -> Result<InvocationOwner, DurableRemoteError> {
@@ -378,6 +431,46 @@ impl DurableRemoteComputation {
             journal: Some(journal),
         })
     }
+}
+
+/// Drop order matters when cancellation destroys an uninvoked pool closure.
+/// Retire callback captures while both file owners remain alive, then the
+/// replacement, and return the source journal to its slot last. `run` consumes
+/// this whole envelope so closure capture precision cannot split its fields.
+struct JournalReplacementJob<P> {
+    publish: P,
+    replacement: File,
+    owner: InvocationOwner,
+}
+
+impl<P> JournalReplacementJob<P> {
+    fn run<R>(
+        mut self,
+        worker: Cx,
+        operation: impl FnOnce(&mut InvocationOwner, File, P) -> Result<R, DurableRemoteError>,
+    ) -> JournalReplacementResult<R> {
+        let result = if worker.checkpoint().is_err() {
+            drop(self.publish);
+            drop(self.replacement);
+            Err(DurableRemoteError::Unavailable)
+        } else {
+            // The called operation owns and retires both arguments before
+            // returning or unwinding through this still-owned source journal.
+            operation(&mut self.owner, self.replacement, self.publish)
+        };
+        JournalReplacementResult {
+            result,
+            _owner: self.owner,
+        }
+    }
+}
+
+/// Keep the exclusive slot through drained retirement, including destruction
+/// of an unclaimed result. An error payload can have user-defined Drop, so it
+/// also precedes the journal owner in field order.
+struct JournalReplacementResult<R> {
+    result: Result<R, DurableRemoteError>,
+    _owner: InvocationOwner,
 }
 
 // Also travels in the drained worker's result. Dropping an unclaimed result

@@ -20,6 +20,8 @@ impl LabRuntime {
     /// this model. Scheduled conditions, the runtime's automatic time advances,
     /// and its existing event-injection/chaos handle share one event queue and
     /// clock. Scripted reactor-operation failures reach the runtime's driver.
+    /// [`LabReactorModel::inject_source_error`] additionally delivers a
+    /// one-use error to native I/O through the registered source's error hook.
     ///
     /// Unlike [`Self::new`], this opt-in constructor enforces one-shot, edge, or
     /// level delivery. `mode` selects the default for registrations without an

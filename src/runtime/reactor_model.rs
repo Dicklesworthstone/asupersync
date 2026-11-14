@@ -17,13 +17,18 @@
 //! Scripts can target a token, delay a failure by matching attempts, and drive
 //! retry, registration rollback, poll-error, and cancellation-cleanup paths.
 //! A failed operation does not mutate readiness or advance virtual time.
+//! [`inject_source_error`](LabReactorModel::inject_source_error) instead attaches
+//! an error to one registered source. It asserts error readiness and is consumed
+//! exactly once through [`Reactor::take_error`], allowing native I/O operations
+//! to exercise their error paths without failing the reactor poll itself.
 //!
 //! This is an opt-in model, not a change to legacy `LabReactor` semantics or the
 //! default `LabRuntime`. Supply an `Arc<LabReactorModel>` wherever a `Reactor`
 //! is accepted. It models readiness, not the contents of a socket: simulated
 //! reads/writes must explicitly clear conditions when they reach `WouldBlock`.
-//! It does not emulate descriptor identity, kernel queue ordering, or socket
-//! read/write errors. Events in one batch are coalesced and sorted by token.
+//! It does not emulate descriptor identity or kernel queue ordering. Events in
+//! one batch are coalesced and sorted by token. Raw readiness/chaos events still
+//! carry no source error; use the explicit source-error script when needed.
 //!
 //! [`crate::lab::LabRuntime::with_reactor_model`] installs this model in a fresh
 //! lab runtime. Its driver, event queue, chaos source and virtual clock are
@@ -61,6 +66,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod lab;
+
+#[cfg(test)]
+mod source_error_tests;
 
 /// Delivery policy for registrations without explicit trigger flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,6 +161,10 @@ struct RegistrationState {
     ready: Interest,
     edges: Interest,
     armed: bool,
+    /// Independent of manually asserted ERROR readiness, which consumption
+    /// of a scripted source error must not erase.
+    source_error: Option<io::ErrorKind>,
+    source_error_edge: bool,
 }
 
 impl RegistrationState {
@@ -165,11 +177,16 @@ impl RegistrationState {
         if !self.armed {
             return Interest::NONE;
         }
-        let ready = if self.interest.is_edge_triggered() {
+        let mut ready = if self.interest.is_edge_triggered() {
             self.ready & self.edges
         } else {
             self.ready
         };
+        if self.source_error.is_some()
+            && (!self.interest.is_edge_triggered() || self.source_error_edge)
+        {
+            ready |= Interest::ERROR;
+        }
         // Native reactors report error/hangup even when not requested.
         ready & (self.interest | Interest::ERROR | Interest::HUP) & READINESS
     }
@@ -408,6 +425,45 @@ impl LabReactorModel {
         Ok(())
     }
 
+    /// Injects one error for a registered source's next I/O operation.
+    ///
+    /// This asserts an independent `ERROR` condition, including when the
+    /// interest mask does not request errors. It follows the registration's
+    /// current one-shot/edge/level policy: injection never re-arms a disarmed
+    /// source. A successful `modify` rechecks an unconsumed error. Attached
+    /// lab runtimes observe deliverable errors at the current virtual time.
+    ///
+    /// [`Reactor::take_error`] consumes the exact kind once, independently of
+    /// notification delivery, without changing the arm or manually asserted
+    /// readiness. Native I/O can therefore observe the error on a spurious
+    /// repoll too. `clear_ready(ERROR)` clears only a manually asserted condition;
+    /// it cannot discard this pending error. Successful deregistration discards
+    /// the error before the token can be reused.
+    ///
+    /// There is one bounded slot per source. A second injection is refused
+    /// until the first is consumed, preserving the original failure. This API
+    /// does not consume operation-failure rules, draw chaos, or advance time.
+    /// Readiness-only events from `set_ready` and the raw lab injector retain
+    /// their existing behavior and do not manufacture a source error.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unregistered token or `AlreadyExists` when
+    /// another source error is pending. Rejection changes no state.
+    pub fn inject_source_error(&self, token: Token, kind: io::ErrorKind) -> io::Result<()> {
+        let mut state = self.state.lock();
+        let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
+        if registration.source_error.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "readiness model source already has an unconsumed error",
+            ));
+        }
+        registration.source_error = Some(kind);
+        registration.source_error_edge = true;
+        self.queue_clock_pump(&mut state);
+        Ok(())
+    }
+
     /// Schedules persistent conditions to become set after a virtual delay.
     ///
     /// The scheduled assertion is applied during a poll even when the source
@@ -449,7 +505,13 @@ impl LabReactorModel {
             .lock()
             .registrations
             .get(&token)
-            .map(|registration| registration.ready)
+            .map(|registration| {
+                if registration.source_error.is_some() {
+                    registration.ready | Interest::ERROR
+                } else {
+                    registration.ready
+                }
+            })
             .ok_or_else(not_registered)
     }
 }
@@ -491,6 +553,8 @@ impl Reactor for LabReactorModel {
                 ready: Interest::NONE,
                 edges: Interest::NONE,
                 armed: true,
+                source_error: None,
+                source_error_edge: false,
             },
         );
         Ok(())
@@ -504,6 +568,7 @@ impl Reactor for LabReactorModel {
         registration.armed = true;
         // A native re-arm samples readiness again, even in edge-triggered mode.
         registration.edges = registration.ready;
+        registration.source_error_edge = registration.source_error.is_some();
         self.queue_clock_pump(&mut state);
         Ok(())
     }
@@ -548,6 +613,9 @@ impl Reactor for LabReactorModel {
             }
             events.push(Event::new(token, ready));
             registration.edges &= !ready;
+            if ready.is_error() {
+                registration.source_error_edge = false;
+            }
             if registration.is_one_shot(self.mode) {
                 registration.armed = false;
             }
@@ -566,6 +634,14 @@ impl Reactor for LabReactorModel {
 
     fn registration_count(&self) -> usize {
         self.state.lock().registrations.len()
+    }
+
+    fn take_error(&self, token: Token) -> Option<io::Error> {
+        let mut state = self.state.lock();
+        let registration = state.registrations.get_mut(&token)?;
+        let kind = registration.source_error.take()?;
+        registration.source_error_edge = false;
+        Some(io::Error::from(kind))
     }
 }
 
@@ -682,6 +758,145 @@ mod tests {
         assert!(poll(&model).is_empty());
         model.modify(token, Interest::NONE).unwrap();
         assert_eq!(poll(&model), vec![Event::new(token, ready)]);
+    }
+
+    fn source_error_kind(model: &LabReactorModel, token: Token) -> Option<io::ErrorKind> {
+        model.take_error(token).map(|error| error.kind())
+    }
+
+    #[test]
+    fn source_error_preserves_exact_kind_and_refuses_to_overwrite_a_pending_failure() {
+        let model = LabReactorModel::new();
+        let token = Token::new(30);
+        register(&model, token, Interest::NONE);
+        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
+        assert_eq!(model.next_event_time(), Some(Time::ZERO));
+        assert_eq!(
+            model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert!(!model.is_armed(token).unwrap());
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionReset));
+        assert_eq!(source_error_kind(&model, token), None);
+        assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
+        assert!(!model.is_armed(token).unwrap(), "consumption must not re-arm");
+        assert_eq!(model.now(), Time::ZERO);
+        model.modify(token, Interest::NONE).unwrap();
+        assert!(poll(&model).is_empty());
+        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert!(poll(&model).is_empty(), "an error consumed before delivery is no longer ready");
+    }
+
+    #[test]
+    fn source_error_consumption_and_manual_readiness_do_not_erase_each_other() {
+        let model = LabReactorModel::with_mode(ReadinessMode::Level);
+        let token = Token::new(31);
+        register(&model, token, Interest::READABLE);
+        let manual = Interest::READABLE | Interest::ERROR | Interest::HUP;
+        model.set_ready(token, manual).unwrap();
+        assert_eq!(source_error_kind(&model, token), None, "ERROR alone has no invented kind");
+        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(model.readiness(token).unwrap(), manual);
+        assert_eq!(poll(&model), vec![Event::new(token, manual)]);
+
+        model.inject_source_error(token, io::ErrorKind::ConnectionAborted).unwrap();
+        model.clear_ready(token, manual).unwrap();
+        assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionAborted));
+        assert!(poll(&model).is_empty());
+    }
+
+    #[test]
+    fn source_error_while_disarmed_waits_for_rearm_without_losing_its_kind() {
+        let model = LabReactorModel::new();
+        let token = Token::new(32);
+        register(&model, token, Interest::READABLE);
+        model.set_ready(token, Interest::READABLE).unwrap();
+        assert_eq!(poll(&model), vec![Event::readable(token)]);
+        model.clear_ready(token, Interest::READABLE).unwrap();
+        model.inject_source_error(token, io::ErrorKind::TimedOut).unwrap();
+        assert!(!model.is_armed(token).unwrap());
+        assert_eq!(model.next_event_time(), None);
+        assert!(poll(&model).is_empty());
+        model.modify(token, Interest::WRITABLE).unwrap();
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::TimedOut));
+        assert!(poll(&model).is_empty());
+    }
+
+    #[test]
+    fn source_errors_obey_edge_delivery_and_successful_rearm_rechecks_them() {
+        let model = LabReactorModel::new();
+        let token = Token::new(33);
+        let interest = Interest::READABLE | Interest::EDGE_TRIGGERED;
+        register(&model, token, interest);
+        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert!(poll(&model).is_empty(), "an unconsumed error is not a new edge");
+        assert!(model.is_armed(token).unwrap());
+        model.modify(token, interest).unwrap();
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionReset));
+        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert!(poll(&model).is_empty());
+    }
+
+    #[test]
+    fn source_errors_are_isolated_by_registration_and_discarded_before_token_reuse() {
+        let model = LabReactorModel::new();
+        let token = Token::new(34);
+        let other = Token::new(35);
+        register(&model, token, Interest::READABLE);
+        register(&model, other, Interest::READABLE);
+        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        assert_eq!(source_error_kind(&model, other), None);
+        model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Interrupted).unwrap();
+        assert_eq!(model.deregister(token).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
+        model.deregister(token).unwrap();
+        assert_eq!(source_error_kind(&model, token), None);
+        assert_eq!(
+            model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        register(&model, token, Interest::READABLE);
+        assert_eq!(source_error_kind(&model, token), None);
+        assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
+        assert!(poll(&model).is_empty());
+        model.inject_source_error(other, io::ErrorKind::TimedOut).unwrap();
+        assert_eq!(poll(&model), vec![Event::errored(other)]);
+        assert_eq!(source_error_kind(&model, other), Some(io::ErrorKind::TimedOut));
+    }
+
+    #[test]
+    fn source_errors_do_not_consume_reactor_failure_rules_or_disappear_on_poll_failure() {
+        let model = LabReactorModel::new();
+        let token = Token::new(36);
+        register(&model, token, Interest::READABLE);
+        model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
+        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(model.fault_stats(ReactorOperation::Poll).attempts, 0);
+        assert_eq!(model.fault_stats(ReactorOperation::Poll).pending_failures, 1);
+        let mut events = Events::with_capacity(4);
+        assert_eq!(
+            model.poll(&mut events, Some(Duration::from_secs(30))).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(events.is_empty());
+        assert!(model.is_armed(token).unwrap());
+        assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
+        assert_eq!(model.now(), Time::ZERO);
+        assert_eq!(poll(&model), vec![Event::errored(token)]);
+        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(model.fault_stats(ReactorOperation::Poll).injected_failures, 1);
+        assert_eq!(model.last_failure().unwrap().kind, io::ErrorKind::Interrupted);
     }
 
     #[test]

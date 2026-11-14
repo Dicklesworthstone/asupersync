@@ -63,6 +63,10 @@ pub use tls_options::{PgTlsOptions, PgTlsVerification};
 mod cursor;
 pub use cursor::{PgCursor, PgCursorComplete, PgCursorConfig};
 
+#[path = "postgres/array.rs"]
+mod array;
+pub use array::{PgArray, PgArrayDimension};
+
 /// Logical replication protocol messages produced by PostgreSQL's pgoutput plugin.
 #[path = "postgres/pgoutput.rs"]
 pub mod pgoutput;
@@ -979,8 +983,23 @@ impl FromSql for f64 {
     }
 }
 
+/// Text types retain their contents. Binary UUID, date, timestamp and interval
+/// values are rendered in PostgreSQL-compatible text, including infinities and
+/// BC dates. Binary `timestamptz` has no session time zone, so its finite values
+/// are rendered in UTC with an explicit `+00` offset. Text-format values retain
+/// the server's chosen representation and time zone.
 impl FromSql for String {
     fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        if format == Format::Binary {
+            match oid {
+                oid::UUID => return decode_binary_uuid_to_text(data),
+                oid::DATE => return decode_binary_date_to_text(data),
+                oid::TIMESTAMP => return decode_binary_timestamp_to_text(data, false),
+                oid::TIMESTAMPTZ => return decode_binary_timestamp_to_text(data, true),
+                oid::INTERVAL => return decode_binary_interval_to_text(data),
+                _ => {}
+            }
+        }
         let mut data = data;
         if format == Format::Binary && oid == oid::JSONB {
             if data.first() == Some(&1) {
@@ -1001,6 +1020,8 @@ impl FromSql for String {
             oid,
             oid::TEXT
                 | oid::VARCHAR
+                | oid::BPCHAR
+                | oid::NAME
                 | oid::CHAR
                 | oid::JSON
                 | oid::JSONB
@@ -1378,7 +1399,7 @@ impl FromSql for serde_json::Value {
 
 // ---- One-dimensional arrays ----
 
-/// A Rust type that binds as an element of a one-dimensional PostgreSQL array.
+/// A Rust type that binds as an element of a PostgreSQL array.
 ///
 /// `Vec<T>` and `[T]` of these types bind as the matching array type, so a
 /// batch lookup such as `WHERE id = ANY($1)` takes a `Vec<i64>`, and
@@ -1389,6 +1410,8 @@ impl FromSql for serde_json::Value {
 /// types (`text`, `varchar`, `bpchar`, `json`), whose text is their binary
 /// form. Decoding goes through `Vec<T>`'s [`FromSql`] implementation, for any
 /// element type `T` that implements [`FromSql`].
+/// [`PgArray<T>`] uses the same element contract while retaining multiple
+/// dimensions and nondefault lower bounds.
 pub trait PgArrayElement: ToSql {
     /// The array type a `[Self]` binds as.
     const ARRAY_OID: u32;
@@ -1771,6 +1794,25 @@ fn pg_value_to_wire_bytes(val: &PgValue, oid: u32, format: Format) -> Result<Vec
     })
 }
 
+/// Some binary scalars have already been rendered by `parse_binary_value`.
+/// Their original wire bytes cannot be recovered by copying the text, so a
+/// typed decoder must receive that text with the matching format. Other binary
+/// values can be stored as UTF-8 too (including raw timestamptz and arrays);
+/// those must retain their binary format even when represented as `Text`.
+fn pg_value_decode_format(value: &PgValue, column: &PgColumn) -> Format {
+    if column.format_code != 1
+        || (matches!(value, PgValue::Text(_))
+            && matches!(
+                column.type_oid,
+                oid::DATE | oid::TIMESTAMP | oid::INTERVAL | oid::NUMERIC | oid::UUID
+            ))
+    {
+        Format::Text
+    } else {
+        Format::Binary
+    }
+}
+
 /// A row from a PostgreSQL query result.
 #[derive(Debug, Clone)]
 pub struct PgRow {
@@ -1896,11 +1938,7 @@ impl PgRow {
         if val.is_null() {
             return T::from_sql_null();
         }
-        let format = if col.format_code == 1 {
-            Format::Binary
-        } else {
-            Format::Text
-        };
+        let format = pg_value_decode_format(val, col);
         let bytes = pg_value_to_wire_bytes(val, col.type_oid, format)?;
         T::from_sql(&bytes, col.type_oid, format)
     }
@@ -1918,11 +1956,7 @@ impl PgRow {
         if val.is_null() {
             return T::from_sql_null();
         }
-        let format = if col.format_code == 1 {
-            Format::Binary
-        } else {
-            Format::Text
-        };
+        let format = pg_value_decode_format(val, col);
         let bytes = pg_value_to_wire_bytes(val, col.type_oid, format)?;
         T::from_sql(&bytes, col.type_oid, format)
     }
@@ -9164,7 +9198,7 @@ impl PgConnection {
                 )));
             }
             oid::DATE => PgValue::Text(decode_binary_date_to_text(data)?),
-            oid::TIMESTAMP => PgValue::Text(decode_binary_timestamp_to_text(data)?),
+            oid::TIMESTAMP => PgValue::Text(decode_binary_timestamp_to_text(data, false)?),
             oid::INTERVAL => PgValue::Text(decode_binary_interval_to_text(data)?),
             oid::NUMERIC => PgValue::Text(decode_binary_numeric_to_text(data)?),
             oid::UUID => PgValue::Text(decode_binary_uuid_to_text(data)?),
@@ -10190,12 +10224,18 @@ fn decode_binary_date_to_text(data: &[u8]) -> Result<String, PgError> {
         )));
     }
 
-    let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]) as i64;
-    let (year, month, day) = civil_from_unix_days(POSTGRES_EPOCH_UNIX_DAYS + days);
-    Ok(format!("{year:04}-{month:02}-{day:02}"))
+    let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    match days {
+        i32::MIN => return Ok("-infinity".to_string()),
+        i32::MAX => return Ok("infinity".to_string()),
+        _ => {}
+    }
+    let (year, month, day) = civil_from_unix_days(POSTGRES_EPOCH_UNIX_DAYS + i64::from(days));
+    let (year, era) = postgres_year_and_era(year);
+    Ok(format!("{year:04}-{month:02}-{day:02}{era}"))
 }
 
-fn decode_binary_timestamp_to_text(data: &[u8]) -> Result<String, PgError> {
+fn decode_binary_timestamp_to_text(data: &[u8], with_timezone: bool) -> Result<String, PgError> {
     if data.len() != 8 {
         return Err(PgError::Protocol(format!(
             "TIMESTAMP requires exactly 8 bytes, got {}",
@@ -10206,14 +10246,21 @@ fn decode_binary_timestamp_to_text(data: &[u8]) -> Result<String, PgError> {
     let micros = i64::from_be_bytes([
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
+    match micros {
+        i64::MIN => return Ok("-infinity".to_string()),
+        i64::MAX => return Ok("infinity".to_string()),
+        _ => {}
+    }
     let days = micros.div_euclid(POSTGRES_DAY_MICROSECONDS);
     let micros_of_day = micros.rem_euclid(POSTGRES_DAY_MICROSECONDS);
     let (year, month, day) = civil_from_unix_days(POSTGRES_EPOCH_UNIX_DAYS + days);
     let (hour, minute, second, fractional_micros) = split_day_microseconds(micros_of_day as u64);
+    let (year, era) = postgres_year_and_era(year);
+    let timezone = if with_timezone { "+00" } else { "" };
 
     if fractional_micros == 0 {
         Ok(format!(
-            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}{timezone}{era}"
         ))
     } else {
         let mut fractional = format!("{fractional_micros:06}");
@@ -10221,7 +10268,7 @@ fn decode_binary_timestamp_to_text(data: &[u8]) -> Result<String, PgError> {
             fractional.pop();
         }
         Ok(format!(
-            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{fractional}"
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{fractional}{timezone}{era}"
         ))
     }
 }
@@ -10240,7 +10287,19 @@ fn decode_binary_interval_to_text(data: &[u8]) -> Result<String, PgError> {
     let months = reader.read_i32()?;
     reader.ensure_consumed("INTERVAL")?;
 
-    Ok(render_interval_text(months, days, microseconds))
+    match (months, days, microseconds) {
+        (i32::MIN, i32::MIN, i64::MIN) => Ok("-infinity".to_string()),
+        (i32::MAX, i32::MAX, i64::MAX) => Ok("infinity".to_string()),
+        _ => Ok(render_interval_text(months, days, microseconds)),
+    }
+}
+
+fn postgres_year_and_era(year: i32) -> (i64, &'static str) {
+    if year <= 0 {
+        (1 - i64::from(year), " BC")
+    } else {
+        (i64::from(year), "")
+    }
 }
 
 fn civil_from_unix_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {

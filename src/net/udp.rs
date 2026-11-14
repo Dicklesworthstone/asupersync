@@ -2042,11 +2042,44 @@ impl ReactorRegistration {
         self.on_fallback = false;
     }
 
+    /// Takes a source error before an operation or registration migration.
+    /// Call without holding a socket lock; shared callers use `error_source`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_error(&self) -> Option<io::Error> {
+        self.registration
+            .as_ref()
+            .and_then(IoRegistration::take_error)
+    }
+
+    /// Captures the query while the registration is locked, for use after unlock.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn error_source(&self) -> Option<crate::runtime::io_driver::IoErrorSource> {
+        self.registration
+            .as_ref()
+            .and_then(IoRegistration::error_source)
+    }
+
     /// Arms readiness `interest` for `source` on behalf of `waker`; see the
     /// type docs for the three steps. `Ok(Armed::SelfWake)` means no reactor
     /// took the fd and the caller must re-poll on its own.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn arm(
+        &mut self,
+        source: &dyn crate::runtime::reactor::Source,
+        interest: Interest,
+        waker: &std::task::Waker,
+    ) -> io::Result<Armed> {
+        if let Some(error) = self.take_error() {
+            return Err(error);
+        }
+        self.arm_after_error_check(source, interest, waker)
+    }
+
+    /// Arms after a shared caller queried its source outside the socket lock.
+    /// Keeping maintenance non-consuming also preserves pending errors when a
+    /// split guard changes the registration's interest or waker.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn arm_after_error_check(
         &mut self,
         source: &dyn crate::runtime::reactor::Source,
         interest: Interest,
@@ -2128,7 +2161,9 @@ impl ReactorRegistration {
         let (interest, displaced) = waiters.register(owner, interest, waker);
         let mut retired: smallvec::SmallVec<[_; 2]> = displaced.into_iter().collect();
         let dispatch = std::task::Waker::from(Arc::clone(&waiters));
-        let armed = self.arm(source, interest, &dispatch);
+        // The shared socket checks its source before taking the lock that
+        // guards this registration. Do not invoke a backend error hook here.
+        let armed = self.arm_after_error_check(source, interest, &dispatch);
         let stranded = if matches!(armed, Ok(Armed::Parked)) {
             Vec::new()
         } else {
@@ -2511,6 +2546,9 @@ impl UdpSocket {
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
                 }
+                if let Some(error) = self.registration.take_error() {
+                    return Err(error);
+                }
                 match self.inner.connect(addr) {
                     Ok(()) => return Ok(()),
                     Err(err) if udp_already_connected(&err) => {
@@ -2586,6 +2624,9 @@ impl UdpSocket {
                         "cancelled",
                     )));
                 }
+                if let Some(error) = self.registration.take_error() {
+                    return Poll::Ready(Err(error));
+                }
                 match self.inner.send_to(buf, addr) {
                     Ok(n) => return Poll::Ready(Ok(n)),
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -2638,6 +2679,9 @@ impl UdpSocket {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             match self.inner.recv_from(buf) {
                 Ok(res) => Poll::Ready(Ok(res)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -2678,6 +2722,9 @@ impl UdpSocket {
             }
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match self.inner.send(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
@@ -2720,6 +2767,9 @@ impl UdpSocket {
 
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match self.inner.recv(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
@@ -2766,6 +2816,9 @@ impl UdpSocket {
 
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match self.inner.peek_from(buf) {
                 Ok(res) => Poll::Ready(Ok(res)),
@@ -3043,6 +3096,17 @@ impl UdpSocket {
                     "UDP send batch exceeds UDP_MAX_BATCH_SIZE",
                 )));
             }
+            if !packets.is_empty() {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
+                    )));
+                }
+                if let Some(error) = self.registration.take_error() {
+                    return Poll::Ready(Err(error));
+                }
+            }
             match self.try_send_batch_to_native(packets, strategy.clamped())? {
                 NativeSendBatchAttempt::Sent(report) => return Poll::Ready(Ok(report)),
                 NativeSendBatchAttempt::WouldBlock => {
@@ -3135,6 +3199,12 @@ impl UdpSocket {
         // syscall per datagram on the connected ATP-RQ spray path.
         let mut armed = false;
         std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             if armed {
                 return Poll::Ready(Ok(()));
             }
@@ -3290,6 +3360,9 @@ impl UdpSocket {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
 
         let connected_peer = self.inner.peer_addr().ok();
         if let Some(peer_addr) = connected_peer {
@@ -3349,6 +3422,9 @@ impl UdpSocket {
         }
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
         }
 
         let connected_peer = self.inner.peer_addr()?;

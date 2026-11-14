@@ -170,6 +170,10 @@ impl Reactor for ParticipantReactor {
         self.backend.modify(token, interest)
     }
 
+    fn take_error(&self, token: Token) -> Option<io::Error> {
+        self.backend.take_error(token)
+    }
+
     fn deregister(&self, token: Token) -> io::Result<()> {
         self.backend.deregister(token)
     }

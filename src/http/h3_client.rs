@@ -1,4 +1,7 @@
-//! One bounded HTTP exchange on an owned authenticated native QUIC connection.
+//! Bounded HTTP exchanges and CONNECT tunnels on owned native QUIC connections.
+
+mod tunnel;
+pub use tunnel::{NativeH3Tunnel, NativeH3TunnelError, NativeH3TunnelEvent};
 
 use std::fmt;
 use std::future::Future;
@@ -40,9 +43,11 @@ const MAX_CLIENT_FIELD_SECTION_SIZE: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub struct NativeH3ClientConfig {
     /// Maximum total request payload, buffered or produced incrementally.
+    /// For CONNECT, this bounds cumulative tunneled send bytes over its lifetime.
     /// Zero allows only empty bodies.
     pub max_request_body_bytes: usize,
     /// Maximum total response payload, buffered or streamed to a sink.
+    /// For CONNECT, this bounds cumulative tunneled receive bytes over its lifetime.
     /// Zero allows only empty bodies.
     pub max_response_body_bytes: usize,
     /// Maximum individual request, response, or trailer field section.
@@ -56,6 +61,8 @@ pub struct NativeH3ClientConfig {
     /// including producer waits, sink backpressure, flush and cleanup.
     /// Must be nonzero. An already completed response survives cleanup errors
     /// or expiry of this deadline.
+    /// `connect_tunnel` uses this only through accepted response headers;
+    /// Cx deadlines and cancellation continue to govern the tunnel lifetime.
     pub timeout: Duration,
 }
 
@@ -299,8 +306,9 @@ impl From<ManagedEndpointError> for NativeH3ClientError {
 /// Responses may be collected or written incrementally to an [`AsyncWrite`]
 /// sink with [`Self::execute_to`], [`Self::execute_stream_to`], or
 /// [`Self::execute_with_body_to`], respectively. This adapter
-/// does not pool, reconnect, retry, follow redirects, multiplex, or implement
-/// CONNECT tunnels. Use [`NativeH3Session`] with an explicitly owned transport
+/// does not pool, reconnect, retry, follow redirects, or multiplex. CONNECT
+/// requires the explicit [`Self::connect_tunnel`] duplex owner. Use
+/// [`NativeH3Session`] with an explicitly owned transport
 /// for multi-request compositions. Existing streams must not be shared with
 /// this consuming adapter.
 /// The session uses static QPACK, a 1 MiB maximum wire-frame payload, and

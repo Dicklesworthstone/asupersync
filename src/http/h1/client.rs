@@ -6,8 +6,9 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal,
-    find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line, parse_header_line,
+    CHUNK_METADATA_ALLOWANCE_BYTES, ChunkedBodyDecoder, HttpError, append_chunk_size_line,
+    append_decimal, chunk_size_line_metadata_bytes, find_chunk_size_line_end, is_forbidden_trailer,
+    parse_chunk_size_line, parse_header_line,
     require_transfer_encoding_chunked, trim_ows, unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
@@ -1645,6 +1646,7 @@ pub struct ClientIncomingBody<T> {
     kind: ClientBodyKind,
     done: bool,
     received: u64,
+    chunk_metadata_bytes: u64,
     size_hint: SizeHint,
     max_chunk_size: usize,
     max_body_size: u64,
@@ -1675,6 +1677,7 @@ impl<T> ClientIncomingBody<T> {
             done: matches!(kind, ClientBodyKind::Empty),
             kind,
             received: 0,
+            chunk_metadata_bytes: 0,
             size_hint,
             max_chunk_size: Self::DEFAULT_MAX_CHUNK_SIZE,
             max_body_size: u64::try_from(max_body_size).unwrap_or(u64::MAX),
@@ -1822,6 +1825,14 @@ impl<T> ClientIncomingBody<T> {
 
                     let line = &self.buffer.as_ref()[..line_end];
                     let chunk_size = parse_chunk_size_line(line)?;
+                    self.chunk_metadata_bytes = self
+                        .chunk_metadata_bytes
+                        .saturating_add(chunk_size_line_metadata_bytes(line));
+                    if self.chunk_metadata_bytes
+                        > self.received.saturating_add(CHUNK_METADATA_ALLOWANCE_BYTES)
+                    {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
 
                     self.buffer.advance(line_end + 2);
 

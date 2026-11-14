@@ -50,6 +50,9 @@ const H3_ALPN: &[u8] = b"h3";
 const OTHER_ALPN: &[u8] = b"hq-29";
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[path = "quic_h3_live_udp/tunnel.rs"]
+mod owned_native_h3_tunnel;
+
 // Canonical test CA + leaf chain. The leaf has SAN DNS:localhost and the
 // serverAuth EKU; the client trusts only this CA, so the test crosses WebPKI's
 // real chain/hostname/signature verifier without a skip-verify path.

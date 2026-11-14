@@ -1025,6 +1025,20 @@ pub trait Reactor: Send + Sync {
     /// - **Windows**: Re-posts completion notification
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()>;
 
+    /// Takes one pending I/O error belonging to this registered source.
+    ///
+    /// This is distinct from a failure of [`Self::poll`] or [`Self::modify`]:
+    /// the error is delivered to an operation on `token`, not to the reactor's
+    /// other users. Taking it consumes it exactly once without re-arming the
+    /// source. An unknown or retired token returns `None`.
+    ///
+    /// The default leaves platform I/O errors to the descriptor's ordinary
+    /// syscalls. Opt-in models may override this to inject source failures.
+    /// Callers must not hold a driver or socket lock while invoking the hook.
+    fn take_error(&self, _token: Token) -> Option<io::Error> {
+        None
+    }
+
     /// Deregisters a previously registered source by token.
     ///
     /// Removes the source from the reactor's set of monitored sources.
@@ -1142,6 +1156,10 @@ impl Reactor for ObservedReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         self.inner.modify(token, interest)
+    }
+
+    fn take_error(&self, token: Token) -> Option<io::Error> {
+        self.inner.take_error(token)
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {

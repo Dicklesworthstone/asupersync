@@ -11,8 +11,10 @@
 //!
 //! The caller supplies a regular read/write file, its access policy and durable
 //! directory linkage. This module retains an exclusive lock and never opens a
-//! path, truncates, repairs or deletes a file. Explicit compaction writes a
-//! caller-supplied replacement and requires the caller to publish it durably.
+//! path, truncates or deletes a file. Explicit compaction and incomplete-tail
+//! recovery write a caller-supplied replacement and require the caller to
+//! publish it durably. Recovery preserves the exact authenticated prefix and
+//! never grants permission to repeat an uncertain effect.
 //! Do not retain cloned
 //! handles or permit writers that ignore the lock. Authentication is not
 //! encryption or an external rollback witness: replacing a file with an older
@@ -79,7 +81,8 @@ pub struct DurableRemoteLimits {
 pub enum DurableRemoteJournalStatus {
     /// The complete authenticated prefix is synced and may accept bounded writes.
     Writable,
-    /// An incomplete trailing record is preserved; only exact terminal replay is allowed.
+    /// An incomplete trailing record is preserved. Exact terminal replay and
+    /// explicit replacement-file tail recovery remain available.
     ReadOnlyTail,
     /// A write, sync or external-length check was uncertain; reopen before use.
     Poisoned,
@@ -216,6 +219,8 @@ impl fmt::Debug for DurableRemoteReconciliationPermit {
 /// records through a caller-owned replacement and durable publication boundary.
 /// A read-only incomplete tail preserves exact terminal replay; complete corrupt
 /// records fail the entire open. Poisoned owners refuse even cached replay.
+/// [`Self::recover_tail`] can restore append access through an authenticated
+/// prefix replacement without resolving any pending request.
 pub struct DurableRemoteJournal {
     core: Journal<File>,
 }
@@ -418,6 +423,9 @@ struct Journal<F> {
     last: AuthenticationTag,
     last_time: u64,
     status: DurableRemoteJournalStatus,
+    // The complete observed length, including an incomplete suffix. Only an
+    // authenticated reopen may establish recovery's source-length witness.
+    read_only_source_len: Option<u64>,
 }
 
 fn valid_label(value: &str) -> bool { !value.is_empty() && value.len() <= 255 }
@@ -535,9 +543,20 @@ impl<'a> Cursor<'a> {
 
 impl<F: JournalIo> Journal<F> {
     fn empty(file: F, config: Config, offset: u64, last: AuthenticationTag) -> Self {
-        Self { file, config, instance: Arc::new(()), entries: BTreeMap::new(), retained_bytes: 0,
-            reserved_terminal_bytes: 0, offset, sequence: 0, last, last_time: 0,
-            status: DurableRemoteJournalStatus::Writable }
+        Self {
+            file,
+            config,
+            instance: Arc::new(()),
+            entries: BTreeMap::new(),
+            retained_bytes: 0,
+            reserved_terminal_bytes: 0,
+            offset,
+            sequence: 0,
+            last,
+            last_time: 0,
+            status: DurableRemoteJournalStatus::Writable,
+            read_only_source_len: None,
+        }
     }
 
     fn create(mut file: F, config: Config) -> Result<Self, DurableRemoteError> {
@@ -600,6 +619,9 @@ impl<F: JournalIo> Journal<F> {
         }
         if log.file.length()? != length { return Err(DurableRemoteError::Changed); }
         log.file.sync()?;
+        if log.status == DurableRemoteJournalStatus::ReadOnlyTail {
+            log.read_only_source_len = Some(length);
+        }
         Ok(log)
     }
 
@@ -873,6 +895,9 @@ impl<F: JournalIo> Journal<F> {
 
 mod compaction;
 pub use compaction::DurableRemoteCompactionReport;
+
+mod recovery;
+pub use recovery::DurableRemoteRecoveryReport;
 
 mod runtime;
 pub use runtime::DurableRemoteComputation;

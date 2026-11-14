@@ -8,8 +8,22 @@
     use crate::time::{TimeSource, WallClock};
     use crate::types::{Budget, RegionId, TaskId};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::{Context, Waker};
+    use std::task::{Context, Wake, Waker};
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn timed_cx(clock: &Arc<VirtualClock>) -> Cx {
         Cx::new_with_drivers(
@@ -478,8 +492,8 @@
         let io = std::pin::pin!(poll_fn(move |_| {
             assert_eq!(
                 probe.pending_count(),
-                1,
-                "the deadline is armed before the I/O"
+                0,
+                "ready I/O must not register a timer, even transiently"
             );
             Poll::Ready(Ok::<_, WsError>(7_u8))
         }));
@@ -489,17 +503,153 @@
     }
 
     #[test]
+    fn ready_io_errors_do_not_register_a_timer() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let io = std::pin::pin!(poll_fn(|_| {
+            assert_eq!(driver.pending_count(), 0);
+            Poll::Ready(Err::<u8, _>(WsError::Io(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "peer reset",
+            ))))
+        }));
+        let wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
+        assert!(matches!(
+            poll_once(wait),
+            Poll::Ready(Err(WsError::Io(error)))
+                if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
     fn pending_io_arms_the_timer_and_its_deadline_still_fires() {
         let clock = Arc::new(VirtualClock::new());
         let cx = timed_cx(&clock);
         let driver = cx.timer_driver().expect("timer driver");
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = Context::from_waker(&waker);
         let io = std::pin::pin!(std::future::pending::<Result<u8, WsError>>());
+        let mut wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+        clock.advance(20_000_000);
+        assert_eq!(driver.process_timers(), 1, "the heartbeat deadline fires");
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Ok(None))));
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
+    fn dropping_a_pending_wait_cleans_its_timer_and_allows_restart() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let mut io = std::pin::pin!(std::future::pending::<Result<u8, WsError>>());
+        for _ in 0..2 {
+            {
+                let mut wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io.as_mut()));
+                assert!(poll_once(wait.as_mut()).is_pending());
+                assert_eq!(driver.pending_count(), 1);
+            }
+            assert_eq!(driver.pending_count(), 0);
+        }
+        clock.advance(20_000_000);
+        assert_eq!(driver.process_timers(), 0, "dropped waits leave no timer behind");
+    }
+
+    #[test]
+    fn ready_repoll_releases_a_previously_armed_timer() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let mut polls = 0;
+        let io = std::pin::pin!(poll_fn(|_| {
+            polls += 1;
+            if polls == 1 {
+                assert_eq!(driver.pending_count(), 0);
+                Poll::Pending
+            } else {
+                assert_eq!(driver.pending_count(), 1);
+                Poll::Ready(Ok::<_, WsError>(7_u8))
+            }
+        }));
         let mut wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
         assert!(poll_once(wait.as_mut()).is_pending());
         assert_eq!(driver.pending_count(), 1);
-        clock.advance(20_000_000);
-        assert_eq!(driver.process_timers(), 1, "the heartbeat deadline fires");
-        assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(None))));
+        assert!(matches!(poll_once(wait.as_mut()), Poll::Ready(Ok(Some(7)))));
+        assert_eq!(driver.pending_count(), 0, "cleanup precedes dropping the completed future");
+    }
+
+    #[test]
+    fn deadline_crossing_during_pending_io_does_not_park_without_a_wake() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let io = std::pin::pin!(poll_fn(|_| {
+            clock.advance(20_000_000);
+            Poll::Pending::<Result<u8, WsError>>
+        }));
+        let wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
+        assert!(matches!(poll_once(wait), Poll::Ready(Ok(None))));
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
+    fn ready_io_keeps_its_result_when_time_crosses_the_deadline_inside_its_poll() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let io = std::pin::pin!(poll_fn(|_| {
+            clock.advance(20_000_000);
+            Poll::Ready(Ok::<_, WsError>(7_u8))
+        }));
+        let wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
+        assert!(matches!(poll_once(wait), Poll::Ready(Ok(Some(7)))));
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
+    fn ready_io_checks_the_retained_deadline_clock_before_polling() {
+        use std::cell::Cell;
+
+        for (retained_millis, receiver_millis, expired) in [(0, 20, false), (20, 0, true)] {
+            let retained = timed_cx(&Arc::new(VirtualClock::starting_at(Time::from_millis(
+                retained_millis,
+            ))));
+            let receiver = timed_cx(&Arc::new(VirtualClock::starting_at(Time::from_millis(
+                receiver_millis,
+            ))));
+            let ambient = timed_cx(&Arc::new(VirtualClock::starting_at(Time::from_secs(30))));
+            ambient.set_cancel_requested(true);
+            let _ambient = Cx::set_current(Some(ambient.clone()));
+            let retained_timer = retained.timer_driver().expect("retained timer");
+            let receiver_timer = receiver.timer_driver().expect("receiver timer");
+            let ambient_timer = ambient.timer_driver().expect("ambient timer");
+            let polls = Cell::new(0);
+            let io = std::pin::pin!(poll_fn(|_| {
+                polls.set(polls.get() + 1);
+                assert_eq!(retained_timer.pending_count(), 0);
+                assert_eq!(receiver_timer.pending_count(), 0);
+                assert_eq!(ambient_timer.pending_count(), 0);
+                Poll::Ready(Ok::<_, WsError>(7_u8))
+            }));
+            let wait = std::pin::pin!(wait_until(&receiver, deadline_at(&retained, 10), io));
+            let result = poll_once(wait);
+            if expired {
+                assert!(matches!(result, Poll::Ready(Ok(None))));
+                assert_eq!(polls.get(), 0, "an expired owner deadline precedes I/O");
+            } else {
+                assert!(matches!(result, Poll::Ready(Ok(Some(7)))));
+                assert_eq!(polls.get(), 1, "foreign clocks cannot expire the deadline");
+            }
+            assert_eq!(retained_timer.pending_count(), 0);
+            assert_eq!(receiver_timer.pending_count(), 0);
+            assert_eq!(ambient_timer.pending_count(), 0);
+        }
     }
 
     #[test]
@@ -531,14 +681,22 @@
     fn cancellation_while_pending_wakes_and_interrupts() {
         let clock = Arc::new(VirtualClock::new());
         let cx = timed_cx(&clock);
+        let driver = cx.timer_driver().expect("timer driver");
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = Context::from_waker(&waker);
         let io = std::pin::pin!(std::future::pending::<Result<u8, WsError>>());
-        let mut wait = std::pin::pin!(wait_until(&cx, None, io));
-        assert!(poll_once(wait.as_mut()).is_pending());
+        let mut wait = std::pin::pin!(wait_until(&cx, deadline_at(&cx, 10), io));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
         cx.set_cancel_requested(true);
+        assert!(wakes.0.load(Ordering::Relaxed) > 0, "cancellation wakes the pending wait");
         assert!(matches!(
-            poll_once(wait.as_mut()),
+            wait.as_mut().poll(&mut task),
             Poll::Ready(Err(WsError::Io(error))) if error.kind() == io::ErrorKind::Interrupted
         ));
+        assert_eq!(driver.pending_count(), 0);
     }
 
     const INTERVAL_NS: u64 = 10_000_000;
