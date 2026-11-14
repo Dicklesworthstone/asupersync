@@ -2321,123 +2321,105 @@ impl HttpClient {
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
+    /// Keep discarded request metadata out of later hops without changing the
+    /// caller's defaults for independent requests. Pool and cookie state remain
+    /// shared; only this redirect chain receives a private configuration.
+    fn without_default_content_headers(&self) -> Self {
+        let mut client = self.clone();
+        let config = Arc::make_mut(&mut client.config);
+        config.default_headers = strip_content_headers(std::mem::take(&mut config.default_headers));
+        client
+    }
+
     /// Execute a request, following redirects as configured.
     fn execute_with_redirects<'a>(
         &'a self,
         cx: &'a Cx,
-        method: Method,
-        parsed: ParsedUrl,
-        extra_headers: Vec<(String, String)>,
-        body: Vec<u8>,
-        origin: Option<ParsedUrl>,
-        redirect_count: u32,
-        retry_count: u32,
+        mut method: Method,
+        mut parsed: ParsedUrl,
+        mut extra_headers: Vec<(String, String)>,
+        mut body: Vec<u8>,
+        mut origin: Option<ParsedUrl>,
+        mut redirect_count: u32,
+        mut retry_count: u32,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            check_cx(cx)?;
-            let resp = Box::pin(self.execute_single(
-                cx,
-                &method,
-                &parsed,
-                &extra_headers,
-                &body,
-                origin.as_ref(),
-            ))
-            .await?;
+            let mut redirect_client: Option<Self> = None;
+            loop {
+                check_cx(cx)?;
+                let client = redirect_client.as_ref().unwrap_or(self);
+                let resp = Box::pin(client.execute_single(
+                    cx,
+                    &method,
+                    &parsed,
+                    &extra_headers,
+                    &body,
+                    origin.as_ref(),
+                ))
+                .await?;
 
-            // Check for redirect
-            if is_redirect(resp.status) {
-                match &self.config.redirect_policy {
-                    RedirectPolicy::None => return Ok(resp),
-                    RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => {
-                        if redirect_count >= *max {
-                            return Err(ClientError::TooManyRedirects {
-                                count: redirect_count.saturating_add(1),
-                                max: *max,
-                            });
+                if is_redirect(resp.status) {
+                    let max = match &self.config.redirect_policy {
+                        RedirectPolicy::None => return Ok(resp),
+                        RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => *max,
+                    };
+                    if redirect_count >= max {
+                        return Err(ClientError::TooManyRedirects {
+                            count: redirect_count.saturating_add(1),
+                            max,
+                        });
+                    }
+
+                    if let Some(location) = get_header(&resp.headers, "Location") {
+                        let next_parsed = ParsedUrl::parse(&resolve_redirect(&parsed, &location))?;
+                        if !redirect_policy_allows_target(
+                            &self.config.redirect_policy,
+                            &parsed,
+                            &next_parsed,
+                        ) {
+                            return Ok(resp);
                         }
-
-                        if let Some(location) = get_header(&resp.headers, "Location") {
-                            let next_url = resolve_redirect(&parsed, &location);
-                            let next_parsed = ParsedUrl::parse(&next_url)?;
-                            if !redirect_policy_allows_target(
-                                &self.config.redirect_policy,
-                                &parsed,
-                                &next_parsed,
-                            ) {
-                                return Ok(resp);
+                        let next_method = redirect_method(resp.status, &method);
+                        let drops_body = redirect_drops_body(resp.status, &method, &next_method);
+                        // Buffered responses can be large. Release each hop before
+                        // continuing instead of retaining it in a recursive future.
+                        drop(resp);
+                        extra_headers =
+                            self.redirect_headers(&parsed, &next_parsed, extra_headers);
+                        if drops_body {
+                            body = Vec::new();
+                            extra_headers = strip_content_headers(extra_headers);
+                            if redirect_client.is_none() {
+                                redirect_client = Some(self.without_default_content_headers());
                             }
-
-                            // 303 See Other always converts to GET
-                            // 301/302 traditionally convert to GET for POST
-                            let next_method = redirect_method(resp.status, &method);
-                            let next_body = if next_method == Method::Get {
-                                Vec::new()
-                            } else {
-                                body
-                            };
-
-                            // Origin credentials follow the origin; proxy credentials
-                            // follow the selected route, which can change at this hop.
-                            let next_headers = self.redirect_headers(
-                                &parsed,
-                                &next_parsed,
-                                extra_headers,
-                            );
-                            // A redirect that changes the method drops the body,
-                            // and the headers that described it (RFC 9110 §15.4).
-                            let next_headers = if next_method == method {
-                                next_headers
-                            } else {
-                                strip_content_headers(next_headers)
-                            };
-
-                            // Pin the credential origin to the first request's
-                            // URL for the whole chain, so client-wide default
-                            // Authorization/Cookie headers are re-attached only
-                            // when a later hop lands back on that exact origin.
-                            let next_origin = Some(origin.unwrap_or_else(|| parsed.clone()));
-
-                            return self
-                                .execute_with_redirects(
-                                    cx,
-                                    next_method,
-                                    next_parsed,
-                                    next_headers,
-                                    next_body,
-                                    next_origin,
-                                    redirect_count.saturating_add(1),
-                                    retry_count,
-                                )
-                                .await;
                         }
+                        // Default credentials remain tied to the first request,
+                        // including after a retry or a return to that origin.
+                        origin = Some(origin.unwrap_or_else(|| parsed.clone()));
+                        method = next_method;
+                        parsed = next_parsed;
+                        redirect_count = redirect_count.saturating_add(1);
+                        continue;
                     }
                 }
-            }
 
-            if let Some(delay) =
-                self.config
-                    .retry_policy
-                    .response_retry_delay(&method, &resp, retry_count)
-            {
-                sleep_before_retry(cx, delay).await?;
-                return self
-                    .execute_with_redirects(
-                        cx,
-                        method,
-                        parsed,
-                        extra_headers,
-                        body,
-                        origin,
-                        redirect_count,
-                        retry_count.saturating_add(1),
-                    )
-                    .await;
-            }
+                if let Some(delay) =
+                    self.config
+                        .retry_policy
+                        .response_retry_delay(&method, &resp, retry_count)
+                {
+                    // Neither the response body nor another layer of the future
+                    // chain needs to survive a retry or its backoff.
+                    drop(resp);
+                    sleep_before_retry(cx, delay).await?;
+                    retry_count = retry_count.saturating_add(1);
+                    continue;
+                }
 
-            Ok(resp)
+                return Ok(resp);
+            }
         })
     }
 
@@ -2445,12 +2427,12 @@ impl HttpClient {
     fn execute_with_redirects_streaming<'a>(
         &'a self,
         cx: &'a Cx,
-        method: Method,
-        parsed: ParsedUrl,
-        extra_headers: Vec<(String, String)>,
-        body: Vec<u8>,
-        origin: Option<ParsedUrl>,
-        redirect_count: u32,
+        mut method: Method,
+        mut parsed: ParsedUrl,
+        mut extra_headers: Vec<(String, String)>,
+        mut body: Vec<u8>,
+        mut origin: Option<ParsedUrl>,
+        mut redirect_count: u32,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<ClientStreamingResponse<ClientIo>, ClientError>>
@@ -2459,83 +2441,61 @@ impl HttpClient {
         >,
     > {
         Box::pin(async move {
-            check_cx(cx)?;
-            let resp = self
-                .execute_single_streaming(cx, &method, &parsed, &extra_headers, &body, origin.as_ref())
-                .await?;
-
-            // Check for redirect
-            if is_redirect(resp.head.status) {
-                match &self.config.redirect_policy {
+            let mut redirect_client: Option<Self> = None;
+            loop {
+                check_cx(cx)?;
+                let client = redirect_client.as_ref().unwrap_or(self);
+                let resp = client
+                    .execute_single_streaming(
+                        cx,
+                        &method,
+                        &parsed,
+                        &extra_headers,
+                        &body,
+                        origin.as_ref(),
+                    )
+                    .await?;
+                if !is_redirect(resp.head.status) {
+                    return Ok(resp);
+                }
+                let max = match &self.config.redirect_policy {
                     RedirectPolicy::None => return Ok(resp),
-                    RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => {
-                        if redirect_count >= *max {
-                            return Err(ClientError::TooManyRedirects {
-                                count: redirect_count.saturating_add(1),
-                                max: *max,
-                            });
-                        }
-
-                        if let Some(location) = get_header(&resp.head.headers, "Location") {
-                            let status = resp.head.status;
-                            let next_url = resolve_redirect(&parsed, &location);
-                            let next_parsed = ParsedUrl::parse(&next_url)?;
-                            if !redirect_policy_allows_target(
-                                &self.config.redirect_policy,
-                                &parsed,
-                                &next_parsed,
-                            ) {
-                                return Ok(resp);
-                            }
-
-                            // Drop streaming response (closes connection) before following.
-                            drop(resp);
-
-                            // 303 See Other always converts to GET
-                            // 301/302 traditionally convert to GET for POST
-                            let next_method = redirect_method(status, &method);
-                            let next_body = if next_method == Method::Get {
-                                Vec::new()
-                            } else {
-                                body
-                            };
-
-                            // Origin credentials follow the origin; proxy credentials
-                            // follow the selected route, which can change at this hop.
-                            let next_headers = self.redirect_headers(
-                                &parsed,
-                                &next_parsed,
-                                extra_headers,
-                            );
-                            // A redirect that changes the method drops the body,
-                            // and the headers that described it (RFC 9110 §15.4).
-                            let next_headers = if next_method == method {
-                                next_headers
-                            } else {
-                                strip_content_headers(next_headers)
-                            };
-
-                            // Pin the credential origin to the first request's
-                            // URL for the whole chain (see the buffered path).
-                            let next_origin = Some(origin.unwrap_or_else(|| parsed.clone()));
-
-                            return self
-                                .execute_with_redirects_streaming(
-                                    cx,
-                                    next_method,
-                                    next_parsed,
-                                    next_headers,
-                                    next_body,
-                                    next_origin,
-                                    redirect_count.saturating_add(1),
-                                )
-                                .await;
-                        }
+                    RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => *max,
+                };
+                if redirect_count >= max {
+                    return Err(ClientError::TooManyRedirects {
+                        count: redirect_count.saturating_add(1),
+                        max,
+                    });
+                }
+                let Some(location) = get_header(&resp.head.headers, "Location") else {
+                    return Ok(resp);
+                };
+                let next_parsed = ParsedUrl::parse(&resolve_redirect(&parsed, &location))?;
+                if !redirect_policy_allows_target(
+                    &self.config.redirect_policy,
+                    &parsed,
+                    &next_parsed,
+                ) {
+                    return Ok(resp);
+                }
+                let next_method = redirect_method(resp.head.status, &method);
+                let drops_body = redirect_drops_body(resp.head.status, &method, &next_method);
+                // Dropping an unread streaming response closes its connection.
+                drop(resp);
+                extra_headers = self.redirect_headers(&parsed, &next_parsed, extra_headers);
+                if drops_body {
+                    body = Vec::new();
+                    extra_headers = strip_content_headers(extra_headers);
+                    if redirect_client.is_none() {
+                        redirect_client = Some(self.without_default_content_headers());
                     }
                 }
+                origin = Some(origin.unwrap_or_else(|| parsed.clone()));
+                method = next_method;
+                parsed = next_parsed;
+                redirect_count = redirect_count.saturating_add(1);
             }
-
-            Ok(resp)
         })
     }
 
@@ -2566,8 +2526,10 @@ impl HttpClient {
     ) -> Result<(Method, PooledClientStreamingResponse), ClientError> {
         let mut origin = None;
         let mut redirect_count = 0_u32;
+        let mut redirect_client: Option<Self> = None;
         loop {
-            let response = self
+            let client = redirect_client.as_ref().unwrap_or(self);
+            let response = client
                 .execute_single_pooled_streaming(
                     cx,
                     &method,
@@ -2599,14 +2561,16 @@ impl HttpClient {
                 return Ok((method, response));
             }
             let next_method = redirect_method(response.head.status, &method);
+            let drops_body = redirect_drops_body(response.head.status, &method, &next_method);
             // Unread redirect bodies release admission before the next hop.
             drop(response);
             extra_headers = self.redirect_headers(&parsed, &next_parsed, extra_headers);
-            if next_method != method {
+            if drops_body {
+                body = Vec::new();
                 extra_headers = strip_content_headers(extra_headers);
-            }
-            if next_method == Method::Get {
-                body.clear();
+                if redirect_client.is_none() {
+                    redirect_client = Some(self.without_default_content_headers());
+                }
             }
             origin = Some(origin.unwrap_or_else(|| parsed.clone()));
             method = next_method;
@@ -4230,6 +4194,12 @@ fn redirect_method(status: u16, original: &Method) -> Method {
         // 307/308 preserve method; all others preserve too
         _ => original.clone(),
     }
+}
+
+fn redirect_drops_body(status: u16, original: &Method, redirected: &Method) -> bool {
+    // A 303 starts a retrieval even when GET or HEAD was already in use.
+    // All method-preserving 301/302/307/308 hops must replay the body.
+    status == 303 || original != redirected
 }
 
 fn canonical_cookie_host(host: &str) -> String {

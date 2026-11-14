@@ -338,6 +338,320 @@
             tokens
         }
 
+
+        #[derive(Clone, Copy, Debug)]
+        enum RedirectResponseMode {
+            Buffered,
+            Streaming,
+            PooledStreaming,
+        }
+
+        async fn redirect_response_status(
+            mode: RedirectResponseMode,
+            client: &HttpClient,
+            cx: &Cx,
+            method: Method,
+            url: &str,
+            headers: Vec<(String, String)>,
+            body: Vec<u8>,
+        ) -> Result<u16, ClientError> {
+            match mode {
+                RedirectResponseMode::Buffered => client
+                    .request(cx, method, url, headers, body)
+                    .await
+                    .map(|response| response.status),
+                RedirectResponseMode::Streaming => client
+                    .request_streaming(cx, method, url, headers, body)
+                    .await
+                    .map(|response| response.head.status),
+                RedirectResponseMode::PooledStreaming => client
+                    .request_streaming_pooled(cx, method, url, headers, body)
+                    .await
+                    .map(|response| response.head.status),
+            }
+        }
+
+        #[test]
+        fn redirect_preserves_get_payload_and_framing_in_every_response_mode() {
+            for multithread in [false, true] {
+                let runtime = runtime(multithread);
+                for mode in [
+                    RedirectResponseMode::Buffered,
+                    RedirectResponseMode::Streaming,
+                    RedirectResponseMode::PooledStreaming,
+                ] {
+                    for status in [301_u16, 302, 307, 308] {
+                        let (listener, url) = listener();
+                        let peer = std::thread::spawn(move || {
+                            for path in ["/start", "/done"] {
+                                let mut socket = accept(&listener);
+                                let head = request_head(&mut socket);
+                                assert!(head.starts_with(&format!("GET {path} HTTP/1.1\r\n")), "{mode:?} {status}: {head}");
+                                let lower = head.to_ascii_lowercase();
+                                assert!(lower.contains("content-length: 3\r\n"), "{mode:?} {status}: {head}");
+                                assert!(lower.contains("content-type: text/plain\r\n"), "{mode:?} {status}: {head}");
+                                assert!(lower.contains("content-language: en\r\n"), "{mode:?} {status}: {head}");
+                                let mut payload = [0_u8; 3];
+                                socket.read_exact(&mut payload).expect("redirect must replay the GET payload");
+                                assert_eq!(&payload, b"abc", "{mode:?} {status} {path}");
+                                if path == "/start" {
+                                    write!(socket, "HTTP/1.1 {status} Redirect\r\nLocation: /done\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                                } else {
+                                    socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").unwrap();
+                                }
+                            }
+                        });
+                        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                        let client = HttpClient::builder()
+                            .max_connections_per_host(1)
+                            .max_total_connections(1)
+                            .request_timeout(Duration::from_secs(4))
+                            .default_header("Content-Length", "3")
+                            .default_header("Content-Type", "text/plain")
+                            .build();
+                        runtime.block_on_with_cx(cx.clone(), async {
+                            let wakes = cancel_waker_tokens(&cx);
+                            let response = redirect_response_status(
+                                mode,
+                                &client,
+                                &cx,
+                                Method::Get,
+                                &format!("{url}/start"),
+                                vec![("Content-Language".into(), "en".into())],
+                                b"abc".to_vec(),
+                            ).await.unwrap();
+                            assert_eq!(response, 204, "{mode:?} {status}");
+                            assert_eq!(client.pool_stats().total_connections, 0);
+                            assert_eq!(cancel_waker_tokens(&cx), wakes);
+                        });
+                        peer.join().unwrap();
+                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    }
+                }
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn redirect_retrieval_discards_all_body_headers_without_mutating_client_defaults() {
+            for multithread in [false, true] {
+                let runtime = runtime(multithread);
+                for mode in [
+                    RedirectResponseMode::Buffered,
+                    RedirectResponseMode::Streaming,
+                    RedirectResponseMode::PooledStreaming,
+                ] {
+                    for (method, status, redirected) in [
+                        (Method::Get, 303_u16, Method::Get),
+                        (Method::Head, 303, Method::Head),
+                        (Method::Post, 301, Method::Get),
+                        (Method::Post, 302, Method::Get),
+                        (Method::Put, 303, Method::Get),
+                    ] {
+                        let (listener, url) = listener();
+                        let first_method = method.clone();
+                        let peer = std::thread::spawn(move || {
+                            for path in ["/start", "/second", "/done", "/fresh"] {
+                                let mut socket = accept(&listener);
+                                let head = request_head(&mut socket);
+                                let expected_method = match path {
+                                    "/start" => first_method.clone(),
+                                    "/fresh" => Method::Post,
+                                    _ => redirected.clone(),
+                                };
+                                assert!(head.starts_with(&format!("{expected_method} {path} HTTP/1.1\r\n")), "{mode:?} {status}: {head}");
+                                let lower = head.to_ascii_lowercase();
+                                assert!(lower.contains("x-default: retained\r\n"), "{head}");
+                                assert!(lower.contains("x-request: retained\r\n"), "{head}");
+                                if matches!(path, "/start" | "/fresh") {
+                                    assert!(lower.contains("content-length: 3\r\n"), "{head}");
+                                    assert!(lower.contains("content-type: text/plain\r\n"), "{head}");
+                                    assert!(lower.contains("content-language: en\r\n"), "{head}");
+                                    assert!(lower.contains("content-encoding: identity\r\n"), "{head}");
+                                    let mut payload = [0_u8; 3];
+                                    socket.read_exact(&mut payload).unwrap();
+                                    assert_eq!(&payload, b"abc");
+                                } else {
+                                    for header in [
+                                        "content-length", "content-type", "content-encoding",
+                                        "content-language", "content-location", "transfer-encoding",
+                                        "digest", "last-modified",
+                                    ] {
+                                        assert!(
+                                            !lower.contains(&format!("\r\n{header}:")),
+                                            "{mode:?} {status} {path} retained discarded-body metadata: {head}"
+                                        );
+                                    }
+                                }
+                                match path {
+                                    "/start" => write!(socket, "HTTP/1.1 {status} Redirect\r\nLocation: /second\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
+                                    "/second" => socket.write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /done\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
+                                    _ => socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").unwrap(),
+                                }
+                                // A discarded payload must not trail a bodyless request.
+                                // This also proves the prior hop closed before the next
+                                // admission uses the single available connection slot.
+                                expect_closed(&mut socket);
+                            }
+                        });
+                        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                        let client = HttpClient::builder()
+                            .max_connections_per_host(1)
+                            .max_total_connections(1)
+                            .request_timeout(Duration::from_secs(4))
+                            .default_header("Content-Length", "3")
+                            .default_header("Content-Type", "text/plain")
+                            .default_header("Content-Language", "en")
+                            .default_header("X-Default", "retained")
+                            .build();
+                        let headers = vec![
+                            ("Content-Encoding".into(), "identity".into()),
+                            ("Content-Location".into(), "/payload".into()),
+                            ("Digest".into(), "sha-256=example".into()),
+                            ("Last-Modified".into(), "Wed, 21 Oct 2015 07:28:00 GMT".into()),
+                            ("X-Request".into(), "retained".into()),
+                        ];
+                        runtime.block_on_with_cx(cx.clone(), async {
+                            let wakes = cancel_waker_tokens(&cx);
+                            assert_eq!(
+                                redirect_response_status(mode, &client, &cx, method, &format!("{url}/start"), headers.clone(), b"abc".to_vec()).await.unwrap(),
+                                204,
+                                "{mode:?} {status}"
+                            );
+                            assert_eq!(client.pool_stats().total_connections, 0);
+                            assert_eq!(cancel_waker_tokens(&cx), wakes);
+                            // A separate request on the same client still uses its
+                            // original content defaults and shared pool state.
+                            assert_eq!(
+                                redirect_response_status(mode, &client, &cx, Method::Post, &format!("{url}/fresh"), headers, b"abc".to_vec()).await.unwrap(),
+                                204
+                            );
+                            assert_eq!(client.pool_stats().total_connections, 0);
+                            assert_eq!(cancel_waker_tokens(&cx), wakes);
+                        });
+                        peer.join().unwrap();
+                        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                    }
+                }
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn buffered_retry_preserves_body_cookies_and_one_connection_across_many_attempts() {
+            const RETRIES: u32 = 64;
+            for multithread in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    socket.set_nodelay(true).unwrap();
+                    let response_body = vec![b'x'; 32 * 1024];
+                    for attempt in 0..=RETRIES {
+                        let head = request_head(&mut socket);
+                        assert!(head.starts_with("PUT /retry HTTP/1.1\r\n"), "{head}");
+                        assert!(head.to_ascii_lowercase().contains("content-length: 3\r\n"), "{head}");
+                        if attempt != 0 {
+                            assert!(head.contains(&format!("Cookie: attempt={}\r\n", attempt - 1)), "{head}");
+                        }
+                        let mut payload = [0_u8; 3];
+                        socket.read_exact(&mut payload).unwrap();
+                        assert_eq!(&payload, b"abc");
+                        if attempt == RETRIES {
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                        } else {
+                            write!(socket, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nRetry-After: 0\r\nSet-Cookie: attempt={attempt}\r\n\r\n", response_body.len()).unwrap();
+                            socket.write_all(&response_body).unwrap();
+                        }
+                    }
+                    expect_closed(&mut socket);
+                    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(8))
+                    .cookie_store(true)
+                    .retry_idempotent_statuses(RETRIES)
+                    .build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let wakes = cancel_waker_tokens(&cx);
+                    let response = client.request(
+                        &cx,
+                        Method::Put,
+                        &format!("{url}/retry"),
+                        vec![("Content-Type".into(), "text/plain".into())],
+                        b"abc".to_vec(),
+                    ).await.unwrap();
+                    assert_eq!(response.status, 200);
+                    assert_eq!(response.body, b"ok");
+                    assert_eq!(client.pool_stats().connections_created, 1);
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert_eq!(cancel_waker_tokens(&cx), wakes);
+                });
+                peer.join().unwrap();
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
+        #[test]
+        fn buffered_retry_budget_survives_redirects() {
+            for multithread in [false, true] {
+                let (listener, url) = listener();
+                let peer = std::thread::spawn(move || {
+                    let mut socket = accept(&listener);
+                    socket.set_nodelay(true).unwrap();
+                    for attempt in 0..5 {
+                        let path = if attempt < 2 { "/start" } else { "/next" };
+                        let head = request_head(&mut socket);
+                        assert!(head.starts_with(&format!("PUT {path} HTTP/1.1\r\n")), "{head}");
+                        assert!(head.to_ascii_lowercase().contains("content-length: 3\r\n"), "{head}");
+                        let mut payload = [0_u8; 3];
+                        socket.read_exact(&mut payload).unwrap();
+                        assert_eq!(&payload, b"abc");
+                        match attempt {
+                            1 => socket.write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n").unwrap(),
+                            4 => socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nRetry-After: 0\r\nConnection: close\r\n\r\nlast").unwrap(),
+                            _ => socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 1\r\nRetry-After: 0\r\n\r\nx").unwrap(),
+                        }
+                    }
+                    expect_closed(&mut socket);
+                    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                });
+                let runtime = runtime(multithread);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let client = HttpClient::builder()
+                    .max_connections_per_host(1)
+                    .max_total_connections(1)
+                    .request_timeout(Duration::from_secs(4))
+                    .max_redirects(1)
+                    .retry_idempotent_statuses(3)
+                    .build();
+                runtime.block_on_with_cx(cx.clone(), async {
+                    let wakes = cancel_waker_tokens(&cx);
+                    let response = client.request(
+                        &cx,
+                        Method::Put,
+                        &format!("{url}/start"),
+                        Vec::new(),
+                        b"abc".to_vec(),
+                    ).await.unwrap();
+                    // One retry happened before the redirect and two after it.
+                    // The redirect must not grant a fresh retry allowance.
+                    assert_eq!(response.status, 503);
+                    assert_eq!(response.body, b"last");
+                    assert_eq!(client.pool_stats().connections_created, 1);
+                    assert_eq!(client.pool_stats().total_connections, 0);
+                    assert_eq!(cancel_waker_tokens(&cx), wakes);
+                });
+                peer.join().unwrap();
+                assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+
         struct UploadBody {
             frames: std::collections::VecDeque<Frame<crate::bytes::BytesCursor>>,
             exact: Option<u64>,
