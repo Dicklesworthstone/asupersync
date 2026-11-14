@@ -1838,27 +1838,13 @@ impl Connection {
         let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
             H2Error::connection(ErrorCode::InternalError, "decode_headers missing stream")
         })?;
-        // br-asupersync-0eyf7t — RFC 9113 §8.1: trailers MUST NOT
-        // contain pseudo-header fields. A second HEADERS-with-
-        // END_HEADERS for the same stream is either trailers
-        // (server-side: always; client-side: when END_STREAM is
-        // set) or 1xx informational (client-side: when END_STREAM
-        // is not set). Capture the discrimination here, before any
-        // mutation, so the validator can reject pseudo-headers in
-        // the trailers section. is_request is unchanged from
-        // br-asupersync-vqpx88: server sees requests, client sees
-        // responses.
-        let is_subsequent_headers = stream.initial_headers_decoded();
+        // RFC 9113 §8.1: once the initial request or FINAL response has
+        // been decoded, every later field block is trailers. In particular,
+        // a peer cannot turn trailers into another response by adding
+        // :status. Informational responses do not set this marker, so a
+        // final bodyless response after 100/103 is still an initial block.
+        let is_trailers = stream.initial_headers_decoded();
         let is_request = !self.is_client;
-        // br-asupersync-k4jj9p: a client may receive 1xx informational
-        // HEADERS (e.g. 100 Continue, 103 Early Hints) followed by the
-        // final 2xx/3xx/4xx/5xx HEADERS even when the final response is
-        // bodyless. Per RFC 9113 §8.1 + §8.3.2, only the FINAL response
-        // promotes the stream to "initial headers decoded"; subsequent
-        // HEADERS before a final response are still informational, NOT
-        // trailers. Compute a tentative is_trailers and refine it after
-        // header decoding using the just-observed :status pseudo-header.
-        let tentative_is_trailers = is_subsequent_headers && (is_request || end_stream);
 
         let fragments = stream.take_header_fragments();
 
@@ -1887,27 +1873,16 @@ impl Connection {
             self.hpack_decoder.decode(&mut src)?
         };
 
-        // br-asupersync-k4jj9p: refine is_trailers using the just-observed
-        // :status pseudo-header. CLIENT side: a subsequent HEADERS is
-        // trailers ONLY if there is NO :status pseudo-header (since 1xx
-        // informational AND final responses both carry :status). SERVER
-        // side keeps the original semantics — any subsequent HEADERS is
-        // trailers (1xx informational is impossible request-side).
-        let observed_status = headers
-            .iter()
-            .find(|h| h.name.as_bytes() == b":status")
-            .and_then(|h| std::str::from_utf8(h.value.as_bytes()).ok())
-            .and_then(|s| s.parse::<u16>().ok());
-        let is_informational_response =
-            !is_request && observed_status.is_some_and(|s| (100..200).contains(&s));
-        let is_trailers = if is_request {
-            tentative_is_trailers
-        } else {
-            // Client side: trailers iff subsequent-headers AND no :status.
-            // end_stream alone is NOT sufficient — a bodyless final
-            // response after 1xx has end_stream=true but is NOT trailers.
-            is_subsequent_headers && observed_status.is_none() && end_stream
-        };
+        // Reject message-ordering errors only AFTER the complete HPACK
+        // block has been decoded. Its dynamic-table insertions must remain
+        // available to unrelated streams even when this message is refused.
+        if is_trailers && !end_stream {
+            return Err(H2Error::stream(
+                stream_id,
+                ErrorCode::ProtocolError,
+                "trailers MUST have END_STREAM (RFC 9113 §8.1)",
+            ));
+        }
 
         // br-asupersync-vqpx88 + br-asupersync-0eyf7t: RFC 9113
         // §8.3.1/§8.3.2 pseudo-header structural validation, plus
@@ -1923,6 +1898,18 @@ impl Connection {
             self.extended_connect_enabled,
         ) {
             return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
+        }
+
+        let is_informational_response = !is_request
+            && headers
+                .iter()
+                .any(|header| header.name == ":status" && header.value.starts_with('1'));
+        if is_informational_response && end_stream {
+            return Err(H2Error::stream(
+                stream_id,
+                ErrorCode::ProtocolError,
+                "informational response MUST NOT have END_STREAM (RFC 9113 §8.1)",
+            ));
         }
 
         // br-asupersync-0eyf7t + br-asupersync-k4jj9p — mark the
@@ -2891,8 +2878,8 @@ pub enum ReceivedFrame {
 ///    are exempt.
 ///
 /// **What this does NOT validate for ordinary requests** (deeper §8.3.1
-/// value-syntax checks — path-form, scheme syntax, authority form, status
-/// range, method token, header-value byte set): those are the depth implemented in
+/// value-syntax checks — path-form, scheme syntax, authority form,
+/// method token, header-value byte set): those are the depth implemented in
 /// `crate::http::h3_native::validate_request_pseudo_headers_with_settings`
 /// and represent a follow-up. The structural rules above are the ones
 /// flagged by the bead and are the highest-value subset because they
@@ -3022,6 +3009,17 @@ fn validate_h2_pseudo_headers_with_connect(
                 b":status" => {
                     if seen_status {
                         return Err("duplicate :status pseudo-header");
+                    }
+                    // A noncanonical value must not bypass informational
+                    // response classification, and HTTP/2 never switches
+                    // protocols with status 101 (RFC 9113 §8.6).
+                    let status = h.value.as_bytes();
+                    if status.len() != 3
+                        || !(b'1'..=b'5').contains(&status[0])
+                        || !status[1..].iter().all(u8::is_ascii_digit)
+                        || status == b"101"
+                    {
+                        return Err("invalid HTTP/2 :status pseudo-header");
                     }
                     seen_status = true;
                 }

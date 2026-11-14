@@ -5805,6 +5805,253 @@
         encoded.freeze()
     }
 
+    fn process_test_field_block(
+        connection: &mut Connection,
+        stream_id: u32,
+        block: Bytes,
+        end_stream: bool,
+        split: bool,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
+        if !split {
+            return connection.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id, block, end_stream, true,
+            )));
+        }
+        let cut = block.len() / 2;
+        assert!(cut > 0, "the fixture must exercise two nonempty fragments");
+        assert!(
+            connection
+                .process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id,
+                    block.slice(..cut),
+                    end_stream,
+                    false,
+                )))?
+                .is_none()
+        );
+        connection.process_frame(Frame::Continuation(ContinuationFrame {
+            stream_id,
+            header_block: block.slice(cut..),
+            end_headers: true,
+        }))
+    }
+
+    #[test]
+    fn response_headers_after_final_are_trailers_and_keep_hpack_in_step() {
+        for split in [false, true] {
+            for end_stream in [false, true] {
+                for status in ["103", "200", "404"] {
+                    let mut conn = Connection::client(Settings::client());
+                    conn.state = ConnectionState::Open;
+                    let stream_id = conn
+                        .open_stream(test_request_header_vec("/first"), true)
+                        .unwrap();
+                    while conn.next_frame().is_some() {}
+                    let mut peer = hpack::Encoder::new();
+                    let initial = encode_with(&mut peer, &[(":status", "200")]);
+                    conn.process_frame(Frame::Headers(HeadersFrame::new(
+                        stream_id, initial, false, true,
+                    )))
+                    .expect("initial final response");
+                    assert!(conn.streams.get(stream_id).unwrap().initial_headers_decoded());
+
+                    // Even an informational status cannot reopen response headers
+                    // after the final status. The rejected block inserts a new
+                    // table entry, which a sibling response MUST still decode.
+                    let block = encode_with(
+                        &mut peer,
+                        &[(":status", status), ("x-rejected-block", "retained")],
+                    );
+                    let error = process_test_field_block(
+                        &mut conn, stream_id, block, end_stream, split,
+                    )
+                    .expect_err("a second :status is never a new response");
+                    assert_eq!(error.stream_id, Some(stream_id));
+                    assert_eq!(error.code, ErrorCode::ProtocolError);
+                    assert_eq!(conn.state(), ConnectionState::Open);
+                    assert_eq!(conn.continuation_stream_id, None);
+                    conn.reset_stream(stream_id, error.code);
+                    while conn.next_frame().is_some() {}
+
+                    let sibling = conn
+                        .open_stream(test_request_header_vec("/sibling"), true)
+                        .unwrap();
+                    while conn.next_frame().is_some() {}
+                    let block = encode_with(
+                        &mut peer,
+                        &[(":status", "200"), ("x-rejected-block", "retained")],
+                    );
+                    assert_eq!(block.as_ref(), &[0x88, 0xbe], "use the dynamic entry");
+                    let Some(ReceivedFrame::Headers { headers, end_stream, .. }) =
+                        conn.process_frame(Frame::Headers(HeadersFrame::new(
+                            sibling, block, true, true,
+                        )))
+                        .expect("the sibling survives with synchronized HPACK")
+                    else {
+                        panic!("sibling response missing");
+                    };
+                    assert_eq!(headers, vec![
+                        Header::new(":status", "200"),
+                        Header::new("x-rejected-block", "retained"),
+                    ]);
+                    assert!(end_stream);
+                    assert_eq!(conn.active_stream_count(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn informational_responses_cannot_end_the_stream() {
+        for split in [false, true] {
+            for request_ended in [false, true] {
+                for status in ["100", "102", "103", "199"] {
+                    let mut conn = Connection::client(Settings::client());
+                    conn.state = ConnectionState::Open;
+                    let stream_id = conn
+                        .open_stream(test_request_header_vec("/continue"), request_ended)
+                        .unwrap();
+                    while conn.next_frame().is_some() {}
+                    let block = encode_test_headers(&[
+                        (":status", status), ("x-informational", "no-final-response"),
+                    ]);
+                    let error = process_test_field_block(
+                        &mut conn, stream_id, block, true, split,
+                    )
+                    .expect_err("END_STREAM requires a final response");
+                    assert_eq!(error.stream_id, Some(stream_id));
+                    assert_eq!(error.code, ErrorCode::ProtocolError);
+                    assert!(!conn.streams.get(stream_id).unwrap().initial_headers_decoded());
+                    assert_eq!(conn.continuation_stream_id, None);
+                    conn.reset_stream(stream_id, error.code);
+                    while conn.next_frame().is_some() {}
+                    assert_eq!(conn.active_stream_count(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn response_status_is_validated_before_classifying_the_header_section() {
+        for status in ["", "20", "0200", "+200", "2xx", "099", "600", "999", "101"] {
+            let mut conn = Connection::client(Settings::client());
+            conn.state = ConnectionState::Open;
+            let stream_id = conn
+                .open_stream(test_request_header_vec("/status"), true)
+                .unwrap();
+            while conn.next_frame().is_some() {}
+            let error = conn
+                .process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id, test_response_headers(status), false, true,
+                )))
+                .expect_err("invalid status cannot become an initial or interim response");
+            assert_eq!(error.stream_id, Some(stream_id), "status {status:?}");
+            assert_eq!(error.code, ErrorCode::ProtocolError, "status {status:?}");
+            assert!(!conn.streams.get(stream_id).unwrap().initial_headers_decoded());
+        }
+    }
+
+    #[test]
+    fn informational_responses_leave_the_final_header_and_trailer_slots_open() {
+        for split in [false, true] {
+            for final_ends_stream in [false, true] {
+                let mut conn = Connection::client(Settings::client());
+                conn.state = ConnectionState::Open;
+                let stream_id = conn
+                    .open_stream(test_request_header_vec("/hints"), true)
+                    .unwrap();
+                while conn.next_frame().is_some() {}
+                let mut peer = hpack::Encoder::new();
+                for status in ["100", "103", "200"] {
+                    let end_stream = status == "200" && final_ends_stream;
+                    let block = encode_with(&mut peer, &[(":status", status), ("x-stage", status)]);
+                    let event = process_test_field_block(
+                        &mut conn, stream_id, block, end_stream, split,
+                    )
+                    .expect("interim responses followed by a final response are valid");
+                    let Some(ReceivedFrame::Headers { headers, end_stream: actual_end, .. }) = event
+                    else {
+                        panic!("response field block missing");
+                    };
+                    assert_eq!(headers[0], Header::new(":status", status));
+                    assert_eq!(actual_end, end_stream);
+                    assert_eq!(
+                        conn.streams.get(stream_id).unwrap().initial_headers_decoded(),
+                        status == "200",
+                    );
+                }
+                if !final_ends_stream {
+                    let event = conn.process_frame(Frame::Data(DataFrame::new(
+                        stream_id, Bytes::from_static(b"payload"), false,
+                    )))
+                    .expect("body after final response");
+                    assert!(matches!(event, Some(ReceivedFrame::Data { .. })));
+                    let trailers = encode_with(&mut peer, &[("x-checksum", "verified")]);
+                    let event = process_test_field_block(
+                        &mut conn, stream_id, trailers, true, split,
+                    )
+                    .expect("ordinary trailers still terminate the message");
+                    assert!(matches!(event, Some(ReceivedFrame::Headers { end_stream: true, .. })));
+                }
+                assert_eq!(conn.active_stream_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_field_block_without_status_before_the_final_response_is_not_trailers() {
+        for informational_first in [false, true] {
+            let mut conn = Connection::client(Settings::client());
+            conn.state = ConnectionState::Open;
+            let stream_id = conn
+                .open_stream(test_request_header_vec("/missing-final"), true)
+                .unwrap();
+            while conn.next_frame().is_some() {}
+            if informational_first {
+                conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id, test_response_headers("100"), false, true,
+                )))
+                .unwrap();
+            }
+            let error = conn
+                .process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id, encode_test_headers(&[("grpc-status", "0")]), true, true,
+                )))
+                .expect_err("there must be a final :status before trailers");
+            assert_eq!(error.stream_id, Some(stream_id));
+            assert_eq!(error.code, ErrorCode::ProtocolError);
+            assert!(error.message.contains("missing required :status"));
+        }
+    }
+
+    #[test]
+    fn request_trailers_still_complete_after_initial_request_headers() {
+        for split in [false, true] {
+            let mut conn = Connection::server(Settings::default());
+            conn.state = ConnectionState::Open;
+            let mut peer = hpack::Encoder::new();
+            let initial = encode_with(&mut peer, &[
+                (":method", "POST"), (":scheme", "https"), (":path", "/upload"),
+                (":authority", "example.com"),
+            ]);
+            process_test_field_block(&mut conn, 1, initial, false, split).unwrap();
+            assert!(conn.streams.get(1).unwrap().initial_headers_decoded());
+            conn.process_frame(Frame::Data(DataFrame::new(
+                1, Bytes::from_static(b"request"), false,
+            )))
+            .unwrap();
+            let trailers = encode_with(&mut peer, &[("x-checksum", "verified")]);
+            let Some(ReceivedFrame::Headers { headers, end_stream, .. }) =
+                process_test_field_block(&mut conn, 1, trailers, true, split).unwrap()
+            else {
+                panic!("request trailers missing");
+            };
+            assert_eq!(headers, vec![Header::new("x-checksum", "verified")]);
+            assert!(end_stream);
+            assert_eq!(conn.streams.get(1).unwrap().state(), StreamState::HalfClosedRemote);
+        }
+    }
+
     /// RFC 9113 §5.1: after sending RST_STREAM an endpoint MUST ignore the
     /// frames the peer already had in flight on that stream, and §4.3 still
     /// requires their field blocks to be decoded so both HPACK tables stay in
