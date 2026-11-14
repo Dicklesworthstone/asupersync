@@ -217,6 +217,8 @@ const IMMEDIATE_ACQUIRE_SENTINEL: u64 = u64::MAX;
 struct QueueEntry {
     id: u64,
     cost: u32,
+    /// Reset generation in which this entry was admitted.
+    generation: Option<u64>,
     enqueued_at_millis: u64,
     deadline_millis: u64,
     /// State of this entry.
@@ -260,6 +262,14 @@ struct BucketState {
 
     /// Last refill time (as millis since epoch).
     last_refill: u64,
+
+    /// Refund ownership across reset. Exhaustion permanently disables refunds.
+    generation: Option<u64>,
+}
+
+/// Credit admitted in one reset generation, even after refund epochs exhaust.
+struct TokenBucketGrant {
+    generation: Option<u64>,
 }
 
 /// Thread-safe rate limiter using token bucket algorithm.
@@ -296,9 +306,12 @@ pub struct RateLimiter {
 /// The permit refunds its token cost if dropped before [`Self::commit`]. This
 /// is useful for async or panic-prone call paths where the protected work is
 /// split from synchronous token acquisition.
+/// A reset leaves an existing permit usable, but its drop cannot refund into
+/// the new reset generation.
 pub struct RateLimitPermit<'a> {
     limiter: &'a RateLimiter,
     cost: u32,
+    generation: Option<u64>,
     refund: bool,
 }
 
@@ -312,7 +325,7 @@ impl RateLimitPermit<'_> {
 impl Drop for RateLimitPermit<'_> {
     fn drop(&mut self) {
         if self.refund {
-            self.limiter.refund_tokens(self.cost);
+            self.limiter.refund_tokens(self.cost, self.generation);
         }
     }
 }
@@ -323,6 +336,8 @@ impl Drop for RateLimitPermit<'_> {
 /// been granted, including an immediate acquisition, it refunds them instead
 /// of leaving an abandoned reservation behind. Keep the guard alive across
 /// waits so cancellation of the enclosing future releases the acquisition.
+/// Refunds belong to the reset generation in which the guard was admitted;
+/// dropping an old grant cannot replenish quota consumed after a reset.
 ///
 /// This is a caller-driven queue handle, not a future: it does not register a
 /// waker or arrange another poll. Call [`Self::poll_claim`] after the caller's
@@ -333,6 +348,7 @@ pub struct QueuedRateLimitAcquire<'a> {
     limiter: &'a RateLimiter,
     entry_id: Option<u64>,
     cost: u32,
+    generation: Option<u64>,
     last_observed_now: Time,
     /// Async owners use their captured clock for cancellation-time queue progress.
     drop_timer: Option<crate::time::TimerDriverHandle>,
@@ -364,6 +380,7 @@ impl<'a> QueuedRateLimitAcquire<'a> {
                 Ok(Some(RateLimitPermit {
                     limiter: self.limiter,
                     cost: self.cost,
+                    generation: self.generation,
                     refund: true,
                 }))
             }
@@ -385,7 +402,7 @@ impl Drop for QueuedRateLimitAcquire<'_> {
         if entry_id == IMMEDIATE_ACQUIRE_SENTINEL {
             // The raw sentinel does not retain its cost, so cancel_entry()
             // cannot refund an immediate grant. This owner retains that cost.
-            self.limiter.refund_tokens(self.cost);
+            self.limiter.refund_tokens(self.cost, self.generation);
         } else {
             // Async drop uses the captured clock: a stale last poll must not
             // grant a follower whose queue deadline has since expired. Manual
@@ -411,6 +428,7 @@ impl RateLimiter {
                 tokens: burst,
                 fractional: 0,
                 last_refill: 0,
+                generation: Some(0),
             }),
             wait_queue: RwLock::new(VecDeque::with_capacity(16)),
             changed: Notify::new(),
@@ -519,12 +537,19 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
+        self.try_acquire_generation(cost, now).is_some()
+    }
+
+    /// Debit and capture refund ownership in the same state critical section.
+    /// An admitted grant remains usable when its generation is exhausted,
+    /// but cannot refund credit into a later reset.
+    fn try_acquire_generation(&self, cost: u32, now: Time) -> Option<TokenBucketGrant> {
         if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
             // Preserve FIFO fairness for queued waiters, but do not let stale
             // timed-out or already-grantable queue state strand the fast path.
             let _ = self.process_queue(now);
             if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
-                return false;
+                return None;
             }
         }
 
@@ -537,7 +562,7 @@ impl RateLimiter {
         // AB-BA deadlock (d8ji01).
         let wait_queue = self.wait_queue.read();
         if wait_queue.iter().any(|entry| entry.result.is_none()) {
-            return false;
+            return None;
         }
 
         let mut state = self.state.lock();
@@ -547,14 +572,16 @@ impl RateLimiter {
 
         let acquired = if state.tokens >= cost {
             state.tokens -= cost;
-            true
+            Some(TokenBucketGrant {
+                generation: state.generation,
+            })
         } else {
-            false
+            None
         };
         drop(state);
         drop(wait_queue);
 
-        if acquired {
+        if acquired.is_some() {
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
         }
         acquired
@@ -596,12 +623,15 @@ impl RateLimiter {
         }
     }
 
-    fn refund_tokens(&self, cost: u32) {
-        if cost == 0 {
+    fn refund_tokens(&self, cost: u32, generation: Option<u64>) {
+        if cost == 0 || generation.is_none() {
             return;
         }
 
         let mut state = self.state.lock();
+        if state.generation != generation {
+            return;
+        }
         let previous_tokens = state.tokens;
         state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
         if state.tokens == self.policy.burst {
@@ -623,14 +653,15 @@ impl RateLimiter {
         cost: u32,
         now: Time,
     ) -> Result<RateLimitPermit<'_>, RateLimitError<()>> {
-        if !self.try_acquire(cost, now) {
+        let Some(TokenBucketGrant { generation }) = self.try_acquire_generation(cost, now) else {
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitError::RateLimitExceeded);
-        }
+        };
 
         Ok(RateLimitPermit {
             limiter: self,
             cost,
+            generation,
             refund: true,
         })
     }
@@ -778,11 +809,12 @@ impl RateLimiter {
         cost: u32,
         now: Time,
     ) -> Result<QueuedRateLimitAcquire<'_>, RateLimitError<()>> {
-        let entry_id = self.enqueue(cost, now)?;
+        let (entry_id, generation) = self.enqueue_with_limit(cost, now, None)?;
         Ok(QueuedRateLimitAcquire {
             limiter: self,
             entry_id: Some(entry_id),
             cost,
+            generation,
             last_observed_now: now,
             drop_timer: None,
         })
@@ -806,11 +838,12 @@ impl RateLimiter {
         now: Time,
         max_queued: usize,
     ) -> Result<QueuedRateLimitAcquire<'_>, RateLimitError<()>> {
-        let entry_id = self.enqueue_with_limit(cost, now, Some(max_queued))?;
+        let (entry_id, generation) = self.enqueue_with_limit(cost, now, Some(max_queued))?;
         Ok(QueuedRateLimitAcquire {
             limiter: self,
             entry_id: Some(entry_id),
             cost,
+            generation,
             last_observed_now: now,
             drop_timer: None,
         })
@@ -823,6 +856,7 @@ impl RateLimiter {
     /// ID space has been exhausted and the limiter must fail closed.
     pub fn enqueue(&self, cost: u32, now: Time) -> Result<u64, RateLimitError<()>> {
         self.enqueue_with_limit(cost, now, None)
+            .map(|(entry_id, _)| entry_id)
     }
 
     #[allow(clippy::cast_precision_loss, clippy::significant_drop_tightening)]
@@ -831,10 +865,10 @@ impl RateLimiter {
         cost: u32,
         now: Time,
         max_queued: Option<usize>,
-    ) -> Result<u64, RateLimitError<()>> {
+    ) -> Result<(u64, Option<u64>), RateLimitError<()>> {
         // Fast path: try immediate acquisition
-        if self.try_acquire(cost, now) {
-            return Ok(IMMEDIATE_ACQUIRE_SENTINEL); // Already acquired
+        if let Some(TokenBucketGrant { generation }) = self.try_acquire_generation(cost, now) {
+            return Ok((IMMEDIATE_ACQUIRE_SENTINEL, generation)); // Already acquired
         }
 
         if cost > self.policy.burst {
@@ -869,10 +903,15 @@ impl RateLimiter {
             return Err(RateLimitError::RateLimitExceeded);
         }
         let entry_id = self.allocate_entry_id(&queue)?;
+        // Reset holds the same queue lock while advancing this generation
+        // and clearing entries. A retained entry therefore cannot survive
+        // into a different generation before its grant is claimed.
+        let generation = self.state.lock().generation;
 
         queue.push_back(QueueEntry {
             id: entry_id,
             cost,
+            generation,
             enqueued_at_millis: now_millis,
             deadline_millis,
             result: None,
@@ -883,7 +922,7 @@ impl RateLimiter {
         drop(queue);
         self.notify_admission_change();
 
-        Ok(entry_id)
+        Ok((entry_id, generation))
     }
 
     /// Process the queue, granting entries that can now proceed.
@@ -1064,6 +1103,7 @@ impl RateLimiter {
             let entry = queue.remove(idx).expect("must exist");
             let previous_result = entry.result;
             let cost = entry.cost;
+            let generation = entry.generation;
             let enqueued_at_millis = entry.enqueued_at_millis;
             // Every change to the count happens under the queue lock: a
             // concurrent reset() zeroing it between the removal and this
@@ -1075,7 +1115,7 @@ impl RateLimiter {
 
             if previous_result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
-                self.refund_tokens(cost);
+                self.refund_tokens(cost, generation);
                 // total_allowed records the grant, even when its owner cancels.
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
@@ -1089,6 +1129,9 @@ impl RateLimiter {
     }
 
     /// Reset the rate limiter to full capacity.
+    ///
+    /// Queued entries are invalidated. Existing grants remain usable, but
+    /// their eventual drops cannot refund tokens into the new generation.
     pub fn reset(&self) {
         let initial_tokens = self.policy.burst;
 
@@ -1102,6 +1145,7 @@ impl RateLimiter {
             state.tokens = initial_tokens;
             state.fractional = 0;
             state.last_refill = 0;
+            state.generation = state.generation.and_then(|value| value.checked_add(1));
         }
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
@@ -2136,12 +2180,14 @@ impl RateLimiter {
             return None;
         }
         state.tokens -= cost;
+        let generation = state.generation;
         drop(state);
         drop(queue);
         self.total_allowed.fetch_add(1, Ordering::Relaxed);
         Some(RateLimitPermit {
             limiter: self,
             cost,
+            generation,
             refund: true,
         })
     }

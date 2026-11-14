@@ -135,6 +135,7 @@
         rl.wait_queue.write().push_back(QueueEntry {
             id: 1,
             cost: 1,
+            generation: Some(0),
             enqueued_at_millis: 0,
             deadline_millis: u64::MAX,
             result: None,
@@ -1570,6 +1571,149 @@ mod queued_acquisition_ownership {
     }
 
     #[test]
+    fn reset_does_not_let_old_permits_refund_new_consumption() {
+        let rl = limiter(0, 3);
+        let old = rl.acquire_permit(3, Time::ZERO).unwrap();
+        rl.reset();
+        let current = rl.acquire_permit(1, Time::ZERO).unwrap();
+        assert!(rl.try_acquire(2, Time::ZERO));
+
+        drop(old);
+        assert_eq!(
+            rl.available_tokens(),
+            0,
+            "old credit must not replenish the reset"
+        );
+        assert!(!rl.try_acquire(1, Time::ZERO));
+        drop(current);
+        assert_eq!(
+            rl.available_tokens(),
+            1,
+            "current-generation refunds still work"
+        );
+        assert!(rl.try_acquire(1, Time::ZERO));
+        assert!(!rl.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn reset_does_not_let_immediate_queue_guards_refund_new_consumption() {
+        for bounded in [false, true] {
+            let rl = limiter(0, 2);
+            let old = if bounded {
+                rl.acquire_queued_bounded(2, Time::ZERO, 0).unwrap()
+            } else {
+                rl.acquire_queued(2, Time::ZERO).unwrap()
+            };
+            assert!(
+                rl.wait_queue.read().is_empty(),
+                "the grant uses the sentinel"
+            );
+            rl.reset();
+            assert!(rl.try_acquire(2, Time::ZERO));
+            drop(old);
+            assert_eq!(rl.available_tokens(), 0, "bounded={bounded}");
+            assert!(!rl.try_acquire(1, Time::ZERO));
+        }
+    }
+
+    #[test]
+    fn claiming_an_immediate_guard_after_reset_keeps_its_original_credit() {
+        let rl = limiter(0, 2);
+        let mut old = rl.acquire_queued_bounded(2, Time::ZERO, 0).unwrap();
+        rl.reset();
+        assert!(rl.try_acquire(2, Time::ZERO));
+
+        let permit = old
+            .poll_claim(Time::ZERO)
+            .unwrap()
+            .expect("an already granted reservation stays usable after reset");
+        drop(old);
+        assert_eq!(rl.available_tokens(), 0);
+        drop(permit);
+        assert_eq!(
+            rl.available_tokens(),
+            0,
+            "claim must not adopt the reset generation"
+        );
+        assert!(!rl.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn a_claimed_queued_grant_cannot_refund_a_later_reset() {
+        let rl = limiter(0, 2);
+        let held = rl.acquire_permit(2, Time::ZERO).unwrap();
+        let mut queued = rl.acquire_queued_bounded(2, Time::ZERO, 1).unwrap();
+        assert!(queued.poll_claim(Time::ZERO).unwrap().is_none());
+        drop(held);
+        let permit = queued
+            .poll_claim(Time::ZERO)
+            .unwrap()
+            .expect("refunded tokens grant the waiting owner");
+        drop(queued);
+        assert!(rl.wait_queue.read().is_empty());
+
+        rl.reset();
+        assert!(rl.try_acquire(2, Time::ZERO));
+        drop(permit);
+        assert_eq!(rl.available_tokens(), 0);
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+        assert!(!rl.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn dropping_a_pre_reset_queue_grant_cannot_fund_a_new_waiter() {
+        let rl = limiter(0, 1);
+        let held = rl.acquire_permit(1, Time::ZERO).unwrap();
+        let old = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        drop(held);
+        assert!(rl.process_queue(Time::ZERO).is_some());
+        assert_eq!(
+            rl.wait_queue.read().len(),
+            1,
+            "old grant is still unclaimed"
+        );
+        assert_eq!(rl.available_tokens(), 0);
+
+        rl.reset();
+        assert!(rl.try_acquire(1, Time::ZERO));
+        let mut current = rl.acquire_queued_bounded(1, Time::ZERO, 1).unwrap();
+        drop(old);
+        assert!(current.poll_claim(Time::ZERO).unwrap().is_none());
+        assert_eq!(rl.available_tokens(), 0);
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 1);
+        drop(current);
+        assert!(rl.wait_queue.read().is_empty());
+        assert_eq!(rl.pending_queue_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn token_bucket_generation_exhaustion_never_aliases_old_permits() {
+        let rl = limiter(0, 2);
+        rl.state.lock().generation = Some(u64::MAX);
+        let old = rl.acquire_permit(2, Time::ZERO).unwrap();
+        rl.reset();
+        assert!(rl.try_acquire(2, Time::ZERO));
+        drop(old);
+        assert_eq!(rl.available_tokens(), 0);
+
+        rl.reset();
+        let exhausted = rl.acquire_permit(2, Time::ZERO).unwrap();
+        drop(exhausted);
+        assert_eq!(
+            rl.available_tokens(),
+            0,
+            "exhausted generations cannot refund"
+        );
+        rl.reset();
+        drop(rl.acquire_queued_bounded(2, Time::ZERO, 0).unwrap());
+        assert_eq!(
+            rl.available_tokens(),
+            0,
+            "sentinel refunds also fail closed"
+        );
+    }
+
+    #[test]
     fn concurrent_bounded_admission_cannot_overfill_the_queue() {
         const CALLERS: usize = 8;
         const LIMIT: usize = 3;
@@ -2469,6 +2613,31 @@ mod async_admission_tests {
             assert!(lab.state.tasks_is_empty());
             assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
             assert!(report.lab_test_passed(), "{report:?}");
+        }
+    }
+
+    #[test]
+    fn reset_invalidates_refunds_from_both_async_admission_paths() {
+        for with_timer in [false, true] {
+            let cx = if with_timer {
+                virtual_context(Budget::INFINITE).0
+            } else {
+                Cx::for_testing()
+            };
+            let limiter = stalled(1);
+            let mut task = Context::from_waker(Waker::noop());
+            let mut immediate = Box::pin(limiter.acquire_async_bounded(&cx, 1, 0));
+            let permit = match immediate.as_mut().poll(&mut task) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("existing credit must admit immediately, timer={with_timer}"),
+            };
+            drop(immediate);
+
+            limiter.reset();
+            assert!(limiter.try_acquire(1, Time::ZERO));
+            drop(permit);
+            assert_empty(&limiter, 0);
+            assert!(!limiter.try_acquire(1, Time::ZERO));
         }
     }
 
