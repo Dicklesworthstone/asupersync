@@ -1645,6 +1645,22 @@ impl NativeQuicConnection {
             .map_err(map_stream_table_error)
     }
 
+    /// Release a retained STREAM copy only when its extent and FIN still
+    /// match the acknowledged wire frame. External recovery owners must use
+    /// this guard because a retransmit can coalesce a longer frame at the
+    /// same offset while an ACK for the original prefix is still in flight.
+    pub(crate) fn release_sent_stream_frame_if_matches(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+        data_len: usize,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.streams
+            .release_sent_stream_frame_if_matches(id, offset, data_len, fin)
+            .map_err(map_stream_table_error)
+    }
+
     /// Account bytes received on a stream at an explicit offset.
     pub fn receive_stream_segment(
         &mut self,
@@ -2434,10 +2450,9 @@ impl NativeQuicConnection {
                 fin,
             } = frame_ref
                 && let Err(error) = self
-                    .streams
                     .release_sent_stream_frame_if_matches(*stream_id, *offset, *data_len, *fin)
             {
-                result = Err(map_stream_table_error(error));
+                result = Err(error);
                 break;
             }
             if let Some(control) = frame_ref.control_frame() {

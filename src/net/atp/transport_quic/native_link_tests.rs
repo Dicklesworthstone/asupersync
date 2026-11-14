@@ -2989,6 +2989,7 @@ mod tests {
             stream: StreamId(0),
             offset: 4096,
             len: 1024,
+            fin: false,
         }];
         assert_eq!(
             need_more_pto_mode(&recorded),
@@ -3039,21 +3040,25 @@ mod tests {
                 stream,
                 offset: 4096,
                 len: 1024,
+                fin: false,
             },
             SentControlStreamFrame {
                 stream,
                 offset: 1024,
                 len: 1024,
+                fin: false,
             },
             SentControlStreamFrame {
                 stream,
                 offset: 4096,
                 len: 1024,
+                fin: false,
             },
             SentControlStreamFrame {
                 stream: StreamId(8),
                 offset: 0,
                 len: 1024,
+                fin: false,
             },
         ];
 
@@ -3064,16 +3069,19 @@ mod tests {
                     stream,
                     offset: 1024,
                     len: 1024,
+                    fin: false,
                 },
                 SentControlStreamFrame {
                     stream,
                     offset: 4096,
                     len: 1024,
+                    fin: false,
                 },
                 SentControlStreamFrame {
                     stream: StreamId(8),
                     offset: 0,
                     len: 1024,
+                    fin: false,
                 },
             ]
         );
@@ -3087,6 +3095,7 @@ mod tests {
                 stream,
                 offset: idx * 1024,
                 len: 1024,
+                fin: false,
             })
             .collect::<Vec<_>>();
 

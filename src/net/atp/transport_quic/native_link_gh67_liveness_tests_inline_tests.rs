@@ -37,6 +37,139 @@
         (client, server)
     }
 
+    /// Keep the original packet identities alive while a retry coalesces
+    /// their retained STREAM copies, then deliver a delayed ACK for only the
+    /// original prefix. The link sends real UDP flights; ACK ordering is
+    /// injected directly so no packet-delay sleeps or loss lottery is needed.
+    // Keep emission, stale ACK, replay, and exact retirement in one sequence.
+    #[allow(clippy::too_many_lines)]
+    async fn assert_delayed_prefix_ack_preserves_coalesced_frame(tail: &'static [u8]) {
+        const PREFIX: &[u8] = b"prefix";
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        let (mut client, _server) = established_loopback_links(&cx, &config).await;
+        let stream = client.conn.open_local_bidi(&cx).expect("open stream");
+        let prefix_len = u64::try_from(PREFIX.len()).expect("prefix length");
+
+        client
+            .conn
+            .write_stream_bytes(&cx, stream, Bytes::from_static(PREFIX), false)
+            .expect("queue original prefix");
+        assert!(client.flush(&cx).await.expect("flush original prefix") > 0);
+        let prefix_packet = client
+            .in_flight_stream_frames
+            .iter()
+            .find_map(|(packet, frames)| {
+                frames
+                    .iter()
+                    .any(|frame| {
+                        frame.stream == stream
+                            && frame.offset == 0
+                            && frame.len == prefix_len
+                            && !frame.fin
+                    })
+                    .then_some(*packet)
+            })
+            .expect("original non-final prefix was actually emitted");
+
+        // With an empty tail this is a separate FIN-only frame. Coalescing
+        // then changes only FIN, proving that a length-only guard is unsafe.
+        client
+            .conn
+            .write_stream_bytes(&cx, stream, Bytes::from_static(tail), true)
+            .expect("queue final tail");
+        assert!(client.flush(&cx).await.expect("flush final tail") > 0);
+        let originals = client
+            .in_flight_stream_frames
+            .values()
+            .flatten()
+            .filter(|frame| frame.stream == stream)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(originals.len(), 2, "two distinct original STREAM flights");
+        assert!(
+            client
+                .retransmit_stream_frames(&cx, &originals, "test_coalesced_prefix_ack")
+                .await
+                .expect("flush coalesced retry")
+                > 0
+        );
+
+        let mut expected = PREFIX.to_vec();
+        expected.extend_from_slice(tail);
+        let expected_len = u64::try_from(expected.len()).expect("coalesced length");
+        let coalesced_packet = client
+            .in_flight_stream_frames
+            .iter()
+            .find_map(|(packet, frames)| {
+                frames
+                    .iter()
+                    .any(|frame| {
+                        frame.stream == stream
+                            && frame.offset == 0
+                            && frame.len == expected_len
+                            && frame.fin
+                    })
+                    .then_some(*packet)
+            })
+            .expect("the retry actually coalesced the complete final frame");
+        assert_ne!(prefix_packet, coalesced_packet);
+
+        client
+            .apply_source_stream_ack_ranges(
+                &cx,
+                &[NativeAckRange::new(prefix_packet, prefix_packet).expect("prefix ACK")],
+            )
+            .expect("apply delayed original-prefix ACK");
+        client
+            .conn
+            .requeue_sent_stream_frame(&cx, stream, 0)
+            .expect("requeue the still-unacknowledged coalesced frame");
+        let replay = client
+            .conn
+            .generate_stream_frames_for(&cx, PacketNumberSpace::ApplicationData, stream, 1024)
+            .expect("generate replay after prefix ACK");
+        let Some(QuicFrame::Stream { data, fin, .. }) = replay.iter().find(|frame| {
+            matches!(frame, QuicFrame::Stream { stream_id, .. } if stream_id.value() == stream.0)
+        }) else {
+            panic!("a delayed prefix ACK erased the unacknowledged coalesced frame");
+        };
+        assert_eq!(data.as_ref(), expected.as_slice(), "all tail bytes survive");
+        assert!(*fin, "the unacknowledged FIN survives");
+
+        client
+            .apply_source_stream_ack_ranges(
+                &cx,
+                &[NativeAckRange::new(coalesced_packet, coalesced_packet)
+                    .expect("complete-frame ACK")],
+            )
+            .expect("apply exact complete-frame ACK");
+        client
+            .conn
+            .requeue_sent_stream_frame(&cx, stream, 0)
+            .expect("an already acknowledged offset is a no-op");
+        let after_ack = client
+            .conn
+            .generate_stream_frames_for(&cx, PacketNumberSpace::ApplicationData, stream, 1024)
+            .expect("check retirement after exact ACK");
+        assert!(
+            !after_ack.iter().any(|frame| {
+                matches!(frame, QuicFrame::Stream { stream_id, .. } if stream_id.value() == stream.0)
+            }),
+            "the exact payload-and-FIN ACK must release the retained copy"
+        );
+    }
+
+    #[test]
+    fn delayed_prefix_ack_preserves_coalesced_stream_tail() {
+        block_on(assert_delayed_prefix_ack_preserves_coalesced_frame(b"-tail"));
+    }
+
+    #[test]
+    fn delayed_nonfinal_ack_preserves_same_length_coalesced_fin() {
+        block_on(assert_delayed_prefix_ack_preserves_coalesced_frame(b""));
+    }
+
     // br-asupersync-5f1fcj: a long-header datagram that fails to authenticate
     // made the server's accept return an error, so anyone who could reach the
     // port could end an accept with one garbage packet (ATP's Initial DCID is
@@ -558,6 +691,7 @@
                 stream: control_stream,
                 offset: 0,
                 len: 1,
+                fin: false,
             }];
             let client_wait = async {
                 let started = Instant::now();

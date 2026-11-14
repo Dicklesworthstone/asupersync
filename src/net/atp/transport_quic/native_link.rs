@@ -1202,6 +1202,9 @@ struct SentControlStreamFrame {
     /// Stream payload bytes carried by this frame, so ACK processing can
     /// clock the delivery-rate estimator for adaptive source-stream pacing.
     len: u64,
+    /// FIN is part of the retained wire-frame identity: an ACK for an older
+    /// non-final prefix must not release a coalesced final frame.
+    fin: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4282,13 +4285,14 @@ impl QuicLink {
                     stream_id,
                     offset,
                     data,
-                    ..
+                    fin,
                 } = frame
                 {
                     let stream_frame = SentControlStreamFrame {
                         stream: StreamId(stream_id.value()),
                         offset: offset.map_or(0, |offset| offset.value()),
                         len: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                        fin: *fin,
                     };
                     if self.paced_source_stream == Some(stream_frame.stream) {
                         self.stream_rate_sent_bytes =
@@ -4602,12 +4606,22 @@ impl QuicLink {
             acked_bytes,
             self.stream_rate_now_micros(),
         );
-        // Release the acknowledged frames' retained retransmission copies so
-        // sender memory tracks the un-ACKed window, not the transfer size.
+        // Release only the exact acknowledged wire frame. A retransmit may
+        // have coalesced a longer payload or FIN at the same offset; a late
+        // ACK for the original prefix must leave that newer copy available.
         for frame in &acked_frames {
-            let _ = self
-                .conn
-                .release_sent_stream_frame(frame.stream, frame.offset);
+            let Ok(data_len) = usize::try_from(frame.len) else {
+                // Lengths originate from a Bytes payload on this platform.
+                // If that invariant ever changes, retaining the copy is safer
+                // than releasing an extent we cannot represent faithfully.
+                continue;
+            };
+            let _ = self.conn.release_sent_stream_frame_if_matches(
+                frame.stream,
+                frame.offset,
+                data_len,
+                frame.fin,
+            );
         }
         // Packet-threshold recovery for capped ACK ranges (RFC 9000 §6.1
         // spirit): receiver ACK frames carry only the newest
