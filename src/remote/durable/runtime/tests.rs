@@ -19,6 +19,8 @@ use std::sync::{Condvar, Mutex as StdMutex};
 use std::task::Poll;
 use std::time::Duration;
 
+mod recovery;
+
 const NAME: &str = "durable-native";
 const PEER: &str = "authenticated-peer";
 const VERSION: [u8; 32] = [7; 32];

@@ -177,11 +177,79 @@ an older authenticated prefix without an independently retained head.
 On reopen, every complete bounded record is authenticated and replayed before
 the recovered state is exposed. An incomplete trailing record is preserved and
 puts the owner in `ReadOnlyTail`: exact unexpired terminal replay remains
-available, while new writes are refused. A complete corrupt record rejects the
+available, while new writes are refused until explicit replacement-file recovery.
+A complete corrupt record rejects the
 whole open. Write/sync uncertainty or an external length change poisons the
 current owner, including cached replay, until it is reopened. A failed append
 is not evidence of rollback; reopening can recover a complete synced result or
 an unresolved reservation.
+
+## Restoring writes after an incomplete append
+
+`DurableRemoteJournal::recover_tail(replacement, publish)` provides an explicit
+way to resume service after reopening into `ReadOnlyTail`. It copies the exact
+authenticated prefix into an empty caller-owned replacement, re-authenticates
+every copied record with the existing decoder, checks the configuration,
+sequence and chained head against the current owner, and syncs the replacement
+before publication. The original file is never truncated or overwritten.
+
+An incomplete terminal record remains a pending reservation. Recovery does not
+infer its outcome, clear its key, run the handler, or grant permission to repeat
+the external effect. The existing `prepare_reconciliation` / `reconcile` path
+can establish its result after recovery, subject to its independent application
+fencing requirements. Other new requests can once again obtain durable
+reservations. A complete, authentic terminal record is already replayed by
+ordinary reopen; complete corruption remains fatal.
+
+Recovery accepts only `ReadOnlyTail`. A `Poisoned` owner must be dropped and
+reopened first, and a writable journal does not need this operation. Live
+execution or reconciliation permits refuse `Busy`. Keep all other owners and
+writers fenced throughout recovery. The original observed file length is
+checked before copying and again before publication. Same-length changes to the
+authenticated prefix are detected by verification against the owner's retained
+head. The incomplete suffix is excluded from the replacement without being
+interpreted as application state.
+
+The publication callback has the same contract as compaction: atomically replace
+the authoritative path with the prepared replacement and durably sync its
+directory linkage before returning success. Both files remain locked throughout
+that callback. Do not expose the replacement early or keep a service using the
+old path. Immediately before the callback, the old owner is poisoned; an error
+or panic can occur after a successful rename, so recovery requires reopening
+the authoritative path rather than assuming that publication rolled back.
+Preparation failures do not publish anything. Source read/length uncertainty or
+a mismatched authenticated prefix poisons the owner; replacement write/sync
+failure leaves the original read-only file available.
+
+The returned `DurableRemoteRecoveryReport` records the full source length, copied
+prefix length, excluded tail length, unchanged record count, and current retained
+entry count. All retained outcomes keep their original expiry and every pending
+request keeps its full completion capacity. Recovery does not expire records,
+advance the clock, or append a new record, so it works even when all remaining
+disk capacity is reserved for pending completions. Existing persisted clock
+floors and later in-process clock/cache observations are preserved. As with
+ordinary reopen, transient observations are not made durable by this operation.
+The current journal format and its original record bytes remain unchanged.
+
+Inside a runtime, use
+`DurableRemoteComputation::recover_tail(&cx, replacement, publish).await`.
+It requires the explicit blocking capability and uses the same exclusive owner
+slot as execution, reconciliation and compaction. Cancellation before the worker
+claims the job leaves both files unchanged. After claim, copying, verification
+and publication form one non-preemptible operation. Dropping the waiting future
+does not release either file or the journal while the worker is queued/running.
+A published replacement remains committed after late cancellation. No clock
+callback, resolver, application handler, hidden path lookup or background retry
+is invoked.
+
+Focused engine tests cover every cut position of a terminal record, exact prefix
+preservation, independent reconciliation, fully reserved journal capacity,
+persisted and transient clocks, wrong posture/live owners, source modification,
+replacement write/sync failures, publication error/panic, complete corruption,
+and real atomic file replacement followed by reopen. Native runtime tests cover
+blocking admission and queued/running cancellation ownership. These tests are
+authored until executed; they do not by themselves establish power-loss behavior
+for a particular filesystem.
 
 ## Reclaiming journal capacity
 

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::sync::atomic::{AtomicU64, Ordering};
 
 mod compaction;
+mod recovery;
 
 #[derive(Default)]
 struct FaultFile {
@@ -12,6 +13,8 @@ struct FaultFile {
     budget: Option<usize>,
     fail_sync: bool,
     panic_sync: bool,
+    fail_read: bool,
+    grow_on_read: bool,
     syncs: usize,
 }
 
@@ -26,6 +29,13 @@ impl From<Vec<u8>> for FaultFile {
 
 impl Read for FaultFile {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if self.fail_read {
+            return Err(io::Error::other("injected read failure"));
+        }
+        if self.grow_on_read {
+            self.grow_on_read = false;
+            self.bytes.get_mut().push(0);
+        }
         self.bytes.read(bytes)
     }
 }
