@@ -2582,6 +2582,8 @@ impl LabRuntime {
     /// previous writer's release clock. RwLock writers also inherit completed
     /// readers, while sibling readers remain concurrent. Barrier participants
     /// inherit all surviving arrivals from their own generation and runtime.
+    /// OnceCell value access imports its successful initialization snapshot;
+    /// independent readers do not order each other through the cell.
     /// Retirement-gated joins merge the child's terminal clock only after its
     /// finalization and retirement barrier.
     ///

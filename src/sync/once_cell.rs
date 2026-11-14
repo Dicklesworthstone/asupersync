@@ -10,6 +10,14 @@
 //! - `get_or_try_init`: Same as above, with error handling.
 //! - Racing initializers: Only one will succeed; others will wait or
 //!   get the initialized value.
+//!
+//! # Task causality
+//!
+//! In the lab's opt-in task-causality mode, successful initialization publishes
+//! a fixed clock snapshot. Successful value access and `wait` import that
+//! snapshot only within the originating runtime. Independent readers do not
+//! order each other, and failed or abandoned initialization publishes no value
+//! edge. Readiness checks and telemetry do not observe the value.
 
 use smallvec::SmallVec;
 use std::fmt;
@@ -19,7 +27,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
-use crate::cx::CancelWakerToken;
+use crate::cx::{CancelWakerToken, Cx};
+use crate::trace::distributed::LogicalTime;
 
 /// State values for OnceCell.
 const UNINIT: u8 = 0;
@@ -175,6 +184,9 @@ pub struct OnceCell<T> {
     state: AtomicU8,
     /// The value (using OnceLock for safe &T access).
     value: OnceLock<T>,
+    /// Immutable evidence for this value, present only after publication by
+    /// an opt-in task. Empty cells and default runtimes allocate no metadata.
+    publication: OnceLock<(u64, LogicalTime)>,
     /// Waiters for async notification.
     waiters: StdMutex<WaiterState>,
     /// Condition variable for blocking waiters.
@@ -189,6 +201,7 @@ impl<T> OnceCell<T> {
         Self {
             state: AtomicU8::new(UNINIT),
             value: OnceLock::new(),
+            publication: OnceLock::new(),
             waiters: StdMutex::new(WaiterState {
                 waiters: SmallVec::new(),
                 next_waiter_id: 0,
@@ -203,7 +216,7 @@ impl<T> OnceCell<T> {
     #[must_use]
     pub fn with_value(value: T) -> Self {
         let cell = Self::new();
-        let _ = cell.value.set(value);
+        cell.store_value(value, Self::current_publication());
         cell.state.store(INITIALIZED, Ordering::Release);
         cell
     }
@@ -222,6 +235,7 @@ impl<T> OnceCell<T> {
     #[must_use]
     pub fn get(&self) -> Option<&T> {
         if self.is_initialized() {
+            self.observe_publication();
             self.value.get()
         } else {
             None
@@ -296,7 +310,13 @@ impl<T> OnceCell<T> {
             ) {
                 Ok(_) => {
                     // We are the initializer. Store the value.
-                    let _ = self.value.set(value);
+                    let mut guard = InitGuard {
+                        cell: self,
+                        completed: false,
+                    };
+                    self.store_value(value, Self::current_publication());
+                    guard.completed = true;
+                    drop(guard);
                     self.transition_out_of_initializing(INITIALIZED);
                     return Ok(());
                 }
@@ -339,6 +359,7 @@ impl<T> OnceCell<T> {
     {
         // Fast path: already initialized.
         if self.is_initialized() {
+            self.observe_publication();
             return self.value.get().expect("value should be set");
         }
 
@@ -361,13 +382,14 @@ impl<T> OnceCell<T> {
                         completed: false,
                     };
                     let value = f();
-                    let _ = self.value.set(value);
+                    self.store_value(value, Self::current_publication());
                     guard.completed = true;
                     drop(guard);
                     self.transition_out_of_initializing(INITIALIZED);
                     return self.value.get().expect("just initialized");
                 }
                 Err(INITIALIZED) => {
+                    self.observe_publication();
                     return self.value.get().expect("already initialized");
                 }
                 Err(UNINIT) => {} // Spurious failure, try again
@@ -375,6 +397,7 @@ impl<T> OnceCell<T> {
                     // Another thread is initializing. Wait for it.
                     self.wait_for_init_blocking();
                     if self.is_initialized() {
+                        self.observe_publication();
                         return self.value.get().expect("should be initialized after wait");
                     }
                     // The initializer was cancelled — state is back to UNINIT.
@@ -403,6 +426,7 @@ impl<T> OnceCell<T> {
     {
         // Fast path: already initialized.
         if self.is_initialized() {
+            self.observe_publication();
             return self.value.get().expect("value should be set");
         }
 
@@ -428,13 +452,14 @@ impl<T> OnceCell<T> {
                     let value = f().await;
 
                     // Store value and mark complete.
-                    let _ = self.value.set(value);
+                    self.store_value(value, Self::current_publication());
                     guard.completed = true;
                     drop(guard); // Guard checks `completed` — won't reset state.
                     self.transition_out_of_initializing(INITIALIZED);
                     return self.value.get().expect("just initialized");
                 }
                 Err(INITIALIZED) => {
+                    self.observe_publication();
                     return self.value.get().expect("already initialized");
                 }
                 Err(UNINIT) => {} // Spurious failure, try again
@@ -448,6 +473,7 @@ impl<T> OnceCell<T> {
 
                     // Check whether initialization actually succeeded.
                     if self.is_initialized() {
+                        self.observe_publication();
                         return self.value.get().expect("should be initialized after wait");
                     }
                     // The initializer was cancelled — state is back to UNINIT.
@@ -475,6 +501,7 @@ impl<T> OnceCell<T> {
     {
         // Fast path: already initialized.
         if self.is_initialized() {
+            self.observe_publication();
             return Ok(self.value.get().expect("value should be set"));
         }
 
@@ -502,7 +529,7 @@ impl<T> OnceCell<T> {
                     match f().await {
                         Ok(value) => {
                             // Store value and mark complete.
-                            let _ = self.value.set(value);
+                            self.store_value(value, Self::current_publication());
                             guard.completed = true;
                             drop(guard); // Guard checks `completed` — won't reset state.
                             self.transition_out_of_initializing(INITIALIZED);
@@ -517,6 +544,7 @@ impl<T> OnceCell<T> {
                 }
                 Err(INITIALIZED) => {
                     // Already initialized (race).
+                    self.observe_publication();
                     return Ok(self.value.get().expect("already initialized"));
                 }
                 Err(INITIALIZING) => {
@@ -528,6 +556,7 @@ impl<T> OnceCell<T> {
                     .await;
                     // The other task might have failed, check state.
                     if self.is_initialized() {
+                        self.observe_publication();
                         return Ok(self.value.get().expect("should be initialized"));
                     }
                     // The other task failed. Loop and retry the CAS.
@@ -569,6 +598,7 @@ impl<T> OnceCell<T> {
         Fut: Future<Output = T>,
     {
         if self.is_initialized() {
+            self.observe_publication_cx(cx);
             return Ok(self.value.get().expect("value should be set"));
         }
 
@@ -593,13 +623,14 @@ impl<T> OnceCell<T> {
 
                     let value = f().await;
 
-                    let _ = self.value.set(value);
+                    self.store_value(value, Self::publication_from_cx(cx));
                     guard.completed = true;
                     drop(guard);
                     self.transition_out_of_initializing(INITIALIZED);
                     return Ok(self.value.get().expect("just initialized"));
                 }
                 Err(INITIALIZED) => {
+                    self.observe_publication_cx(cx);
                     return Ok(self.value.get().expect("already initialized"));
                 }
                 Err(UNINIT) => {} // Spurious failure, try again
@@ -613,6 +644,7 @@ impl<T> OnceCell<T> {
                     }
                     .await?;
                     if self.is_initialized() {
+                        self.observe_publication_cx(cx);
                         return Ok(self.value.get().expect("should be initialized after wait"));
                     }
                     // The initializer was cancelled. Retry the CAS.
@@ -667,6 +699,7 @@ impl<T> OnceCell<T> {
         Fut: Future<Output = Result<T, E>>,
     {
         if self.is_initialized() {
+            self.observe_publication_cx(cx);
             return Ok(Ok(self.value.get().expect("value should be set")));
         }
 
@@ -689,7 +722,7 @@ impl<T> OnceCell<T> {
                     let f = init_fn.take().expect("init closure available");
                     match f().await {
                         Ok(value) => {
-                            let _ = self.value.set(value);
+                            self.store_value(value, Self::publication_from_cx(cx));
                             guard.completed = true;
                             drop(guard);
                             self.transition_out_of_initializing(INITIALIZED);
@@ -702,6 +735,7 @@ impl<T> OnceCell<T> {
                     }
                 }
                 Err(INITIALIZED) => {
+                    self.observe_publication_cx(cx);
                     return Ok(Ok(self.value.get().expect("already initialized")));
                 }
                 Err(INITIALIZING) => {
@@ -714,6 +748,7 @@ impl<T> OnceCell<T> {
                     }
                     .await?;
                     if self.is_initialized() {
+                        self.observe_publication_cx(cx);
                         return Ok(Ok(self
                             .value
                             .get()
@@ -732,7 +767,9 @@ impl<T> OnceCell<T> {
     #[inline]
     pub fn take(&mut self) -> Option<T> {
         if self.is_initialized() {
+            self.observe_publication();
             self.state.store(UNINIT, Ordering::Release);
+            let _ = self.publication.take();
             self.value.take()
         } else {
             None
@@ -744,6 +781,9 @@ impl<T> OnceCell<T> {
     /// Returns `None` if the cell is not initialized.
     #[inline]
     pub fn into_inner(self) -> Option<T> {
+        if self.is_initialized() {
+            self.observe_publication();
+        }
         self.value.into_inner()
     }
 
@@ -767,6 +807,7 @@ impl<T> OnceCell<T> {
     pub async fn wait<Caps>(&self, cx: &crate::cx::Cx<Caps>) -> Result<(), OnceCellError> {
         // Fast path: already initialized
         if self.is_initialized() {
+            self.observe_publication_cx(cx);
             return Ok(());
         }
 
@@ -777,7 +818,61 @@ impl<T> OnceCell<T> {
             cancel_waker: None,
             settle_when_uninit: false,
         }
-        .await
+        .await?;
+        self.observe_publication_cx(cx);
+        Ok(())
+    }
+
+    /// Sample before storing a value, without ticking. Clock-counter overflow
+    /// must not leave a successful initializer stuck in INITIALIZING.
+    fn snapshot_publication<Caps>(cx: &Cx<Caps>) -> Option<(u64, LogicalTime)> {
+        cx.task_causality_runtime()
+            .map(|runtime| (runtime, cx.logical_now()))
+    }
+
+    fn current_publication() -> Option<(u64, LogicalTime)> {
+        Cx::with_current(Self::snapshot_publication).flatten()
+    }
+
+    fn publication_from_cx<Caps>(cx: &Cx<Caps>) -> Option<(u64, LogicalTime)> {
+        // A moved future belongs to its actual poller. An untracked ambient
+        // task is authoritative too; only a host poll may use the explicit Cx.
+        Cx::with_current(Self::snapshot_publication)
+            .unwrap_or_else(|| Self::snapshot_publication(cx))
+    }
+
+    fn store_value(&self, value: T, publication: Option<(u64, LogicalTime)>) {
+        // The successful initializer is exclusive until the release-store of
+        // INITIALIZED. Publish metadata in that interval, never after waking
+        // readers, and retain no live handle to the initializer's later work.
+        let _ = self.value.set(value);
+        if let Some(publication) = publication {
+            let _ = self.publication.set(publication);
+        }
+    }
+
+    fn observe_snapshot<Caps>(cx: &Cx<Caps>, publication: &(u64, LogicalTime)) {
+        if cx.task_causality_runtime() == Some(publication.0) {
+            let _ = cx.logical_receive(&publication.1);
+        }
+    }
+
+    fn observe_publication(&self) {
+        // The default path returns before any TLS lookup, clock operation, or
+        // waiter-mutex acquisition. No per-read metadata is retained.
+        let Some(publication) = self.publication.get() else {
+            return;
+        };
+        let _ = Cx::with_current(|cx| Self::observe_snapshot(cx, publication));
+    }
+
+    fn observe_publication_cx<Caps>(&self, cx: &Cx<Caps>) {
+        let Some(publication) = self.publication.get() else {
+            return;
+        };
+        if Cx::with_current(|current| Self::observe_snapshot(current, publication)).is_none() {
+            Self::observe_snapshot(cx, publication);
+        }
     }
 
     /// Block until initialized.
@@ -954,7 +1049,13 @@ impl<T> Default for OnceCell<T> {
 impl<T: fmt::Debug> fmt::Debug for OnceCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("OnceCell");
-        match self.get() {
+        // Diagnostic formatting must not alter the task's causal history.
+        let value = if self.is_initialized() {
+            self.value.get()
+        } else {
+            None
+        };
+        match value {
             Some(v) => d.field("value", v),
             None => d.field("value", &format_args!("<uninitialized>")),
         };
@@ -1154,3 +1255,7 @@ impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
 #[cfg(test)]
 #[path = "once_cell_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "once_cell_causality_tests.rs"]
+mod causality_tests;
