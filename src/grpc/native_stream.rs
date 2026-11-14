@@ -410,6 +410,58 @@ impl CallDeadline {
         }
         Ok(())
     }
+
+    /// Interceptors may tighten a previously captured call deadline, but
+    /// cannot restart its allowance or remove the caller's original bound.
+    pub(crate) fn tighten(&mut self, metadata: &Metadata) -> Result<(), Status> {
+        if let Some(timeout) = request_timeout(metadata, None)? {
+            let clock = self.clock.as_ref().ok_or_else(|| {
+                Status::failed_precondition("native gRPC deadline requires an explicit timer")
+            })?;
+            self.at = earlier(self.at, Some(clock.now() + timeout));
+        }
+        self.check()
+    }
+
+    /// Refresh the outgoing relative timeout from this retained clock and
+    /// absolute deadline after synchronous work or admission has elapsed.
+    pub(crate) fn apply_remaining(&self, metadata: &mut Metadata) -> Result<(), Status> {
+        if let Some((at, clock)) = self.at.zip(self.clock.as_ref()) {
+            let now = clock.now();
+            if now >= at {
+                return Err(Status::deadline_exceeded(
+                    "native gRPC deadline expired before dispatch",
+                ));
+            }
+            let remaining = Duration::from_nanos(at.duration_since(now));
+            let _ = metadata.insert_or_replace("grpc-timeout", format_grpc_timeout(remaining));
+        }
+        Ok(())
+    }
+
+    /// Keep the same timer authority around an admitted unary exchange. The
+    /// borrowing call future owns its transport and permits, so expiration
+    /// drops those before this helper returns to its caller.
+    pub(crate) async fn run<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, Status>>,
+    ) -> Result<T, Status> {
+        let Some((at, clock)) = self.at.zip(self.clock.as_ref()) else {
+            return future.await;
+        };
+        let mut future = std::pin::pin!(future);
+        let mut timer = std::pin::pin!(Sleep::with_timer_driver(at, clock.clone()));
+        poll_fn(|task| {
+            if timer.as_mut().poll_deadline(task).is_ready() {
+                Poll::Ready(Err(Status::deadline_exceeded(
+                    "native gRPC call deadline expired",
+                )))
+            } else {
+                future.as_mut().poll(task)
+            }
+        })
+        .await
+    }
 }
 
 /// One typed, cancellation-aware response stream over an owned native transport.
