@@ -10,9 +10,6 @@ use crate::net::UdpSocket;
 use crate::time::TimerDriverHandle;
 use std::future::poll_fn;
 
-const MAX_UNRELATED_REPLIES: usize = 32;
-const MAX_DNS_PACKET: usize = u16::MAX as usize;
-
 /// A reactor lookup behind the resolver's public boundary: a boxed `Send` trait object, not a concrete `async` type.
 pub(super) type NativeLookup<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, DnsError>> + Send + 'a>>;
@@ -465,26 +462,6 @@ fn meet_budget(deadline: &mut NativeDeadline, cx: &Cx) {
         let remaining = budget.as_nanos().saturating_sub(now.as_nanos());
         deadline.at = deadline.at.min(deadline.now().saturating_add_nanos(remaining));
     }
-}
-
-/// A response must echo this query's sole IN question, ID, and standard opcode.
-/// Unrelated datagrams are ignored while the original timeout keeps running.
-fn matches_query(packet: &[u8], query: &[u8], id: u16) -> bool {
-    if packet.len() < 12
-        || u16::from_be_bytes([packet[0], packet[1]]) != id
-        || u16::from_be_bytes([packet[2], packet[3]]) & 0xf800 != 0x8000
-        || u16::from_be_bytes([packet[4], packet[5]]) != 1
-    {
-        return false;
-    }
-    let mut offset = 12;
-    let Ok(name) = decode_dns_name(packet, &mut offset) else { return false; };
-    let Ok(kind) = read_u16(packet, &mut offset) else { return false; };
-    let Ok(class) = read_u16(packet, &mut offset) else { return false; };
-    class == DnsQueryType::DNS_CLASS_IN
-        && first_question(query).is_some_and(|(expected, query_type)| {
-            kind == query_type && name.eq_ignore_ascii_case(&expected)
-        })
 }
 
 async fn query_nameserver_native(

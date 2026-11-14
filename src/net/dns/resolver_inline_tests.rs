@@ -24,6 +24,233 @@
     }
 
     #[test]
+    fn blocking_udp_ignores_unrelated_replies_until_the_query_matches() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind DNS peer");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound peer request wait");
+        let address = socket.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut request = [0u8; 512];
+            let (length, peer) = socket.recv_from(&mut request).expect("receive query");
+            let mut zone = BTreeMap::new();
+            zone.insert(
+                ("wanted.example.test".to_string(), DnsQueryType::A.code()),
+                vec![TestDnsRecord::A {
+                    ttl: 30,
+                    addr: Ipv4Addr::new(192, 0, 2, 91),
+                }],
+            );
+            let response = build_test_dns_response(&request[..length], &zone, false);
+            let (_, question_end, _) = parse_test_dns_question(&response);
+            for case in 0..7 {
+                let mut unrelated = response.clone();
+                match case {
+                    0 => unrelated[0] ^= 1,
+                    1 => unrelated[13] = b'x',
+                    2 => unrelated[question_end - 3] = 28,
+                    3 => unrelated[question_end - 1] = 3,
+                    4 => unrelated[2] &= !0x80,
+                    5 => unrelated[2] |= 0x08,
+                    _ => unrelated[5] = 0,
+                }
+                socket.send_to(&unrelated, peer).expect("send unrelated reply");
+            }
+            socket.send_to(&response, peer).expect("send matching reply");
+        });
+        let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        server.join().expect("DNS peer");
+        let response = result.expect("unrelated replies must not consume the query");
+        assert_eq!(response.answers.len(), 1);
+        assert!(matches!(
+            response.answers[0].data,
+            DnsRecordData::A(address) if address == Ipv4Addr::new(192, 0, 2, 91)
+        ));
+    }
+
+    #[test]
+    fn blocking_udp_unrelated_reply_flood_has_a_finite_work_bound() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind DNS peer");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound peer request wait");
+        let address = socket.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut request = [0u8; 512];
+            let (length, peer) = socket.recv_from(&mut request).expect("receive query");
+            let mut response = build_test_dns_response(&request[..length], &BTreeMap::new(), false);
+            response[0] ^= 1;
+            for _ in 0..MAX_UNRELATED_REPLIES {
+                socket.send_to(&response, peer).expect("send unrelated reply");
+            }
+        });
+        let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        server.join().expect("DNS peer");
+        assert!(matches!(result, Err(DnsError::Protocol(message))
+            if message == "too many unrelated DNS UDP responses"));
+    }
+
+    #[test]
+    fn blocking_udp_matching_malformed_reply_still_reports_a_protocol_error() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind DNS peer");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound peer request wait");
+        let address = socket.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut request = [0u8; 512];
+            let (length, peer) = socket.recv_from(&mut request).expect("receive query");
+            let mut response = build_test_dns_response(&request[..length], &BTreeMap::new(), false);
+            // The identity is valid, but the declared answer is absent.
+            response[7] = 1;
+            socket.send_to(&response, peer).expect("send malformed reply");
+        });
+        let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        server.join().expect("DNS peer");
+        assert!(matches!(result, Err(DnsError::Protocol(message))
+            if message.contains("truncated")));
+    }
+
+    #[test]
+    fn blocking_dns_zero_budget_sends_no_datagram() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind DNS peer");
+        socket.set_nonblocking(true).unwrap();
+        let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
+        let result = query_nameserver(
+            socket.local_addr().unwrap(),
+            &query,
+            0x1234,
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Err(DnsError::Timeout)));
+        let mut packet = [0u8; 512];
+        assert_eq!(
+            socket.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn blocking_dns_tcp_fallback_shares_udp_deadline_and_reply_identity() {
+        for expire_during_tcp in [false, true] {
+            let (udp, tcp, address) = bind_test_dns_sockets();
+            udp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            tcp.set_nonblocking(true).unwrap();
+            let elapsed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let server_elapsed = Arc::clone(&elapsed);
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = Arc::clone(&stop);
+            let server = thread::spawn(move || {
+                let mut request = [0u8; 512];
+                let (length, peer) = udp.recv_from(&mut request).expect("receive UDP query");
+                let truncated = build_test_dns_response(&request[..length], &BTreeMap::new(), true);
+                // Spend most of the same virtual attempt budget in UDP.
+                server_elapsed.store(80_000_000_000, Ordering::SeqCst);
+                udp.send_to(&truncated, peer).expect("request TCP fallback");
+                let mut stream = loop {
+                    match tcp.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if server_stop.load(Ordering::SeqCst) {
+                                return false;
+                            }
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("accept DNS TCP fallback: {error}"),
+                    }
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut length = [0u8; 2];
+                stream.read_exact(&mut length).expect("read TCP query length");
+                let mut request = vec![0u8; usize::from(u16::from_be_bytes(length))];
+                stream.read_exact(&mut request).expect("read complete TCP query");
+                let mut zone = BTreeMap::new();
+                zone.insert(
+                    ("wanted.example.test".to_string(), DnsQueryType::A.code()),
+                    vec![TestDnsRecord::A {
+                        ttl: 30,
+                        addr: Ipv4Addr::new(192, 0, 2, 92),
+                    }],
+                );
+                let response = build_test_dns_response(&request, &zone, false);
+                let response_length = u16::try_from(response.len()).unwrap().to_be_bytes();
+                if expire_during_tcp {
+                    // The peer definitely received the complete fallback
+                    // query before expiry. No wall-clock sleep decides it.
+                    server_elapsed.store(100_000_000_000, Ordering::SeqCst);
+                    let _ = stream.write_all(&response_length);
+                    let _ = stream.write_all(&response);
+                } else {
+                    let mut unrelated = response.clone();
+                    unrelated[0] ^= 1;
+                    stream.write_all(&response_length).unwrap();
+                    stream.write_all(&unrelated).unwrap();
+                    stream.write_all(&response_length).unwrap();
+                    stream.write_all(&response).unwrap();
+                }
+                true
+            });
+            let now = || Time::from_nanos(elapsed.load(Ordering::SeqCst));
+            let deadline = DnsTransportDeadline {
+                timeout: Duration::from_secs(100),
+                time: SyncTimeSource::CxDerived {
+                    started: Time::from_nanos(0),
+                    now: &now,
+                },
+            };
+            let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
+            let result = query_nameserver_with_deadline(address, &query, 0x1234, &deadline);
+            stop.store(true, Ordering::SeqCst);
+            assert!(server.join().expect("DNS peer"), "TCP query must reach the peer");
+            if expire_during_tcp {
+                assert!(matches!(result, Err(DnsError::Timeout)), "{result:?}");
+            } else {
+                let response = result.expect("TCP must skip unrelated replies too");
+                assert_eq!(response.answers.len(), 1);
+                assert!(matches!(
+                    response.answers[0].data,
+                    DnsRecordData::A(address) if address == Ipv4Addr::new(192, 0, 2, 92)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn blocking_dns_tcp_transfer_checks_expiry_after_ready_io() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.write_all(b"reply").unwrap();
+        let polls = std::cell::Cell::new(0);
+        let now = || {
+            let observed = polls.get();
+            polls.set(observed + 1);
+            Time::from_nanos(if observed == 0 { 0 } else { 1_000_000_000 })
+        };
+        let deadline = DnsTransportDeadline {
+            timeout: Duration::from_secs(1),
+            time: SyncTimeSource::CxDerived {
+                started: Time::from_nanos(0),
+                now: &now,
+            },
+        };
+        let mut response = [0u8; 5];
+        assert!(matches!(
+            read_dns_tcp_exact(&mut client, &mut response, &deadline),
+            Err(DnsError::Timeout)
+        ));
+        polls.set(0);
+        assert!(matches!(
+            write_dns_tcp_all(&mut client, b"query", &deadline),
+            Err(DnsError::Timeout)
+        ));
+    }
+
+    #[test]
     fn cname_selection_consumes_bundled_records_and_bounds_their_ttl() {
         let cases = [
             (DnsQueryType::A, DnsRecordData::A(Ipv4Addr::LOCALHOST)),

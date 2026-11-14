@@ -1523,64 +1523,194 @@ fn bind_addr_for(nameserver: SocketAddr) -> SocketAddr {
     }
 }
 
+const MAX_UNRELATED_REPLIES: usize = 32;
+const MAX_DNS_PACKET: usize = u16::MAX as usize;
+
+/// Both transports use the same RFC 5452 question identity checks. An
+/// unrelated reply must not consume the outstanding query or poison its cache.
+fn matches_query(packet: &[u8], query: &[u8], id: u16) -> bool {
+    if packet.len() < 12
+        || u16::from_be_bytes([packet[0], packet[1]]) != id
+        || u16::from_be_bytes([packet[2], packet[3]]) & 0xf800 != 0x8000
+        || u16::from_be_bytes([packet[4], packet[5]]) != 1
+    {
+        return false;
+    }
+    let mut offset = 12;
+    let Ok(name) = decode_dns_name(packet, &mut offset) else {
+        return false;
+    };
+    let Ok(kind) = read_u16(packet, &mut offset) else {
+        return false;
+    };
+    let Ok(class) = read_u16(packet, &mut offset) else {
+        return false;
+    };
+    class == DnsQueryType::DNS_CLASS_IN
+        && first_question(query).is_some_and(|(expected, query_type)| {
+            kind == query_type && name.eq_ignore_ascii_case(&expected)
+        })
+}
+
+/// One attempt owns one allowance, including UDP filtering and TCP fallback.
+/// Socket timeouts bound individual syscalls only; refresh them from this
+/// deadline before every partial transfer so a trickling peer cannot renew it.
+struct DnsTransportDeadline<'a> {
+    timeout: Duration,
+    time: SyncTimeSource<'a>,
+}
+
+impl DnsTransportDeadline<'_> {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            time: SyncTimeSource::Wall {
+                started: Instant::now(),
+                #[cfg(not(any(test, feature = "test-internals")))]
+                marker: std::marker::PhantomData,
+            },
+        }
+    }
+
+    fn remaining(&self) -> Result<Duration, DnsError> {
+        self.timeout
+            .checked_sub(self.time.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(DnsError::Timeout)
+    }
+}
+
 fn send_udp_dns_query(
     nameserver: SocketAddr,
     query: &[u8],
     expected_id: u16,
-    timeout: Duration,
+    deadline: &DnsTransportDeadline<'_>,
 ) -> Result<ParsedDnsResponse, DnsError> {
+    deadline.remaining()?;
     let socket = StdUdpSocket::bind(bind_addr_for(nameserver)).map_err(|err| dns_io_error(&err))?;
-    socket
-        .set_read_timeout(Some(timeout))
-        .map_err(|err| dns_io_error(&err))?;
-    socket
-        .set_write_timeout(Some(timeout))
-        .map_err(|err| dns_io_error(&err))?;
     socket
         .connect(nameserver)
         .map_err(|err| dns_io_error(&err))?;
-    socket.send(query).map_err(|err| dns_io_error(&err))?;
+    loop {
+        socket
+            .set_write_timeout(Some(deadline.remaining()?))
+            .map_err(|err| dns_io_error(&err))?;
+        match socket.send(query) {
+            Ok(sent) if sent == query.len() => break,
+            Ok(_) => return Err(DnsError::Io("short DNS UDP send".to_string())),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(dns_io_error(&err)),
+        }
+    }
 
-    let mut packet = [0u8; 2048];
-    let len = socket.recv(&mut packet).map_err(|err| dns_io_error(&err))?;
+    let mut packet = vec![0u8; MAX_DNS_PACKET];
     let expected_question = first_question(query);
-    parse_dns_response(&packet[..len], expected_id, expected_question.as_ref())
+    for _ in 0..MAX_UNRELATED_REPLIES {
+        let len = loop {
+            socket
+                .set_read_timeout(Some(deadline.remaining()?))
+                .map_err(|err| dns_io_error(&err))?;
+            match socket.recv(&mut packet) {
+                Ok(len) => break len,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(dns_io_error(&err)),
+            }
+        };
+        deadline.remaining()?;
+        if matches_query(&packet[..len], query, expected_id) {
+            return parse_dns_response(&packet[..len], expected_id, expected_question.as_ref());
+        }
+    }
+    Err(DnsError::Protocol(
+        "too many unrelated DNS UDP responses".to_string(),
+    ))
+}
+
+fn write_dns_tcp_all(
+    stream: &mut StdTcpStream,
+    mut bytes: &[u8],
+    deadline: &DnsTransportDeadline<'_>,
+) -> Result<(), DnsError> {
+    while !bytes.is_empty() {
+        stream
+            .set_write_timeout(Some(deadline.remaining()?))
+            .map_err(|err| dns_io_error(&err))?;
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(dns_io_error(&io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole DNS query",
+                )));
+            }
+            Ok(written) => bytes = &bytes[written..],
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(dns_io_error(&err)),
+        }
+    }
+    deadline.remaining().map(|_| ())
+}
+
+fn read_dns_tcp_exact(
+    stream: &mut StdTcpStream,
+    mut bytes: &mut [u8],
+    deadline: &DnsTransportDeadline<'_>,
+) -> Result<(), DnsError> {
+    while !bytes.is_empty() {
+        stream
+            .set_read_timeout(Some(deadline.remaining()?))
+            .map_err(|err| dns_io_error(&err))?;
+        match stream.read(bytes) {
+            Ok(0) => {
+                return Err(dns_io_error(&io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole DNS response",
+                )));
+            }
+            Ok(read) => {
+                let (_, remaining) = bytes.split_at_mut(read);
+                bytes = remaining;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(dns_io_error(&err)),
+        }
+    }
+    deadline.remaining().map(|_| ())
 }
 
 fn send_tcp_dns_query(
     nameserver: SocketAddr,
     query: &[u8],
     expected_id: u16,
-    timeout: Duration,
+    deadline: &DnsTransportDeadline<'_>,
 ) -> Result<ParsedDnsResponse, DnsError> {
-    let mut stream =
-        StdTcpStream::connect_timeout(&nameserver, timeout).map_err(|err| dns_io_error(&err))?;
-    stream
-        .set_read_timeout(Some(timeout))
+    let mut stream = StdTcpStream::connect_timeout(&nameserver, deadline.remaining()?)
         .map_err(|err| dns_io_error(&err))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|err| dns_io_error(&err))?;
-
     let query_len = u16::try_from(query.len())
         .map_err(|_| DnsError::Protocol("DNS query too large for TCP transport".to_string()))?;
-    stream
-        .write_all(&query_len.to_be_bytes())
-        .and_then(|()| stream.write_all(query))
-        .map_err(|err| dns_io_error(&err))?;
+    write_dns_tcp_all(&mut stream, &query_len.to_be_bytes(), deadline)?;
+    write_dns_tcp_all(&mut stream, query, deadline)?;
 
-    let mut len_buf = [0u8; 2];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|err| dns_io_error(&err))?;
-    let response_len = usize::from(u16::from_be_bytes(len_buf));
-    let mut packet = vec![0u8; response_len];
-    stream
-        .read_exact(&mut packet)
-        .map_err(|err| dns_io_error(&err))?;
-    let _ = stream.shutdown(std::net::Shutdown::Both);
     let expected_question = first_question(query);
-    parse_dns_response(&packet, expected_id, expected_question.as_ref())
+    for _ in 0..MAX_UNRELATED_REPLIES {
+        let mut len_buf = [0u8; 2];
+        read_dns_tcp_exact(&mut stream, &mut len_buf, deadline)?;
+        let response_len = usize::from(u16::from_be_bytes(len_buf));
+        let mut packet = vec![0u8; response_len];
+        read_dns_tcp_exact(&mut stream, &mut packet, deadline)?;
+        if matches_query(&packet, query, expected_id) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            let response = parse_dns_response(&packet, expected_id, expected_question.as_ref())?;
+            if response.truncated {
+                return Err(DnsError::Protocol(
+                    "DNS TCP response is truncated".to_string(),
+                ));
+            }
+            return Ok(response);
+        }
+    }
+    Err(DnsError::Protocol(
+        "too many unrelated DNS TCP responses".to_string(),
+    ))
 }
 
 fn query_nameserver(
@@ -1589,9 +1719,23 @@ fn query_nameserver(
     expected_id: u16,
     timeout: Duration,
 ) -> Result<ParsedDnsResponse, DnsError> {
-    let response = send_udp_dns_query(nameserver, query, expected_id, timeout)?;
+    query_nameserver_with_deadline(
+        nameserver,
+        query,
+        expected_id,
+        &DnsTransportDeadline::new(timeout),
+    )
+}
+
+fn query_nameserver_with_deadline(
+    nameserver: SocketAddr,
+    query: &[u8],
+    expected_id: u16,
+    deadline: &DnsTransportDeadline<'_>,
+) -> Result<ParsedDnsResponse, DnsError> {
+    let response = send_udp_dns_query(nameserver, query, expected_id, deadline)?;
     if response.truncated {
-        send_tcp_dns_query(nameserver, query, expected_id, timeout)
+        send_tcp_dns_query(nameserver, query, expected_id, deadline)
     } else {
         Ok(response)
     }
