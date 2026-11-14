@@ -59,7 +59,7 @@
             socket.send_to(&response, peer).expect("send matching reply");
         });
         let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
-        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10), None);
         server.join().expect("DNS peer");
         let response = result.expect("unrelated replies must not consume the query");
         assert_eq!(response.answers.len(), 1);
@@ -86,7 +86,7 @@
             }
         });
         let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
-        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10), None);
         server.join().expect("DNS peer");
         assert!(matches!(result, Err(DnsError::Protocol(message))
             if message == "too many unrelated DNS UDP responses"));
@@ -108,7 +108,7 @@
             socket.send_to(&response, peer).expect("send malformed reply");
         });
         let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
-        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10));
+        let result = query_nameserver(address, &query, 0x1234, Duration::from_secs(10), None);
         server.join().expect("DNS peer");
         assert!(matches!(result, Err(DnsError::Protocol(message))
             if message.contains("truncated")));
@@ -124,6 +124,7 @@
             &query,
             0x1234,
             Duration::ZERO,
+            None,
         );
         assert!(matches!(result, Err(DnsError::Timeout)));
         let mut packet = [0u8; 512];
@@ -201,6 +202,7 @@
                     started: Time::from_nanos(0),
                     now: &now,
                 },
+                stop: None,
             };
             let query = build_dns_query("wanted.example.test", DnsQueryType::A, 0x1234).unwrap();
             let result = query_nameserver_with_deadline(address, &query, 0x1234, &deadline);
@@ -237,6 +239,7 @@
                 started: Time::from_nanos(0),
                 now: &now,
             },
+            stop: None,
         };
         let mut response = [0u8; 5];
         assert!(matches!(
@@ -1997,19 +2000,40 @@
             Err(DnsError::Timeout)
         };
 
-        let result = retry_system_lookup(3, || false, transient);
+        let result = retry_system_lookup(3, || None, transient);
         assert!(matches!(result, Err(DnsError::Timeout)));
         assert_eq!(calls.get(), 4, "a caller still waiting gets every retry");
 
         calls.set(0);
-        let result = retry_system_lookup(3, || true, transient);
+        let result = retry_system_lookup(3, || Some(DnsError::Cancelled), transient);
+        assert!(matches!(result, Err(DnsError::Cancelled)));
+        assert_eq!(calls.get(), 0, "an abandoned worker never starts a lookup");
+
+        let result = retry_system_lookup(3, || Some(DnsError::Timeout), transient);
         assert!(matches!(result, Err(DnsError::Timeout)));
-        assert_eq!(calls.get(), 1, "no retry after the caller gave up");
+        assert_eq!(calls.get(), 0, "an expired worker never starts a lookup");
+
+        let stopped = std::cell::Cell::new(false);
+        let result = retry_system_lookup(
+            3,
+            || stopped.get().then_some(DnsError::Cancelled),
+            || {
+                calls.set(calls.get() + 1);
+                stopped.set(true);
+                Err(DnsError::Io("resolver unavailable".to_string()))
+            },
+        );
+        assert!(matches!(result, Err(DnsError::Io(message)) if message == "resolver unavailable"));
+        assert_eq!(
+            calls.get(),
+            1,
+            "stopping preserves the completed attempt's error"
+        );
 
         calls.set(0);
         let result = retry_system_lookup(
             3,
-            || false,
+            || None,
             || {
                 calls.set(calls.get() + 1);
                 Err(DnsError::NoRecords("gone.test".to_string()))
@@ -2017,6 +2041,210 @@
         );
         assert!(matches!(result, Err(DnsError::NoRecords(_))));
         assert_eq!(calls.get(), 1, "NoRecords is definitive");
+    }
+
+    #[test]
+    fn blocking_dns_abandoned_before_start_sends_no_datagram() {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind DNS peer");
+        socket.set_nonblocking(true).unwrap();
+        let address = socket.local_addr().unwrap();
+        let stop = AtomicBool::new(true);
+        let entropy = FixedEntropy([0x12, 0x34]);
+        let query = build_dns_query("abandoned.example.test", DnsQueryType::A, 0x1234).unwrap();
+
+        assert!(matches!(
+            query_nameserver(address, &query, 0x1234, Duration::from_secs(10), Some(&stop)),
+            Err(DnsError::Cancelled)
+        ));
+        assert!(matches!(
+            Resolver::query_ip_with_nameservers_sync(
+                "abandoned.example.test",
+                &[address],
+                3,
+                Duration::from_secs(10),
+                &entropy,
+                &stop,
+            ),
+            Err(DnsError::Cancelled)
+        ));
+        assert!(matches!(
+            Resolver::query_records_sync(
+                "abandoned.example.test",
+                DnsQueryType::Mx,
+                &[address],
+                3,
+                Duration::from_secs(10),
+                &entropy,
+                &stop,
+            ),
+            Err(DnsError::Cancelled)
+        ));
+        let mut packet = [0u8; 512];
+        assert_eq!(
+            socket.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "no transport work starts after abandonment"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AbandonedDnsReply {
+        RetryableFailure,
+        Address,
+        Alias,
+    }
+
+    fn check_abandoned_dns_lookup(
+        query_type: DnsQueryType,
+        cancel: bool,
+        reply: AbandonedDnsReply,
+    ) {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("bind first DNS peer");
+        let alternate = UdpSocket::bind(("127.0.0.1", 0)).expect("bind second DNS peer");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound first query wait");
+        let mut nameservers = vec![socket.local_addr().unwrap()];
+        if matches!(reply, AbandonedDnsReply::RetryableFailure) {
+            nameservers.push(alternate.local_addr().unwrap());
+        }
+        let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x12, 0x34]));
+        let resolver = Resolver::with_config(ResolverConfig {
+            nameservers,
+            retries: 2,
+            timeout: Duration::from_secs(10),
+            ..ResolverConfig::default()
+        })
+        .with_entropy(Arc::clone(&entropy));
+        let cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(cx.clone()));
+        let host = "abandoned.example.test";
+        let mut lookup: Pin<Box<dyn Future<Output = Result<(), DnsError>> + '_>> =
+            match query_type {
+                DnsQueryType::Aaaa => Box::pin(async { resolver.lookup_ip(host).await.map(|_| ()) }),
+                DnsQueryType::Mx => Box::pin(async { resolver.lookup_mx(host).await.map(|_| ()) }),
+                DnsQueryType::Srv => Box::pin(async { resolver.lookup_srv(host).await.map(|_| ()) }),
+                DnsQueryType::Txt => Box::pin(async { resolver.lookup_txt(host).await.map(|_| ()) }),
+                DnsQueryType::A | DnsQueryType::Cname => {
+                    unreachable!("IP lookups start with AAAA")
+                }
+            };
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(lookup.as_mut().poll(&mut task).is_pending());
+
+        // Receipt proves the worker has started. Keep its first syscall
+        // blocked until the caller has dropped or cancelled the lookup.
+        let mut packet = [0u8; 512];
+        let (length, peer) = socket
+            .recv_from(&mut packet)
+            .expect("receive first DNS query");
+        assert_eq!(
+            parse_test_dns_question(&packet[..length]).2,
+            query_type.code()
+        );
+        if cancel {
+            cx.cancel_with(crate::types::CancelKind::User, Some("dns caller cancelled"));
+            assert!(matches!(
+                lookup.as_mut().poll(&mut task),
+                Poll::Ready(Err(DnsError::Cancelled))
+            ));
+        }
+        drop(lookup);
+
+        let mut zone = BTreeMap::new();
+        if matches!(reply, AbandonedDnsReply::Address) {
+            zone.insert(
+                (host.to_string(), DnsQueryType::Aaaa.code()),
+                vec![TestDnsRecord::Aaaa {
+                    ttl: 30,
+                    addr: Ipv6Addr::LOCALHOST,
+                }],
+            );
+        }
+        let mut response = build_test_dns_response(&packet[..length], &zone, false);
+        match reply {
+            AbandonedDnsReply::RetryableFailure => {
+                response[2..4].copy_from_slice(&0x8182_u16.to_be_bytes());
+            }
+            AbandonedDnsReply::Address => {}
+            AbandonedDnsReply::Alias => {
+                response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+                response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&0xc00c_u16.to_be_bytes());
+                response.extend_from_slice(&5_u16.to_be_bytes());
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&30_u32.to_be_bytes());
+                let mut target = Vec::new();
+                encode_dns_name("target.example.test", &mut target).unwrap();
+                response.extend_from_slice(&u16::try_from(target.len()).unwrap().to_be_bytes());
+                response.extend_from_slice(&target);
+            }
+        }
+        socket
+            .send_to(&response, peer)
+            .expect("release blocked DNS worker");
+        socket.set_nonblocking(true).unwrap();
+        alternate.set_nonblocking(true).unwrap();
+
+        // The worker owns one entropy Arc until its closure exits. Wait for
+        // that ownership to end, checking both peers throughout; a fixed
+        // observation sleep could miss a delayed retry on a loaded machine.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let retired = Arc::strong_count(&entropy) == 2;
+            for peer in [&socket, &alternate] {
+                assert_eq!(
+                    peer.recv_from(&mut packet).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock,
+                    "abandoned {query_type:?} lookup sent a follow-up after {reply:?}"
+                );
+            }
+            if retired {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "abandoned DNS worker failed to retire"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            resolver.cache.get_ip_result(host).is_none(),
+            "abandoned lookup results must never enter the cache"
+        );
+    }
+
+    #[test]
+    fn dropped_nameserver_lookups_stop_retries_and_failover() {
+        for query_type in [
+            DnsQueryType::Aaaa,
+            DnsQueryType::Mx,
+            DnsQueryType::Srv,
+            DnsQueryType::Txt,
+        ] {
+            check_abandoned_dns_lookup(query_type, false, AbandonedDnsReply::RetryableFailure);
+        }
+    }
+
+    #[test]
+    fn cancelled_nameserver_lookups_stop_retries_and_failover() {
+        for query_type in [
+            DnsQueryType::Aaaa,
+            DnsQueryType::Mx,
+            DnsQueryType::Srv,
+            DnsQueryType::Txt,
+        ] {
+            check_abandoned_dns_lookup(query_type, true, AbandonedDnsReply::RetryableFailure);
+        }
+    }
+
+    #[test]
+    fn abandoned_ip_lookups_stop_address_family_and_cname_followups() {
+        for cancel in [false, true] {
+            for reply in [AbandonedDnsReply::Address, AbandonedDnsReply::Alias] {
+                check_abandoned_dns_lookup(DnsQueryType::Aaaa, cancel, reply);
+            }
+        }
     }
 
     // A lookup whose task is cancelled returns Cancelled at once instead of

@@ -55,6 +55,7 @@ use std::net::{
 };
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::time::Instant;
@@ -287,7 +288,7 @@ impl Resolver {
 
         // Each blocking attempt can take seconds in a DNS outage: none starts
         // after the caller gave up (timeout, drop or cancellation).
-        let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let abandoned = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&abandoned);
         let deadline = Instant::now().checked_add(self.config.timeout);
 
@@ -297,8 +298,13 @@ impl Resolver {
             retry_system_lookup(
                 retries,
                 || {
-                    stop.load(std::sync::atomic::Ordering::Relaxed)
-                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                    if stop.load(Ordering::Relaxed) {
+                        Some(DnsError::Cancelled)
+                    } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        Some(DnsError::Timeout)
+                    } else {
+                        None
+                    }
                 },
                 || Self::query_ip_sync(&host),
             )
@@ -321,6 +327,9 @@ impl Resolver {
         let host = host.to_string();
         let nameservers = self.effective_nameservers()?;
         let entropy = Arc::clone(&self.entropy);
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let _abandon = AbandonOnDrop(abandoned);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
             Self::query_ip_with_nameservers_sync(
@@ -329,6 +338,7 @@ impl Resolver {
                 retries,
                 query_budget(timeout),
                 entropy.as_ref(),
+                stop.as_ref(),
             )
         }));
 
@@ -523,6 +533,9 @@ impl Resolver {
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let _abandon = AbandonOnDrop(abandoned);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
             let answers = Self::query_records_sync(
@@ -532,6 +545,7 @@ impl Resolver {
                 retries,
                 timeout,
                 entropy.as_ref(),
+                stop.as_ref(),
             )?;
             let mut records = Vec::new();
             for answer in answers {
@@ -573,6 +587,9 @@ impl Resolver {
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let _abandon = AbandonOnDrop(abandoned);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
             let answers = Self::query_records_sync(
@@ -582,6 +599,7 @@ impl Resolver {
                 retries,
                 timeout,
                 entropy.as_ref(),
+                stop.as_ref(),
             )?;
             let mut records = Vec::new();
             for answer in answers {
@@ -627,6 +645,9 @@ impl Resolver {
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&abandoned);
+        let _abandon = AbandonOnDrop(abandoned);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
             let answers = Self::query_records_sync(
@@ -636,6 +657,7 @@ impl Resolver {
                 retries,
                 timeout,
                 entropy.as_ref(),
+                stop.as_ref(),
             )?;
             let mut records = Vec::new();
             for answer in answers {
@@ -1558,6 +1580,7 @@ fn matches_query(packet: &[u8], query: &[u8], id: u16) -> bool {
 struct DnsTransportDeadline<'a> {
     timeout: Duration,
     time: SyncTimeSource<'a>,
+    stop: Option<&'a AtomicBool>,
 }
 
 impl DnsTransportDeadline<'_> {
@@ -1569,10 +1592,12 @@ impl DnsTransportDeadline<'_> {
                 #[cfg(not(any(test, feature = "test-internals")))]
                 marker: std::marker::PhantomData,
             },
+            stop: None,
         }
     }
 
     fn remaining(&self) -> Result<Duration, DnsError> {
+        check_dns_abandoned(self.stop)?;
         self.timeout
             .checked_sub(self.time.elapsed())
             .filter(|remaining| !remaining.is_zero())
@@ -1718,13 +1743,11 @@ fn query_nameserver(
     query: &[u8],
     expected_id: u16,
     timeout: Duration,
+    stop: Option<&AtomicBool>,
 ) -> Result<ParsedDnsResponse, DnsError> {
-    query_nameserver_with_deadline(
-        nameserver,
-        query,
-        expected_id,
-        &DnsTransportDeadline::new(timeout),
-    )
+    let mut deadline = DnsTransportDeadline::new(timeout);
+    deadline.stop = stop;
+    query_nameserver_with_deadline(nameserver, query, expected_id, &deadline)
 }
 
 fn query_nameserver_with_deadline(
@@ -1831,22 +1854,24 @@ fn query_budget(timeout: Duration) -> Duration {
 }
 
 /// Runs a blocking system lookup up to `retries + 1` times. A definitive
-/// `NoRecords` ends it at once. No further attempt starts once `should_stop`
-/// reports that the caller no longer waits for the result.
+/// `NoRecords` ends it at once. No attempt starts once `stop_error` reports
+/// that the caller abandoned the lookup or its deadline elapsed.
 fn retry_system_lookup(
     retries: u32,
-    should_stop: impl Fn() -> bool,
+    stop_error: impl Fn() -> Option<DnsError>,
     mut query: impl FnMut() -> Result<LookupIp, DnsError>,
 ) -> Result<LookupIp, DnsError> {
     let mut last_error = None;
     for _attempt in 0..=retries {
+        // The worker may not have started before its caller stopped waiting.
+        // Preserve an actual lookup failure when stopping after an attempt.
+        if let Some(error) = stop_error() {
+            return Err(last_error.unwrap_or(error));
+        }
         match query() {
             Ok(result) => return Ok(result),
-            Err(error @ DnsError::NoRecords(_)) => return Err(error),
+            Err(error @ (DnsError::NoRecords(_) | DnsError::Cancelled)) => return Err(error),
             Err(error) => last_error = Some(error),
-        }
-        if should_stop() {
-            break;
         }
     }
     Err(last_error.unwrap_or(DnsError::Timeout))
@@ -1854,12 +1879,19 @@ fn retry_system_lookup(
 
 /// Sets the flag when dropped: the caller of a blocking lookup has stopped
 /// waiting for it.
-struct AbandonOnDrop(Arc<std::sync::atomic::AtomicBool>);
+struct AbandonOnDrop(Arc<AtomicBool>);
 
 impl Drop for AbandonOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.0.store(true, Ordering::Relaxed);
     }
+}
+
+fn check_dns_abandoned(stop: Option<&AtomicBool>) -> Result<(), DnsError> {
+    if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+        return Err(DnsError::Cancelled);
+    }
+    Ok(())
 }
 
 /// Parses an IP literal, accepting an IPv6 address in URL brackets
@@ -1939,6 +1971,7 @@ struct SyncDnsQueryContext<'a> {
     timeout: Duration,
     time: SyncTimeSource<'a>,
     entropy: &'a dyn EntropySource,
+    stop: Option<&'a AtomicBool>,
 }
 
 impl Resolver {
@@ -1949,6 +1982,7 @@ impl Resolver {
         retries: u32,
         timeout: Duration,
         entropy: &dyn EntropySource,
+        stop: &AtomicBool,
     ) -> Result<Vec<DnsAnswer>, DnsError> {
         let context = SyncDnsQueryContext {
             timeout,
@@ -1958,6 +1992,7 @@ impl Resolver {
                 marker: std::marker::PhantomData,
             },
             entropy,
+            stop: Some(stop),
         };
         Self::query_records_inner_sync(name, query_type, nameservers, retries, &context, 0)
     }
@@ -2006,6 +2041,7 @@ impl Resolver {
                 now: now_ref,
             },
             entropy,
+            stop: None,
         };
         Self::query_records_inner_sync(name, query_type, nameservers, retries, &context, 0)
     }
@@ -2018,6 +2054,7 @@ impl Resolver {
         context: &SyncDnsQueryContext<'_>,
         cname_depth: usize,
     ) -> Result<Vec<DnsAnswer>, DnsError> {
+        check_dns_abandoned(context.stop)?;
         if nameservers.is_empty() {
             return Err(DnsError::Io("no DNS nameservers configured".to_string()));
         }
@@ -2038,6 +2075,7 @@ impl Resolver {
 
         for attempt in 0..=retries {
             for (index, nameserver) in nameservers.iter().copied().enumerate() {
+                check_dns_abandoned(context.stop)?;
                 if answered[index] {
                     continue;
                 }
@@ -2059,7 +2097,17 @@ impl Resolver {
                 let query_id = dns_query_id(context.entropy);
                 let query = build_dns_query(name, query_type, query_id)?;
 
-                match query_nameserver(nameserver, &query, query_id, query_timeout) {
+                let response = query_nameserver(
+                    nameserver,
+                    &query,
+                    query_id,
+                    query_timeout,
+                    context.stop,
+                );
+                // A blocked syscall can finish after its caller is gone. Do
+                // not consume its answer or start another resolver operation.
+                check_dns_abandoned(context.stop)?;
+                match response {
                     Ok(response) => match response.rcode {
                         0 => match select_records_for_query(
                             name,
@@ -2090,6 +2138,7 @@ impl Resolver {
                             )));
                         }
                     },
+                    Err(DnsError::Cancelled) => return Err(DnsError::Cancelled),
                     Err(DnsError::Timeout) => {
                         last_error = Some(DnsError::Timeout);
                     }
@@ -2103,6 +2152,7 @@ impl Resolver {
             }
         }
 
+        check_dns_abandoned(context.stop)?;
         if let Some((alias, ttl, hops)) = deferred_alias {
             let mut records = Self::query_records_inner_sync(
                 &alias,
@@ -2130,6 +2180,7 @@ impl Resolver {
         retries: u32,
         timeout: Duration,
         entropy: &dyn EntropySource,
+        stop: &AtomicBool,
     ) -> Result<LookupIp, DnsError> {
         let context = SyncDnsQueryContext {
             timeout,
@@ -2139,12 +2190,14 @@ impl Resolver {
                 marker: std::marker::PhantomData,
             },
             entropy,
+            stop: Some(stop),
         };
         let mut addresses = Vec::new();
         let mut ttl = None;
         let mut last_error = None;
 
         for query_type in [DnsQueryType::Aaaa, DnsQueryType::A] {
+            check_dns_abandoned(context.stop)?;
             match Self::query_records_inner_sync(
                 host,
                 query_type,
@@ -2176,10 +2229,12 @@ impl Resolver {
                     }
                 }
                 Err(DnsError::NoRecords(_)) => {}
+                Err(DnsError::Cancelled) => return Err(DnsError::Cancelled),
                 Err(err) => last_error = Some(err),
             }
         }
 
+        check_dns_abandoned(context.stop)?;
         if addresses.is_empty() {
             Err(last_error.unwrap_or_else(|| DnsError::NoRecords(host.to_string())))
         } else if last_error.is_some() {
