@@ -102,6 +102,199 @@
     }
 
     #[test]
+    fn test_uring_offsets_stay_in_the_nonnegative_kernel_range() {
+        init_test("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
+        let largest = u64::try_from(i64::MAX).unwrap();
+        for offset in [0, 1, largest] {
+            assert_eq!(IoUringFile::checked_io_offset(offset).unwrap(), offset);
+        }
+        for offset in [largest + 1, u64::MAX] {
+            assert_eq!(
+                IoUringFile::checked_io_offset(offset).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(IoUringFile::checked_seek_target(largest, 0).unwrap(), largest);
+        assert_eq!(IoUringFile::checked_seek_target(largest, -i64::MAX).unwrap(), 0);
+        for (base, delta) in [(0, -1), (largest, 1), (1, i64::MAX), (u64::MAX, 1)] {
+            assert_eq!(
+                IoUringFile::checked_seek_target(base, delta).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        crate::test_complete!("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
+    }
+
+    #[test]
+    fn test_uring_positioned_offsets_never_select_the_kernel_cursor() {
+        init_test("test_uring_positioned_offsets_never_select_the_kernel_cursor");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("positioned_offset_range.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+        // Prove a real six-byte read has completed before consuming only its
+        // prefix. Rejected positioned I/O must preserve this unread suffix.
+        let mut whole = [0; 6];
+        assert!(
+            Pin::new(&mut file)
+                .poll_read(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut ReadBuf::new(&mut whole),
+                )
+                .is_pending()
+        );
+        occupied.release_and_drain();
+        let mut prefix = [0; 2];
+        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+        assert_eq!(&prefix, b"ab");
+        assert_eq!(file.position(), 2);
+        assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
+        assert_eq!(file.trait_io.lock().unread_len(), 4);
+        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+        for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
+            assert_eq!(
+                file.seek(SeekFrom::Start(offset)).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(matches!(
+                Pin::new(&mut file).poll_seek(
+                    &mut Context::from_waker(Waker::noop()),
+                    SeekFrom::Start(offset),
+                ),
+                Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
+            ));
+            assert_eq!(file.position(), 2);
+            assert_eq!(file.trait_io.lock().unread_len(), 4);
+        }
+        let file = Arc::new(file);
+
+        for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
+            let mut read = [0xA5; 2];
+            let error = futures_lite::future::block_on(file.read_at(&mut read, offset))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(read, [0xA5; 2]);
+            let error = futures_lite::future::block_on(file.write_at(b"XY", offset))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+            let (result, read) = futures_lite::future::block_on(
+                Arc::clone(&file).read_at_owned(vec![0xA5; 2], offset),
+            );
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(read, [0xA5; 2]);
+            let (result, written) = futures_lite::future::block_on(
+                Arc::clone(&file).write_at_owned(b"XY".to_vec(), offset),
+            );
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(written, b"XY");
+
+            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+            assert_eq!(file.position(), 2, "logical cursor stays at the consumed prefix");
+            assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
+            assert_eq!(file.trait_io.lock().unread_len(), 4);
+            assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
+        }
+
+        let mut file = Arc::try_unwrap(file).unwrap();
+        let mut suffix = [0; 4];
+        assert_eq!(read_via_trait(&mut file, &mut suffix).unwrap(), 4);
+        assert_eq!(&suffix, b"cdef");
+        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+        crate::test_complete!("test_uring_positioned_offsets_never_select_the_kernel_cursor");
+    }
+
+    #[test]
+    fn test_uring_invalid_absolute_seek_preserves_a_completed_write_retry() {
+        init_test("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid_seek_write_retry.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx = crate::cx::Cx::for_testing()
+            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut file).poll_write(&mut task, b"XY").is_pending());
+        assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+        occupied.release_and_drain();
+        futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_flush(cx)
+        }))
+        .unwrap();
+        assert_eq!(file.position(), 2);
+        assert!(file.trait_io.lock().write_credit.is_some());
+        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+
+        assert_eq!(
+            file.seek(SeekFrom::Start(u64::MAX)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(matches!(
+            Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Start(u64::MAX)),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(matches!(
+            Pin::new(&mut file).poll_write(&mut task, b"XY"),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+        assert_eq!(file.position(), 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
+        crate::test_complete!("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
+    }
+
+    #[test]
+    fn test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io() {
+        init_test("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("seek_offset_range.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let largest = u64::try_from(i64::MAX).unwrap();
+        for position in [
+            SeekFrom::Start(largest + 1),
+            SeekFrom::Start(u64::MAX),
+            SeekFrom::Current(i64::MAX),
+            SeekFrom::End(i64::MAX),
+        ] {
+            file.seek(SeekFrom::Start(2)).unwrap();
+            assert_eq!(file.seek(position).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(file.position(), 2);
+            let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, position)
+            }))
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(file.position(), 2);
+        }
+
+        assert_eq!(file.seek(SeekFrom::Start(largest)).unwrap(), largest);
+        assert_eq!(
+            file.seek(SeekFrom::Current(1)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(file.position(), largest);
+        assert_eq!(file.seek(SeekFrom::Current(-i64::MAX)).unwrap(), 0);
+        assert_eq!(futures_lite::future::block_on(file.write(b"XY")).unwrap(), 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
+        let mut rest = [0; 4];
+        assert_eq!(futures_lite::future::block_on(file.read(&mut rest)).unwrap(), 4);
+        assert_eq!(&rest, b"cdef");
+        assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
+        crate::test_complete!("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
+    }
+
+    #[test]
     fn test_submitted_completion_wait_retries_syscall_errors() {
         init_test("test_submitted_completion_wait_retries_syscall_errors");
         let mut attempts = 0;

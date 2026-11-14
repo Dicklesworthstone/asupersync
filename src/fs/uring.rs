@@ -477,7 +477,8 @@ impl IoUringFile {
 
     /// Reads bytes from the file at a specific offset.
     ///
-    /// This does not modify the file's current position.
+    /// This does not modify the file's current position. Offsets above
+    /// [`i64::MAX`] are rejected with [`io::ErrorKind::InvalidInput`].
     #[must_use]
     pub fn read_at<'a>(&'a self, buf: &'a mut [u8], offset: u64) -> ReadFuture<'a> {
         ReadFuture {
@@ -508,7 +509,8 @@ impl IoUringFile {
     /// Writes bytes to the file at a specific offset.
     ///
     /// This does not modify the file's current position. Its poll has the same
-    /// synchronous-completion boundary as [`write`](Self::write).
+    /// synchronous-completion boundary as [`write`](Self::write). Offsets above
+    /// [`i64::MAX`] are rejected with [`io::ErrorKind::InvalidInput`].
     #[must_use]
     pub fn write_at<'a>(&'a self, buf: &'a [u8], offset: u64) -> WriteFuture<'a> {
         WriteFuture {
@@ -560,13 +562,28 @@ impl IoUringFile {
             .saturating_sub(io.unread_len() as u64)
     }
 
+    fn checked_io_offset(offset: u64) -> io::Result<u64> {
+        // io_uring encodes a signed file offset in an unsigned SQE field.
+        // In particular, u64::MAX is not a far-away position: it requests
+        // I/O at the descriptor's current offset and advances that offset.
+        // Never let a positioned operation silently become cursor I/O.
+        i64::try_from(offset)
+            .map(|_| offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file offset out of range"))
+    }
+
     fn checked_seek_target(base: u64, delta: i64) -> io::Result<u64> {
-        base.checked_add_signed(delta)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range"))
+        let target = base
+            .checked_add_signed(delta)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek offset out of range"))?;
+        Self::checked_io_offset(target)
     }
 
     /// Sets the logical file position used by sequential read/write operations.
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
+        if let SeekFrom::Start(offset) = pos {
+            Self::checked_io_offset(offset)?;
+        }
         self.prepare_synchronous_operation(true, true)?;
         // Preparation ends the previous trait seek and write sequences. This
         // synchronous call is a new seek, not a retry of a collected result;
@@ -579,7 +596,7 @@ impl IoUringFile {
         let current = self.inner.position.load(Ordering::Relaxed);
 
         let new_pos = match pos {
-            SeekFrom::Start(n) => n,
+            SeekFrom::Start(n) => Self::checked_io_offset(n)?,
             SeekFrom::End(delta) => {
                 let end = self.metadata()?.len();
                 Self::checked_seek_target(end, delta)?
@@ -704,6 +721,7 @@ impl IoUringFile {
 
     /// Blocking read using io_uring (for poll-based async trait).
     fn blocking_read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let offset = Self::checked_io_offset(offset)?;
         let fd = self.inner.fd.as_raw_fd();
         let user_data = self.allocate_user_data(OpKind::Read);
         let entry = opcode::Read::new(
@@ -725,6 +743,7 @@ impl IoUringFile {
 
     /// Blocking write using io_uring (for poll-based async trait).
     fn blocking_write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        let offset = Self::checked_io_offset(offset)?;
         let fd = self.inner.fd.as_raw_fd();
         let user_data = self.allocate_user_data(OpKind::Write);
         let entry = opcode::Write::new(
@@ -1232,6 +1251,9 @@ impl IoUringFile {
         offset: Option<u64>,
         update_position: bool,
     ) -> io::Result<usize> {
+        if let Some(offset) = offset {
+            Self::checked_io_offset(offset)?;
+        }
         self.prepare_synchronous_operation(update_position, false)?;
         if update_position {
             let _cursor_guard = self.inner.cursor_lock.lock();
@@ -1257,6 +1279,9 @@ impl IoUringFile {
         offset: Option<u64>,
         update_position: bool,
     ) -> io::Result<usize> {
+        if let Some(offset) = offset {
+            Self::checked_io_offset(offset)?;
+        }
         // Positioned writes invalidate unread trait data too, without changing
         // the caller's logical sequential position.
         self.prepare_synchronous_operation(true, true)?;
@@ -1323,7 +1348,8 @@ impl IoUringFile {
 
     /// Reads into an owned buffer at `offset`, leaving the logical cursor
     /// unchanged. Placement, buffer recovery, and cancellation follow
-    /// [`Self::read_owned`].
+    /// [`Self::read_owned`]. Offsets above [`i64::MAX`] return
+    /// [`io::ErrorKind::InvalidInput`] and the unchanged buffer.
     pub async fn read_at_owned(
         self: Arc<Self>,
         buffer: Vec<u8>,
@@ -1351,7 +1377,8 @@ impl IoUringFile {
 
     /// Writes an owned buffer at `offset`, leaving the logical cursor
     /// unchanged. Placement, buffer recovery, and cancellation follow
-    /// [`Self::write_owned`].
+    /// [`Self::write_owned`]. Offsets above [`i64::MAX`] return
+    /// [`io::ErrorKind::InvalidInput`] and the unchanged buffer.
     pub async fn write_at_owned(
         self: Arc<Self>,
         buffer: Vec<u8>,
@@ -1858,6 +1885,9 @@ impl AsyncSeek for IoUringFile {
         cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
+        if let SeekFrom::Start(offset) = pos {
+            Self::checked_io_offset(offset)?;
+        }
         let this = self.get_mut();
         let inner = &this.inner;
         poll_trait_operation(this.trait_io.get_mut(), 3, cx, |state, task| {
