@@ -39,7 +39,8 @@
       "asupersync-xukyx5 (2026-10-10) re-locates the two src/fs/path_ops.rs locators by +35 lines (754, 759 to 789, 794) after unifying commit/commit_async with commit_with_hook and expanding cancellation docs above them. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
       "asupersync-x2cqdf (2026-10-10) registers six locators in src/sync/mutex_cancel_tests.rs for raw_waker_probe exercising L3 (cancellation during RawWaker clone outside the mutex state lock). Categories, invariants, evidence, and no-claim boundaries are documented.",
       "asupersync-rp8mnn (2026-10-12) re-locates two src/bin/atp.rs locators by +26 lines (13757, 13765 to 13783, 13791) after adding BondRecvArgs --rq-auth-key-stdin CLI support and unit test. No unsafe site is added or removed; categories, invariants, evidence, and no-claim boundaries are unchanged.",
-      "2026-11-12 (FR Windows host): registers src/process/windows_pipe.rs (12 locators: overlapped child-pipe I/O for ChildStdin/ChildStdout/ChildStderr on Windows) and re-locates 0 src/process.rs locators that the new cfg(windows) stream fields and poll arms moved. 28 src/process.rs locators that were already stale at the parent commit are left as found."
+      "2026-11-12 (FR Windows host): registers src/process/windows_pipe.rs (12 locators: overlapped child-pipe I/O for ChildStdin/ChildStdout/ChildStderr on Windows) and re-locates 0 src/process.rs locators that the new cfg(windows) stream fields and poll arms moved. 28 src/process.rs locators that were already stale at the parent commit are left as found.",
+      "asupersync-8ynh18 (2026-11-14) refreshes the 14 existing locators moved by safe-only source-error delivery: two src/net/unix/stream.rs sites move from actual parent lines 830/850 to 884/904, and twelve src/process.rs sites after the child-pipe poll methods move by +16 lines. These 14 entries also had pre-existing locator drift, resolved against parent 75f280b62c16c5148efc79603ee9ca1d0924e796 and the reviewed working sources. Unrelated baseline drift is unchanged. No unsafe operation is added, removed, or modified; categories, invariants, evidence, and no-claim boundaries are unchanged. This locator refresh is not an executed contract or platform safety receipt."
     ]
   },
   "required_row_fields": [
@@ -2453,12 +2454,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 816,
+          "line": 884,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 836,
+          "line": 904,
           "pattern": "let (bytes, received_fds, truncated) = unsafe {"
         }
       ]
@@ -2723,62 +2724,62 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 4158,
+          "line": 4353,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4198,
+          "line": 4393,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4385,
+          "line": 4580,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4428,
+          "line": 4623,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4874,
+          "line": 5070,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4886,
+          "line": 5082,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4897,
+          "line": 5093,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4967,
+          "line": 5163,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 5043,
+          "line": 5239,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5048,
+          "line": 5244,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5102,
+          "line": 5298,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5166,
+          "line": 5362,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]

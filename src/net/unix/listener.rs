@@ -531,6 +531,10 @@ impl UnixListener {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
+        if let Some(error) = self.take_source_error() {
+            self.accept_waiters.wake_others(cx.waker());
+            return Poll::Ready(Err(error));
+        }
         match self.inner.accept() {
             Ok((stream, addr)) => {
                 self.accept_waiters.wake_others(cx.waker());
@@ -546,6 +550,10 @@ impl UnixListener {
                 // Close the re-arm race for edge-triggered readiness backends.
                 // If a connection arrived between the first `accept()` returning WouldBlock
                 // and the registration, we might miss the edge-triggered wakeup.
+                if let Some(error) = self.take_source_error() {
+                    self.accept_waiters.wake_others(cx.waker());
+                    return Poll::Ready(Err(error));
+                }
                 match self.inner.accept() {
                     Ok((stream, addr)) => {
                         self.accept_waiters.wake_others(cx.waker());
@@ -572,15 +580,24 @@ impl UnixListener {
     /// asupersync-tx9j0f); see [`ReactorRegistration::arm`]. The lock is
     /// released before any self-wake so a re-poll cannot contend on it.
     fn register_interest(&self) -> io::Result<()> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         let accept_waker = Waker::from(Arc::clone(&self.accept_waiters));
-        let armed = self
-            .registration
-            .lock()
-            .arm(&self.inner, Interest::READABLE, &accept_waker)?;
+        let armed = self.registration.lock().arm_after_error_check(
+            &self.inner,
+            Interest::READABLE,
+            &accept_waker,
+        )?;
         if armed == Armed::SelfWake {
             fallback_rewake_waiters(&self.accept_waiters);
         }
         Ok(())
+    }
+
+    fn take_source_error(&self) -> Option<io::Error> {
+        let source = self.registration.lock().error_source();
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
     }
 
     /// Returns the local socket address.

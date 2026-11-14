@@ -1028,6 +1028,25 @@ pub struct IoRegistration {
     interest_change_wakes_reactor: bool,
 }
 
+/// A source-error query detached from a socket's registration mutex.
+///
+/// Retaining the dispatcher owner during the query prevents a retired token
+/// namespace from being confused with a replacement driver's registrations.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct IoErrorSource {
+    token: Token,
+    owner: Weak<shared::DriverOwner>,
+    reactor: Arc<dyn Reactor>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IoErrorSource {
+    pub(crate) fn take_error(self) -> Option<io::Error> {
+        let _owner = self.owner.upgrade()?;
+        self.reactor.take_error(self.token)
+    }
+}
+
 impl IoRegistration {
     fn new(
         token: Token,
@@ -1084,6 +1103,31 @@ impl IoRegistration {
     #[must_use]
     pub fn interest(&self) -> Interest {
         self.interest
+    }
+
+    /// Takes one pending source-specific error, without changing readiness.
+    ///
+    /// Ordinary reactors return `None`; opt-in reactors can report a failure
+    /// to the next operation using this registration. The error is not a
+    /// dispatcher-service failure, even when its kind is `NotConnected`.
+    /// Re-arm and other registration-maintenance operations do not consume it.
+    /// No driver lock is acquired. Call outside any lock guarding this handle.
+    pub fn take_error(&self) -> Option<io::Error> {
+        if self.deregistered {
+            return None;
+        }
+        let _owner = self.owner.upgrade()?;
+        self.reactor.take_error(self.token)
+    }
+
+    /// Snapshot under the socket lock; invoke the backend only after unlocking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn error_source(&self) -> Option<IoErrorSource> {
+        (!self.deregistered).then(|| IoErrorSource {
+            token: self.token,
+            owner: self.owner.clone(),
+            reactor: Arc::clone(&self.reactor),
+        })
     }
 
     /// Whether this registration belongs to the handle's physical dispatcher.
@@ -1463,6 +1507,149 @@ mod tests {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
             0
         }
+    }
+
+    struct SourceErrorProbe {
+        model: crate::runtime::reactor_model::LabReactorModel,
+        driver: Mutex<Option<Weak<Mutex<IoDriver>>>>,
+        queries: AtomicUsize,
+    }
+
+    impl Reactor for SourceErrorProbe {
+        fn register(
+            &self,
+            source: &dyn Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
+            self.model.register(source, token, interest)
+        }
+
+        fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            self.model.modify(token, interest)
+        }
+
+        fn take_error(&self, token: Token) -> Option<io::Error> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            if let Some(driver) = self.driver.lock().as_ref().and_then(Weak::upgrade) {
+                assert!(
+                    driver.try_lock().is_some(),
+                    "source hook ran under driver gate"
+                );
+            }
+            self.model.take_error(token)
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            self.model.deregister(token)
+        }
+
+        fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            self.model.poll(events, timeout)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.model.wake()
+        }
+
+        fn registration_count(&self) -> usize {
+            self.model.registration_count()
+        }
+    }
+
+    fn source_error_probe() -> (Arc<SourceErrorProbe>, IoDriverHandle) {
+        let reactor = Arc::new(SourceErrorProbe {
+            model: crate::runtime::reactor_model::LabReactorModel::new(),
+            driver: Mutex::new(None),
+            queries: AtomicUsize::new(0),
+        });
+        let driver = IoDriverHandle::new(reactor.clone());
+        *reactor.driver.lock() = Some(Arc::downgrade(&driver.inner));
+        (reactor, driver)
+    }
+
+    #[test]
+    fn registration_maintenance_preserves_source_error_for_next_operation() {
+        let (reactor, driver) = source_error_probe();
+        let waker = Waker::noop();
+        let mut registration = driver
+            .register(&TestFdSource, Interest::READABLE, waker.clone())
+            .unwrap();
+        reactor
+            .model
+            .inject_source_error(registration.token(), io::ErrorKind::NotConnected)
+            .unwrap();
+
+        registration.set_interest(Interest::WRITABLE).unwrap();
+        assert!(registration.rearm(Interest::READABLE, waker).unwrap());
+        assert_eq!(reactor.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registration.take_error().unwrap().kind(),
+            io::ErrorKind::NotConnected
+        );
+        assert!(registration.take_error().is_none());
+        assert_eq!(reactor.queries.load(Ordering::SeqCst), 2);
+        assert_eq!(driver.poll_error_count(), 0);
+        drop(registration);
+        assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn detached_source_query_runs_outside_registration_and_driver_locks() {
+        let (reactor, driver) = source_error_probe();
+        let registration = Mutex::new(
+            driver
+                .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+                .unwrap(),
+        );
+        let token = registration.lock().token();
+        reactor
+            .model
+            .inject_source_error(token, io::ErrorKind::ConnectionReset)
+            .unwrap();
+
+        let query = registration.lock().error_source().unwrap();
+        assert!(registration.try_lock().is_some());
+        assert_eq!(
+            query.take_error().unwrap().kind(),
+            io::ErrorKind::ConnectionReset
+        );
+        assert_eq!(reactor.queries.load(Ordering::SeqCst), 1);
+        assert!(registration.lock().error_source().is_some());
+        drop(registration);
+        assert!(driver.is_empty());
+    }
+
+    #[test]
+    fn retired_source_queries_cannot_consume_a_successor_error() {
+        let (reactor, driver) = source_error_probe();
+        let registration = driver
+            .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+            .unwrap();
+        let query = registration.error_source().unwrap();
+        drop(driver);
+        assert_eq!(reactor.model.registration_count(), 0);
+
+        let successor = IoDriverHandle::new(reactor.clone());
+        *reactor.driver.lock() = Some(Arc::downgrade(&successor.inner));
+        let live = successor
+            .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+            .unwrap();
+        reactor
+            .model
+            .inject_source_error(live.token(), io::ErrorKind::ConnectionRefused)
+            .unwrap();
+        assert!(registration.take_error().is_none());
+        assert!(query.take_error().is_none());
+        assert_eq!(reactor.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            live.take_error().unwrap().kind(),
+            io::ErrorKind::ConnectionRefused
+        );
+        drop(registration);
+        assert_eq!(successor.waker_count(), 1);
+        drop(live);
+        assert!(successor.is_empty());
     }
 
     struct NotFoundReactor;

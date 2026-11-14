@@ -3301,6 +3301,9 @@ impl AsyncWrite for ChildStdin {
         let this = self.get_mut();
         #[cfg(unix)]
         {
+            if let Some(error) = this.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             let Some(inner) = this.inner.as_mut() else {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::NotConnected,
@@ -3352,6 +3355,9 @@ impl AsyncWrite for ChildStdin {
         let this = self.get_mut();
         #[cfg(unix)]
         {
+            if let Some(error) = this.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             let Some(inner) = this.inner.as_mut() else {
                 return Poll::Ready(Ok(()));
             };
@@ -3392,6 +3398,10 @@ impl AsyncWrite for ChildStdin {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
+        #[cfg(unix)]
+        if let Some(error) = this.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
         // A write still in flight finishes before the pipe closes; its error
         // is the shutdown's.
         #[cfg(windows)]
@@ -3479,6 +3489,9 @@ impl AsyncRead for ChildStdout {
         let this = self.get_mut();
         #[cfg(unix)]
         {
+            if let Some(error) = this.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             let unfilled = buf.unfilled();
             match this.inner.read(unfilled) {
                 Ok(n) => {
@@ -3595,6 +3608,9 @@ impl AsyncRead for ChildStderr {
         let this = self.get_mut();
         #[cfg(unix)]
         {
+            if let Some(error) = this.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             let unfilled = buf.unfilled();
             match this.inner.read(unfilled) {
                 Ok(n) => {

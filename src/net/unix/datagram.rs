@@ -273,6 +273,9 @@ impl UnixDatagram {
     /// ```
     pub fn connect<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect")?;
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         self.inner.connect(path)
     }
 
@@ -293,6 +296,9 @@ impl UnixDatagram {
 
         crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect_abstract")?;
         let addr = SocketAddr::from_abstract_name(name)?;
+        if let Some(error) = self.registration.take_error() {
+            return Err(error);
+        }
         self.inner.connect_addr(&addr)
     }
 
@@ -355,6 +361,9 @@ impl UnixDatagram {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             match self.inner.send_to(buf, path_ref) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -401,6 +410,9 @@ impl UnixDatagram {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match self.inner.recv_from(buf) {
                 Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
@@ -449,6 +461,9 @@ impl UnixDatagram {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
+            }
             match self.inner.send(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -494,6 +509,9 @@ impl UnixDatagram {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match self.inner.recv(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
@@ -610,6 +628,9 @@ impl UnixDatagram {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
+        }
 
         // For datagrams, a 1-byte MSG_PEEK probe checks readiness without consuming data.
         let mut buf = [0u8; 1];
@@ -635,6 +656,9 @@ impl UnixDatagram {
 
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
+        }
+        if let Some(error) = self.registration.take_error() {
+            return Poll::Ready(Err(error));
         }
 
         let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
@@ -673,6 +697,9 @@ impl UnixDatagram {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             match socket::recv(
                 self.inner.as_raw_fd(),
@@ -738,6 +765,9 @@ impl UnixDatagram {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
+            }
+            if let Some(error) = self.registration.take_error() {
+                return Poll::Ready(Err(error));
             }
             let mut iov = [IoSliceMut::new(buf)];
             match socket::recvmsg::<socket::UnixAddr>(

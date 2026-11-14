@@ -58,6 +58,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
             return cancelled_poll();
         }
 
+        if let Some(error) = registration.as_ref().and_then(IoRegistration::take_error) {
+            return Poll::Ready(Err(error));
+        }
+
         if let Some(err) = socket.take_error()? {
             return Poll::Ready(Err(err));
         }
@@ -110,6 +114,9 @@ fn rearm_connect_registration(
     registration: &mut Option<IoRegistration>,
     cx: &Context<'_>,
 ) -> io::Result<()> {
+    if let Some(error) = registration.as_ref().and_then(IoRegistration::take_error) {
+        return Err(error);
+    }
     if registration
         .as_ref()
         .is_some_and(|existing| crate::net::udp::registration_needs_migration(existing, false))
@@ -375,6 +382,9 @@ impl UnixStream {
 
     /// Shuts down the read, write, or both halves of the stream.
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         self.inner.shutdown(how)
     }
 
@@ -382,6 +392,11 @@ impl UnixStream {
     #[must_use]
     pub fn as_std(&self) -> &net::UnixStream {
         &self.inner
+    }
+
+    fn take_source_error(&self) -> Option<io::Error> {
+        let source = self.registration.lock().error_source();
+        source.and_then(crate::runtime::io_driver::IoErrorSource::take_error)
     }
 
     fn pending_on_interest<T>(&self, cx: &Context<'_>, interest: Interest) -> Poll<io::Result<T>> {
@@ -398,10 +413,13 @@ impl UnixStream {
     /// asupersync-tx9j0f); see [`ReactorRegistration::arm`]. The lock is
     /// released before any self-wake so a re-poll cannot contend on it.
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let armed = self
-            .registration
-            .lock()
-            .arm(&*self.inner, interest, cx.waker())?;
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
+        let armed =
+            self.registration
+                .lock()
+                .arm_after_error_check(&*self.inner, interest, cx.waker())?;
         if armed == Armed::SelfWake {
             crate::net::tcp::stream::fallback_rewake(cx);
         }
@@ -488,6 +506,9 @@ impl UnixStream {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
+            if let Some(error) = self.take_source_error() {
+                return Poll::Ready(Err(error));
+            }
 
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
@@ -557,6 +578,9 @@ impl UnixStream {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
+            if let Some(error) = self.take_source_error() {
+                return Poll::Ready(Err(error));
+            }
 
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
@@ -584,7 +608,10 @@ impl UnixStream {
     /// ```
     #[must_use]
     pub fn split(&self) -> (ReadHalf<'_>, WriteHalf<'_>) {
-        (ReadHalf::new(&self.inner), WriteHalf::new(&self.inner))
+        (
+            ReadHalf::with_registration(&self.inner, &self.registration),
+            WriteHalf::with_registration(&self.inner, &self.registration),
+        )
     }
 
     /// Splits the stream into owned read and write halves.
@@ -621,6 +648,9 @@ impl AsyncRead for UnixStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::UnixStream = &self.inner;
         // std::os::unix::net::UnixStream implements Read for &UnixStream
         match (&*inner).read(buf.unfilled()) {
@@ -645,6 +675,9 @@ impl AsyncReadVectored for UnixStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -665,6 +698,9 @@ impl AsyncWrite for UnixStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -682,6 +718,9 @@ impl AsyncWrite for UnixStream {
     ) -> Poll<io::Result<usize>> {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
+        }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
         }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write_vectored(bufs) {
@@ -701,6 +740,9 @@ impl AsyncWrite for UnixStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -715,6 +757,9 @@ impl AsyncWrite for UnixStream {
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
@@ -726,16 +771,25 @@ impl AsyncWrite for UnixStream {
 // Legacy std Read/Write impls for backwards compatibility
 impl Read for UnixStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         (&*self.inner).read(buf)
     }
 }
 
 impl Write for UnixStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         (&*self.inner).write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if let Some(error) = self.take_source_error() {
+            return Err(error);
+        }
         (&*self.inner).flush()
     }
 }
@@ -968,6 +1022,9 @@ impl UnixStream {
         interest: Interest,
         owner: u64,
     ) -> Poll<io::Result<T>> {
+        if let Some(error) = self.take_source_error() {
+            return Poll::Ready(Err(error));
+        }
         // RawWaker clone hooks may re-enter this stream, just like drop and
         // wake hooks. Run them before taking the registration lock.
         let waker = cx.waker().clone();
