@@ -8,12 +8,25 @@
 //!
 //! - `notified().await`: Cancel-safe, waiter is removed on cancellation
 //! - Notifications before any waiter: Stored and delivered to next waiter
+//!
+//! # Task causality
+//!
+//! In the lab's opt-in task-causality mode, a successful wait imports the
+//! fixed clock snapshot of its notification. Stored notifications and dropped
+//! waiters' notification batons retain their original producer. Broadcasts
+//! retain one receipt per interested generation, so a later broadcast cannot
+//! rewrite an earlier grant. The task that completes the wait is the observer;
+//! creating, enabling, inspecting, or dropping a wait does not observe it.
 
+use crate::cx::Cx;
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::trace::distributed::LogicalTime;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 /// Sentinel used by the intrusive active-waiter FIFO.
@@ -45,6 +58,9 @@ pub struct Notify {
     generation: AtomicU64,
     /// Number of stored notifications (for notify_one before wait).
     stored_notifications: AtomicUsize,
+    /// Monotone hint: only opt-in publication activates causal bookkeeping.
+    /// Default constructors and zero-token polls need no extra waiter lock.
+    causality_started: AtomicBool,
     /// Queue of waiters (protected by mutex).
     waiters: Mutex<WaiterSlab>,
 }
@@ -65,6 +81,123 @@ struct WaiterSlab {
     /// older waiter.
     active_head: usize,
     active_tail: usize,
+    /// Allocated only by an opt-in notifier, never by an ordinary waiter.
+    causality: Option<Box<NotifyCausality>>,
+}
+
+/// Immutable evidence, shared by broadcast recipients without ordering them.
+#[derive(Debug)]
+struct NotifyPublication {
+    runtime: u64,
+    time: LogicalTime,
+}
+
+impl NotifyPublication {
+    fn capture_current() -> Option<Arc<Self>> {
+        Cx::with_current(|cx| {
+            cx.task_causality_runtime().map(|runtime| {
+                // Do not tick: notification and Drop baton publication must
+                // not fail because the producer's clock counter is exhausted.
+                Arc::new(Self {
+                    runtime,
+                    time: cx.logical_now(),
+                })
+            })
+        })
+        .flatten()
+    }
+
+    fn observe_current(&self) {
+        let _ = Cx::with_current(|cx| {
+            if cx.task_causality_runtime() == Some(self.runtime) {
+                let _ = cx.logical_receive(&self.time);
+            }
+        });
+    }
+}
+
+type BroadcastReceipt = OnceLock<Option<Arc<NotifyPublication>>>;
+
+#[derive(Debug)]
+struct StoredNotification {
+    count: usize,
+    publication: Option<Arc<NotifyPublication>>,
+}
+
+/// No broadcast history is retained. Interested futures own their generation's
+/// receipt after publication, and the Notify keeps at most one open receipt.
+#[derive(Debug)]
+struct NotifyCausality {
+    stored: VecDeque<StoredNotification>,
+    broadcast: Option<Arc<BroadcastReceipt>>,
+    /// Futures created before activation have only a scalar generation. Only
+    /// this generation's first subsequent broadcast could be their first
+    /// attributed grant; earlier generations were notified while untracked.
+    activation_generation: u64,
+    activation_broadcast: Option<Option<Arc<NotifyPublication>>>,
+}
+
+impl NotifyCausality {
+    fn new(stored: usize, generation: u64) -> Self {
+        let mut pending = VecDeque::new();
+        if stored != 0 {
+            // Compress an arbitrary pre-existing untracked backlog into one
+            // run rather than allocating one metadata slot per notification.
+            pending.push_back(StoredNotification {
+                count: stored,
+                publication: None,
+            });
+        }
+        Self {
+            stored: pending,
+            broadcast: None,
+            activation_generation: generation,
+            activation_broadcast: None,
+        }
+    }
+
+    fn store(&mut self, publication: Option<Arc<NotifyPublication>>) {
+        if publication.is_none()
+            && let Some(last) = self.stored.back_mut()
+            && last.publication.is_none()
+        {
+            last.count += 1;
+            return;
+        }
+        self.stored.push_back(StoredNotification {
+            count: 1,
+            publication,
+        });
+    }
+
+    fn consume(&mut self) -> Option<Arc<NotifyPublication>> {
+        let first = self
+            .stored
+            .front_mut()
+            .expect("stored notification has metadata");
+        first.count -= 1;
+        if first.count == 0 {
+            self.stored.pop_front().and_then(|entry| entry.publication)
+        } else {
+            first.publication.clone()
+        }
+    }
+
+    fn interest(&mut self) -> Arc<BroadcastReceipt> {
+        Arc::clone(
+            self.broadcast
+                .get_or_insert_with(|| Arc::new(OnceLock::new())),
+        )
+    }
+
+    fn broadcast(&mut self, publication: &Option<Arc<NotifyPublication>>) {
+        if self.activation_broadcast.is_none() {
+            self.activation_broadcast = Some(publication.clone());
+        }
+        if let Some(receipt) = self.broadcast.take() {
+            let _ = receipt.set(publication.clone());
+        }
+    }
 }
 
 /// A reusable waiter slot and the epoch the next occupant must receive.
@@ -100,6 +233,8 @@ struct WaiterEntry {
     /// either to a duplicate baton-pass or, in the worst case, the
     /// new occupant's wakeup being silently consumed.
     slot_epoch: u64,
+    /// The first grant to this slot, retained until completion or baton pass.
+    publication: Option<Arc<NotifyPublication>>,
 }
 
 impl WaiterSlab {
@@ -111,6 +246,7 @@ impl WaiterSlab {
             active: 0,
             active_head: NO_ACTIVE_WAITER,
             active_tail: NO_ACTIVE_WAITER,
+            causality: None,
         }
     }
 
@@ -246,6 +382,7 @@ impl WaiterSlab {
             }
             retired_waker = self.entries[index].waker.take();
             self.entries[index].notified = false;
+            self.entries[index].publication = None;
             self.entries[index].active_prev = NO_ACTIVE_WAITER;
             self.entries[index].active_next = NO_ACTIVE_WAITER;
             self.free_slots.push(FreeSlot { index, next_epoch });
@@ -274,7 +411,10 @@ impl WaiterSlab {
     }
 
     #[inline]
-    fn take_next_active_waker(&mut self) -> Option<Waker> {
+    fn take_next_active_waker(
+        &mut self,
+        publication: &mut Option<Arc<NotifyPublication>>,
+    ) -> Option<Waker> {
         let index = self.active_head;
         if index == NO_ACTIVE_WAITER {
             debug_assert_eq!(self.active, 0);
@@ -285,6 +425,7 @@ impl WaiterSlab {
         self.unlink_active(index);
         let entry = &mut self.entries[index];
         entry.notified = true;
+        entry.publication = publication.take();
         let waker = entry.waker.take();
         debug_assert!(waker.is_some());
         waker
@@ -299,6 +440,7 @@ impl Notify {
         Self {
             generation: AtomicU64::new(0),
             stored_notifications: AtomicUsize::new(0),
+            causality_started: AtomicBool::new(false),
             waiters: Mutex::new(WaiterSlab::new()),
         }
     }
@@ -345,27 +487,90 @@ impl Notify {
     /// ```
     #[inline]
     pub fn notified(&self) -> Notified<'_> {
-        Notified {
-            notify: self,
-            state: NotifiedState::Init,
-            waiter_index: None,
-            initial_generation: self.generation.load(Ordering::Acquire),
-            generation_capture: GenerationCapture::OnFirstPoll,
-        }
-    }
-
-    /// Creates a waiter armed against a generation sampled before a caller's
-    /// condition check. Unlike [`Notify::notified`], this private path must
-    /// preserve the supplied generation through its first poll so a broadcast
-    /// between the condition check and registration cannot be lost.
-    #[inline]
-    fn notified_at_generation(&self, generation: u64) -> Notified<'_> {
+        let (generation, broadcast_receipt) = self.broadcast_interest();
         Notified {
             notify: self,
             state: NotifiedState::Init,
             waiter_index: None,
             initial_generation: generation,
-            generation_capture: GenerationCapture::Armed(generation),
+            generation_capture: GenerationCapture::OnFirstPoll,
+            broadcast_receipt,
+            completion_publication: None,
+        }
+    }
+
+    /// Capture a baseline and, after causal activation, its shared receipt.
+    /// Loading generation before the activation hint ensures a generation
+    /// published after activation cannot be mistaken for an untracked one.
+    fn broadcast_interest(&self) -> (u64, Option<Arc<BroadcastReceipt>>) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if !self.causality_started.load(Ordering::Acquire) {
+            return (generation, None);
+        }
+        let mut waiters = self.waiters.lock();
+        let generation = self.generation.load(Ordering::Acquire);
+        let receipt = waiters
+            .causality
+            .as_mut()
+            .map(|causality| causality.interest());
+        (generation, receipt)
+    }
+
+    fn activate_causality(&self, waiters: &mut WaiterSlab) {
+        if waiters.causality.is_none() {
+            waiters.causality = Some(Box::new(NotifyCausality::new(
+                self.stored_notifications.load(Ordering::Acquire),
+                self.generation.load(Ordering::Acquire),
+            )));
+            self.causality_started.store(true, Ordering::Release);
+        }
+    }
+
+    fn store_notification(
+        &self,
+        waiters: &mut WaiterSlab,
+        publication: Option<Arc<NotifyPublication>>,
+    ) {
+        if let Some(causality) = &mut waiters.causality {
+            causality.store(publication);
+        }
+        self.stored_notifications.fetch_add(1, Ordering::Release);
+    }
+
+    /// Serialize consumption with publication even before causal activation.
+    /// A flag alone cannot protect the former lock-free CAS: a stale untracked
+    /// consumer can win after activation and steal an attributed token (ABA).
+    /// The extra stored-token lock buys exact pairing; default operation still
+    /// allocates no causal state and performs no logical-clock operation.
+    fn consume_stored_notification(
+        &self,
+        waiters: &mut WaiterSlab,
+    ) -> Option<Option<Arc<NotifyPublication>>> {
+        if self.stored_notifications.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let publication = waiters
+            .causality
+            .as_mut()
+            .and_then(|causality| causality.consume());
+        // Preserve the acquire/release handoff of the original count CAS.
+        self.stored_notifications.fetch_sub(1, Ordering::AcqRel);
+        Some(publication)
+    }
+
+    fn broadcast_publication(
+        waiters: &WaiterSlab,
+        generation: u64,
+        receipt: Option<&Arc<BroadcastReceipt>>,
+    ) -> Option<Arc<NotifyPublication>> {
+        if let Some(receipt) = receipt {
+            return receipt.get().cloned().flatten();
+        }
+        let causality = waiters.causality.as_ref()?;
+        if generation == causality.activation_generation {
+            causality.activation_broadcast.as_ref().cloned().flatten()
+        } else {
+            None
         }
     }
 
@@ -412,11 +617,13 @@ impl Notify {
         F: FnMut() -> bool,
     {
         loop {
-            let generation = self.generation.load(Ordering::Acquire);
+            // Capture interest before the predicate can publish a broadcast.
+            let mut notified = self.notified();
+            notified.generation_capture = GenerationCapture::Armed(notified.initial_generation);
             if predicate() {
                 return;
             }
-            self.notified_at_generation(generation).await;
+            notified.await;
         }
     }
 
@@ -434,10 +641,14 @@ impl Notify {
     /// `false` when no waiter was available and the notification was stored.
     #[inline]
     pub fn notify_one(&self) -> bool {
+        let mut publication = NotifyPublication::capture_current();
         let waker_to_wake = {
             let mut waiters = self.waiters.lock();
+            if publication.is_some() {
+                self.activate_causality(&mut waiters);
+            }
 
-            if let Some(found_waker) = waiters.take_next_active_waker() {
+            if let Some(found_waker) = waiters.take_next_active_waker(&mut publication) {
                 drop(waiters);
                 Some(found_waker)
             } else {
@@ -447,7 +658,7 @@ impl Notify {
                 // `stored_notifications` so a waiter can't observe
                 // `stored_notifications == 0`, then register, and miss the stored
                 // notification (lost wakeup).
-                self.stored_notifications.fetch_add(1, Ordering::Release);
+                self.store_notification(&mut waiters, publication);
                 drop(waiters);
                 None
             }
@@ -469,16 +680,24 @@ impl Notify {
     /// start waiting after this call will not be affected.
     #[inline]
     pub fn notify_waiters(&self) {
-        // Increment generation to signal all waiters.
-        let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
+        let publication = NotifyPublication::capture_current();
 
         // Collect all wakers (SmallVec avoids heap allocation for ≤8 waiters).
         let wakers: SmallVec<[Waker; 8]> = {
             let mut waiters = self.waiters.lock();
+            if publication.is_some() {
+                self.activate_causality(&mut waiters);
+            }
 
             // Reserve before detaching any Waker so allocation failure cannot
             // retire a user payload while the waiter mutex is held.
             let mut wakers: SmallVec<[Waker; 8]> = SmallVec::with_capacity(waiters.active);
+            // Publish receipts before the generation release. A constructor
+            // sampling that generation must see causal activation too.
+            if let Some(causality) = &mut waiters.causality {
+                causality.broadcast(&publication);
+            }
+            let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
 
             let mut index = waiters.active_head;
             while index != NO_ACTIVE_WAITER {
@@ -488,6 +707,7 @@ impl Notify {
                     let entry = &mut waiters.entries[index];
                     entry.generation = new_generation;
                     entry.notified = true;
+                    entry.publication = publication.clone();
                     if let Some(waker) = entry.waker.take() {
                         wakers.push(waker);
                     }
@@ -538,13 +758,17 @@ impl Notify {
 
     /// Passes a `notify_one` baton to the next active waiter, or stores it if none exist.
     /// This must be called with the waiters lock held.
-    fn pass_baton(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
-        if let Some(waker) = waiters.take_next_active_waker() {
+    fn pass_baton(
+        &self,
+        mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
+        mut publication: Option<Arc<NotifyPublication>>,
+    ) {
+        if let Some(waker) = waiters.take_next_active_waker(&mut publication) {
             drop(waiters);
             wake_baton(waker);
             return;
         }
-        self.stored_notifications.fetch_add(1, Ordering::Release);
+        self.store_notification(&mut waiters, publication);
     }
 
     /// Passes a `notify_one` baton to a post-broadcast waiter, optionally
@@ -562,14 +786,15 @@ impl Notify {
         &self,
         mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
         store_if_absent: bool,
+        mut publication: Option<Arc<NotifyPublication>>,
     ) {
-        if let Some(waker) = waiters.take_next_active_waker() {
+        if let Some(waker) = waiters.take_next_active_waker(&mut publication) {
             drop(waiters);
             wake_baton(waker);
             return;
         }
         if store_if_absent {
-            self.stored_notifications.fetch_add(1, Ordering::Release);
+            self.store_notification(&mut waiters, publication);
         }
     }
 }
@@ -599,7 +824,7 @@ impl Drop for Notify {
             let mut wakers = Vec::with_capacity(waiters.active);
 
             // Detach all pending waiter wakers in registration order.
-            while let Some(waker) = waiters.take_next_active_waker() {
+            while let Some(waker) = waiters.take_next_active_waker(&mut None) {
                 wakers.push(waker);
             }
 
@@ -685,6 +910,10 @@ pub struct Notified<'a> {
     waiter_index: Option<(usize, u64)>,
     initial_generation: u64,
     generation_capture: GenerationCapture,
+    broadcast_receipt: Option<Arc<BroadcastReceipt>>,
+    /// Consumption is committed before user Waker cleanup. If cleanup panics,
+    /// a later successful poll must still observe this grant in its own task.
+    completion_publication: Option<Arc<NotifyPublication>>,
 }
 
 impl Notified<'_> {
@@ -728,45 +957,21 @@ impl Notified<'_> {
     }
 
     #[inline]
-    fn mark_done(&mut self) -> Poll<()> {
+    fn mark_done(&mut self, publication: Option<Arc<NotifyPublication>>) -> Poll<()> {
         self.state = NotifiedState::Done;
-        Poll::Ready(())
+        self.broadcast_receipt = None;
+        self.completion_publication = publication;
+        self.finish_ready()
     }
 
-    #[inline]
-    fn try_consume_stored_notification(&self) -> bool {
-        let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
-        while stored > 0 {
-            // br-asupersync-fu402k: success ordering must be AcqRel.
-            // notify_one stores a notification with Release (around
-            // line 215) so subsequent producers/consumers form a
-            // happens-before chain through stored_notifications.
-            // Acquire on the consume side is required to OBSERVE the
-            // produced value — that part was already correct. But the
-            // CAS that decrements is itself a producer for any
-            // subsequent observer that reads the lower count via
-            // Acquire (e.g., a later notify_one finding the counter
-            // back at zero and re-storing): without Release on the
-            // consume side, the consumer's prior writes are NOT
-            // released to that observer, so the consumer's
-            // post-notification work can be reordered behind the
-            // producer's load. AcqRel restores both sides of the
-            // synchronization edge.
-            //
-            // Failure ordering stays Relaxed: a failed CAS does not
-            // form a happens-before edge — the next loop iteration
-            // re-reads with Acquire on its own.
-            match self.notify.stored_notifications.compare_exchange_weak(
-                stored,
-                stored - 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(actual) => stored = actual,
-            }
+    fn finish_ready(&mut self) -> Poll<()> {
+        if let Some(publication) = &self.completion_publication {
+            publication.observe_current();
         }
-        false
+        // Keep the receipt if clock observation itself panics too. A future
+        // caught and moved to a new poller has not delivered Ready yet.
+        self.completion_publication = None;
+        Poll::Ready(())
     }
 
     #[inline]
@@ -777,14 +982,25 @@ impl Notified<'_> {
         // instead of spuriously waking futures that were created earlier but
         // never polled.
         let observed_generation = match self.generation_capture {
-            GenerationCapture::OnFirstPoll => self.notify.generation.load(Ordering::Acquire),
+            GenerationCapture::OnFirstPoll => {
+                let (generation, receipt) = self.notify.broadcast_interest();
+                self.broadcast_receipt = receipt;
+                generation
+            }
             GenerationCapture::Armed(generation) => generation,
         };
         self.initial_generation = observed_generation;
 
-        // Lock-free fast path: consume a stored notify token.
-        if self.try_consume_stored_notification() {
-            return self.mark_done();
+        // No Waker clone is needed for a stored token. Pair the count and its
+        // optional producer under the same lock as notification publication.
+        if self.notify.stored_notifications.load(Ordering::Acquire) != 0 {
+            let publication = {
+                let mut waiters = self.notify.waiters.lock();
+                self.notify.consume_stored_notification(&mut waiters)
+            };
+            if let Some(publication) = publication {
+                return self.mark_done(publication);
+            }
         }
 
         // A custom RawWaker clone may re-enter this Notify or panic. Prepare
@@ -795,7 +1011,17 @@ impl Notified<'_> {
 
             // Re-check conditions under waiter lock to close races with concurrent notifiers.
             let current_gen = self.notify.generation.load(Ordering::Acquire);
-            if current_gen != observed_generation || self.try_consume_stored_notification() {
+            let received = if current_gen != observed_generation {
+                Some(Notify::broadcast_publication(
+                    &waiters,
+                    observed_generation,
+                    self.broadcast_receipt.as_ref(),
+                ))
+            } else {
+                self.notify.consume_stored_notification(&mut waiters)
+            };
+            if let Some(received) = received {
+                self.completion_publication = received;
                 // Commit completion before an unused Waker payload is retired:
                 // its destructor is arbitrary user code and may panic.
                 self.state = NotifiedState::Done;
@@ -816,6 +1042,7 @@ impl Notified<'_> {
                     generation: observed_generation,
                     broadcast_covered_peer: false,
                     slot_epoch: 0, // overwritten by insert()
+                    publication: None,
                 });
                 self.waiter_index = Some((index, slot_epoch));
                 self.state = NotifiedState::Waiting;
@@ -825,9 +1052,10 @@ impl Notified<'_> {
 
         // An unused clone can own arbitrary safe Drop state. Retire it only
         // after the waiter mutex has been released and state is committed.
+        self.broadcast_receipt = None;
         drop(incoming_waker);
         if ready {
-            Poll::Ready(())
+            self.finish_ready()
         } else {
             Poll::Pending
         }
@@ -866,6 +1094,9 @@ impl Notified<'_> {
                     let entry_notified = waiters.entries[index].notified;
 
                     if is_gen_changed || entry_notified {
+                        // The slot's first grant wins even if another
+                        // broadcast happened while this waiter was unscheduled.
+                        self.completion_publication = waiters.entries[index].publication.take();
                         retired_waker = waiters.remove(index);
                         self.waiter_index = None;
                         self.state = NotifiedState::Done;
@@ -904,10 +1135,10 @@ impl Notified<'_> {
             drop(retired_waker);
             drop(incoming_waker);
             if completed {
-                return Poll::Ready(());
+                return self.finish_ready();
             }
         } else if gen_changed {
-            return self.mark_done();
+            return self.mark_done(None);
         }
 
         Poll::Pending
@@ -923,7 +1154,7 @@ impl Future for Notified<'_> {
             NotifiedState::Init => self.poll_init(cx),
             NotifiedState::Waiting => self.poll_waiting(cx),
             // Preserve completion on re-poll instead of panicking in library code.
-            NotifiedState::Done => Poll::Ready(()),
+            NotifiedState::Done => self.finish_ready(),
         }
     }
 }
@@ -959,6 +1190,7 @@ impl Drop for Notified<'_> {
                 let was_notified = entry.notified;
                 let notified_generation = entry.generation;
                 let broadcast_covered_peer = entry.broadcast_covered_peer;
+                let publication = waiters.entries[index].publication.take();
 
                 let retired_waker = waiters.remove(index);
 
@@ -979,10 +1211,13 @@ impl Drop for Notified<'_> {
                     // the normal baton semantics, which store the notification when
                     // no waiter exists.
                     if generation_advanced {
-                        self.notify
-                            .pass_baton_after_broadcast(waiters, !broadcast_covered_peer);
+                        self.notify.pass_baton_after_broadcast(
+                            waiters,
+                            !broadcast_covered_peer,
+                            publication,
+                        );
                     } else {
-                        self.notify.pass_baton(waiters);
+                        self.notify.pass_baton(waiters, publication);
                     }
                     // Baton state and any selected wake are committed before a
                     // retired payload destructor is allowed to run or panic.
