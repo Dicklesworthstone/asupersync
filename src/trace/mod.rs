@@ -212,7 +212,8 @@ pub use streaming::{
 };
 pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};
 pub use verified::{
-    TraceReadLimits, VerifiedReplayCheckpoint, VerifiedTraceError, VerifiedTraceReader,
+    TraceReadLimits, VerifiedReplayCheckpoint, VerifiedReplayPrefixCheckpoint, VerifiedTraceError,
+    VerifiedTraceReader,
 };
 
 // ============================================================================

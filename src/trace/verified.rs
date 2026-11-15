@@ -5,6 +5,9 @@
 //! stream before exposing its first event. Verification retains one event at a
 //! time. Checkpoints bind to the metadata and *all* events, including the suffix
 //! not yet consumed, rather than just a seed and a declared count.
+//! [`VerifiedTraceReader::checkpoint_with_prefix`] additionally binds the
+//! canonical prefix actually returned during replay, so restoring a changed
+//! source cannot silently legitimize a checkpoint from a different prefix.
 //!
 //! Inputs must remain immutable while a reader is alive. An open file is not an
 //! OS snapshot. Replay checks the content fingerprint again at its end, but that
@@ -20,6 +23,8 @@ use std::path::Path;
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"ASUPRC01";
 const CHECKPOINT_LEN: usize = 56;
+const PREFIX_CHECKPOINT_MAGIC: &[u8; 8] = b"ASUPRC02";
+const PREFIX_CHECKPOINT_LEN: usize = CHECKPOINT_LEN + 32;
 const HASH_DOMAIN: &[u8] = b"asupersync-verified-replay-content-v1\0";
 
 /// Explicit verification and replay budgets.
@@ -150,6 +155,77 @@ impl VerifiedReplayCheckpoint {
             position,
             total_events,
             content_digest,
+        })
+    }
+}
+
+/// Portable position bound to both the verified source and the replayed prefix.
+///
+/// The `ASUPRC02` encoding adds a SHA-256 digest of the canonical events actually
+/// returned before this checkpoint. Resuming verifies the complete source and
+/// compares its skipped prefix with that digest before exposing another event.
+/// A prefix changed after initial verification cannot be accepted just because
+/// the source was restored before resuming.
+///
+/// This is an additive format: [`VerifiedReplayCheckpoint`] retains its existing
+/// `ASUPRC01` encoding and semantics. Both formats identify semantic content,
+/// so equivalent compressed, uncompressed, and legacy traces can share a
+/// checkpoint. Neither format is a signature or authorization token.
+///
+/// Creating a checkpoint does not re-read the source or prove it stayed
+/// immutable. The reader's immutable-input requirement still applies; this
+/// format detects a different consumed prefix when the checkpoint is resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedReplayPrefixCheckpoint {
+    checkpoint: VerifiedReplayCheckpoint,
+    prefix_digest: [u8; 32],
+}
+
+impl VerifiedReplayPrefixCheckpoint {
+    /// Number of events already consumed.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.checkpoint.position()
+    }
+
+    /// Total events in the verified source.
+    #[must_use]
+    pub const fn total_events(&self) -> u64 {
+        self.checkpoint.total_events()
+    }
+
+    /// Encode exactly one `ASUPRC02` checkpoint without allocation.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; PREFIX_CHECKPOINT_LEN] {
+        let mut bytes = [0; PREFIX_CHECKPOINT_LEN];
+        bytes[..CHECKPOINT_LEN].copy_from_slice(&self.checkpoint.to_bytes());
+        bytes[..8].copy_from_slice(PREFIX_CHECKPOINT_MAGIC);
+        bytes[CHECKPOINT_LEN..].copy_from_slice(&self.prefix_digest);
+        bytes
+    }
+
+    /// Decode exactly one prefix-bound checkpoint. Trailing bytes are rejected.
+    ///
+    /// # Errors
+    /// Returns [`VerifiedTraceError::InvalidCheckpoint`] for an unsupported
+    /// version, wrong length, or position beyond the declared end. The content
+    /// and prefix digests are checked against the source when resuming.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VerifiedTraceError> {
+        if bytes.len() != PREFIX_CHECKPOINT_LEN || &bytes[..8] != PREFIX_CHECKPOINT_MAGIC {
+            return Err(VerifiedTraceError::InvalidCheckpoint);
+        }
+        // The position, count and source identity retain the v1 layout. Reuse
+        // its position validation without making either decoder accept the
+        // other format on the wire.
+        let mut original = [0; CHECKPOINT_LEN];
+        original.copy_from_slice(&bytes[..CHECKPOINT_LEN]);
+        original[..8].copy_from_slice(CHECKPOINT_MAGIC);
+        let checkpoint = VerifiedReplayCheckpoint::from_bytes(&original)?;
+        let mut prefix_digest = [0; 32];
+        prefix_digest.copy_from_slice(&bytes[CHECKPOINT_LEN..]);
+        Ok(Self {
+            checkpoint,
+            prefix_digest,
         })
     }
 }
@@ -422,6 +498,77 @@ impl VerifiedTraceReader {
         Ok(reader)
     }
 
+    /// Re-verify the source and its previously consumed prefix before resuming.
+    ///
+    /// The complete source must match its original verified identity. Its
+    /// prefix must also match the events actually returned before the
+    /// checkpoint, including their order and the exact consumed-event boundary.
+    /// The source must remain immutable throughout this operation and replay.
+    ///
+    /// # Errors
+    /// Returns the usual verification errors and
+    /// [`VerifiedTraceError::CheckpointMismatch`] for either identity mismatch.
+    pub fn resume_with_prefix(
+        path: impl AsRef<Path>,
+        checkpoint: VerifiedReplayPrefixCheckpoint,
+        limits: TraceReadLimits,
+    ) -> Result<Self, VerifiedTraceError> {
+        Self::resume_with_prefix_and_container_limits(
+            path,
+            checkpoint,
+            limits,
+            TraceContainerLimits::new(),
+        )
+    }
+
+    /// Resume a prefix-bound checkpoint with an additional raw-event limit.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::resume_with_prefix`] and
+    /// [`Self::open_with_frame_limit`]. Verification and prefix skipping both
+    /// enforce the caller's current frame limit.
+    pub fn resume_with_prefix_and_frame_limit(
+        path: impl AsRef<Path>,
+        checkpoint: VerifiedReplayPrefixCheckpoint,
+        limits: TraceReadLimits,
+        max_frame_bytes: usize,
+    ) -> Result<Self, VerifiedTraceError> {
+        Self::resume_with_prefix_and_container_limits(
+            path,
+            checkpoint,
+            limits,
+            TraceContainerLimits::new().with_max_event_bytes(max_frame_bytes),
+        )
+    }
+
+    /// Resume a prefix-bound checkpoint under explicit container and event budgets.
+    ///
+    /// The complete source is verified and its prefix skipped under the same
+    /// limits as ordinary verified resume. No new reader is exposed until the
+    /// skipped canonical prefix matches the checkpoint's replayed prefix.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::resume_with_container_limits`] and
+    /// [`VerifiedTraceError::CheckpointMismatch`] when the prefix differs.
+    pub fn resume_with_prefix_and_container_limits(
+        path: impl AsRef<Path>,
+        checkpoint: VerifiedReplayPrefixCheckpoint,
+        limits: TraceReadLimits,
+        container_limits: TraceContainerLimits,
+    ) -> Result<Self, VerifiedTraceError> {
+        let reader = Self::resume_with_container_limits(
+            path,
+            checkpoint.checkpoint,
+            limits,
+            container_limits,
+        )?;
+        let prefix_digest: [u8; 32] = reader.hasher.clone().finalize().into();
+        if prefix_digest != checkpoint.prefix_digest {
+            return Err(VerifiedTraceError::CheckpointMismatch);
+        }
+        Ok(reader)
+    }
+
     /// Verified trace metadata.
     #[must_use]
     pub fn metadata(&self) -> &TraceMetadata {
@@ -464,6 +611,25 @@ impl VerifiedTraceReader {
             position: self.events_consumed,
             total_events: self.total_events(),
             content_digest: self.content_digest,
+        })
+    }
+
+    /// Checkpoint the verified source and the canonical prefix actually consumed.
+    ///
+    /// The prefix digest comes from the running replay hash; this neither
+    /// re-reads nor re-serializes events. The returned `ASUPRC02` checkpoint is
+    /// accepted by [`Self::resume_with_prefix`] only if both the whole source
+    /// and its consumed prefix match. Creating it does not itself validate a
+    /// source mutation or relax the immutable-input requirement.
+    ///
+    /// # Errors
+    /// Rejects checkpoint creation after any replay failure.
+    pub fn checkpoint_with_prefix(
+        &self,
+    ) -> Result<VerifiedReplayPrefixCheckpoint, VerifiedTraceError> {
+        Ok(VerifiedReplayPrefixCheckpoint {
+            checkpoint: self.checkpoint()?,
+            prefix_digest: self.hasher.clone().finalize().into(),
         })
     }
 
