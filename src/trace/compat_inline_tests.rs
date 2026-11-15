@@ -310,6 +310,214 @@
             matches!(first, Err(TraceFileError::Io(_))),
             "got: {first:?}"
         );
+        assert!(iter.next().is_none(), "a truncated stream must be terminal");
+        assert!(iter.next().is_none(), "an errored iterator must stay fused");
+    }
+
+    // Hand-built containers exercise both legacy v2 and checksummed v3 without
+    // relying on the writer's event-count backpatching or reader implementation.
+    fn compat_container(version: u16, event_count: u64, event_bytes: &[u8]) -> Vec<u8> {
+        let metadata = rmp_serde::to_vec(&TraceMetadata::new(42)).expect("encode metadata");
+        let mut bytes = TRACE_MAGIC.to_vec();
+        bytes.extend_from_slice(&version.to_le_bytes());
+        let flags = if version == 3 { FLAG_CHECKSUMMED } else { 0 };
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        if version == 3 {
+            bytes.extend_from_slice(&Sha256::digest(&metadata));
+        }
+        bytes.extend_from_slice(&metadata);
+        bytes.extend_from_slice(&event_count.to_le_bytes());
+        if version == 3 {
+            bytes.extend_from_slice(&Sha256::digest(event_bytes));
+        }
+        bytes.extend_from_slice(event_bytes);
+        bytes
+    }
+
+    fn compat_frames(payloads: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for payload in payloads {
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+        }
+        bytes
+    }
+
+    #[test]
+    fn compat_event_iterator_preserves_partial_read_position_and_checksum() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled { task: CompactTaskId(1), at_tick: 3 },
+            ReplayEvent::TaskYielded { task: CompactTaskId(1) },
+        ];
+        let payloads = events.iter().map(|event| rmp_serde::to_vec(event).unwrap()).collect::<Vec<_>>();
+        let frames = compat_frames(&payloads);
+        for version in [2, 3] {
+            for consumed in 0..=events.len() {
+                let temp = NamedTempFile::new().unwrap();
+                std::fs::write(temp.path(), compat_container(version, events.len() as u64, &frames)).unwrap();
+                let mut reader = CompatReader::open(temp.path()).unwrap();
+                for event in &events[..consumed] {
+                    assert_eq!(reader.read_event().unwrap().as_ref(), Some(event));
+                }
+                let mut iter = reader.events();
+                assert_eq!(iter.size_hint(), (0, Some(events.len() - consumed)));
+                let unread = iter.by_ref().collect::<TraceFileResult<Vec<_>>>().unwrap();
+                assert_eq!(unread, events[consumed..], "version {version}, consumed {consumed}");
+                assert!(iter.next().is_none());
+                assert_eq!(iter.size_hint(), (0, Some(0)));
+            }
+        }
+    }
+
+    #[test]
+    fn compat_event_iterator_checks_checksum_after_an_earlier_direct_read() {
+        let frames = compat_frames(&[
+            rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 1 }).unwrap(),
+            rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 2 }).unwrap(),
+        ]);
+        let mut bytes = compat_container(3, 2, &frames);
+        // Change the final integer to another well-formed MessagePack value.
+        // The final frame must fail integrity instead of publishing seed 3.
+        *bytes.last_mut().unwrap() ^= 1;
+        let temp = NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), bytes).unwrap();
+        let mut reader = CompatReader::open(temp.path()).unwrap();
+        assert_eq!(reader.read_event().unwrap(), Some(ReplayEvent::RngSeed { seed: 1 }));
+        let mut iter = reader.events();
+        assert!(matches!(iter.next(), Some(Err(TraceFileError::ChecksumMismatch { section: "event stream" }))));
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[test]
+    fn compat_event_iterator_fuses_each_malformed_frame_without_reading_a_suffix() {
+        let valid = rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 42 }).unwrap();
+        let mut oversized = ((MAX_EVENT_LEN as u32) + 1).to_le_bytes().to_vec();
+        oversized.extend_from_slice(&compat_frames(&[valid]));
+        let cases = [
+            ("missing length", Vec::new()),
+            ("partial length", vec![1, 0]),
+            ("partial payload", vec![4, 0, 0, 0, 0x81]),
+            ("oversized", oversized),
+            ("invalid MessagePack", compat_frames(&[vec![0xc1]])),
+        ];
+        for version in [2, 3] {
+            for (name, frames) in &cases {
+                let temp = NamedTempFile::new().unwrap();
+                std::fs::write(temp.path(), compat_container(version, 1, frames)).unwrap();
+                let mut iter = CompatReader::open(temp.path()).unwrap().events();
+                let results = iter.by_ref().take(3).collect::<Vec<_>>();
+                assert_eq!(results.len(), 1, "version {version}, {name}: error must be yielded once");
+                match *name {
+                    "oversized" => assert!(matches!(results[0], Err(TraceFileError::OversizedField { field: "event", .. }))),
+                    "invalid MessagePack" => assert!(matches!(results[0], Err(TraceFileError::Deserialize(_)))),
+                    _ => assert!(matches!(results[0], Err(TraceFileError::Io(_)))),
+                }
+                assert!(iter.next().is_none(), "version {version}, {name}");
+                assert_eq!(iter.size_hint(), (0, Some(0)));
+            }
+        }
+    }
+
+    #[test]
+    fn compat_event_iterator_rejection_callback_cannot_skip_the_bad_event() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let unknown = rmp_serde::to_vec(&serde_json::json!({ "type": "FutureEvent", "value": 9 })).unwrap();
+        let known = rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 42 }).unwrap();
+        for version in [2, 3] {
+            for panic_in_callback in [false, true] {
+                let temp = NamedTempFile::new().unwrap();
+                let frames = compat_frames(&[unknown.clone(), known.clone()]);
+                std::fs::write(temp.path(), compat_container(version, 2, &frames)).unwrap();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let count = Arc::clone(&calls);
+                let expected = unknown.clone();
+                let mut iter = CompatReader::open(temp.path()).unwrap().on_skip(move |reason, bytes| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(bytes, expected);
+                    assert!(reason.starts_with("rejected unknown event:"));
+                    assert!(!panic_in_callback, "observer panic");
+                }).events();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| iter.next()));
+                if panic_in_callback {
+                    assert!(result.is_err());
+                } else {
+                    assert!(matches!(result.unwrap(), Some(Err(TraceFileError::Deserialize(_)))));
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(iter.next().is_none(), "rejected record cannot be skipped");
+                assert!(iter.next().is_none());
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn compat_reader_failure_is_sticky_until_rewind_but_diagnostic_skips_are_explicit() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let first = ReplayEvent::RngSeed { seed: 42 };
+        let last = ReplayEvent::TaskYielded { task: CompactTaskId(1) };
+        let unknown = rmp_serde::to_vec(&serde_json::json!({ "type": "FutureEvent", "value": 9 })).unwrap();
+        let frames = compat_frames(&[
+            rmp_serde::to_vec(&first).unwrap(), unknown.clone(), rmp_serde::to_vec(&last).unwrap(),
+        ]);
+        for version in [2, 3] {
+            let temp = NamedTempFile::new().unwrap();
+            std::fs::write(temp.path(), compat_container(version, 3, &frames)).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&calls);
+            let mut reader = CompatReader::open(temp.path()).unwrap().on_skip(move |_, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+            assert_eq!(reader.read_event().unwrap(), Some(first.clone()));
+            assert!(matches!(reader.read_event(), Err(TraceFileError::Deserialize(_))));
+            assert!(matches!(reader.read_event(), Err(TraceFileError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+            assert!(matches!(reader.read_event_compat(), Err(TraceFileError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "direct reads do not invoke the iterator callback");
+
+            reader.rewind().unwrap();
+            assert_eq!(reader.read_event().unwrap(), Some(first.clone()));
+            assert!(matches!(reader.read_event_compat().unwrap(), Some(CompatEvent::Skipped { raw_bytes, .. }) if raw_bytes == unknown));
+            assert_eq!(reader.stats().events_skipped, 1);
+            let suffix = reader.events().collect::<TraceFileResult<Vec<_>>>().unwrap();
+            assert_eq!(suffix, [last.clone()], "diagnostic read retains v3 checksum progress");
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn compat_reader_diagnostic_io_failure_cannot_resume_in_an_oversized_frame() {
+        let mut frames = ((MAX_EVENT_LEN as u32) + 1).to_le_bytes().to_vec();
+        frames.extend_from_slice(&compat_frames(&[
+            rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 42 }).unwrap(),
+        ]));
+        for version in [2, 3] {
+            let temp = NamedTempFile::new().unwrap();
+            std::fs::write(temp.path(), compat_container(version, 2, &frames)).unwrap();
+            let mut reader = CompatReader::open(temp.path()).unwrap();
+            assert!(matches!(reader.read_event_compat(), Err(TraceFileError::OversizedField { .. })));
+            assert!(matches!(reader.read_event_compat(), Err(TraceFileError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+            assert!(matches!(reader.read_event(), Err(TraceFileError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+            assert!(reader.events().next().is_none());
+        }
+    }
+
+    #[test]
+    fn compat_event_iterator_never_uses_a_hostile_count_as_an_allocation_lower_bound() {
+        for version in [2, 3] {
+            let temp = NamedTempFile::new().unwrap();
+            std::fs::write(temp.path(), compat_container(version, u64::MAX, &[])).unwrap();
+            let mut iter = CompatReader::open(temp.path()).unwrap().events();
+            assert_eq!(iter.size_hint().0, 0);
+            let results = iter.by_ref().take(3).collect::<Vec<_>>();
+            assert_eq!(results.len(), 1);
+            assert!(matches!(results[0], Err(TraceFileError::Io(_))));
+            assert_eq!(iter.size_hint(), (0, Some(0)));
+        }
     }
 
     #[test]

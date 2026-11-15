@@ -39,8 +39,8 @@
 //! ```
 
 use super::file::{
-    FLAG_CHECKSUMMED, FLAG_COMPRESSED, MAX_EVENT_LEN, MAX_EVENT_PREALLOC, MAX_META_LEN,
-    TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError, TraceFileResult,
+    FLAG_CHECKSUMMED, FLAG_COMPRESSED, MAX_EVENT_LEN, MAX_META_LEN, TRACE_CHECKSUM_LEN,
+    TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError, TraceFileResult,
 };
 use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use sha2::{Digest, Sha256};
@@ -186,6 +186,7 @@ pub struct CompatReader {
     event_hasher: Sha256,
     stats: CompatStats,
     on_skip: Option<Box<SkipHandler>>,
+    failed: bool,
 }
 
 impl CompatReader {
@@ -339,12 +340,16 @@ impl CompatReader {
             event_hasher: Sha256::new(),
             stats: CompatStats::default(),
             on_skip: None,
+            failed: false,
         })
     }
 
-    /// Sets a callback for when events are skipped.
+    /// Sets a callback for an undecodable event rejected during iteration.
     ///
-    /// The callback receives the skip reason and raw bytes.
+    /// The callback receives the rejection reason and raw bytes. The iterator
+    /// still returns the error and terminates; the callback cannot authorize
+    /// skipping the record. Explicit diagnostic reads return those bytes in
+    /// [`CompatEvent::Skipped`] instead of invoking the callback.
     #[must_use]
     pub fn on_skip<F>(mut self, f: F) -> Self
     where
@@ -383,15 +388,57 @@ impl CompatReader {
     /// Returns `Ok(None)` when all events have been read.
     /// Unknown events are an explicit deserialization error. Use
     /// [`read_event_compat`](Self::read_event_compat) to inspect one rejected
-    /// raw record at a time.
+    /// raw record at a time. After an error, all further reads are refused
+    /// until [`Self::rewind`] succeeds; a partial or rejected frame cannot be
+    /// mistaken for the beginning of the next event.
     pub fn read_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
+        self.read_strict_event(false)
+    }
+
+    fn read_strict_event(
+        &mut self,
+        report_rejection: bool,
+    ) -> TraceFileResult<Option<ReplayEvent>> {
+        self.ensure_readable()?;
+        let result = self.read_next_strict_event(report_rejection);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn read_next_strict_event(
+        &mut self,
+        report_rejection: bool,
+    ) -> TraceFileResult<Option<ReplayEvent>> {
         if self.events_read >= self.event_count {
             return Ok(None);
         }
 
         let (len_bytes, event_bytes) = self.read_event_frame()?;
-        let event = rmp_serde::from_slice::<ReplayEvent>(&event_bytes)?;
         self.record_frame(&len_bytes, &event_bytes)?;
+        let event = match rmp_serde::from_slice::<ReplayEvent>(&event_bytes) {
+            Ok(event) => event,
+            Err(error) => {
+                // Publish terminal state before invoking foreign code: even if
+                // the observer panics, the rejected frame cannot be skipped.
+                self.failed = true;
+                if report_rejection {
+                    if let Some(ref callback) = self.on_skip {
+                        let event_type = extract_event_type(&event_bytes);
+                        let reason = format!(
+                            "rejected unknown event: {}{}",
+                            event_type
+                                .map(|event_type| format!("type '{event_type}', "))
+                                .unwrap_or_default(),
+                            error
+                        );
+                        callback(&reason, &event_bytes);
+                    }
+                }
+                return Err(TraceFileError::from(error));
+            }
+        };
         self.events_read += 1;
         self.stats.record_read();
         Ok(Some(event))
@@ -400,8 +447,19 @@ impl CompatReader {
     /// Reads the next event, returning detailed compatibility info.
     ///
     /// Unlike `read_event`, this returns `CompatEvent::Skipped` for unknown
-    /// events instead of silently skipping them.
+    /// events instead of silently skipping them. That explicit diagnostic
+    /// result consumes the record and permits another read. Framing, I/O and
+    /// checksum errors are terminal until [`Self::rewind`] succeeds.
     pub fn read_event_compat(&mut self) -> TraceFileResult<Option<CompatEvent>> {
+        self.ensure_readable()?;
+        let result = self.read_next_compat_event();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
+    fn read_next_compat_event(&mut self) -> TraceFileResult<Option<CompatEvent>> {
         if self.events_read >= self.event_count {
             return Ok(None);
         }
@@ -437,16 +495,14 @@ impl CompatReader {
         }
     }
 
-    /// Returns a fail-closed iterator over events.
+    /// Returns a fail-closed iterator over the remaining events.
+    ///
+    /// Earlier reads remain included in the stream checksum. An error is
+    /// yielded once, then the iterator terminates permanently. Its allocation
+    /// hint never trusts the header's declared event count as a lower bound.
     #[must_use]
     pub fn events(self) -> CompatEventIterator {
-        CompatEventIterator {
-            reader: self.reader,
-            remaining: self.event_count,
-            on_skip: self.on_skip,
-            expected_event_digest: self.expected_event_digest,
-            event_hasher: self.event_hasher,
-        }
+        CompatEventIterator { reader: self }
     }
 
     /// Resets to the beginning of the events section.
@@ -454,20 +510,29 @@ impl CompatReader {
         self.reader.seek(SeekFrom::Start(self.events_start_pos))?;
         self.events_read = 0;
         self.event_hasher = Sha256::new();
+        self.failed = false;
         Ok(())
     }
 
     /// Loads all known events into memory without skipping unknown records.
+    ///
+    /// Storage grows from decoded events, not from the untrusted header count.
     pub fn load_all(mut self) -> TraceFileResult<(Vec<ReplayEvent>, CompatStats)> {
-        let mut events = Vec::with_capacity(
-            usize::try_from(self.event_count)
-                .unwrap_or(usize::MAX)
-                .min(MAX_EVENT_PREALLOC),
-        );
+        let mut events = Vec::new();
         while let Some(event) = self.read_event()? {
             events.push(event);
         }
         Ok((events, self.stats))
+    }
+
+    fn ensure_readable(&self) -> TraceFileResult<()> {
+        if self.failed {
+            return Err(TraceFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "compatibility reader is terminal after a prior read failure; rewind before retrying",
+            )));
+        }
+        Ok(())
     }
 
     fn read_event_frame(&mut self) -> TraceFileResult<([u8; 4], Vec<u8>)> {
@@ -506,74 +571,38 @@ impl CompatReader {
     }
 }
 
-/// Iterator over events with compatibility handling.
+/// Fail-closed iterator over the remaining events of a compatibility reader.
+///
+/// A framing, deserialization or checksum error is returned once and ends the
+/// iterator. Unknown events can be inspected explicitly with
+/// [`CompatReader::read_event_compat`] before constructing an iterator.
 pub struct CompatEventIterator {
-    reader: BufReader<File>,
-    remaining: u64,
-    on_skip: Option<Box<SkipHandler>>,
-    expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
-    event_hasher: Sha256,
+    reader: CompatReader,
 }
 
 impl Iterator for CompatEventIterator {
     type Item = TraceFileResult<ReplayEvent>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
+        if self.reader.failed {
             return None;
         }
+        self.reader.read_strict_event(true).transpose()
+    }
 
-        let mut len_bytes = [0u8; 4];
-        if let Err(error) = self.reader.read_exact(&mut len_bytes) {
-            return Some(Err(TraceFileError::Io(error)));
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.reader.failed {
+            return (0, Some(0));
         }
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if len > MAX_EVENT_LEN {
-            return Some(Err(TraceFileError::OversizedField {
-                field: "event",
-                actual: len as u64,
-                max: MAX_EVENT_LEN as u64,
-            }));
-        }
-
-        let mut event_bytes = vec![0u8; len];
-        if let Err(error) = self.reader.read_exact(&mut event_bytes) {
-            return Some(Err(TraceFileError::Io(error)));
-        }
-
-        self.event_hasher.update(len_bytes);
-        self.event_hasher.update(&event_bytes);
-        if self.remaining == 1 {
-            if let Some(expected) = self.expected_event_digest {
-                let actual: [u8; TRACE_CHECKSUM_LEN] = self.event_hasher.clone().finalize().into();
-                if expected != actual {
-                    return Some(Err(TraceFileError::ChecksumMismatch {
-                        section: "event stream",
-                    }));
-                }
-            }
-        }
-        self.remaining -= 1;
-
-        match rmp_serde::from_slice::<ReplayEvent>(&event_bytes) {
-            Ok(event) => Some(Ok(event)),
-            Err(error) => {
-                if let Some(ref callback) = self.on_skip {
-                    let event_type = extract_event_type(&event_bytes);
-                    let reason = format!(
-                        "rejected unknown event: {}{}",
-                        event_type
-                            .map(|event_type| format!("type '{event_type}', "))
-                            .unwrap_or_default(),
-                        error
-                    );
-                    callback(&reason, &event_bytes);
-                }
-                Some(Err(TraceFileError::from(error)))
-            }
-        }
+        let remaining = self
+            .reader
+            .event_count
+            .saturating_sub(self.reader.events_read);
+        (0, usize::try_from(remaining).ok())
     }
 }
+
+impl std::iter::FusedIterator for CompatEventIterator {}
 
 // =============================================================================
 // Migration
