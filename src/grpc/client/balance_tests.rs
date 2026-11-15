@@ -636,7 +636,7 @@ fn endpoint_admission_deadline_and_cancellation_never_reroute() {
                 queued_owner.cancel_with(CancelKind::User, Some("queued caller stopped"));
             } else {
                 clock.advance(50_000_000);
-                driver.process_timers();
+                let _ = driver.process_timers();
             }
             let error = within(&cx, queued.as_mut()).await.unwrap_err();
             assert_eq!(
@@ -1158,7 +1158,7 @@ fn returned_stream_keeps_the_deadline_captured_before_its_codec_factory() {
         })
         .await;
         clock.advance(6_000_000_000);
-        driver.process_timers();
+        let _ = driver.process_timers();
         let error = within(&cx, message.as_mut()).await.unwrap_err();
         assert_eq!(error.code(), Code::DeadlineExceeded);
         drop(message);
