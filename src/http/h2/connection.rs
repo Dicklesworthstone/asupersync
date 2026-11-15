@@ -179,8 +179,23 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = H2Error;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        // The wire length is 24 bits even if a caller sets a larger limit.
+        // Include the header without consulting any peer-advertised length.
+        let payload = self.max_frame_size.min(super::frame::MAX_FRAME_SIZE);
+        usize::try_from(payload).ok()?.checked_add(FRAME_HEADER_SIZE)
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.decode_item(src)? {
+            Some(DecodedFrame::Frame(frame)) => Ok(Some(frame)),
+            Some(DecodedFrame::PriorityError(error)) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode_item_eof(src)? {
             Some(DecodedFrame::Frame(frame)) => Ok(Some(frame)),
             Some(DecodedFrame::PriorityError(error)) => Err(error),
             None => Ok(None),
@@ -223,8 +238,16 @@ impl Decoder for ListenerFrameCodec {
     type Item = DecodedFrame;
     type Error = H2Error;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        self.0.max_buffered_frame_len()
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         self.0.decode_item(src)
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.0.decode_item_eof(src)
     }
 }
 
@@ -237,6 +260,20 @@ impl<T: AsRef<Frame>> Encoder<T> for ListenerFrameCodec {
 }
 
 impl FrameCodec {
+    fn decode_item_eof(&mut self, src: &mut BytesMut) -> Result<Option<DecodedFrame>, H2Error> {
+        match self.decode_item(src)? {
+            Some(frame) => Ok(Some(frame)),
+            // A consumed header can leave the byte buffer empty while its
+            // payload is still missing. Only a frame boundary is clean EOF.
+            None if self.partial_header.is_none() && src.is_empty() => Ok(None),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete frame at EOF",
+            )
+            .into()),
+        }
+    }
+
     fn decode_item(&mut self, src: &mut BytesMut) -> Result<Option<DecodedFrame>, H2Error> {
         loop {
             // First, try to parse the header if we don't have one.

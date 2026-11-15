@@ -13,6 +13,286 @@
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
+    #[test]
+    fn frame_codec_eof_rejects_every_truncated_frame_prefix() {
+        fn check<D>(new_codec: impl Fn() -> D, wire: &[u8])
+        where
+            D: Decoder<Error = H2Error>,
+            D::Item: std::fmt::Debug,
+        {
+            for decode_first in [false, true] {
+                for end in 1..wire.len() {
+                    let mut codec = new_codec();
+                    let mut input = BytesMut::from(&wire[..end]);
+                    if decode_first {
+                        assert!(codec.decode(&mut input).unwrap().is_none());
+                    }
+                    let error = codec.decode_eof(&mut input).unwrap_err();
+                    assert_eq!(error.code, ErrorCode::InternalError, "prefix {end}");
+                    assert_eq!(error.stream_id, None, "prefix {end}");
+                    assert_eq!(error.message, "incomplete frame at EOF", "prefix {end}");
+                }
+            }
+        }
+
+        let mut ping = BytesMut::new();
+        Frame::Ping(PingFrame::new([3; 8])).encode(&mut ping).unwrap();
+        let mut empty_settings = BytesMut::new();
+        Frame::Settings(SettingsFrame::ack())
+            .encode(&mut empty_settings)
+            .unwrap();
+        let mut extension = BytesMut::new();
+        FrameHeader {
+            length: 3,
+            frame_type: 0xff,
+            flags: 0,
+            stream_id: 0,
+        }
+        .write(&mut extension);
+        extension.extend_from_slice(&[1, 2, 3]);
+
+        for wire in [ping, empty_settings, extension] {
+            check(FrameCodec::new, &wire);
+            check(ListenerFrameCodec::new, &wire);
+        }
+    }
+
+    #[test]
+    fn frame_codec_eof_finishes_every_split_payload() {
+        fn check<D>(new_codec: impl Fn() -> D, wire: &[u8])
+        where
+            D: Decoder<Error = H2Error>,
+            D::Item: std::fmt::Debug,
+        {
+            for split in 0..wire.len() {
+                let mut codec = new_codec();
+                let mut input = BytesMut::from(&wire[..split]);
+                assert!(codec.decode(&mut input).unwrap().is_none());
+                input.extend_from_slice(&wire[split..]);
+                assert!(codec.decode_eof(&mut input).unwrap().is_some());
+                assert!(input.is_empty());
+                assert!(codec.decode_eof(&mut input).unwrap().is_none());
+            }
+        }
+
+        let mut wire = BytesMut::new();
+        Frame::Ping(PingFrame::new([3; 8])).encode(&mut wire).unwrap();
+        check(FrameCodec::new, &wire);
+        check(ListenerFrameCodec::new, &wire);
+    }
+
+    #[test]
+    fn frame_codec_eof_preserves_empty_frames_extensions_and_priority_errors() {
+        let mut public = FrameCodec::new();
+        let mut listener = ListenerFrameCodec::new();
+        assert!(public.decode_eof(&mut BytesMut::new()).unwrap().is_none());
+        assert!(listener.decode_eof(&mut BytesMut::new()).unwrap().is_none());
+
+        let mut wire = BytesMut::new();
+        Frame::Settings(SettingsFrame::ack())
+            .encode(&mut wire)
+            .unwrap();
+        FrameHeader {
+            length: 0,
+            frame_type: 0xff,
+            flags: 0,
+            stream_id: 0,
+        }
+        .write(&mut wire);
+        let mut listener_wire = wire.clone();
+        assert!(matches!(
+            public.decode_eof(&mut wire).unwrap(),
+            Some(Frame::Settings(_))
+        ));
+        assert!(public.decode_eof(&mut wire).unwrap().is_none());
+        assert!(wire.is_empty());
+        assert!(matches!(
+            listener.decode_eof(&mut listener_wire).unwrap(),
+            Some(DecodedFrame::Frame(Frame::Settings(_)))
+        ));
+        assert!(listener.decode_eof(&mut listener_wire).unwrap().is_none());
+        assert!(listener_wire.is_empty());
+
+        let mut wire = priority_error_wire(&[0; 4]);
+        Frame::Ping(PingFrame::new([7; 8])).encode(&mut wire).unwrap();
+        assert!(matches!(
+            listener.decode_eof(&mut wire).unwrap(),
+            Some(DecodedFrame::PriorityError(error))
+                if error.code == ErrorCode::FrameSizeError && error.stream_id == Some(1)
+        ));
+        assert!(matches!(
+            listener.decode_eof(&mut wire).unwrap(),
+            Some(DecodedFrame::Frame(Frame::Ping(_)))
+        ));
+        assert!(listener.decode_eof(&mut wire).unwrap().is_none());
+    }
+
+    #[test]
+    fn framed_http2_truncated_payload_errors_once_then_terminates() {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn check<S, T>(mut stream: S)
+        where
+            S: Stream<Item = Result<T, H2Error>> + Unpin,
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            let Poll::Ready(Some(Err(error))) = Pin::new(&mut stream).poll_next(&mut context)
+            else {
+                panic!("a consumed HTTP/2 header with no payload must fail at EOF");
+            };
+            assert_eq!(error.code, ErrorCode::InternalError);
+            assert_eq!(error.stream_id, None);
+            assert_eq!(error.message, "incomplete frame at EOF");
+            for _ in 0..2 {
+                assert!(matches!(
+                    Pin::new(&mut stream).poll_next(&mut context),
+                    Poll::Ready(None)
+                ));
+            }
+        }
+
+        let mut wire = BytesMut::new();
+        FrameHeader {
+            length: 8,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 0,
+        }
+        .write(&mut wire);
+        check(crate::codec::FramedRead::new(
+            std::io::Cursor::new(wire.to_vec()),
+            FrameCodec::new(),
+        ));
+        check(crate::codec::Framed::new(
+            std::io::Cursor::new(wire.to_vec()),
+            ListenerFrameCodec::new(),
+        ));
+    }
+
+    #[test]
+    fn frame_codec_buffer_hint_uses_local_and_wire_limits() {
+        for (limit, expected) in [
+            (0, FRAME_HEADER_SIZE),
+            (16_384, 16_384 + FRAME_HEADER_SIZE),
+            (
+                crate::http::h2::frame::MAX_FRAME_SIZE,
+                16_777_215 + FRAME_HEADER_SIZE,
+            ),
+            (u32::MAX, 16_777_215 + FRAME_HEADER_SIZE),
+        ] {
+            let mut codec = FrameCodec::new();
+            codec.set_max_frame_size(limit);
+            assert_eq!(codec.max_buffered_frame_len(), Some(expected));
+            let mut listener = ListenerFrameCodec::new();
+            listener.set_max_frame_size(limit);
+            assert_eq!(listener.max_buffered_frame_len(), Some(expected));
+        }
+        let mut codec = FrameCodec::new();
+        let original = codec.max_buffered_frame_len();
+        let mut wire = BytesMut::new();
+        FrameHeader {
+            length: crate::http::h2::frame::MAX_FRAME_SIZE,
+            frame_type: FrameType::Data as u8,
+            flags: 0,
+            stream_id: 1,
+        }
+        .write(&mut wire);
+        assert_eq!(
+            codec.decode(&mut wire).unwrap_err().code,
+            ErrorCode::FrameSizeError
+        );
+        assert_eq!(codec.max_buffered_frame_len(), original);
+    }
+
+    #[test]
+    fn framed_http2_auto_limit_tracks_configuration_and_preserves_overrides() {
+        let mut reader = crate::codec::FramedRead::new(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            FrameCodec::new(),
+        );
+        assert_eq!(
+            reader.effective_max_buffer_len(),
+            crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN
+        );
+        reader.decoder_mut().set_max_frame_size(16_777_215);
+        assert_eq!(
+            reader.effective_max_buffer_len(),
+            16_777_215 + FRAME_HEADER_SIZE
+        );
+        let mut reader = reader.with_max_buffer_len(64);
+        reader.decoder_mut().set_max_frame_size(u32::MAX);
+        assert_eq!(reader.effective_max_buffer_len(), 64);
+        assert_eq!(reader.with_max_buffer_len(0).effective_max_buffer_len(), 0);
+
+        let mut framed = crate::codec::Framed::new(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            ListenerFrameCodec::new(),
+        );
+        framed.codec_mut().set_max_frame_size(16_777_215);
+        assert_eq!(
+            framed.effective_max_buffer_len(),
+            16_777_215 + FRAME_HEADER_SIZE
+        );
+        assert_eq!(framed.with_max_buffer_len(64).effective_max_buffer_len(), 64);
+    }
+
+    #[test]
+    fn framed_http2_decodes_locally_allowed_payload_above_legacy_cap() {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn next<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
+            let mut context = Context::from_waker(Waker::noop());
+            for _ in 0..128 {
+                if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut context) {
+                    return item;
+                }
+            }
+            panic!("bounded in-memory HTTP/2 frame made no terminal progress");
+        }
+
+        let payload_len = crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN + 1;
+        let payload = Bytes::from(vec![7; payload_len]);
+        let mut wire = BytesMut::new();
+        Frame::Data(DataFrame::new(1, payload.clone(), true))
+            .encode(&mut wire)
+            .unwrap();
+        let mut codec = FrameCodec::new();
+        codec.set_max_frame_size(u32::try_from(payload_len).unwrap());
+        let mut reader = crate::codec::FramedRead::new(std::io::Cursor::new(wire.to_vec()), codec);
+        let Some(Ok(Frame::Data(frame))) = next(&mut reader) else {
+            panic!("configured HTTP/2 frame must fit the automatic buffer limit");
+        };
+        assert_eq!(frame.data, payload);
+        assert!(next(&mut reader).is_none());
+        drop(reader);
+
+        let mut codec = ListenerFrameCodec::new();
+        codec.set_max_frame_size(u32::try_from(payload_len).unwrap());
+        let mut framed = crate::codec::Framed::new(std::io::Cursor::new(wire.to_vec()), codec);
+        let Some(Ok(DecodedFrame::Frame(Frame::Data(frame)))) = next(&mut framed) else {
+            panic!("listener codec must advertise the same allowed frame bound");
+        };
+        assert_eq!(frame.data, payload);
+        assert!(next(&mut framed).is_none());
+        drop(framed);
+
+        let mut codec = FrameCodec::new();
+        codec.set_max_frame_size(u32::try_from(payload_len).unwrap());
+        let mut capped = crate::codec::FramedRead::new(std::io::Cursor::new(wire.to_vec()), codec)
+            .with_max_buffer_len(1024);
+        let Some(Err(error)) = next(&mut capped) else {
+            panic!("explicit buffer cap must override the codec hint");
+        };
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert!(error.message.contains("max_buffer_len"));
+        assert!(capped.read_buffer().len() <= 1024);
+        assert!(next(&mut capped).is_none());
+    }
+
     static TEST_TIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static TEST_NOW_BASE: OnceLock<Time> = OnceLock::new();
     static TEST_NOW_OFFSET_MS: AtomicU64 = AtomicU64::new(0);

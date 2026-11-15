@@ -573,6 +573,20 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = WsError;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        // Bound only locally permitted payloads, including their largest
+        // possible length field and the incoming role's masking key.
+        let extended_len = if self.max_payload_size <= CONTROL_FRAME_MAX_PAYLOAD_LEN {
+            0
+        } else if self.max_payload_size <= usize::from(u16::MAX) {
+            2
+        } else {
+            8
+        };
+        let mask_len = if self.role == Role::Server { 4 } else { 0 };
+        self.max_payload_size.checked_add(2 + extended_len + mask_len)
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.decode_inner(src) {
             Err(e) => {
@@ -580,6 +594,19 @@ impl Decoder for FrameCodec {
                 Err(e)
             }
             Ok(v) => Ok(v),
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if matches!(self.state, DecodeState::Header) && src.is_empty() => Ok(None),
+            None => {
+                // Header, extended-length, and mask bytes may already have
+                // left src. Truncation is fatal even when no bytes remain.
+                self.poison();
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete frame at EOF").into())
+            }
         }
     }
 }
