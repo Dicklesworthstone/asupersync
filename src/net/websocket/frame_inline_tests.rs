@@ -9,6 +9,274 @@
     use super::*;
     use insta::assert_snapshot;
 
+    fn websocket_eof_wire(role: Role, frame: &Frame) -> BytesMut {
+        let sender = match role {
+            Role::Client => FrameCodec::server(),
+            Role::Server => FrameCodec::client(),
+        };
+        let mut wire = BytesMut::new();
+        sender
+            .encode_with_entropy(frame, &mut wire, &FixedEntropy([1, 2, 3, 4]))
+            .unwrap();
+        wire
+    }
+
+    fn assert_websocket_truncated_eof(role: Role, wire: &[u8], end: usize) {
+        for decode_first in [false, true] {
+            let mut codec = FrameCodec::new(role);
+            let mut input = BytesMut::from(&wire[..end]);
+            if decode_first {
+                assert!(codec.decode(&mut input).unwrap().is_none());
+            }
+            let error = codec.decode_eof(&mut input).unwrap_err();
+            assert!(
+                matches!(&error, WsError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof),
+                "role {role:?}, prefix {end}, eager {decode_first}: {error:?}"
+            );
+            // A valid subsequent frame cannot resume a stream whose frame
+            // was truncated, whether the fatal EOF had buffered bytes or not.
+            let mut complete = BytesMut::from(wire);
+            assert!(matches!(
+                codec.decode(&mut complete),
+                Err(WsError::ProtocolViolation(message)) if message.contains("poisoned")
+            ));
+            assert_eq!(&complete[..], wire);
+            assert!(matches!(
+                codec.decode_eof(&mut complete),
+                Err(WsError::ProtocolViolation(message)) if message.contains("poisoned")
+            ));
+        }
+    }
+
+    #[test]
+    fn frame_codec_eof_rejects_every_short_and_16_bit_frame_prefix() {
+        for role in [Role::Client, Role::Server] {
+            for len in [0, 3, 126] {
+                let payload = vec![7; len];
+                let wire = websocket_eof_wire(role, &Frame::binary(payload.clone()));
+                for end in 1..wire.len() {
+                    assert_websocket_truncated_eof(role, &wire, end);
+                }
+                // Every split of the same frame must still complete when the
+                // missing suffix arrives before EOF is declared.
+                for split in 0..wire.len() {
+                    let mut codec = FrameCodec::new(role);
+                    let mut input = BytesMut::from(&wire[..split]);
+                    assert!(codec.decode(&mut input).unwrap().is_none());
+                    input.extend_from_slice(&wire[split..]);
+                    let frame = codec.decode_eof(&mut input).unwrap().unwrap();
+                    assert_eq!(frame.opcode, Opcode::Binary);
+                    assert_eq!(frame.payload.as_ref(), payload.as_slice());
+                    assert!(input.is_empty());
+                    assert!(codec.decode_eof(&mut input).unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_codec_eof_rejects_64_bit_header_and_payload_truncation() {
+        for role in [Role::Client, Role::Server] {
+            let frame = Frame::binary(vec![7; 65_536]);
+            let wire = websocket_eof_wire(role, &frame);
+            let header_len = if role == Role::Server { 14 } else { 10 };
+            for end in (1..=header_len + 1).chain([wire.len() - 1]) {
+                assert_websocket_truncated_eof(role, &wire, end);
+            }
+            let mut codec = FrameCodec::new(role);
+            let mut complete = wire;
+            let decoded = codec.decode_eof(&mut complete).unwrap().unwrap();
+            assert_eq!(decoded.payload, frame.payload);
+            assert!(codec.decode_eof(&mut complete).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn frame_codec_eof_preserves_empty_boundaries_and_multiple_frames() {
+        for role in [Role::Client, Role::Server] {
+            let mut codec = FrameCodec::new(role);
+            assert!(codec.decode_eof(&mut BytesMut::new()).unwrap().is_none());
+            let mut wire = websocket_eof_wire(role, &Frame::binary(Bytes::new()));
+            wire.extend_from_slice(&websocket_eof_wire(role, &Frame::ping("done")));
+            let empty = codec.decode_eof(&mut wire).unwrap().unwrap();
+            assert_eq!(empty.opcode, Opcode::Binary);
+            assert!(empty.payload.is_empty());
+            let ping = codec.decode_eof(&mut wire).unwrap().unwrap();
+            assert_eq!(ping.opcode, Opcode::Ping);
+            assert_eq!(ping.payload.as_ref(), b"done");
+            assert!(wire.is_empty());
+            assert!(codec.decode_eof(&mut wire).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn framed_websocket_truncated_payload_errors_once_then_terminates() {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn check<S>(mut stream: S)
+        where
+            S: Stream<Item = Result<Frame, WsError>> + Unpin,
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            let Poll::Ready(Some(Err(error))) = Pin::new(&mut stream).poll_next(&mut context)
+            else {
+                panic!("a consumed WebSocket header with no payload must fail at EOF");
+            };
+            assert!(matches!(
+                error,
+                WsError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof
+            ));
+            for _ in 0..2 {
+                assert!(matches!(
+                    Pin::new(&mut stream).poll_next(&mut context),
+                    Poll::Ready(None)
+                ));
+            }
+        }
+
+        for role in [Role::Client, Role::Server] {
+            let mut wire = websocket_eof_wire(role, &Frame::binary(vec![7; 3]));
+            let header_len = if role == Role::Server { 6 } else { 2 };
+            wire.truncate(header_len);
+            check(crate::codec::FramedRead::new(
+                std::io::Cursor::new(wire.to_vec()),
+                FrameCodec::new(role),
+            ));
+            check(crate::codec::Framed::new(
+                std::io::Cursor::new(wire.to_vec()),
+                FrameCodec::new(role),
+            ));
+        }
+    }
+
+    #[test]
+    fn frame_codec_buffer_hint_covers_length_fields_and_incoming_masks() {
+        for (maximum, client_bound, server_bound) in [
+            (0, 2, 6),
+            (125, 127, 131),
+            (126, 130, 134),
+            (65_535, 65_539, 65_543),
+            (65_536, 65_546, 65_550),
+        ] {
+            assert_eq!(
+                FrameCodec::client()
+                    .max_payload_size(maximum)
+                    .max_buffered_frame_len(),
+                Some(client_bound)
+            );
+            assert_eq!(
+                FrameCodec::server()
+                    .max_payload_size(maximum)
+                    .max_buffered_frame_len(),
+                Some(server_bound)
+            );
+        }
+        for role in [Role::Client, Role::Server] {
+            assert_eq!(
+                FrameCodec::new(role)
+                    .max_payload_size(usize::MAX)
+                    .max_buffered_frame_len(),
+                None
+            );
+        }
+        let mut codec = FrameCodec::client().max_payload_size(64);
+        let hint = codec.max_buffered_frame_len();
+        let mut wire = BytesMut::from(&[0x82, 0x7f][..]);
+        wire.put_u64((1_u64 << 63) - 1);
+        assert!(matches!(
+            codec.decode(&mut wire),
+            Err(WsError::PayloadTooLarge { .. })
+        ));
+        assert_eq!(codec.max_buffered_frame_len(), hint);
+    }
+
+    #[test]
+    fn framed_websocket_auto_limit_tracks_configuration_and_preserves_overrides() {
+        let mut reader = crate::codec::FramedRead::new(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            FrameCodec::client(),
+        );
+        assert_eq!(
+            reader.effective_max_buffer_len(),
+            FrameCodec::DEFAULT_MAX_PAYLOAD_SIZE + 10
+        );
+        *reader.decoder_mut() = FrameCodec::server().max_payload_size(32 * 1024 * 1024);
+        assert_eq!(reader.effective_max_buffer_len(), 32 * 1024 * 1024 + 14);
+        assert_eq!(reader.with_max_buffer_len(64).effective_max_buffer_len(), 64);
+
+        let mut framed = crate::codec::Framed::new(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            FrameCodec::server(),
+        );
+        assert_eq!(
+            framed.effective_max_buffer_len(),
+            FrameCodec::DEFAULT_MAX_PAYLOAD_SIZE + 14
+        );
+        *framed.codec_mut() = FrameCodec::client().max_payload_size(32 * 1024 * 1024);
+        assert_eq!(framed.effective_max_buffer_len(), 32 * 1024 * 1024 + 10);
+        assert_eq!(framed.with_max_buffer_len(0).effective_max_buffer_len(), 0);
+    }
+
+    #[test]
+    fn framed_websocket_decodes_default_allowed_payload_above_legacy_cap() {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn next<S: Stream + Unpin>(stream: &mut S) -> Option<S::Item> {
+            let mut context = Context::from_waker(Waker::noop());
+            for _ in 0..128 {
+                if let Poll::Ready(item) = Pin::new(&mut *stream).poll_next(&mut context) {
+                    return item;
+                }
+            }
+            panic!("bounded in-memory WebSocket frame made no terminal progress");
+        }
+
+        let payload = Bytes::from(vec![7; crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN + 1]);
+        for role in [Role::Client, Role::Server] {
+            let wire = websocket_eof_wire(role, &Frame::binary(payload.clone()));
+            let mut reader = crate::codec::FramedRead::new(
+                std::io::Cursor::new(wire.to_vec()),
+                FrameCodec::new(role),
+            );
+            let Some(Ok(frame)) = next(&mut reader) else {
+                panic!("default WebSocket payload must fit the automatic buffer limit");
+            };
+            assert_eq!(frame.payload, payload);
+            assert!(next(&mut reader).is_none());
+            drop(reader);
+
+            let mut framed = crate::codec::Framed::new(
+                std::io::Cursor::new(wire.to_vec()),
+                FrameCodec::new(role),
+            );
+            let Some(Ok(frame)) = next(&mut framed) else {
+                panic!("both framed adapters must honor the WebSocket payload bound");
+            };
+            assert_eq!(frame.payload, payload);
+            assert!(next(&mut framed).is_none());
+            drop(framed);
+
+            let mut capped = crate::codec::FramedRead::new(
+                std::io::Cursor::new(wire.to_vec()),
+                FrameCodec::new(role),
+            )
+            .with_max_buffer_len(1024);
+            let Some(Err(error)) = next(&mut capped) else {
+                panic!("explicit buffer cap must override the WebSocket hint");
+            };
+            assert!(matches!(
+                error,
+                WsError::Io(error) if error.kind() == io::ErrorKind::InvalidData
+            ));
+            assert!(capped.read_buffer().len() <= 1024);
+            assert!(next(&mut capped).is_none());
+        }
+    }
+
     fn render_wire_hex(label: &str, bytes: &[u8]) -> String {
         let mut out = String::new();
         out.push_str(label);
