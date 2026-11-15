@@ -4959,3 +4959,244 @@ peers = []
             ));
         }
     }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_native_renewal_reports_enforced_grant_and_replays_without_extension() {
+        // br-asupersync-z8vd8c: exercise the actual authenticated session loop,
+        // not a scripted LeaseRenewed response. The server and client run on
+        // the native runtime; virtual time reaches the 24-hour cap instantly.
+        use crate::runtime::RuntimeBuilder;
+        use crate::time::{Sleep, TimerDriverHandle, VirtualClock};
+        use crate::tls::{
+            Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth,
+            PrivateKey, RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        const TASK: u64 = 0x27c;
+        let certificate = Certificate::from_pem(include_bytes!("../tests/fixtures/tls/server.crt"))
+            .unwrap()
+            .remove(0);
+        let chain =
+            CertificateChain::from_pem(include_bytes!("../tests/fixtures/tls/server.crt")).unwrap();
+        let key = PrivateKey::from_pem(include_bytes!("../tests/fixtures/tls/server.key")).unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(&certificate).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
+            .client_auth(ClientAuth::Required(roots))
+            .build()
+            .unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&certificate)
+            .identity(chain, key)
+            .build()
+            .unwrap();
+
+        for workers in [1, 2] {
+            for (requested, granted) in [
+                (Duration::new(3, 123), Duration::new(3, 123)),
+                (MAX_REMOTE_LEASE, MAX_REMOTE_LEASE),
+                (Duration::new(48 * 3600, 123), MAX_REMOTE_LEASE),
+            ] {
+                let started = Time::from_secs(100);
+                let clock = Arc::new(VirtualClock::starting_at(started));
+                let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+                let builder = if workers == 1 {
+                    RuntimeBuilder::current_thread()
+                } else {
+                    RuntimeBuilder::multi_thread().worker_threads(workers)
+                };
+                let runtime = builder.with_timer_driver(timer.clone()).build().unwrap();
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let parked = Arc::new(AtomicBool::new(false));
+                    let cleaned = Arc::new(AtomicBool::new(false));
+                    let dispatches = Arc::new(AtomicUsize::new(0));
+                    let changed = Arc::new(crate::sync::Notify::new());
+                    let mut computations = RemoteComputationRegistry::new();
+                    let body_parked = Arc::clone(&parked);
+                    let body_cleaned = Arc::clone(&cleaned);
+                    let body_dispatches = Arc::clone(&dispatches);
+                    let body_changed = Arc::clone(&changed);
+                    computations
+                        .register::<Vec<u8>, Vec<u8>, _, _>("proof.granted-lease", move |body, _| {
+                            let parked = Arc::clone(&body_parked);
+                            let cleaned = Arc::clone(&body_cleaned);
+                            let dispatches = Arc::clone(&body_dispatches);
+                            let changed = Arc::clone(&body_changed);
+                            async move {
+                                dispatches.fetch_add(1, Ordering::SeqCst);
+                                let mut cancellation = std::pin::pin!(body.cancelled());
+                                std::future::poll_fn(|task| {
+                                    let result = cancellation.as_mut().poll(task);
+                                    if result.is_pending() && !parked.swap(true, Ordering::AcqRel) {
+                                        changed.notify_waiters();
+                                    }
+                                    result
+                                })
+                                .await;
+                                assert!(body.checkpoint().is_err());
+                                cleaned.store(true, Ordering::Release);
+                                Ok(RemoteOutcome::Cancelled(body.cancel_reason().unwrap()))
+                            }
+                        })
+                        .unwrap();
+                    let peer = NodeId::new("granted-lease-peer");
+                    let mut policy = RemotePeerAdmissionPolicy::new(
+                        RemoteProtocolVersion::V3,
+                        computations.schema_registry().clone(),
+                    );
+                    let pins = CertificatePinSet::new().with_pin(
+                        CertificatePin::compute_spki_sha256(&certificate).unwrap(),
+                    );
+                    policy
+                        .grant_tls_peer(peer.clone(), pins, ["proof.granted-lease"])
+                        .unwrap();
+                    let request = SpawnRequest {
+                        remote_task_id: RemoteTaskId::from_raw(TASK),
+                        computation: ComputationName::new("proof.granted-lease"),
+                        input: RemoteInput::empty(),
+                        lease: Duration::from_secs(1),
+                        idempotency_key: IdempotencyKey::from_raw(u128::from(TASK)),
+                        budget: None,
+                        origin_node: peer.clone(),
+                        origin_region: cx.region_id(),
+                        origin_task: cx.task_id(),
+                    };
+                    let wire = RemoteServiceWireRequest::from_spawn_request(
+                        policy.hello_for(peer.clone()),
+                        &request,
+                    )
+                    .unwrap();
+                    let state = RemoteServiceIdempotency::new(Duration::from_secs(60), 1);
+                    let (client_io, server_io) = crate::io::duplex(4096);
+                    let exchange = async {
+                        let (client_tls, server_tls) = futures_lite::future::zip(
+                            connector.connect("localhost", client_io),
+                            acceptor.accept(server_io),
+                        )
+                        .await;
+                        let client_tls = client_tls.expect("mutually authenticated client");
+                        let mut server_tls = server_tls.expect("mutually authenticated server");
+                        let server = serve_tls_computation_once_with_idempotency(
+                            &cx,
+                            &mut server_tls,
+                            &policy,
+                            &computations,
+                            RemoteServiceWireLimits::default(),
+                            Some(&state),
+                            RemoteServiceExecutionMode::LeaseBound,
+                            None,
+                            None,
+                        );
+                        let client = async {
+                            let start = RemoteComputationSession::start(
+                                &cx,
+                                client_tls,
+                                &wire,
+                                RemoteServiceWireLimits::default(),
+                            )
+                            .await
+                            .unwrap();
+                            let RemoteComputationSessionStart::Running(mut session) = start else {
+                                panic!("the authenticated request must be admitted");
+                            };
+                            changed
+                                .wait_until(|| parked.load(Ordering::Acquire))
+                                .await;
+                            let expected = RemoteServiceSessionEvent::LeaseRenewed {
+                                remote_task_id: TASK,
+                                renewal_id: 1,
+                                lease_secs: granted.as_secs(),
+                                lease_subsec_nanos: granted.subsec_nanos(),
+                            };
+                            assert_eq!(
+                                session.renew_lease(&cx, requested).await.unwrap(),
+                                expected,
+                                "the grant must match the enforced expiry; workers={workers}"
+                            );
+                            assert_eq!(session.next_renewal_id, Some(2));
+
+                            // Replay near the original expiry. It must echo the
+                            // same grant without extending the deadline. Keep
+                            // the original request as identity even above cap.
+                            let expiry = started + granted;
+                            clock.advance_to(Time::from_nanos(expiry.as_nanos() - 1));
+                            let renewal = RemoteServiceSessionCommand::RenewLease {
+                                remote_task_id: TASK,
+                                renewal_id: 1,
+                                lease_secs: requested.as_secs(),
+                                lease_subsec_nanos: requested.subsec_nanos(),
+                            };
+                            assert_eq!(
+                                session.exchange_event(&cx, Some(&renewal)).await.unwrap(),
+                                expected
+                            );
+                            assert!(
+                                !cleaned.load(Ordering::Acquire),
+                                "lease remains live before expiry"
+                            );
+                            let conflicting = requested + Duration::from_nanos(1);
+                            let command = RemoteServiceSessionCommand::RenewLease {
+                                remote_task_id: TASK,
+                                renewal_id: 1,
+                                lease_secs: conflicting.as_secs(),
+                                lease_subsec_nanos: conflicting.subsec_nanos(),
+                            };
+                            assert!(
+                                matches!(
+                                    session.exchange_event(&cx, Some(&command)).await.unwrap(),
+                                    RemoteServiceSessionEvent::CommandRejected {
+                                        remote_task_id: TASK,
+                                        renewal_id: Some(1),
+                                        ..
+                                    }
+                                ),
+                                "different requests cannot alias after clamping"
+                            );
+                            assert_eq!(
+                                session.exchange_event(&cx, Some(&renewal)).await.unwrap(),
+                                expected,
+                                "rejecting a conflicting replay leaves the original replay valid"
+                            );
+                            clock.advance_to(expiry);
+                            let _ = timer.process_timers();
+                            let terminal = session.wait(&cx).await.unwrap();
+                            assert!(matches!(
+                                &terminal,
+                                RemoteServiceWireResponse::Outcome {
+                                    remote_task_id: TASK,
+                                    outcome: RemoteServiceWireOutcome::Cancelled(reason),
+                                } if reason.kind == crate::types::CancelKind::Deadline
+                            ));
+                            assert!(
+                                cleaned.load(Ordering::Acquire),
+                                "terminal follows handler cleanup"
+                            );
+                            terminal
+                        };
+                        let (server, client) = futures_lite::future::zip(server, client).await;
+                        assert_eq!(server.unwrap(), client);
+                    };
+                    // Independent wall time bounds fixture failures even if a
+                    // regression accidentally moves the virtual lease deadline.
+                    futures_lite::future::or(exchange, async {
+                        Sleep::with_wall_clock(
+                            crate::time::raw_wall_now() + Duration::from_secs(10),
+                        )
+                        .await;
+                        panic!("session must expire at the granted virtual deadline");
+                    })
+                    .await;
+                    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+                    assert!(matches!(
+                        state.admit(&peer, &request, timer.now()),
+                        RemoteServiceIdempotencyAdmission::CachedOutcome(RemoteOutcome::Cancelled(reason))
+                            if reason.kind == crate::types::CancelKind::Deadline
+                    ));
+                });
+                assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+            }
+        }
+    }

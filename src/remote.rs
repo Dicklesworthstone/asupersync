@@ -5962,15 +5962,19 @@ where
                             continue;
                         }
                         let lease = lease.expect("validated V3 renewal lease");
+                        let granted = remote_service_clamp_lease(lease);
                         if !is_replay {
-                            expires_at = cx.now() + remote_service_clamp_lease(lease);
+                            expires_at = cx.now() + granted;
+                            // Replay identity is the original request: two
+                            // different durations can produce the same capped
+                            // grant, but must not reuse one renewal ID.
                             last_renewal = Some((renewal_id, lease));
                         }
                         let renewed = RemoteServiceSessionEvent::LeaseRenewed {
                             remote_task_id: remote_task_id.raw(),
                             renewal_id,
-                            lease_secs: lease.as_secs(),
-                            lease_subsec_nanos: lease.subsec_nanos(),
+                            lease_secs: granted.as_secs(),
+                            lease_subsec_nanos: granted.subsec_nanos(),
                         };
                         if let Err(error) =
                             remote_service_v3_queue_event(framed, &renewed, max_frame_bytes)
@@ -6329,14 +6333,15 @@ fn remote_service_lease_expired(now: Time, expires_at: Time) -> bool {
 /// regardless of the peer-requested value. A peer supplies `lease_secs` as an
 /// unbounded `u64`, so without a cap a single admitted-but-adversarial peer can
 /// pin its child task, region and admission slot indefinitely
-/// (`Time + Duration` saturates). The enforced expiry is bounded here; the
-/// requested value is still echoed back unchanged so the client's exact-match
-/// renewal verification is unaffected (br-asupersync-35qp1j).
+/// (`Time + Duration` saturates). Renewal acknowledgements report the enforced
+/// grant so the client can schedule its next renewal from the actual duration.
+/// Replay identity retains the original requested duration
+/// (br-asupersync-35qp1j, br-asupersync-z8vd8c).
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 const MAX_REMOTE_LEASE: Duration = Duration::from_secs(86_400);
 
-/// Bound a peer-requested lease to [`MAX_REMOTE_LEASE`] for expiry enforcement.
-/// Leases at or below the cap pass through unchanged.
+/// Bound a peer-requested lease to [`MAX_REMOTE_LEASE`] for enforcement
+/// and renewal acknowledgements. Leases at or below the cap pass through unchanged.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 fn remote_service_clamp_lease(lease: Duration) -> Duration {
     lease.min(MAX_REMOTE_LEASE)
