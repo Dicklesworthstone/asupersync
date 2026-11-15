@@ -4705,6 +4705,52 @@ impl Runtime {
         self.inner.browser_pump.get().map(Arc::clone)
     }
 
+    /// Configure bounded startup preparation of root async cleanup.
+    ///
+    /// This reserves task/Cx storage for accepted callbacks. It does not make
+    /// arbitrary callback polling, timers, or scheduler wake queues OOM-safe.
+    pub fn configure_prepared_cleanup(
+        &self,
+        capacity: usize,
+    ) -> Result<(), crate::runtime::state::PreparedCleanupError> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .configure_prepared_cleanup(capacity)
+    }
+
+    /// Register root cleanup while startup allocation and normal admission
+    /// remain available, before tightening ordinary task/heap quotas.
+    ///
+    /// Accepted task generations remain dormant until the existing LIFO
+    /// finalization path activates them. Refusal returns the original future.
+    pub fn prepare_async_cleanup<F>(
+        &self,
+        future: F,
+    ) -> Result<(), (crate::runtime::state::PreparedCleanupError, F)>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let dispatch = self.inner.scheduler.dispatch_task_table();
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut tasks = dispatch.as_ref().map_or(
+            crate::runtime::state::AdmissionTaskTarget::Embedded,
+            |table| {
+                crate::runtime::state::AdmissionTaskTarget::External(
+                    table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
+            },
+        );
+        state.prepare_async_cleanup_in(self.inner.root_region, future, &mut tasks, dispatch.clone())
+    }
+
     /// Spawns a local `!Send` future pinned to the runtime's single worker thread.
     ///
     /// # Panics
@@ -5301,6 +5347,7 @@ impl Runtime {
     /// live records would report an empty runtime while work is still
     /// queued for admission (observed under parallel test load).
     fn work_is_drained(&self) -> bool {
+        retire_prepared_cleanup_batch(&self.inner.state);
         self.dispatch_completed_root_cancellations();
         self.root_drain_snapshot(Duration::ZERO).outcome == RootDrainOutcome::Quiescent
     }
@@ -5406,6 +5453,7 @@ impl Runtime {
             && report.pending_spawns == 0
             && !report.has_pending_obligation_posts
             && !guard.has_outstanding_cancel_dispatches()
+            && !guard.has_prepared_cleanup_retirements()
         {
             report.outcome = RootDrainOutcome::Quiescent;
         }
@@ -7686,9 +7734,26 @@ impl Drop for RuntimeInner {
     }
 }
 
-/// Retires the tasks, region finalizers and pending spawn requests of a
-/// runtime whose workers have exited: the abort-by-drop part of teardown,
-/// shared by `RuntimeInner::drop` and the `shutdown_timeout` reaper.
+/// Retires manually consumed prepared task storage outside runtime locks.
+pub(crate) fn retire_prepared_cleanup_batch(
+    state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+) {
+    let mut batch = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_prepared_cleanup_retirements();
+    // Neither runtime nor queue/table locks are held during foreign Drop.
+    // Each item retains its outstanding credit through destructor completion.
+    for retirement in batch.drain(..) {
+        drop(retirement);
+    }
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .recycle_prepared_cleanup_retirement_storage(&mut batch);
+}
+
+/// Retires tasks, finalizers and pending spawns after workers have exited.
 fn retire_stopped_tasks(
     state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
     sharded_state: Option<&Arc<crate::runtime::ShardedState>>,
@@ -7756,6 +7821,14 @@ fn retire_stopped_tasks(
         }
     }
     drop(retired_tasks);
+    let retired_prepared = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_stopped_prepared_cleanup();
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(retired_prepared)) {
+        std::mem::forget(payload);
+    }
+    retire_prepared_cleanup_batch(state);
     for finalizer in retired_finalizers {
         if let Err(payload) =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(finalizer)))

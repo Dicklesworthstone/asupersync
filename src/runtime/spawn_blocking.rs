@@ -133,7 +133,10 @@ impl<T> DrainedBlockingHandle<T> {
     /// A retired operation reports the same errors as [`Self::join`]. An
     /// interrupted wait reports the caller's cancellation without consuming
     /// the operation's terminal result.
-    pub async fn join_cancellable(&mut self, cx: &Cx) -> Result<T, crate::runtime::JoinError> {
+    pub async fn join_cancellable<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+    ) -> Result<T, crate::runtime::JoinError> {
         let terminal = DrainedJoinWait {
             waiting: self.task.join_cancellable(cx),
             state: &self.state,
@@ -172,13 +175,13 @@ impl<T> DrainedBlockingHandle<T> {
     }
 }
 
-struct DrainedJoinWait<'a, T> {
-    waiting: crate::runtime::task_handle::CancellableJoinFuture<'a, ()>,
+struct DrainedJoinWait<'a, T, Caps> {
+    waiting: crate::runtime::task_handle::CancellableJoinFuture<'a, (), Caps>,
     state: &'a DrainedBlockingState<T>,
     complete: bool,
 }
 
-impl<T> std::future::Future for DrainedJoinWait<'_, T> {
+impl<T, Caps> std::future::Future for DrainedJoinWait<'_, T, Caps> {
     type Output = Result<(), crate::runtime::JoinError>;
 
     fn poll(self: std::pin::Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
@@ -194,7 +197,7 @@ impl<T> std::future::Future for DrainedJoinWait<'_, T> {
     }
 }
 
-impl<T> Drop for DrainedJoinWait<'_, T> {
+impl<T, Caps> Drop for DrainedJoinWait<'_, T, Caps> {
     fn drop(&mut self) {
         // Drop runs before the waiting field: either close the pool claim gate
         // before task cancellation, or protect a result already produced before

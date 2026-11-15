@@ -126,7 +126,7 @@ impl RetirementBarrier {
 
     /// A join future may move after construction. Attribute observation to
     /// the task polling it, using the explicit context only outside a task.
-    fn observe_join(&self, fallback: &Cx) {
+    fn observe_join<Caps>(&self, fallback: &Cx<Caps>) {
         if self.causality.get().is_none() {
             return;
         }
@@ -972,7 +972,7 @@ impl<T> TaskHandle<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn join<'a>(&'a mut self, cx: &'a Cx) -> JoinFuture<'a, T> {
+    pub fn join<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> JoinFuture<'a, T, Caps> {
         // Resolve the live linkage at join time: mailbox spawns start with a
         // dangling weak that admission supersedes via the admitted slot.
         let cx_inner = self
@@ -1025,7 +1025,10 @@ impl<T> TaskHandle<T> {
     /// same completed future again returns [`JoinError::PolledAfterCompletion`].
     #[inline]
     #[must_use]
-    pub fn join_cancellable<'a>(&'a mut self, cx: &'a Cx) -> CancellableJoinFuture<'a, T> {
+    pub fn join_cancellable<'a, Caps>(
+        &'a mut self,
+        cx: &'a Cx<Caps>,
+    ) -> CancellableJoinFuture<'a, T, Caps> {
         CancellableJoinFuture {
             inner: Some(self.join(cx)),
             cancellation: crate::channel::OwnedCancelRegistration::new(cx.clone()),
@@ -1040,11 +1043,11 @@ impl<T> TaskHandle<T> {
     /// to "losing the race".
     #[inline]
     #[must_use]
-    pub fn join_with_drop_reason<'a>(
+    pub fn join_with_drop_reason<'a, Caps>(
         &'a mut self,
-        cx: &'a Cx,
+        cx: &'a Cx<Caps>,
         reason: CancelReason,
-    ) -> JoinFuture<'a, T> {
+    ) -> JoinFuture<'a, T, Caps> {
         // Resolve the live linkage at join time, exactly like `join`: mailbox
         // spawns start with a dangling `self.inner` weak that admission
         // supersedes via the admitted slot. Cloning `self.inner` directly
@@ -1257,7 +1260,7 @@ impl<T> Drop for TaskHandle<T> {
 ///
 /// This future aborts the task if dropped before completion, ensuring correct
 /// cleanup in races and timeouts.
-pub struct JoinFuture<'a, T> {
+pub struct JoinFuture<'a, T, Caps = crate::cx::cap::All> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     fallback_task_id: TaskId,
     cx_inner: Weak<RwLock<CxInner>>,
@@ -1271,7 +1274,7 @@ pub struct JoinFuture<'a, T> {
     /// Fallback observer for polling outside a runtime task. A current task
     /// takes precedence if this future moves after construction; cancellation
     /// still cannot interrupt the join.
-    observer: &'a Cx,
+    observer: &'a Cx<Caps>,
     /// Whether this future stored its waker on the barrier. Only then does
     /// dropping it clear the slot: a waker the handle's own `poll_join`
     /// registered is not this future's to drop.
@@ -1280,7 +1283,7 @@ pub struct JoinFuture<'a, T> {
     drop_reason: Option<CancelReason>,
 }
 
-impl<T> JoinFuture<'_, T> {
+impl<T, Caps> JoinFuture<'_, T, Caps> {
     fn live_inner(&self) -> Option<Arc<RwLock<CxInner>>> {
         if let Some(admitted) = self.admitted.and_then(|slot| slot.get()) {
             return admitted.cx_inner.upgrade();
@@ -1315,7 +1318,7 @@ impl<T> JoinFuture<'_, T> {
     }
 }
 
-impl<T> std::future::Future for JoinFuture<'_, T> {
+impl<T, Caps> std::future::Future for JoinFuture<'_, T, Caps> {
     type Output = Result<T, JoinError>;
 
     #[inline]
@@ -1368,7 +1371,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
     }
 }
 
-impl<T> Drop for JoinFuture<'_, T> {
+impl<T, Caps> Drop for JoinFuture<'_, T, Caps> {
     fn drop(&mut self) {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
@@ -1397,14 +1400,14 @@ impl<T> Drop for JoinFuture<'_, T> {
 /// Caller cancellation ends this wait while leaving the task's result and
 /// region ownership intact. A later join on the same handle can still wait
 /// for actual retirement. Dropping a pending wait requests task cancellation.
-pub struct CancellableJoinFuture<'a, T> {
+pub struct CancellableJoinFuture<'a, T, Caps = crate::cx::cap::All> {
     // Drop the join (and request its cancellation) before retiring any final
     // caller-waker owner, whose destructor is foreign code and may panic.
-    inner: Option<JoinFuture<'a, T>>,
-    cancellation: crate::channel::OwnedCancelRegistration,
+    inner: Option<JoinFuture<'a, T, Caps>>,
+    cancellation: crate::channel::OwnedCancelRegistration<Caps>,
 }
 
-impl<T> CancellableJoinFuture<'_, T> {
+impl<T, Caps> CancellableJoinFuture<'_, T, Caps> {
     /// A separately retained producer may have completed before this task
     /// published its join result. Its owner can suppress a redundant drop abort
     /// while retaining the ordinary task-retirement wait.
@@ -1475,7 +1478,7 @@ impl<T> CancellableJoinFuture<'_, T> {
     }
 }
 
-impl<T> std::future::Future for CancellableJoinFuture<'_, T> {
+impl<T, Caps> std::future::Future for CancellableJoinFuture<'_, T, Caps> {
     type Output = Result<T, JoinError>;
 
     fn poll(

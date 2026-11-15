@@ -2574,7 +2574,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             Output = Result<AsyncPooledConnection<'a, M>, AsyncAcquireFailure<M::Error>>,
         >,
     ) -> Result<AsyncPooledConnection<'a, M>, AsyncAcquireFailure<M::Error>> {
-        use std::future::{Future, poll_fn};
+        use std::future::poll_fn;
         use std::task::Poll;
 
         let mut acquisition = std::pin::pin!(acquisition);

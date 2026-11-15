@@ -3352,8 +3352,6 @@ mod tests {
     fn assert_pg_rollback_required<T>(
         future: impl std::future::Future<Output = Outcome<T, PgError>>,
     ) {
-        use std::future::Future;
-
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(std::task::Waker::noop());
         let Poll::Ready(Outcome::Err(PgError::Protocol(message))) =
@@ -3408,13 +3406,13 @@ mod tests {
                 &cx,
                 &statement,
                 &[],
-                PgCursorConfig::default(),
+                PgCursorConfig::new(1, 128).unwrap(),
             ));
             assert_pg_rollback_required(tx.query_cursor_params(
                 &cx,
                 "SELECT $1",
                 &[&1_i32],
-                PgCursorConfig::default(),
+                PgCursorConfig::new(1, 128).unwrap(),
             ));
             assert_pg_rollback_required(PgSavepoint::new(&mut tx, &cx, "later"));
 

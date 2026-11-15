@@ -376,6 +376,55 @@ impl TaskTable {
         }
     }
 
+    /// Retain startup-created cleanup storage without making it live work.
+    pub(crate) fn make_cleanup_dormant(&mut self, task: TaskId) -> bool {
+        let index = task.arena_index();
+        let Some(record) = self.tasks.get_mut(index) else {
+            return false;
+        };
+        record.phase.detach_phase_tracker();
+        let phase = record.phase.load();
+        let deadline = record.deadline;
+        let slot = index.index() as usize;
+        self.stored_futures
+            .resize_with(self.stored_futures.len().max(slot + 1), || None);
+        assert!(
+            self.stored_futures[slot].is_none(),
+            "prepared task cannot already own a dispatched future"
+        );
+        assert!(self.tasks.make_dormant(index));
+        self.note_task_removed(phase, deadline);
+        true
+    }
+
+    /// Publish the exact prepared generation into the live task table.
+    pub(crate) fn activate_cleanup(&mut self, task: TaskId) -> bool {
+        let index = task.arena_index();
+        if !self.tasks.activate_dormant(index) {
+            return false;
+        }
+        let record = self.tasks.get(index).expect("activated cleanup record");
+        let phase = record.phase.load();
+        let deadline = record.deadline;
+        self.note_task_added(phase, deadline);
+        self.count_live(index);
+        true
+    }
+
+    /// Retire unused prepared storage without publishing a task or callbacks.
+    /// The caller retains the returned record until its outer locks are gone.
+    pub(crate) fn take_dormant_cleanup(&mut self, task: TaskId) -> Option<TaskRecord> {
+        let index = task.arena_index();
+        if !self.tasks.activate_dormant(index) {
+            return None;
+        }
+        let record = self.tasks.remove(index).expect("owned dormant generation");
+        if let Some(cx) = &record.cx {
+            cx.revoke_obligation_admission();
+        }
+        Some(record)
+    }
+
     /// Removes a task record by arena index.
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
@@ -742,6 +791,7 @@ impl Drop for TaskTable {
             }
         }
 
+        self.tasks.activate_all_dormant_for_teardown();
         let mut barriers = Vec::new();
         for (_, record) in self.tasks.iter_mut() {
             if let Some(barrier) = record

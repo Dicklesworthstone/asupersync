@@ -1196,6 +1196,14 @@ struct TaskSpawnEffectsPayload {
 }
 
 impl TaskSpawnEffects {
+    fn unregistered() -> Self {
+        Self {
+            payload: None,
+            panic_count: None,
+            epoch_telemetry: None,
+        }
+    }
+
     fn new(
         metrics: Arc<dyn MetricsProvider>,
         trace: TraceBufferHandle,
@@ -2157,6 +2165,371 @@ pub enum SpawnError {
     },
 }
 
+/// Refusal from opt-in startup preparation of native root cleanup.
+/// This is capacity admission, not a promise to recover from process OOM.
+#[derive(Debug)]
+pub enum PreparedCleanupError {
+    /// Configure a nonzero bounded capacity before preparing cleanup.
+    Disabled,
+    /// The configured number of pending preparations is already owned.
+    AtCapacity,
+    /// Capacity cannot change while prepared records remain owned.
+    ReservationsActive,
+    /// Region is absent or already closing.
+    RegionUnavailable,
+    /// A fallible backing-storage reservation failed.
+    StorageUnavailable,
+    /// Existing task infrastructure could not be admitted during startup.
+    TaskAdmission(SpawnError),
+}
+
+type PreparedCleanupInfrastructure = (
+    TaskId,
+    crate::runtime::TaskHandle<()>,
+    crate::cx::Cx,
+    crate::runtime::task_handle::TaskResultSender<()>,
+    TaskSpawnEffects,
+);
+
+struct PreparedCleanupTask {
+    infrastructure: PreparedCleanupInfrastructure,
+    table: Option<Arc<crate::sync::ContendedMutex<TaskTable>>>,
+}
+
+struct PreparedCleanupRetirementPayload {
+    _record: TaskRecord,
+    _infrastructure: PreparedCleanupInfrastructure,
+    _table: Option<Arc<crate::sync::ContendedMutex<TaskTable>>>,
+}
+
+pub(crate) struct PreparedCleanupRetirement {
+    payload: Option<PreparedCleanupRetirementPayload>,
+    outstanding: Arc<AtomicUsize>,
+}
+
+impl Drop for PreparedCleanupRetirement {
+    fn drop(&mut self) {
+        struct FinishRetirement<'a>(&'a AtomicUsize);
+        impl Drop for FinishRetirement<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        if let Some(payload) = self.payload.take() {
+            let _finished = FinishRetirement(&self.outstanding);
+            if let Err(panic) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(panic);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod prepared_cleanup_manual_tests {
+    use super::*;
+    use std::task::{Context, Poll, Waker};
+
+    #[derive(Debug)]
+    struct DropProbeEntropy {
+        runtime: std::sync::Weak<crate::sync::ContendedMutex<RuntimeState>>,
+        drops: Arc<AtomicUsize>,
+        would_deadlock: Arc<AtomicBool>,
+        panic_on_drop: bool,
+        child: bool,
+    }
+
+    impl crate::util::EntropySource for DropProbeEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+        fn next_u64(&self) -> u64 {
+            0
+        }
+        fn fork(&self, _task: TaskId) -> Arc<dyn crate::util::EntropySource> {
+            Arc::new(Self {
+                runtime: self.runtime.clone(),
+                drops: Arc::clone(&self.drops),
+                would_deadlock: Arc::clone(&self.would_deadlock),
+                panic_on_drop: self.panic_on_drop,
+                child: true,
+            })
+        }
+        fn source_id(&self) -> &'static str {
+            "prepared-cleanup-drop-probe"
+        }
+    }
+
+    impl Drop for DropProbeEntropy {
+        fn drop(&mut self) {
+            if self.child {
+                let runtime = self
+                    .runtime
+                    .upgrade()
+                    .expect("runtime retained during receipt retirement");
+                self.would_deadlock
+                    .store(runtime.try_lock().is_err(), Ordering::Release);
+                self.drops.fetch_add(1, Ordering::AcqRel);
+                assert!(!self.panic_on_drop, "injected provider destructor panic");
+            }
+        }
+    }
+
+    #[test]
+    fn unused_prepared_cleanup_teardown_does_not_publish_spawn() {
+        struct CallbackDrop(Arc<AtomicUsize>);
+        impl Drop for CallbackDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let trace = {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            state.configure_prepared_cleanup(1).unwrap();
+            let guard = CallbackDrop(Arc::clone(&drops));
+            assert!(
+                state
+                    .prepare_async_cleanup_in(
+                        root,
+                        async move {
+                            drop(guard);
+                        },
+                        &mut AdmissionTaskTarget::Embedded,
+                        None
+                    )
+                    .is_ok()
+            );
+            assert_eq!(state.tasks.live_task_count(), 0);
+            state.trace.clone()
+        };
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert!(
+            !trace
+                .snapshot()
+                .iter()
+                .any(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+        );
+    }
+
+    #[test]
+    fn manual_cleanup_releases_exact_generation_without_phantom_spawn_or_callback() {
+        for external in [false, true] {
+            for sync_handoff in [false, true] {
+                for abandoned in [false, true] {
+                    for panic_on_drop in [false, true] {
+                        let runtime = Arc::new(crate::sync::ContendedMutex::new(
+                            "prepared-state-test",
+                            RuntimeState::new(),
+                        ));
+                        let mut state = runtime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let drops = Arc::new(AtomicUsize::new(0));
+                        let would_deadlock = Arc::new(AtomicBool::new(false));
+                        state.entropy_source = Arc::new(DropProbeEntropy {
+                            runtime: Arc::downgrade(&runtime),
+                            drops: Arc::clone(&drops),
+                            would_deadlock: Arc::clone(&would_deadlock),
+                            panic_on_drop,
+                            child: false,
+                        });
+                        let root = state.create_root_region(Budget::INFINITE);
+                        let table = external.then(|| {
+                            Arc::new(crate::sync::ContendedMutex::new(
+                                "prepared-cleanup-test",
+                                TaskTable::new(),
+                            ))
+                        });
+                        state.configure_prepared_cleanup(1).unwrap();
+                        let ran = Arc::new(AtomicUsize::new(0));
+                        let completed = Arc::clone(&ran);
+                        {
+                            let mut target =
+                                table
+                                    .as_ref()
+                                    .map_or(AdmissionTaskTarget::Embedded, |table| {
+                                        AdmissionTaskTarget::External(
+                                            table
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                        )
+                                    });
+                            assert!(
+                                state
+                                    .prepare_async_cleanup_in(
+                                        root,
+                                        async move {
+                                            completed.fetch_add(1, Ordering::AcqRel);
+                                        },
+                                        &mut target,
+                                        table.clone()
+                                    )
+                                    .is_ok()
+                            );
+                        }
+                        let reserved = state
+                            .prepared_cleanup_tasks
+                            .values()
+                            .next()
+                            .unwrap()
+                            .infrastructure
+                            .0;
+                        let retired_cx = Arc::downgrade(
+                            &state
+                                .prepared_cleanup_tasks
+                                .values()
+                                .next()
+                                .unwrap()
+                                .infrastructure
+                                .2
+                                .inner,
+                        );
+                        assert!(
+                            !state
+                                .trace
+                                .snapshot()
+                                .iter()
+                                .any(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+                        );
+                        let region = state.regions.get(root.arena_index()).unwrap();
+                        region.begin_close(None);
+                        assert!(region.begin_finalize());
+                        let (finalizer, mut receipt) = if sync_handoff {
+                            state.run_sync_finalizers(root).unwrap()
+                        } else {
+                            state.pop_region_finalizer(root).unwrap()
+                        };
+                        assert!(state.prepared_cleanup_tasks.is_empty());
+                        assert!(
+                            matches!(
+                                state.configure_prepared_cleanup(1),
+                                Err(PreparedCleanupError::ReservationsActive)
+                            ),
+                            "retained resources consume capacity until actual retirement"
+                        );
+                        let replacement = {
+                            let mut target =
+                                table
+                                    .as_ref()
+                                    .map_or(AdmissionTaskTarget::Embedded, |table| {
+                                        AdmissionTaskTarget::External(
+                                            table
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                        )
+                                    });
+                            let tasks = target.resolve(&mut state.tasks);
+                            assert_eq!(tasks.live_task_count(), 0);
+                            let index = tasks.insert_task_with(|id| {
+                                TaskRecord::new(TaskId::from_arena(id), root, Budget::INFINITE)
+                            });
+                            assert_eq!(
+                                index.index(),
+                                reserved.arena_index().index(),
+                                "dormant slot became reusable"
+                            );
+                            assert_ne!(index.generation(), reserved.arena_index().generation());
+                            tasks.remove(index).unwrap()
+                        };
+                        drop(state);
+                        drop(replacement);
+                        if abandoned {
+                            drop(finalizer);
+                        } else {
+                            let Finalizer::Async(mut future) = finalizer else {
+                                panic!("async callback");
+                            };
+                            assert!(matches!(
+                                future
+                                    .as_mut()
+                                    .poll(&mut Context::from_waker(Waker::noop())),
+                                Poll::Ready(())
+                            ));
+                            drop(future);
+                        }
+                        let mut state = runtime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if abandoned {
+                            state.abandon_manual_finalizer(&mut receipt).unwrap();
+                        } else {
+                            state.complete_manual_finalizer(&mut receipt).unwrap();
+                        }
+                        assert!(receipt.is_settled());
+                        assert!(state.can_region_complete_close(root));
+                        assert!(
+                            retired_cx.upgrade().is_some(),
+                            "settlement transfers retirement, never drops payloads under caller lock"
+                        );
+                        assert_eq!(ran.load(Ordering::Acquire), usize::from(!abandoned));
+                        assert!(matches!(
+                            state.complete_manual_finalizer(&mut receipt),
+                            Err(ManualFinalizerReceiptError::AlreadySettled)
+                        ));
+                        assert_eq!(
+                            drops.load(Ordering::Acquire),
+                            0,
+                            "handoff/settlement retain foreign resources"
+                        );
+                        drop(receipt); // Adversarial allowed caller: still holds the state mutex.
+                        assert_eq!(
+                            drops.load(Ordering::Acquire),
+                            0,
+                            "receipt Drop cannot retire foreign resources"
+                        );
+                        assert!(state.has_prepared_cleanup_retirements());
+                        drop(state);
+                        crate::runtime::builder::retire_prepared_cleanup_batch(&runtime);
+                        assert_eq!(
+                            drops.load(Ordering::Acquire),
+                            1,
+                            "external owner retired the actual forked entropy resource"
+                        );
+                        assert!(
+                            !would_deadlock.load(Ordering::Acquire),
+                            "native owner held no runtime lock during provider Drop"
+                        );
+                        assert!(
+                            retired_cx.upgrade().is_none(),
+                            "native out-of-lock retirement releases prepared Cx"
+                        );
+                        let mut state = runtime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        assert!(
+                            !state.has_prepared_cleanup_retirements(),
+                            "unwind-safe retirement credit returned"
+                        );
+                        assert!(
+                            state.prepared_cleanup_retirements.capacity() >= 1,
+                            "sequential retirement must recycle reserved queue storage"
+                        );
+                        state
+                            .configure_prepared_cleanup(1)
+                            .expect("capacity reusable after actual retirement");
+                        assert!(
+                            !state
+                                .trace
+                                .snapshot()
+                                .iter()
+                                .any(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for PreparedCleanupRetirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PreparedCleanupRetirement")
+    }
+}
+
 impl SpawnError {
     /// Returns the stable machine-readable error code for this variant.
     ///
@@ -2697,6 +3070,10 @@ pub struct RuntimeState {
     recently_closed_region_order: VecDeque<RegionId>,
     /// Finalizer ids pending per region, mirroring the runtime's LIFO stack.
     pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
+    prepared_cleanup_limit: usize,
+    prepared_cleanup_tasks: HashMap<u64, PreparedCleanupTask>,
+    prepared_cleanup_retirements: Vec<PreparedCleanupRetirement>,
+    outstanding_prepared_retirements: Arc<AtomicUsize>,
     /// Debt monitor receipts retained through queueing, execution, and manual
     /// handoff until the logical finalizer retires.
     finalizer_debt: FinalizerDebt,
@@ -2949,6 +3326,10 @@ impl RuntimeState {
             recently_closed_region_outcomes: HashMap::new(),
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
+            prepared_cleanup_limit: 0,
+            prepared_cleanup_tasks: HashMap::new(),
+            prepared_cleanup_retirements: Vec::new(),
+            outstanding_prepared_retirements: Arc::new(AtomicUsize::new(0)),
             finalizer_debt: FinalizerDebt {
                 monitor: Arc::clone(&debt_monitor),
                 work_ids: HashMap::new(),
@@ -5140,6 +5521,40 @@ impl RuntimeState {
     where
         T: Send + 'static,
     {
+        self.create_task_infrastructure_mode_in(
+            caller_cx,
+            region,
+            budget,
+            cleanup_task,
+            tasks,
+            regions,
+            true,
+        )
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn create_task_infrastructure_mode_in<T>(
+        &mut self,
+        caller_cx: &crate::cx::Cx,
+        region: RegionId,
+        budget: Budget,
+        cleanup_task: bool,
+        tasks: &mut AdmissionTaskTarget<'_>,
+        regions: &AdmissionRegionTarget<'_>,
+        publish_spawn: bool,
+    ) -> Result<
+        (
+            TaskId,
+            crate::runtime::TaskHandle<T>,
+            crate::cx::Cx,
+            crate::runtime::task_handle::TaskResultSender<T>,
+            TaskSpawnEffects,
+        ),
+        SpawnError,
+    >
+    where
+        T: Send + 'static,
+    {
         // Create the TaskRecord
         let now = self.current_runtime_time();
         let idx = tasks
@@ -5166,7 +5581,7 @@ impl RuntimeState {
         let task_id = TaskId::from_arena(idx);
 
         // Register task with cancel protocol validator
-        if self.cancel_protocol_tracking {
+        if publish_spawn && self.cancel_protocol_tracking {
             let mut validator = self.cancel_protocol_validator.lock();
             validator.register_task(task_id, region);
         }
@@ -5178,11 +5593,15 @@ impl RuntimeState {
             spawned_at: now,
             validation_level: CancelValidationLevel::Basic,
         };
-        let validation_result = self.validate_task_protocol_transition(
-            task_id,
-            TaskEvent::Start, // Use Start event for task creation
-            &context,
-        );
+        let validation_result = if publish_spawn {
+            self.validate_task_protocol_transition(
+                task_id,
+                TaskEvent::Start, // Use Start event for task creation
+                &context,
+            )
+        } else {
+            TransitionResult::Valid
+        };
         if matches!(
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
@@ -5298,19 +5717,24 @@ impl RuntimeState {
                 record.set_cx(cx.clone());
             });
 
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         // The spawn-trace logical tick must come from the minting table;
         // an embedded-table read would silently report `None` for
         // external-mode records (br-asupersync-sched-hot-path-perf-bt4y5f.2.2).
-        let logical_time = Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
-        let spawn_effects = self.prepare_task_spawn_effects_with_logical_time(
-            task_id,
-            region,
-            budget,
-            TaskSpawnSource::Direct,
-            now,
-            logical_time,
-        );
+        let spawn_effects = if publish_spawn {
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+            let logical_time =
+                Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
+            self.prepare_task_spawn_effects_with_logical_time(
+                task_id,
+                region,
+                budget,
+                TaskSpawnSource::Direct,
+                now,
+                logical_time,
+            )
+        } else {
+            TaskSpawnEffects::unregistered()
+        };
 
         // Create the inseparable terminal-publication capability and handle.
         let (result_tx, handle) =
@@ -7692,7 +8116,10 @@ impl RuntimeState {
                 // processing-rate observation can sample a user clock, so
                 // abandon that sample when leak recovery flushes under the
                 // runtime lock instead of the usual post-unlock boundary.
-                if matches!(effect, LifecycleObserverEffect::FinalizerDebtCompleted { .. }) {
+                if matches!(
+                    effect,
+                    LifecycleObserverEffect::FinalizerDebtCompleted { .. }
+                ) {
                     continue;
                 }
                 contain_metrics_hook(|| effect.dispatch(&*self.metrics));
@@ -8577,6 +9004,7 @@ impl RuntimeState {
         self.live_task_count() == 0
             && obligations.resolve_ref(&self.obligations).pending_count() == 0
             && !self.has_outstanding_cancel_dispatches()
+            && !self.has_prepared_cleanup_retirements()
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
             && regions.resolve_ref(&self.regions).iter().all(|(_, r)| {
                 r.finalizers_empty()
@@ -10324,6 +10752,126 @@ impl RuntimeState {
     /// dispatching scheduler's workers actually consult, or the injected
     /// `TaskId` can never be resolved (external mode) — while the finalizer
     /// barrier maps and region protocol bookkeeping stay on `self`.
+    pub(crate) fn configure_prepared_cleanup(
+        &mut self,
+        capacity: usize,
+    ) -> Result<(), PreparedCleanupError> {
+        if capacity == 0 || capacity > 65_536 {
+            return Err(PreparedCleanupError::Disabled);
+        }
+        if !self.prepared_cleanup_tasks.is_empty() || self.has_prepared_cleanup_retirements() {
+            return Err(PreparedCleanupError::ReservationsActive);
+        }
+        self.prepared_cleanup_tasks
+            .try_reserve(capacity)
+            .map_err(|_| PreparedCleanupError::StorageUnavailable)?;
+        self.prepared_cleanup_retirements
+            .try_reserve(capacity)
+            .map_err(|_| PreparedCleanupError::StorageUnavailable)?;
+        self.prepared_cleanup_limit = capacity;
+        Ok(())
+    }
+
+    pub(crate) fn has_prepared_cleanup_retirements(&self) -> bool {
+        self.outstanding_prepared_retirements
+            .load(Ordering::Acquire)
+            != 0
+    }
+
+    pub(crate) fn take_prepared_cleanup_retirements(&mut self) -> Vec<PreparedCleanupRetirement> {
+        if self.prepared_cleanup_retirements.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.prepared_cleanup_retirements)
+    }
+
+    pub(crate) fn take_stopped_prepared_cleanup(&mut self) -> impl FnOnce() + Send + 'static {
+        let pending = std::mem::take(&mut self.prepared_cleanup_tasks);
+        move || drop(pending)
+    }
+
+    pub(crate) fn recycle_prepared_cleanup_retirement_storage(
+        &mut self,
+        batch: &mut Vec<PreparedCleanupRetirement>,
+    ) {
+        assert!(batch.is_empty());
+        // Reuse the startup allocation after a sequential drain. Concurrent
+        // handoffs may have allocated another queue while this batch drained;
+        // this is capacity reuse, not an allocation-free activation guarantee.
+        if self.prepared_cleanup_retirements.is_empty()
+            && self.prepared_cleanup_retirements.capacity() < batch.capacity()
+        {
+            std::mem::swap(&mut self.prepared_cleanup_retirements, batch);
+        }
+    }
+
+    /// Build real task/Cx/channel storage while startup allocation is permitted.
+    /// Failure before publication returns the original future to its caller.
+    /// Box/Arc allocation still follows the process allocator's OOM policy.
+    pub(crate) fn prepare_async_cleanup_in<F>(
+        &mut self,
+        region: RegionId,
+        future: F,
+        tasks: &mut AdmissionTaskTarget<'_>,
+        table_owner: Option<Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) -> Result<(), (PreparedCleanupError, F)>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self.prepared_cleanup_limit == 0 {
+            return Err((PreparedCleanupError::Disabled, future));
+        }
+        if self.prepared_cleanup_tasks.len().saturating_add(
+            self.outstanding_prepared_retirements
+                .load(Ordering::Acquire),
+        ) >= self.prepared_cleanup_limit
+        {
+            return Err((PreparedCleanupError::AtCapacity, future));
+        }
+        if !self
+            .regions
+            .get(region.arena_index())
+            .is_some_and(|r| r.state() == RegionState::Open)
+        {
+            return Err((PreparedCleanupError::RegionUnavailable, future));
+        }
+        let cx = self.create_system_cx();
+        let infrastructure = match self.create_task_infrastructure_mode_in::<()>(
+            &cx,
+            region,
+            finalizer_budget(),
+            true,
+            tasks,
+            &AdmissionRegionTarget::Embedded,
+            false,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Err((PreparedCleanupError::TaskAdmission(error), future)),
+        };
+        let task = infrastructure.0;
+        self.regions
+            .get(region.arena_index())
+            .expect("open region")
+            .remove_task(task);
+        assert!(tasks.resolve(&mut self.tasks).make_cleanup_dormant(task));
+        // No task is published to a scheduler and no live task remains here.
+        // Existing finalizer registration retains callback/LIFO/debt ownership.
+        let id = self.next_finalizer_id;
+        assert!(self.register_async_finalizer(region, future));
+        assert!(
+            self.prepared_cleanup_tasks
+                .insert(
+                    id,
+                    PreparedCleanupTask {
+                        infrastructure,
+                        table: table_owner
+                    }
+                )
+                .is_none()
+        );
+        Ok(())
+    }
+
     fn spawn_finalizer_task_in(
         &mut self,
         region_id: RegionId,
@@ -10369,26 +10917,88 @@ impl RuntimeState {
             budget.poll_quota
         );
 
-        let system_cx = self.create_system_cx();
-        let Ok((task_id, _handle, cx, result_tx, spawn_effects)) = self
-            .create_task_infrastructure_in::<()>(
+        let infrastructure = if let Some(prepared) =
+            self.prepared_cleanup_tasks.remove(&finalizer_id)
+        {
+            let task = prepared.infrastructure.0;
+            let region = self
+                .regions
+                .get(region_id.arena_index())
+                .expect("finalizing region");
+            if region.add_cleanup_task(task).is_err() {
+                self.prepared_cleanup_tasks.insert(finalizer_id, prepared);
+                return Err(future);
+            }
+            assert!(
+                tasks.resolve(&mut self.tasks).activate_cleanup(task),
+                "prepared task generation must remain reserved"
+            );
+            tasks.resolve(&mut self.tasks).update_task(task, |record| {
+                record.deadline = budget.deadline;
+                record.polls_remaining = budget.poll_quota;
+            });
+            {
+                let mut inner = prepared.infrastructure.2.inner.write();
+                inner.budget = budget;
+                inner.budget_baseline = budget;
+            }
+            let now = self.current_runtime_time();
+            tasks
+                .resolve(&mut self.tasks)
+                .update_task(task, |record| record.created_at = now);
+            if self.cancel_protocol_tracking {
+                self.cancel_protocol_validator
+                    .lock()
+                    .register_task(task, region_id);
+            }
+            let context = TaskContext {
+                task_id: task,
+                region_id,
+                spawned_at: now,
+                validation_level: CancelValidationLevel::Basic,
+            };
+            let transition =
+                self.validate_task_protocol_transition(task, TaskEvent::Start, &context);
+            if matches!(
+                transition,
+                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+            ) {
+                log_cancel_protocol_violation("prepared cleanup activation", &transition);
+            }
+            let logical_time = Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task);
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+            let mut infrastructure = prepared.infrastructure;
+            infrastructure.4 = self.prepare_task_spawn_effects_with_logical_time(
+                task,
+                region_id,
+                budget,
+                TaskSpawnSource::Direct,
+                now,
+                logical_time,
+            );
+            infrastructure
+        } else {
+            let system_cx = self.create_system_cx();
+            let Ok(infrastructure) = self.create_task_infrastructure_in::<()>(
                 &system_cx,
                 region_id,
                 budget,
                 true,
                 tasks,
                 &AdmissionRegionTarget::Embedded,
-            )
-        else {
-            // EDGE CASE VALIDATION: Log task creation failure for debugging
-            // This helps identify resource exhaustion scenarios that could block finalizer execution
-            debug!(
-                region_id = ?region_id,
-                finalizer_id = finalizer_id,
-                "br-asupersync-mg70eb: failed to create async finalizer task - returning future for requeueing"
-            );
-            return Err(future);
+            ) else {
+                // EDGE CASE VALIDATION: Log task creation failure for debugging
+                // This helps identify resource exhaustion scenarios that could block finalizer execution
+                debug!(
+                    region_id = ?region_id,
+                    finalizer_id = finalizer_id,
+                    "br-asupersync-mg70eb: failed to create async finalizer task - returning future for requeueing"
+                );
+                return Err(future);
+            };
+            infrastructure
         };
+        let (task_id, _handle, cx, result_tx, spawn_effects) = infrastructure;
         let cx_inner = Arc::clone(&cx.inner);
         let masked = MaskedFinalizer::new(future, cx_inner);
         // Keep task admission runnable under the legacy infrastructure budget;
@@ -10926,6 +11536,38 @@ impl RuntimeState {
         finalizer_id: u64,
         finalizer: Finalizer,
     ) -> (Finalizer, ManualFinalizerReceipt) {
+        // The external driver owns the callback, so no native task will ever
+        // activate this reservation. Release the exact table generation now,
+        // but transfer all owned payloads into the native owner's bounded
+        // retirement queue. The receipt remains safe to drop under this lock.
+        let prepared_retirement =
+            self.prepared_cleanup_tasks
+                .remove(&finalizer_id)
+                .map(|prepared| {
+                    let task = prepared.infrastructure.0;
+                    let record = if let Some(table) = &prepared.table {
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take_dormant_cleanup(task)
+                    } else {
+                        self.tasks.take_dormant_cleanup(task)
+                    }
+                    .expect("manual handoff must own the prepared generation");
+                    self.outstanding_prepared_retirements
+                        .fetch_add(1, Ordering::AcqRel);
+                    PreparedCleanupRetirement {
+                        payload: Some(PreparedCleanupRetirementPayload {
+                            _record: record,
+                            _infrastructure: prepared.infrastructure,
+                            _table: prepared.table,
+                        }),
+                        outstanding: Arc::clone(&self.outstanding_prepared_retirements),
+                    }
+                });
+        if let Some(retirement) = prepared_retirement {
+            self.prepared_cleanup_retirements.push(retirement);
+        }
         self.validate_live_region_protocol_transition_in(
             regions,
             region_id,

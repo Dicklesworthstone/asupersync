@@ -1142,6 +1142,51 @@
     }
 
     #[test]
+    fn restricted_observer_can_join_and_cancel_without_consuming_later_result() {
+        let observer = Cx::<cap::None>::detached_cancel_context();
+        let child = test_cx();
+        let (tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 20)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wakes));
+        let mut poll_cx = Context::from_waker(&waker);
+        let mut joining = Box::pin(handle.join_cancellable(&observer));
+        assert!(joining.as_mut().poll(&mut poll_cx).is_pending());
+        let reason = CancelReason::user("restricted observer cancelled");
+        observer.set_cancel_reason(reason.clone());
+        assert!(wakes.load(Ordering::Acquire) > 0);
+        assert_eq!(
+            joining.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Err(JoinError::Cancelled(reason.clone())))
+        );
+        assert_eq!(child.cancel_reason(), Some(reason));
+        drop(joining);
+        assert!(!handle.terminal_consumed_for_test());
+        publish_terminal_result(tx, Ok(73));
+        assert_eq!(block_on(handle.join(&observer)), Ok(73));
+    }
+
+    #[test]
+    fn restricted_observer_retired_result_wins_over_cancellation() {
+        let observer = Cx::<cap::None>::detached_cancel_context();
+        observer.set_cancel_reason(CancelReason::user("already cancelled"));
+        let child = test_cx();
+        let (tx, rx) = task_result_channel::<i32>();
+        let mut handle = TaskHandle::new(
+            TaskId::from_arena(ArenaIndex::new(35, 21)),
+            rx,
+            Arc::downgrade(&child.inner),
+        );
+        publish_terminal_result(tx, Ok(41));
+        assert_eq!(block_on(handle.join_cancellable(&observer)), Ok(41));
+        assert!(!child.is_cancel_requested());
+    }
+
+    #[test]
     fn cancellable_join_wakes_on_caller_cancel_and_keeps_the_terminal_for_rejoin() {
         let caller = test_cx();
         let child = test_cx();

@@ -57,9 +57,14 @@ impl Hash for ArenaIndex {
     }
 }
 
-/// A slot in the arena that can be occupied or vacant.
+/// A slot in the arena that can be occupied, dormant, or vacant.
 #[derive(Debug)]
 enum Slot<T> {
+    /// Owned storage excluded from liveness and from the reusable free list.
+    Dormant {
+        value: T,
+        generation: u32,
+    },
     Occupied {
         value: T,
         generation: u32,
@@ -179,7 +184,9 @@ impl<T> Arena<T> {
                         generation: generation_value,
                     }
                 }
-                Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
+                Slot::Occupied { .. } | Slot::Dormant { .. } => {
+                    unreachable!("free list pointed to owned slot")
+                }
             };
             self.len += 1;
             idx
@@ -212,7 +219,9 @@ impl<T> Arena<T> {
                     next_free,
                     generation,
                 } => (next_free, generation),
-                Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
+                Slot::Occupied { .. } | Slot::Dormant { .. } => {
+                    unreachable!("free list pointed to owned slot")
+                }
             };
 
             let idx = ArenaIndex {
@@ -287,7 +296,7 @@ impl<T> Arena<T> {
 
                 match old_slot {
                     Slot::Occupied { value, .. } => Some(value),
-                    Slot::Vacant { .. } => unreachable!(),
+                    Slot::Vacant { .. } | Slot::Dormant { .. } => unreachable!(),
                 }
             }
             _ => None,
@@ -314,6 +323,67 @@ impl<T> Arena<T> {
         match self.slots.get_mut(index.index as usize)? {
             Slot::Occupied { value, generation } if *generation == index.generation => Some(value),
             _ => None,
+        }
+    }
+
+    /// Hide an owned value without releasing its generation or backing storage.
+    /// Dormant values are not live, iterable, or available for ordinary reuse.
+    pub(crate) fn make_dormant(&mut self, index: ArenaIndex) -> bool {
+        let Some(slot) = self.slots.get_mut(index.index as usize) else {
+            return false;
+        };
+        if !matches!(slot, Slot::Occupied { generation, .. } if *generation == index.generation) {
+            return false;
+        }
+        let old = core::mem::replace(
+            slot,
+            Slot::Vacant {
+                next_free: None,
+                generation: 0,
+            },
+        );
+        let Slot::Occupied { value, generation } = old else {
+            unreachable!()
+        };
+        *slot = Slot::Dormant { value, generation };
+        self.len -= 1;
+        true
+    }
+
+    /// Activate exactly the retained generation; no insertion/allocation occurs.
+    pub(crate) fn activate_dormant(&mut self, index: ArenaIndex) -> bool {
+        let Some(slot) = self.slots.get_mut(index.index as usize) else {
+            return false;
+        };
+        if !matches!(slot, Slot::Dormant { generation, .. } if *generation == index.generation) {
+            return false;
+        }
+        let old = core::mem::replace(
+            slot,
+            Slot::Vacant {
+                next_free: None,
+                generation: 0,
+            },
+        );
+        let Slot::Dormant { value, generation } = old else {
+            unreachable!()
+        };
+        *slot = Slot::Occupied { value, generation };
+        self.len += 1;
+        true
+    }
+
+    /// Teardown owns the table exclusively and must retire dormant payloads too.
+    pub(crate) fn activate_all_dormant_for_teardown(&mut self) {
+        for i in 0..self.slots.len() {
+            let generation = match &self.slots[i] {
+                Slot::Dormant { generation, .. } => *generation,
+                _ => continue,
+            };
+            assert!(self.activate_dormant(ArenaIndex::new(
+                u32::try_from(i).expect("arena slot index"),
+                generation,
+            )));
         }
     }
 
@@ -349,6 +419,9 @@ impl<T> Arena<T> {
                 // Process the remaining slots to link any existing Vacant slots
                 // into our newly rebuilt free list.
                 for i in self.current_index..self.arena.slots.len() {
+                    if matches!(&self.arena.slots[i], Slot::Dormant { .. }) {
+                        continue;
+                    }
                     if matches!(&self.arena.slots[i], Slot::Occupied { .. }) {
                         self.new_len += 1;
                         continue;
@@ -392,9 +465,14 @@ impl<T> Arena<T> {
         while guard.current_index < guard.arena.slots.len() {
             let i = guard.current_index;
 
+            if matches!(&guard.arena.slots[i], Slot::Dormant { .. }) {
+                guard.current_index += 1;
+                continue;
+            }
+
             let kept = match &mut guard.arena.slots[i] {
                 Slot::Occupied { value, .. } => f(value),
-                Slot::Vacant { .. } => false,
+                Slot::Vacant { .. } | Slot::Dormant { .. } => false,
             };
 
             if kept {
@@ -454,7 +532,8 @@ impl<T> Arena<T> {
         guard.panicked = false;
     }
 
-    /// Drains all occupied values, leaving the arena empty.
+    /// Drains all occupied values, leaving no live values.
+    /// Dormant reservations retain their owned storage until activation or drop.
     ///
     /// Yields ownership of each value without cloning, in index order. All
     /// slots become vacant and are linked into the free list ahead of the
@@ -495,7 +574,7 @@ impl<T> Arena<T> {
                     },
                     value,
                 )),
-                Slot::Vacant { .. } => None,
+                Slot::Vacant { .. } | Slot::Dormant { .. } => None,
             })
     }
 
@@ -519,7 +598,7 @@ impl<T> Arena<T> {
                     },
                     value,
                 )),
-                Slot::Vacant { .. } => None,
+                Slot::Vacant { .. } | Slot::Dormant { .. } => None,
             })
     }
 }
@@ -572,7 +651,7 @@ impl<T> Iterator for DrainValues<'_, T> {
                 } else if let Some(previous) = self.last_drained {
                     match &mut self.arena.slots[previous as usize] {
                         Slot::Vacant { next_free, .. } => next_free.replace(index),
-                        Slot::Occupied { .. } => {
+                        Slot::Occupied { .. } | Slot::Dormant { .. } => {
                             unreachable!(
                                 "a drained slot stays vacant while the drain holds the arena"
                             )
@@ -618,3 +697,30 @@ impl<T> Drop for DrainValues<'_, T> {
 #[path = "arena_inline_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+mod dormant_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn dormant_storage_survives_normal_retain_drain_and_generation_reuse() {
+        let mut arena = Arena::new();
+        let reserved = arena.insert(41_u32);
+        assert!(arena.make_dormant(reserved));
+        assert!(arena.is_empty());
+        assert!(arena.get(reserved).is_none());
+        let ordinary = arena.insert(7);
+        assert_ne!(ordinary.index(), reserved.index());
+        arena.retain(|_| false);
+        assert!(arena.is_empty());
+        assert_eq!(arena.drain_values().count(), 0);
+        assert!(
+            !arena.activate_dormant(ArenaIndex::new(reserved.index(), reserved.generation() + 1))
+        );
+        assert!(arena.activate_dormant(reserved));
+        assert_eq!(arena.remove(reserved), Some(41));
+        assert!(!arena.activate_dormant(reserved));
+        let replacement = arena.insert(99);
+        assert_ne!(replacement, reserved);
+        assert_eq!(arena.get(replacement), Some(&99));
+    }
+}

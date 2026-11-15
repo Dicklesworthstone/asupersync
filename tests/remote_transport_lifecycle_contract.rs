@@ -6062,7 +6062,8 @@ fn native_remote_v4_origin_deadline_cancels_and_drains_on_its_own_clock() {
     // The receiver has ten seconds on its own clock. Advance only the origin,
     // so completion proves that the original lifetime remains live locally.
     clock.advance(10_000_000_000);
-    timer.process_timers();
+    // The worker may dispatch first; cancellation and drain assertions below are the oracle.
+    let _ = timer.process_timers();
     let cleanup_cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let result = runtime.block_on(task.join(&cleanup_cx)).expect("expiry should drain terminal");
     assert!(matches!(result, RemoteOutcome::Cancelled(ref reason) if reason.kind == CancelKind::Deadline));

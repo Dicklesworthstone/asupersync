@@ -124,6 +124,162 @@ fn finalizer_only_root_executes_pending_cleanup_with_zero_normal_task_quota() {
     finalizer_only_root_cleanup(true);
 }
 
+#[test]
+fn prepared_cleanup_retains_storage_without_liveness_and_runs_at_quota_exhaustion() {
+    use crate::runtime::state::PreparedCleanupError;
+    for case in 0..4 {
+        let runtime = runtime_for(case);
+        runtime
+            .configure_prepared_cleanup(1)
+            .expect("prepare capacity");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::clone(&ran);
+        let activated_task = Arc::new(Mutex::new(None));
+        let observed_task = Arc::clone(&activated_task);
+        let spawns_before = runtime
+            .trace_snapshot()
+            .iter()
+            .filter(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+            .count();
+        let root = runtime.inner.root_region;
+        let lifo_completed = Arc::clone(&ran);
+        assert!(
+            runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .register_sync_finalizer(root, move || {
+                    assert_eq!(
+                        lifo_completed.load(Ordering::Acquire),
+                        1,
+                        "prepared async cleanup precedes older synchronous cleanup"
+                    );
+                })
+        );
+        assert!(
+            runtime
+                .prepare_async_cleanup(async move {
+                    let cx = Cx::current().expect("real cleanup context");
+                    *observed_task.lock() = Some(cx.task_id());
+                    assert!(cx.inner.read().mask_depth > 0);
+                    let mut sleep =
+                        std::pin::pin!(crate::time::sleep(cx.now(), Duration::from_millis(5)));
+                    let mut observed_pending = false;
+                    std::future::poll_fn(|task| {
+                        let poll = sleep.as_mut().poll(task);
+                        observed_pending |= poll.is_pending();
+                        poll
+                    })
+                    .await;
+                    assert!(observed_pending, "timer must exercise pending/wake path");
+                    assert!(
+                        cx.checkpoint().is_ok(),
+                        "cleanup remains masked during shutdown"
+                    );
+                    completed.fetch_add(1, Ordering::AcqRel);
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime
+                .trace_snapshot()
+                .iter()
+                .filter(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+                .count(),
+            spawns_before,
+            "preparation owns storage but must not announce a live task"
+        );
+        let rejected_polled = Arc::new(AtomicBool::new(false));
+        let polled = Arc::clone(&rejected_polled);
+        let rejection = runtime.prepare_async_cleanup(async move {
+            polled.store(true, Ordering::Release);
+        });
+        let Err((PreparedCleanupError::AtCapacity, rejected_future)) = rejection else {
+            panic!("second reservation must return the unconsumed future");
+        };
+        assert_eq!(
+            runtime
+                .trace_snapshot()
+                .iter()
+                .filter(|event| event.kind == crate::trace::TraceEventKind::Spawn)
+                .count(),
+            spawns_before,
+            "capacity refusal cannot publish a phantom task"
+        );
+        // The caller still owns the rejected future and can execute it elsewhere.
+        runtime.block_on(rejected_future);
+        assert!(rejected_polled.load(Ordering::Acquire));
+        assert_eq!(
+            ran.load(Ordering::Acquire),
+            0,
+            "prepared cleanup cannot run early"
+        );
+        {
+            let state = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                state.region_finalizer_count(root),
+                2,
+                "refusal registered nothing"
+            );
+        }
+        assert_eq!(
+            runtime.root_drain_snapshot(Duration::ZERO).live_tasks,
+            0,
+            "dormant cleanup must not prevent entering Finalizing"
+        );
+        assert_normal_quota_exhausted(&runtime, 0);
+        {
+            let mut state = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(state.set_region_limits(
+                root,
+                crate::record::region::RegionLimits {
+                    max_tasks: Some(0),
+                    max_heap_bytes: Some(0),
+                    ..crate::record::region::RegionLimits::unlimited()
+                }
+            ));
+            assert!(state.region(root).unwrap().heap_alloc(1_u8).is_err());
+        }
+        let report = runtime.shutdown_drained(Duration::from_secs(2));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert_eq!(ran.load(Ordering::Acquire), 1);
+        let activated = activated_task
+            .lock()
+            .expect("callback observed its actual task");
+        let events = runtime.trace_snapshot();
+        for kind in [
+            crate::trace::TraceEventKind::Spawn,
+            crate::trace::TraceEventKind::Complete,
+        ] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind == kind
+                        && matches!(event.data,
+                crate::trace::TraceData::Task { task, .. } if task == activated))
+                    .count(),
+                1,
+                "activated cleanup has exactly one matched spawn/retirement"
+            );
+        }
+        eprintln!(
+            "prepared_cleanup case={case} reservation_refused=true callback_returned=true timer_completed=true task_quota=0 heap_accounting_quota=0 retired=true"
+        );
+    }
+}
+
 fn assert_normal_quota_exhausted(runtime: &Runtime, limit: usize) {
     let root = runtime.inner.root_region;
     {
@@ -456,7 +612,11 @@ fn root_drain_publishes_parked_cancellation_without_a_worker_turn() {
                 runtime.shutdown_drained(Duration::ZERO).outcome,
                 RootDrainOutcome::Quiescent
             );
-            assert_eq!(probe.calls.load(Ordering::Acquire), 1, "dispatch is one-shot");
+            assert_eq!(
+                probe.calls.load(Ordering::Acquire),
+                1,
+                "dispatch is one-shot"
+            );
             eprintln!(
                 "ROOT_DRAIN bead=asupersync-wcc1f5 workers={workers} sharded={sharded} parked_batch=true caller_published=true report={report:?}"
             );
@@ -959,15 +1119,20 @@ fn root_drain_contains_a_residual_cancellation_clock_panic() {
 
 #[test]
 fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer() {
-    shutdown_child_obligation_finalizer(false);
+    shutdown_child_obligation_finalizer(false, false);
 }
 
 #[test]
 fn shutdown_drained_executes_cleanup_after_normal_task_quota_exhaustion() {
-    shutdown_child_obligation_finalizer(true);
+    shutdown_child_obligation_finalizer(true, false);
 }
 
-fn shutdown_child_obligation_finalizer(exhaust_normal_quota: bool) {
+#[test]
+fn prepared_cleanup_retires_after_cancelled_child_at_normal_quota_exhaustion() {
+    shutdown_child_obligation_finalizer(true, true);
+}
+
+fn shutdown_child_obligation_finalizer(exhaust_normal_quota: bool, prepared: bool) {
     for case in 0..4 {
         let runtime = runtime_for(case);
         let root = runtime.inner.root_region;
@@ -1019,20 +1184,28 @@ fn shutdown_child_obligation_finalizer(exhaust_normal_quota: bool) {
         );
         let finalized = Arc::new(AtomicUsize::new(0));
         let finalizer_flag = Arc::clone(&finalized);
-        assert!(
+        let cleanup = async move {
+            assert!(
+                settled.load(Ordering::Acquire),
+                "child settled before root finalization"
+            );
+            finalizer_flag.fetch_add(1, Ordering::AcqRel);
+        };
+        if prepared {
             runtime
-                .inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .register_async_finalizer(root, async move {
-                    assert!(
-                        settled.load(Ordering::Acquire),
-                        "child settled before root finalization"
-                    );
-                    finalizer_flag.fetch_add(1, Ordering::AcqRel);
-                })
-        );
+                .configure_prepared_cleanup(1)
+                .expect("cleanup capacity");
+            assert!(runtime.prepare_async_cleanup(cleanup).is_ok());
+        } else {
+            assert!(
+                runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .register_async_finalizer(root, cleanup)
+            );
+        }
         if exhaust_normal_quota {
             assert_normal_quota_exhausted(&runtime, 1);
         }
@@ -1068,7 +1241,10 @@ fn immediate_scope_region<T>(future: impl Future<Output = T>) -> T {
     // only empty regions with ready bodies, so no state lock may cross a
     // Pending boundary or block native admission/completion.
     let mut future = std::pin::pin!(future);
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("empty scope region must close in its first poll"),
     }
@@ -1364,5 +1540,136 @@ fn scope_region_admission_cannot_replenish_exhausted_native_capabilities() {
                 .expect("native capability refusal owner completes successfully");
         });
         assert_scope_root_drained(&runtime, workers);
+    }
+}
+
+#[derive(Debug)]
+struct GatedCleanupEntropy {
+    entered: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
+    drops: Arc<AtomicUsize>,
+    child: bool,
+}
+
+impl crate::util::EntropySource for GatedCleanupEntropy {
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        dest.fill(0);
+    }
+    fn next_u64(&self) -> u64 {
+        0
+    }
+    fn source_id(&self) -> &'static str {
+        "gated-cleanup-retirement"
+    }
+    fn fork(&self, _task: TaskId) -> Arc<dyn crate::util::EntropySource> {
+        Arc::new(Self {
+            entered: Arc::clone(&self.entered),
+            released: Arc::clone(&self.released),
+            drops: Arc::clone(&self.drops),
+            child: true,
+        })
+    }
+}
+
+impl Drop for GatedCleanupEntropy {
+    fn drop(&mut self) {
+        if self.child {
+            self.entered.store(true, Ordering::Release);
+            let started = Instant::now();
+            while !self.released.load(Ordering::Acquire) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "retirement test gate timed out"
+                );
+                std::thread::yield_now();
+            }
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[test]
+fn prepared_retirement_fences_quiescence_after_actual_region_close() {
+    for case in 0..4 {
+        for abandoned in [false, true] {
+            let runtime = runtime_for(case);
+            let entered = Arc::new(AtomicBool::new(false));
+            let released = Arc::new(AtomicBool::new(false));
+            let drops = Arc::new(AtomicUsize::new(0));
+            runtime
+                .inner
+                .state
+                .lock()
+                .unwrap()
+                .set_entropy_source(Arc::new(GatedCleanupEntropy {
+                    entered: Arc::clone(&entered),
+                    released: Arc::clone(&released),
+                    drops: Arc::clone(&drops),
+                    child: false,
+                }));
+            runtime.configure_prepared_cleanup(1).unwrap();
+            assert!(runtime.prepare_async_cleanup(async {}).is_ok());
+            let root = runtime.inner.root_region;
+            let (finalizer, mut receipt) = {
+                let mut state = runtime.inner.state.lock().unwrap();
+                let region = state.region(root).unwrap();
+                region.begin_close(None);
+                assert!(region.begin_finalize());
+                state.pop_region_finalizer(root).unwrap()
+            };
+            if abandoned {
+                drop(finalizer);
+            } else {
+                let crate::record::Finalizer::Async(mut future) = finalizer else {
+                    panic!("async callback")
+                };
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_ready()
+                );
+            }
+            {
+                let mut state = runtime.inner.state.lock().unwrap();
+                if abandoned {
+                    state.abandon_manual_finalizer(&mut receipt).unwrap();
+                } else {
+                    state.complete_manual_finalizer(&mut receipt).unwrap();
+                }
+                drop(receipt); // Allowed caller holds the state lock.
+                state.advance_region_state(root);
+                assert!(state.region(root).is_none(), "actual close must progress");
+                assert!(!state.is_quiescent(), "queued foreign resources remain");
+            }
+            assert!(!runtime.is_quiescent());
+            assert_eq!(
+                runtime.root_drain_snapshot(Duration::ZERO).outcome,
+                RootDrainOutcome::TimedOut
+            );
+            let state = Arc::clone(&runtime.inner.state);
+            let retiring = std::thread::spawn(move || retire_prepared_cleanup_batch(&state));
+            wait_until(
+                || entered.load(Ordering::Acquire),
+                "foreign destructor must start",
+            );
+            // Capture observations before releasing the destructor, but release and
+            // join before asserting so a failed oracle cannot strand the helper.
+            let state_quiet = runtime.inner.state.lock().unwrap().is_quiescent();
+            let runtime_quiet = runtime.is_quiescent();
+            let outcome = runtime.root_drain_snapshot(Duration::ZERO).outcome;
+            released.store(true, Ordering::Release);
+            retiring.join().unwrap();
+            assert!(!state_quiet, "detached destructor remains live");
+            assert!(!runtime_quiet);
+            assert_eq!(outcome, RootDrainOutcome::TimedOut);
+            assert_eq!(drops.load(Ordering::Acquire), 1);
+            assert!(runtime.inner.state.lock().unwrap().is_quiescent());
+            assert!(runtime.is_quiescent());
+            assert_eq!(
+                runtime.root_drain_snapshot(Duration::ZERO).outcome,
+                RootDrainOutcome::Quiescent
+            );
+        }
     }
 }

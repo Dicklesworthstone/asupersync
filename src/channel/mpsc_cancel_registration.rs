@@ -102,20 +102,23 @@ impl<Caps> Drop for CancelRegistration<'_, Caps> {
 
 /// A stream owns its Cx, so its cancellation slot must own that same context
 /// rather than borrow another field of the stream.
-pub struct OwnedCancelRegistration {
-    cx: Cx,
+pub struct OwnedCancelRegistration<Caps = crate::cx::cap::All> {
+    cx: Cx<Caps>,
     state: RegistrationState,
 }
 
-impl OwnedCancelRegistration {
-    pub(crate) fn new(cx: Cx) -> Self {
+// This registration has no self-references or structurally pinned fields.
+impl<Caps> Unpin for OwnedCancelRegistration<Caps> {}
+
+impl<Caps> OwnedCancelRegistration<Caps> {
+    pub(crate) fn new(cx: Cx<Caps>) -> Self {
         Self {
             cx,
             state: RegistrationState::new(),
         }
     }
 
-    pub(crate) fn cx(&self) -> &Cx {
+    pub(crate) fn cx(&self) -> &Cx<Caps> {
         &self.cx
     }
 
@@ -128,7 +131,7 @@ impl OwnedCancelRegistration {
     }
 }
 
-impl std::fmt::Debug for OwnedCancelRegistration {
+impl<Caps: std::fmt::Debug> std::fmt::Debug for OwnedCancelRegistration<Caps> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnedCancelRegistration")
             .field("cx", &self.cx)
@@ -144,7 +147,7 @@ impl std::fmt::Debug for OwnedCancelRegistration {
     }
 }
 
-impl Drop for OwnedCancelRegistration {
+impl<Caps> Drop for OwnedCancelRegistration<Caps> {
     fn drop(&mut self) {
         self.clear();
     }
