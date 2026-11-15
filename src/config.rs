@@ -292,12 +292,18 @@ pub struct ServerConfig {
     /// Bind address for the HTTP listener.
     pub bind_addr: SocketAddr,
     /// HTTP/1.1 per-connection configuration.
+    ///
+    /// [`Self::listener_config`] and [`Self::bind_http1`] use this in preference
+    /// to `listener.http_config`.
     pub http: Http1Config,
     /// HTTP listener configuration (connection limits, drain timeout).
     pub listener: Http1ListenerConfig,
-    /// Connection pool configuration.
+    /// Outbound connection pool configuration, separate from the HTTP listener.
     pub pool: PoolConfig,
-    /// Graceful shutdown drain timeout.
+    /// Overall graceful shutdown budget for [`Self::bind_http1`].
+    ///
+    /// This becomes the listener's hard drain timeout. Its soft drain timeout
+    /// is capped at this duration.
     pub shutdown_timeout: Duration,
     /// Worker thread count override. `None` uses available parallelism.
     pub worker_threads: Option<usize>,
@@ -409,6 +415,108 @@ impl ServerConfig {
     pub fn worker_threads(mut self, threads: Option<usize>) -> Self {
         self.worker_threads = threads;
         self
+    }
+
+    /// Resolve the unified configuration into an HTTP listener configuration.
+    ///
+    /// The top-level [`http`](Self::http) settings supply every per-connection
+    /// limit and the host policy. [`shutdown_timeout`](Self::shutdown_timeout)
+    /// supplies the hard drain budget; the listener's soft drain budget is
+    /// the smaller of that duration and `listener.drain_timeout`. Connection
+    /// capacity, load-balancer behavior, and the listener clock are preserved.
+    /// This validates the configuration and performs no I/O.
+    ///
+    /// Use this projection with the streaming, upgrade-aware, Unix-socket, or
+    /// TLS listener constructors when [`Self::bind_http1`] is not the desired
+    /// transport or handler shape.
+    pub fn listener_config(&self) -> Result<Http1ListenerConfig, ConfigError> {
+        self.validate()?;
+        let mut listener = self.listener.clone();
+        listener.http_config = self.http.clone();
+        listener.drain_timeout = listener.drain_timeout.min(self.shutdown_timeout);
+        listener.hard_drain_timeout = self.shutdown_timeout;
+        Ok(listener)
+    }
+
+    /// Create a runtime builder using this server's worker-count override.
+    ///
+    /// Validation runs before constructing the builder. `None` retains the
+    /// runtime's available-parallelism default. The returned builder retains
+    /// native I/O, timers, and the on-demand blocking pool, and may be further
+    /// customized before [`build`](crate::runtime::RuntimeBuilder::build).
+    pub fn runtime_builder(&self) -> Result<crate::runtime::RuntimeBuilder, ConfigError> {
+        self.validate()?;
+        let builder = crate::runtime::RuntimeBuilder::new();
+        Ok(match self.worker_threads {
+            Some(threads) => builder.worker_threads(threads),
+            None => builder,
+        })
+    }
+
+    /// Bind the configured address and apply the unified HTTP and drain limits.
+    ///
+    /// Configuration is validated before binding. The explicit context supplies
+    /// the I/O authority for every poll, including when the caller has a broader
+    /// ambient context. Cancellation is checked before binding and before
+    /// returning the listener. An invalid configuration returns
+    /// [`InvalidInput`](std::io::ErrorKind::InvalidInput); cancellation returns
+    /// [`Interrupted`](std::io::ErrorKind::Interrupted).
+    ///
+    /// The returned listener has not spawned any work. Run it with
+    /// [`Http1Listener::run_owned_in`](crate::http::h1::listener::Http1Listener::run_owned_in)
+    /// to keep accepted connections in the serving context's region. The
+    /// default host policy remains deny-by-default; set the served hosts in
+    /// [`http`](Self::http). [`pool`](Self::pool) configures outbound clients
+    /// and is not applied to incoming connections.
+    ///
+    /// ```no_run
+    /// use asupersync::config::{ServerConfig, ServerProfile};
+    /// use asupersync::cx::Cx;
+    /// use asupersync::http::h1::server::{HostPolicy, Http1Config};
+    /// use asupersync::http::h1::types::Response;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = ServerConfig::from_profile(ServerProfile::Development).http(
+    ///     Http1Config::default()
+    ///         .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()])),
+    /// );
+    /// let runtime = config.runtime_builder()?.build()?;
+    /// runtime.block_on(async {
+    ///     let cx = Cx::current().expect("runtime context");
+    ///     let listener = config.bind_http1(&cx, |_request| async {
+    ///         Response::new(200, "OK", b"Hello".to_vec())
+    ///     }).await?;
+    ///     listener.run_owned_in(&cx).await?;
+    ///     Ok::<_, std::io::Error>(())
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn bind_http1<Caps, F, Fut>(
+        &self,
+        cx: &crate::cx::Cx<Caps>,
+        handler: F,
+    ) -> std::io::Result<crate::http::h1::listener::Http1Listener<F>>
+    where
+        Caps: crate::cx::cap::CapSetRuntimeMask,
+        F: Fn(crate::http::h1::types::Request) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = crate::http::h1::types::Response> + Send + 'static,
+    {
+        let listener_config = self
+            .listener_config()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        cx.checkpoint()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Interrupted, error))?;
+        let listener = cx
+            .with_ambient(crate::http::h1::listener::Http1Listener::bind_with_config(
+                self.bind_addr,
+                handler,
+                listener_config,
+            ))
+            .await?;
+        cx.checkpoint()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Interrupted, error))?;
+        Ok(listener)
     }
 
     /// Validate the server configuration.
