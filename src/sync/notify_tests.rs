@@ -190,8 +190,8 @@ mod tests {
         drop(waker);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
-        // Model the real notify_waiters interleaving where generation advances
-        // before the broadcaster obtains the waiter mutex.
+        // Inject generation readiness with the Waker still queued to exercise
+        // the completion cleanup boundary independently of notifier detachment.
         notify.generation.fetch_add(1, Ordering::Release);
         assert!(poll_with_waker(&mut notified, Waker::noop()).is_ready());
 
@@ -6204,5 +6204,589 @@ mod tests {
             "a completed future reports true"
         );
         crate::test_complete!("enabled_notified_receives_a_broadcast_sent_before_its_first_poll");
+    }
+
+    mod causality {
+        use super::*;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::remote::NodeId;
+        use crate::trace::distributed::{CausalOrder, LogicalClockMode, VectorClock};
+        use crate::trace::{TraceData, TraceEvent};
+        use crate::types::Budget;
+
+        fn context(runtime: u64, node: &str) -> Cx {
+            Cx::for_testing()
+                .with_logical_clock(
+                    LogicalClockMode::Vector {
+                        node: NodeId::new(node),
+                    }
+                    .build_handle(None),
+                )
+                .with_task_causality_runtime(Some(runtime))
+        }
+
+        fn notify_one_from(notify: &Notify, source: &Cx) -> bool {
+            let _current = Cx::set_current(Some(source.clone()));
+            notify.notify_one()
+        }
+
+        fn broadcast_from(notify: &Notify, source: &Cx) {
+            let _current = Cx::set_current(Some(source.clone()));
+            notify.notify_waiters();
+        }
+
+        fn poll_as(wait: &mut Notified<'_>, observer: &Cx) -> Poll<()> {
+            let _current = Cx::set_current(Some(observer.clone()));
+            poll_once(wait)
+        }
+
+        fn before(source: &LogicalTime, observed: &Cx) {
+            assert_eq!(
+                source.causal_order(&observed.logical_now()),
+                CausalOrder::Before
+            );
+        }
+
+        fn concurrent(source: &LogicalTime, observed: &Cx) {
+            assert_eq!(
+                source.causal_order(&observed.logical_now()),
+                CausalOrder::Concurrent
+            );
+        }
+
+        #[test]
+        fn stored_notifications_pair_each_producer_with_exactly_one_consumer() {
+            let _host = Cx::set_current(None);
+            let notify = Notify::new();
+            notify.notify_one();
+            notify.notify_one();
+            let first = context(97, "first");
+            let second = context(97, "second");
+            let first_time = first.logical_tick();
+            let second_time = second.logical_tick();
+            assert!(!notify_one_from(&notify, &first));
+            assert!(!notify_one_from(&notify, &second));
+            notify.notify_one();
+            let first_late = first.logical_tick();
+            let second_late = second.logical_tick();
+
+            {
+                let waiters = notify.waiters.lock();
+                let pending = &waiters.causality.as_ref().unwrap().stored;
+                assert_eq!(pending.len(), 4, "pre-activation backlog is run-compressed");
+                assert_eq!(pending[0].count, 2);
+            }
+            for index in 0..5 {
+                let observer = context(97, &format!("observer-{index}"));
+                let unchanged = observer.logical_tick();
+                let mut wait = notify.notified();
+                assert!(poll_as(&mut wait, &observer).is_ready(), "index={index}");
+                if index == 2 {
+                    before(&first_time, &observer);
+                    concurrent(&second_time, &observer);
+                } else if index == 3 {
+                    before(&second_time, &observer);
+                    concurrent(&first_time, &observer);
+                } else {
+                    assert_eq!(observer.logical_now(), unchanged, "untracked index={index}");
+                }
+                concurrent(&first_late, &observer);
+                concurrent(&second_late, &observer);
+                let completed = observer.logical_now();
+                assert!(poll_as(&mut wait, &observer).is_ready());
+                assert_eq!(observer.logical_now(), completed, "repeat poll is inert");
+            }
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+            assert!(
+                notify
+                    .waiters
+                    .lock()
+                    .causality
+                    .as_ref()
+                    .unwrap()
+                    .stored
+                    .is_empty()
+            );
+            assert!(poll_once(&mut notify.notified()).is_pending());
+        }
+
+        #[test]
+        fn selected_grant_follows_actual_poller_and_survives_later_broadcast() {
+            let _host = Cx::set_current(None);
+            let notify = Notify::new();
+            let constructor = context(97, "constructor");
+            let parked = context(97, "parked");
+            let poller = context(97, "poller");
+            let source = context(97, "source");
+            let later_source = context(97, "later-source");
+            let constructor_time = constructor.logical_tick();
+            let parked_time = parked.logical_tick();
+            let _ = poller.logical_tick();
+            let published = source.logical_tick();
+            let later_broadcast = later_source.logical_tick();
+            let mut wait = {
+                let _current = Cx::set_current(Some(constructor.clone()));
+                notify.notified()
+            };
+            assert!(poll_as(&mut wait, &parked).is_pending());
+            assert!(notify_one_from(&notify, &source));
+            broadcast_from(&notify, &later_source);
+            let after = source.logical_tick();
+            assert!(poll_as(&mut wait, &poller).is_ready());
+            before(&published, &poller);
+            for unrelated in [&constructor_time, &parked_time, &later_broadcast, &after] {
+                concurrent(unrelated, &poller);
+            }
+            assert_eq!(constructor.logical_now(), constructor_time);
+            assert_eq!(parked.logical_now(), parked_time);
+            assert_eq!(notify.waiter_count(), 0);
+        }
+
+        #[test]
+        fn dropped_waiter_baton_keeps_original_publication_through_storage() {
+            let _host = Cx::set_current(None);
+            for store_baton in [false, true] {
+                let notify = Notify::new();
+                let source = context(97, "source");
+                let dropper = context(97, "dropper");
+                let observer = context(97, "observer");
+                let source_time = source.logical_tick();
+                let dropper_time = dropper.logical_tick();
+                let _ = observer.logical_tick();
+                let mut first = notify.notified();
+                let mut second = notify.notified();
+                assert!(poll_once(&mut first).is_pending());
+                assert!(poll_once(&mut second).is_pending());
+                assert!(notify_one_from(&notify, &source));
+                let source_late = source.logical_tick();
+                {
+                    let _current = Cx::set_current(Some(dropper.clone()));
+                    drop(first);
+                    if store_baton {
+                        drop(second);
+                        second = notify.notified();
+                    }
+                }
+                assert!(poll_as(&mut second, &observer).is_ready());
+                before(&source_time, &observer);
+                concurrent(&source_late, &observer);
+                concurrent(&dropper_time, &observer);
+                assert_eq!(dropper.logical_now(), dropper_time, "drop did not observe");
+                assert_eq!(notify.waiter_count(), 0);
+                assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+            }
+        }
+
+        #[test]
+        fn registered_broadcast_generations_and_recipients_stay_independent() {
+            let _host = Cx::set_current(None);
+            let notify = Notify::new();
+            let first = context(97, "first-broadcast");
+            let second = context(97, "second-broadcast");
+            let first_time = first.logical_tick();
+            let second_time = second.logical_tick();
+            let mut waits = [notify.notified(), notify.notified(), notify.notified()];
+            assert!(poll_once(&mut waits[0]).is_pending());
+            assert!(poll_once(&mut waits[1]).is_pending());
+            broadcast_from(&notify, &first);
+            assert!(poll_once(&mut waits[2]).is_pending());
+            broadcast_from(&notify, &second);
+            let late = first.logical_tick();
+            let mut observations = Vec::new();
+            for (index, wait) in waits.iter_mut().enumerate() {
+                let observer = context(97, &format!("observer-{index}"));
+                let _ = observer.logical_tick();
+                assert!(poll_as(wait, &observer).is_ready());
+                if index < 2 {
+                    before(&first_time, &observer);
+                    concurrent(&second_time, &observer);
+                } else {
+                    before(&second_time, &observer);
+                    concurrent(&first_time, &observer);
+                }
+                concurrent(&late, &observer);
+                observations.push(observer.logical_now());
+            }
+            assert_eq!(
+                observations[0].causal_order(&observations[1]),
+                CausalOrder::Concurrent
+            );
+            assert_eq!(notify.waiter_count(), 0);
+        }
+
+        #[test]
+        fn enabled_waits_retain_first_generation_without_broadcast_history() {
+            let _host = Cx::set_current(None);
+            for activate_first in [false, true] {
+                let notify = Notify::new();
+                let first = context(97, "first");
+                let second = context(97, "second");
+                let first_time = first.logical_tick();
+                let second_time = second.logical_tick();
+                if activate_first {
+                    assert!(!notify_one_from(&notify, &first));
+                    assert!(poll_once(&mut notify.notified()).is_ready());
+                }
+                let mut old = notify.notified();
+                assert!(!Pin::new(&mut old).enable());
+                let retained = old.broadcast_receipt.as_ref().map(Arc::downgrade);
+                broadcast_from(&notify, &first);
+                let mut newer = notify.notified();
+                assert!(!Pin::new(&mut newer).enable());
+                broadcast_from(&notify, &second);
+                // Additional publications cannot grow retained history or
+                // replace either future's fixed first grant.
+                for _ in 0..32 {
+                    notify.notify_waiters();
+                }
+                let old_observer = context(97, "old-observer");
+                let new_observer = context(97, "new-observer");
+                let _ = old_observer.logical_tick();
+                let _ = new_observer.logical_tick();
+                assert!(poll_as(&mut old, &old_observer).is_ready());
+                assert!(poll_as(&mut newer, &new_observer).is_ready());
+                before(&first_time, &old_observer);
+                concurrent(&second_time, &old_observer);
+                before(&second_time, &new_observer);
+                concurrent(&first_time, &new_observer);
+                if let Some(retained) = retained {
+                    assert!(
+                        retained.upgrade().is_none(),
+                        "completed generation was retired"
+                    );
+                }
+                assert!(
+                    notify
+                        .waiters
+                        .lock()
+                        .causality
+                        .as_ref()
+                        .unwrap()
+                        .broadcast
+                        .is_none()
+                );
+            }
+        }
+
+        #[test]
+        fn activation_does_not_relabel_earlier_untracked_broadcasts() {
+            let _host = Cx::set_current(None);
+            let notify = Notify::new();
+            let source = context(97, "source");
+            let observer = context(97, "observer");
+            let source_time = source.logical_tick();
+            let unchanged = observer.logical_tick();
+            let mut old = notify.notified();
+            assert!(!Pin::new(&mut old).enable());
+            notify.notify_waiters();
+            broadcast_from(&notify, &source);
+            assert!(poll_as(&mut old, &observer).is_ready());
+            assert_eq!(
+                observer.logical_now(),
+                unchanged,
+                "first broadcast was untracked"
+            );
+            concurrent(&source_time, &observer);
+
+            // A plain future still starts at first poll, even if it captured
+            // a causal generation receipt when it was constructed.
+            let mut plain = notify.notified();
+            broadcast_from(&notify, &source);
+            assert!(poll_as(&mut plain, &observer).is_pending());
+            assert_eq!(observer.logical_now(), unchanged);
+            broadcast_from(&notify, &source);
+            assert!(poll_as(&mut plain, &observer).is_ready());
+            before(&source_time, &observer);
+        }
+
+        #[test]
+        fn wait_until_fences_predicate_broadcasts_with_their_original_receipt() {
+            let _host = Cx::set_current(None);
+            for activate_first in [false, true] {
+                let notify = Notify::new();
+                let source = context(97, "source");
+                let later = context(97, "later");
+                let observer = context(97, "observer");
+                let source_time = source.logical_tick();
+                let later_time = later.logical_tick();
+                let _ = observer.logical_tick();
+                if activate_first {
+                    notify_one_from(&notify, &source);
+                    assert!(poll_once(&mut notify.notified()).is_ready());
+                }
+                let mut checked = false;
+                let _current = Cx::set_current(Some(observer.clone()));
+                block_on(notify.wait_until(|| {
+                    if checked {
+                        return true;
+                    }
+                    checked = true;
+                    broadcast_from(&notify, &source);
+                    broadcast_from(&notify, &later);
+                    false
+                }));
+                before(&source_time, &observer);
+                concurrent(&later_time, &observer);
+                assert_eq!(notify.waiter_count(), 0);
+            }
+        }
+
+        #[test]
+        fn foreign_runtimes_untracked_pollers_and_probes_do_not_import_grants() {
+            let _host = Cx::set_current(None);
+            for foreign in [false, true] {
+                let notify = Notify::new();
+                let source = context(97, "source");
+                let observer = context(if foreign { 98 } else { 97 }, "observer");
+                let _ = source.logical_tick();
+                let unchanged = observer.logical_tick();
+                let mut wait = {
+                    let _current = Cx::set_current(Some(observer.clone()));
+                    let mut wait = notify.notified();
+                    assert!(!Pin::new(&mut wait).enable());
+                    assert_eq!(notify.waiter_count(), 0);
+                    let _debug = format!("{notify:?} {wait:?}");
+                    wait
+                };
+                broadcast_from(&notify, &source);
+                if foreign {
+                    assert!(poll_as(&mut wait, &observer).is_ready());
+                } else {
+                    assert!(poll_once(&mut wait).is_ready(), "host is the actual poller");
+                }
+                assert_eq!(observer.logical_now(), unchanged);
+                assert!(poll_as(&mut wait, &observer).is_ready());
+                assert_eq!(
+                    observer.logical_now(),
+                    unchanged,
+                    "re-poll cannot observe again"
+                );
+            }
+
+            let legacy = Cx::for_testing();
+            let unchanged = legacy.logical_now();
+            let _current = Cx::set_current(Some(legacy.clone()));
+            let notify = Notify::new();
+            notify.notify_one();
+            assert!(poll_once(&mut notify.notified()).is_ready());
+            let mut wait = notify.notified();
+            assert!(poll_once(&mut wait).is_pending());
+            notify.notify_waiters();
+            assert!(poll_once(&mut wait).is_ready());
+            assert!(!notify.causality_started.load(Ordering::Acquire));
+            assert!(notify.waiters.lock().causality.is_none());
+            assert_eq!(legacy.logical_now(), unchanged);
+        }
+
+        #[test]
+        fn waker_retirement_panic_defers_causality_until_a_successful_poller() {
+            struct PanicOnRetirement {
+                _probe: NotifyWakerDropProbe,
+            }
+            #[allow(clippy::manual_noop_waker)]
+            impl std::task::Wake for PanicOnRetirement {
+                fn wake(self: Arc<Self>) {}
+            }
+            impl Drop for PanicOnRetirement {
+                fn drop(&mut self) {
+                    panic!("injected Notify completion Waker retirement panic");
+                }
+            }
+
+            let _host = Cx::set_current(None);
+            let notify = Arc::new(Notify::new());
+            let source = context(97, "source");
+            let failed = context(97, "failed-poller");
+            let successful = context(97, "successful-poller");
+            let published = source.logical_tick();
+            let failed_before = failed.logical_tick();
+            let _ = successful.logical_tick();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let unlocked_drops = Arc::new(AtomicUsize::new(0));
+            let waker = Waker::from(Arc::new(PanicOnRetirement {
+                _probe: NotifyWakerDropProbe {
+                    notify: Arc::downgrade(&notify),
+                    drops: Arc::clone(&drops),
+                    unlocked_drops: Arc::clone(&unlocked_drops),
+                },
+            }));
+            let mut wait = notify.notified();
+            assert!(poll_with_waker(&mut wait, &waker).is_pending());
+            drop(waker);
+
+            // White-box fault injection: normal broadcasts detach the queued
+            // Waker. Keep this sole-owner safe Wake queued while injecting
+            // generation readiness and a real producer snapshot, isolating
+            // the completion retirement boundary without an unsafe RawWaker.
+            let publication = {
+                let _current = Cx::set_current(Some(source.clone()));
+                NotifyPublication::capture_current().unwrap()
+            };
+            {
+                let (index, epoch) = wait.waiter_index.unwrap();
+                let mut waiters = notify.waiters.lock();
+                assert_eq!(waiters.entries[index].slot_epoch, epoch);
+                waiters.entries[index].publication = Some(publication);
+                notify.generation.fetch_add(1, Ordering::Release);
+            }
+            let source_after = source.logical_tick();
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_as(&mut wait, &failed)
+            }))
+            .expect_err("the queued Waker retirement must panic before Ready");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"injected Notify completion Waker retirement panic")
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                failed.logical_now(),
+                failed_before,
+                "failed poll never observed"
+            );
+            assert_eq!(wait.state, NotifiedState::Done);
+            assert_eq!(wait.waiter_index, None);
+            assert!(wait.completion_publication.is_some());
+            assert_eq!(notify.waiter_count(), 0);
+            assert!(notify.waiters.lock().entries.is_empty());
+
+            assert!(poll_as(&mut wait, &successful).is_ready());
+            before(&published, &successful);
+            concurrent(&source_after, &successful);
+            concurrent(&failed_before, &successful);
+            assert!(wait.completion_publication.is_none());
+            let completed = successful.logical_now();
+            assert!(poll_as(&mut wait, &successful).is_ready());
+            assert_eq!(
+                successful.logical_now(),
+                completed,
+                "receipt imports exactly once"
+            );
+            assert!(poll_as(&mut wait, &failed).is_ready());
+            assert_eq!(
+                failed.logical_now(),
+                failed_before,
+                "later polls cannot import"
+            );
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+            assert!(poll_once(&mut notify.notified()).is_pending());
+        }
+
+        #[test]
+        fn exhausted_clocks_cannot_lose_a_notification_or_retain_a_waiter() {
+            let _host = Cx::set_current(None);
+            let notify = Notify::new();
+            let source = context(97, "source");
+            let observer = context(97, "observer");
+            for (cx, node) in [(&source, "source"), (&observer, "observer")] {
+                let mut vector = VectorClock::new();
+                vector.set(&NodeId::new(node), u64::MAX - 1);
+                let _ = cx.logical_receive(&LogicalTime::Vector(vector));
+            }
+            let published = source.logical_now();
+            let mut wait = notify.notified();
+            assert!(poll_once(&mut wait).is_pending());
+            assert!(notify_one_from(&notify, &source), "publication never ticks");
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = poll_as(&mut wait, &observer);
+                }))
+                .is_err()
+            );
+            assert_eq!(notify.waiter_count(), 0);
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+            assert!(
+                wait.completion_publication.is_some(),
+                "failed completion retains its receipt"
+            );
+            let successful_poller = context(97, "successful-poller");
+            let _ = successful_poller.logical_tick();
+            assert!(poll_as(&mut wait, &successful_poller).is_ready());
+            before(&published, &successful_poller);
+            assert!(wait.completion_publication.is_none());
+            assert!(poll_once(&mut notify.notified()).is_pending());
+        }
+
+        fn message_time(events: &[TraceEvent], message: &str) -> LogicalTime {
+            events
+                .iter()
+                .find(|event| matches!(&event.data, TraceData::Message(text) if text == message))
+                .and_then(|event| event.logical_time.clone())
+                .unwrap_or_else(|| panic!("missing logical time for {message}"))
+        }
+
+        fn lab_handoff(broadcast: bool) -> Vec<TraceEvent> {
+            let _host = Cx::set_current(None);
+            let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let notify = Arc::new(Notify::new());
+            let mut readers = Vec::new();
+            for message in ["notify-reader-a", "notify-reader-b"] {
+                let notify = Arc::clone(&notify);
+                let (reader, _join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        notify.notified().await;
+                        Cx::current().unwrap().trace(message);
+                    })
+                    .unwrap();
+                readers.push(reader);
+                if broadcast {
+                    lab.scheduler.lock().schedule(reader, 0);
+                    lab.step_for_test();
+                }
+            }
+            if broadcast {
+                assert_eq!(notify.waiter_count(), 2, "both real tasks reached Pending");
+            }
+            let publisher_notify = Arc::clone(&notify);
+            let (publisher, _join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    cx.trace("notify-published");
+                    if broadcast {
+                        publisher_notify.notify_waiters();
+                    } else {
+                        assert!(!publisher_notify.notify_one());
+                        assert!(!publisher_notify.notify_one());
+                    }
+                    cx.trace("notify-publisher-after");
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(publisher, 0);
+            lab.step_for_test();
+            if !broadcast {
+                assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 2);
+                for reader in readers {
+                    lab.scheduler.lock().schedule(reader, 0);
+                }
+            }
+            lab.run_until_idle();
+            assert!(lab.is_quiescent());
+            assert_eq!(notify.waiter_count(), 0);
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+            lab.trace().snapshot()
+        }
+
+        #[test]
+        fn real_lab_notifications_order_recipients_without_ordering_readers() {
+            for broadcast in [false, true] {
+                let events = lab_handoff(broadcast);
+                let published = message_time(&events, "notify-published");
+                let after = message_time(&events, "notify-publisher-after");
+                let first = message_time(&events, "notify-reader-a");
+                let second = message_time(&events, "notify-reader-b");
+                for reader in [&first, &second] {
+                    assert_eq!(published.causal_order(reader), CausalOrder::Before);
+                    assert_eq!(after.causal_order(reader), CausalOrder::Concurrent);
+                }
+                assert_eq!(first.causal_order(&second), CausalOrder::Concurrent);
+                let repeated = lab_handoff(broadcast);
+                assert_eq!(first, message_time(&repeated, "notify-reader-a"));
+                assert_eq!(second, message_time(&repeated, "notify-reader-b"));
+            }
+        }
     }
 }
