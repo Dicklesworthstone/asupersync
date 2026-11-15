@@ -11,6 +11,14 @@
 //!   Checked acquisition returns an admission error if the region cannot accept
 //!   another obligation, restoring capacity before returning.
 //!
+//! # Task causality
+//!
+//! In the opt-in task-causal lab, acquisitions observe the releases of the
+//! capacity they actually consume. Initial permits remain independent, and a
+//! failed admission restores the original release evidence without publishing
+//! the failed acquirer's clock. Ordinary untracked use allocates no causal
+//! metadata.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -28,6 +36,7 @@
 
 use parking_lot::Mutex as ParkingMutex;
 use slab::Slab;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +46,7 @@ use std::task::{Context, Poll, Waker};
 use crate::cx::Cx;
 use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
 use crate::sync::lock_ordering::{self, LockRank};
+use crate::trace::distributed::{LogicalClock, LogicalClockHandle, VectorClock, VectorClockHandle};
 use crate::types::RegionId;
 
 /// Error returned when semaphore acquisition fails.
@@ -155,6 +165,166 @@ struct SemaphoreState {
     next_waiter_id: u64,
     /// Cancelled or dropped acquire waiters observed by telemetry.
     cancellation_count: u64,
+    /// FIFO capacity provenance, allocated only after a tracked release.
+    /// Each batch describes physical available units, never a global clock
+    /// that could order two acquisitions of unrelated permits.
+    causality: Option<Box<VecDeque<PermitPublicationBatch>>>,
+}
+
+/// A fixed publication shared by all units from one release. Splitting a batch
+/// never samples its producer again or merges independent producers together.
+#[derive(Debug, Clone)]
+struct PermitPublicationBatch {
+    count: usize,
+    publication: Option<Arc<(u64, VectorClock)>>,
+}
+
+#[derive(Debug)]
+struct SemaphoreCausalOwner {
+    runtime: u64,
+    // Task-causal runtimes use vector clocks. Keeping the concrete handle
+    // avoids erased host-clock callbacks and preserves unwind auto-traits.
+    clock: Arc<VectorClockHandle>,
+    allow_host_fallback: bool,
+}
+
+impl SemaphoreCausalOwner {
+    fn from_cx<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        let runtime = cx.task_causality_runtime()?;
+        let LogicalClockHandle::Vector(clock) = cx.logical_clock_handle() else {
+            return None;
+        };
+        Some(Self {
+            runtime,
+            clock,
+            allow_host_fallback: false,
+        })
+    }
+
+    fn for_acquire<Caps>(cx: Option<&Cx<Caps>>) -> Option<Self> {
+        // An actual untracked poller also overrides a tracked explicit Cx.
+        Cx::with_current(Self::from_cx).unwrap_or_else(|| {
+            cx.and_then(Self::from_cx).map(|mut owner| {
+                owner.allow_host_fallback = true;
+                owner
+            })
+        })
+    }
+
+    fn publication(fallback: Option<&Self>) -> Option<Arc<(u64, VectorClock)>> {
+        Cx::with_current(|cx| {
+            Self::from_cx(cx).map(|owner| Arc::new((owner.runtime, owner.clock.current())))
+        })
+        .unwrap_or_else(|| {
+            fallback
+                .filter(|owner| owner.allow_host_fallback)
+                .map(|owner| Arc::new((owner.runtime, owner.clock.current())))
+        })
+    }
+}
+
+impl SemaphoreState {
+    /// Prepare the rollback receipt before changing either provenance or
+    /// capacity. Allocation failure cannot leave an unowned partial acquire.
+    fn take_causality(&mut self, count: usize) -> VecDeque<PermitPublicationBatch> {
+        let Some(available) = self.causality.as_mut() else {
+            return VecDeque::new();
+        };
+        let mut acquired = VecDeque::new();
+        let mut remaining = count;
+        for batch in available.iter() {
+            let taken = remaining.min(batch.count);
+            if taken != 0 {
+                acquired.push_back(PermitPublicationBatch {
+                    count: taken,
+                    publication: batch.publication.clone(),
+                });
+                remaining -= taken;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        debug_assert_eq!(remaining, 0, "capacity and causal batches must agree");
+        remaining = count;
+        while remaining != 0 {
+            let front = available.front_mut().expect("available permit provenance");
+            let taken = remaining.min(front.count);
+            front.count -= taken;
+            remaining -= taken;
+            if front.count == 0 {
+                available.pop_front();
+            }
+        }
+        acquired
+    }
+
+    fn publish_capacity(&mut self, count: usize, publication: Option<Arc<(u64, VectorClock)>>) {
+        if count == 0 || (self.causality.is_none() && publication.is_none()) {
+            return;
+        }
+        let available = self.causality.get_or_insert_with(|| {
+            let mut initial = VecDeque::new();
+            if self.permits != 0 {
+                initial.push_back(PermitPublicationBatch {
+                    count: self.permits,
+                    publication: None,
+                });
+            }
+            Box::new(initial)
+        });
+        if publication.is_none()
+            && let Some(last) = available.back_mut()
+            && last.publication.is_none()
+        {
+            last.count += count;
+        } else {
+            available.push_back(PermitPublicationBatch { count, publication });
+        }
+    }
+
+    /// Rollback is not a release by the failed acquirer. Put the exact original
+    /// slices back before capacity published in the meantime. Saturation can
+    /// retain only a prefix, matching the physical saturating-add contract.
+    fn restore_causality(&mut self, count: usize, mut acquired: VecDeque<PermitPublicationBatch>) {
+        let Some(available) = self.causality.as_mut() else {
+            debug_assert!(acquired.is_empty());
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        if acquired.is_empty() {
+            // Tracking may have activated while this admission was in flight.
+            acquired.push_back(PermitPublicationBatch {
+                count,
+                publication: None,
+            });
+        }
+        let mut remaining = count;
+        let mut kept = 0;
+        for batch in &mut acquired {
+            batch.count = batch.count.min(remaining);
+            remaining -= batch.count;
+            kept += 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        debug_assert_eq!(remaining, 0);
+        acquired.truncate(kept);
+        available.reserve(acquired.len());
+        while let Some(batch) = acquired.pop_back() {
+            if batch.publication.is_none()
+                && let Some(first) = available.front_mut()
+                && first.publication.is_none()
+            {
+                first.count += batch.count;
+            } else {
+                available.push_front(batch);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -320,6 +490,7 @@ impl Semaphore {
                 waiter_tail: None,
                 next_waiter_id: 0,
                 cancellation_count: 0,
+                causality: None,
             }),
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
@@ -397,6 +568,7 @@ impl Semaphore {
             state.closed = true;
             // Closed semaphores do not advertise reusable capacity.
             state.permits = 0;
+            state.causality = None;
             self.closed_shadow.store(true, Ordering::Release);
             self.permits_shadow.store(0, Ordering::Relaxed);
             state.waiter_head = None;
@@ -530,6 +702,7 @@ impl Semaphore {
                 obligation: None,
                 runtime_obligation: None,
                 lock_order: Default::default(),
+                causal_owner: None,
             });
         }
         cx.checkpoint().map_err(|_| AcquireError::Cancelled)?;
@@ -550,6 +723,7 @@ impl Semaphore {
         if let Some(rank) = self.rank {
             lock_ordering::check_acquire(self.name, rank);
         }
+        rollback.publications = state.take_causality(count);
         state.permits -= count;
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
         rollback.arm();
@@ -563,6 +737,7 @@ impl Semaphore {
             owner.task_id(),
         )?;
         rollback.obligation = reserve_permit_obligation(cx.region_id());
+        rollback.observe_causality(SemaphoreCausalOwner::for_acquire(Some(cx)));
         Ok(rollback.into_borrowed_permit())
     }
 
@@ -599,6 +774,7 @@ impl Semaphore {
         if let Some(rank) = self.rank {
             lock_ordering::check_acquire(self.name, rank);
         }
+        rollback.publications = state.take_causality(1);
         state.permits -= 1;
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
         rollback.arm();
@@ -609,6 +785,7 @@ impl Semaphore {
         owner = admitted_owner;
         rollback.runtime_obligation = token;
         rollback.obligation = reserve_permit_obligation(cx.region_id());
+        rollback.observe_causality(SemaphoreCausalOwner::for_acquire(Some(cx)));
         Ok((rollback.into_borrowed_permit(), owner))
     }
 
@@ -632,6 +809,7 @@ impl Semaphore {
                 obligation: None,
                 runtime_obligation: None,
                 lock_order: Default::default(),
+                causal_owner: None,
             });
         }
 
@@ -651,6 +829,7 @@ impl Semaphore {
             lock_ordering::check_acquire(self.name, rank);
         }
 
+        rollback.publications = state.take_causality(count);
         state.permits -= count;
         // Relaxed: permits_shadow is an advisory fast-path hint. A stale
         // read in available_permits() just skips the fast path or causes a
@@ -678,6 +857,7 @@ impl Semaphore {
         rollback.obligation = current_cx
             .as_ref()
             .and_then(|cx| reserve_permit_obligation(cx.region_id()));
+        rollback.observe_causality(current_cx.as_ref().and_then(SemaphoreCausalOwner::from_cx));
         Ok(rollback.into_borrowed_permit())
     }
 
@@ -695,21 +875,30 @@ impl Semaphore {
     /// Saturates at `usize::MAX` if adding would overflow.
     #[inline]
     pub fn add_permits(&self, count: usize) {
-        if let Some(waiter) = self.add_permits_deferred(count) {
+        if let Some(waiter) = self.add_permits_deferred(count, None) {
             waiter.wake_by_ref();
         }
     }
 
     /// Return physical capacity before running any notifier or Waker callback.
-    fn add_permits_deferred(&self, count: usize) -> Option<Arc<RegisteredWaker>> {
+    fn add_permits_deferred(
+        &self,
+        count: usize,
+        owner: Option<&SemaphoreCausalOwner>,
+    ) -> Option<Arc<RegisteredWaker>> {
         if count == 0 {
             return None;
         }
+        // Sample before taking the semaphore mutex and without ticking, so a
+        // later event cannot leak into a previously returned capacity batch.
+        let publication = SemaphoreCausalOwner::publication(owner);
         let mut state = self.state.lock();
         if state.closed {
             return None;
         }
-        state.permits = state.permits.saturating_add(count);
+        let accepted = count.min(usize::MAX - state.permits);
+        state.publish_capacity(accepted, publication);
+        state.permits += accepted;
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
         // Only wake the first waiter since FIFO ordering means only it can acquire.
         // Waking all waiters wastes CPU when only the front can make progress.
@@ -717,6 +906,22 @@ impl Semaphore {
         let waiter_to_wake = front_waiter_waker_if_runnable(&state);
         drop(state);
         waiter_to_wake
+    }
+
+    fn restore_permits_deferred(
+        &self,
+        count: usize,
+        publications: VecDeque<PermitPublicationBatch>,
+    ) -> Option<Arc<RegisteredWaker>> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return None;
+        }
+        let accepted = count.min(usize::MAX - state.permits);
+        state.restore_causality(accepted, publications);
+        state.permits += accepted;
+        self.permits_shadow.store(state.permits, Ordering::Relaxed);
+        front_waiter_waker_if_runnable(&state)
     }
 }
 
@@ -766,6 +971,8 @@ struct AcquisitionRollbackGuard<'a> {
     lock_order: lock_ordering::GuardLockOrder,
     armed: bool,
     notify_on_rollback: bool,
+    publications: VecDeque<PermitPublicationBatch>,
+    causal_owner: Option<Box<SemaphoreCausalOwner>>,
 }
 
 impl<'a> AcquisitionRollbackGuard<'a> {
@@ -779,6 +986,8 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             lock_order: Default::default(),
             armed: false,
             notify_on_rollback: false,
+            publications: VecDeque::new(),
+            causal_owner: None,
         }
     }
 
@@ -806,6 +1015,26 @@ impl<'a> AcquisitionRollbackGuard<'a> {
         self.runtime_obligation = runtime_obligation;
     }
 
+    /// Observe only after admission and every user Waker callback have
+    /// succeeded. A refused or unwinding operation restores its receipt.
+    fn observe_causality(&mut self, owner: Option<SemaphoreCausalOwner>) {
+        if let Some(owner) = owner {
+            for batch in &self.publications {
+                if let Some(publication) = &batch.publication
+                    && publication.0 == owner.runtime
+                {
+                    let _ = owner.clock.receive(&publication.1);
+                }
+            }
+            // Ambient acquisitions must not retain a former task's live
+            // clock for a later off-task drop. Only explicit host contexts
+            // provide that fallback; task drops sample their actual returner.
+            if owner.allow_host_fallback {
+                self.causal_owner = Some(Box::new(owner));
+            }
+        }
+    }
+
     #[inline]
     fn into_borrowed_permit(mut self) -> SemaphorePermit<'a> {
         let permit = SemaphorePermit {
@@ -814,6 +1043,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             semaphore: self.semaphore,
             count: self.count,
             lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
+            causal_owner: self.causal_owner.take(),
         };
         self.armed = false;
         permit
@@ -827,6 +1057,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             semaphore,
             count: self.count,
             lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
+            causal_owner: self.causal_owner.take(),
         };
         self.armed = false;
         permit
@@ -840,7 +1071,9 @@ impl Drop for AcquisitionRollbackGuard<'_> {
         }
 
         lock_ordering::record_guard_release(&mut self.lock_order);
-        let waker = self.semaphore.add_permits_deferred(self.count);
+        let waker = self
+            .semaphore
+            .restore_permits_deferred(self.count, std::mem::take(&mut self.publications));
         let _wake = ReleasedSemaphoreWake(if self.notify_on_rollback { waker } else { None });
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
@@ -913,6 +1146,7 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
                 obligation: None,
                 runtime_obligation: None,
                 lock_order: Default::default(),
+                causal_owner: None,
             }));
         }
 
@@ -978,6 +1212,7 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
                     lock_ordering::check_acquire(self.semaphore.name, rank);
                 }
 
+                rollback.publications = state.take_causality(self.count);
                 state.permits -= self.count;
                 self.semaphore
                     .permits_shadow
@@ -1020,6 +1255,7 @@ impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
                     rollback.notify_on_rollback = false;
                     next.wake_by_ref();
                 }
+                rollback.observe_causality(SemaphoreCausalOwner::for_acquire(Some(self.cx)));
                 return Poll::Ready(Ok(rollback.into_borrowed_permit()));
             }
 
@@ -1105,6 +1341,7 @@ pub struct SemaphorePermit<'a> {
     semaphore: &'a Semaphore,
     count: usize,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<Box<SemaphoreCausalOwner>>,
 }
 
 impl SemaphorePermit<'_> {
@@ -1162,7 +1399,10 @@ impl Drop for SemaphorePermit<'_> {
         // Restore physical ownership and arm its wake before token settlement
         // can invoke a user-supplied runtime notifier.
         lock_ordering::record_guard_release(&mut self.lock_order);
-        let _wake = ReleasedSemaphoreWake(self.semaphore.add_permits_deferred(self.count));
+        let _wake = ReleasedSemaphoreWake(
+            self.semaphore
+                .add_permits_deferred(self.count, self.causal_owner.as_deref()),
+        );
         self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
@@ -1191,6 +1431,7 @@ pub struct OwnedSemaphorePermit {
     semaphore: std::sync::Arc<Semaphore>,
     count: usize,
     lock_order: lock_ordering::GuardLockOrder,
+    causal_owner: Option<Box<SemaphoreCausalOwner>>,
 }
 
 impl OwnedSemaphorePermit {
@@ -1203,7 +1444,8 @@ impl OwnedSemaphorePermit {
         cx: &Cx<Caps>,
         count: usize,
     ) -> Result<Self, CheckedAcquireError> {
-        let permit = semaphore.acquire_checked(cx, count).await?;
+        let mut permit = semaphore.acquire_checked(cx, count).await?;
+        let causal_owner = permit.causal_owner.take();
         let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
@@ -1211,6 +1453,7 @@ impl OwnedSemaphorePermit {
             semaphore,
             count,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -1221,7 +1464,8 @@ impl OwnedSemaphorePermit {
         cx: &Cx<Caps>,
         count: usize,
     ) -> Result<Self, CheckedAcquireError> {
-        let permit = semaphore.try_acquire_checked(cx, count)?;
+        let mut permit = semaphore.try_acquire_checked(cx, count)?;
+        let causal_owner = permit.causal_owner.take();
         let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
@@ -1229,6 +1473,7 @@ impl OwnedSemaphorePermit {
             semaphore,
             count,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -1238,7 +1483,8 @@ impl OwnedSemaphorePermit {
         cx: &Cx<Caps>,
         count: usize,
     ) -> Result<Self, CheckedAcquireError> {
-        let permit = semaphore.try_acquire_checked(cx, count)?;
+        let mut permit = semaphore.try_acquire_checked(cx, count)?;
+        let causal_owner = permit.causal_owner.take();
         let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
@@ -1246,6 +1492,7 @@ impl OwnedSemaphorePermit {
             semaphore: Arc::clone(semaphore),
             count,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -1263,6 +1510,7 @@ impl OwnedSemaphorePermit {
                 semaphore,
                 count: 0,
                 lock_order: Default::default(),
+                causal_owner: None,
             });
         }
         OwnedAcquireFuture {
@@ -1281,7 +1529,8 @@ impl OwnedSemaphorePermit {
         semaphore: std::sync::Arc<Semaphore>,
         count: usize,
     ) -> Result<Self, TryAcquireError> {
-        let permit = semaphore.try_acquire(count)?;
+        let mut permit = semaphore.try_acquire(count)?;
+        let causal_owner = permit.causal_owner.take();
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
         let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
@@ -1291,6 +1540,7 @@ impl OwnedSemaphorePermit {
             semaphore,
             count,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -1307,7 +1557,8 @@ impl OwnedSemaphorePermit {
         // Acquire permits via the semaphore's internal state directly.
         // We extract the obligation token from the SemaphorePermit to avoid its Drop
         // releasing permits, since OwnedSemaphorePermit's Drop will handle the release instead.
-        let permit = semaphore.try_acquire(count)?;
+        let mut permit = semaphore.try_acquire(count)?;
+        let causal_owner = permit.causal_owner.take();
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
         let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
@@ -1317,6 +1568,7 @@ impl OwnedSemaphorePermit {
             semaphore: semaphore.clone(),
             count,
             lock_order,
+            causal_owner,
         })
     }
 
@@ -1353,7 +1605,10 @@ impl OwnedSemaphorePermit {
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
         lock_ordering::record_guard_release(&mut self.lock_order);
-        let _wake = ReleasedSemaphoreWake(self.semaphore.add_permits_deferred(self.count));
+        let _wake = ReleasedSemaphoreWake(
+            self.semaphore
+                .add_permits_deferred(self.count, self.causal_owner.as_deref()),
+        );
         self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
@@ -1446,6 +1701,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 semaphore: this.semaphore.clone(),
                 count: 0,
                 lock_order: Default::default(),
+                causal_owner: None,
             }));
         }
 
@@ -1478,6 +1734,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
             // See the borrowed path: the declaration order guarantees that
             // rollback never attempts to re-lock while `state` is held.
             let mut rollback = AcquisitionRollbackGuard::new(&this.semaphore, this.count);
+            rollback.notify_on_rollback = true;
             let mut state = this.semaphore.state.lock();
 
             if state.closed {
@@ -1503,6 +1760,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                     lock_ordering::check_acquire(this.semaphore.name, rank);
                 }
 
+                rollback.publications = state.take_causality(this.count);
                 state.permits -= this.count;
                 this.semaphore
                     .permits_shadow
@@ -1541,8 +1799,10 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                     this.cx.as_ref().and_then(reserve_runtime_permit_obligation),
                 );
                 if let Some(next) = next_waker {
+                    rollback.notify_on_rollback = false;
                     next.wake_by_ref();
                 }
+                rollback.observe_causality(SemaphoreCausalOwner::for_acquire(this.cx.as_ref()));
                 return Poll::Ready(Ok(rollback.into_owned_permit(Arc::clone(&this.semaphore))));
             }
 
@@ -1589,3 +1849,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
 #[cfg(test)]
 #[path = "semaphore_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "semaphore_causality_tests.rs"]
+mod causality_tests;
