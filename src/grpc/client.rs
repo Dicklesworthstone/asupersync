@@ -1540,12 +1540,7 @@ impl<C: Codec> GrpcClient<C> {
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        let mut call = std::pin::pin!(self.unary(path, request));
-        std::future::poll_fn(|task| {
-            let _current = cx.clone().set_current_restricted();
-            call.as_mut().poll(task)
-        })
-        .await
+        with_explicit_call_context(cx, self.unary(path, request)).await
     }
 
     /// Make a unary RPC call.
@@ -1653,7 +1648,34 @@ impl<C: Codec> GrpcClient<C> {
         Ok(Response::with_metadata(payload, wire_response.metadata))
     }
 
+    /// Start a server-streaming RPC under an explicit capability context.
+    ///
+    /// Setup uses `cx` for I/O authority, cancellation, deadlines, and client
+    /// interceptors. Each setup poll restores the previous ambient context
+    /// before returning or unwinding, including when polled outside a runtime
+    /// task or under another task's context.
+    ///
+    /// The returned native response stream retains this context for every later
+    /// read, cancellation check, and deadline. It can be moved to another task
+    /// without adopting that task's authority. Channel settings, terminal
+    /// trailers, loopback behavior, and drop semantics match
+    /// [`Self::server_streaming`]; no background task is started.
+    pub async fn server_streaming_with_cx<Req, Resp>(
+        &mut self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<Req>,
+    ) -> Result<Response<ResponseStream<Resp>>, Status>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+    {
+        with_explicit_call_context(cx, self.server_streaming(path, request)).await
+    }
+
     /// Start a server streaming RPC call.
+    ///
+    /// Use [`Self::server_streaming_with_cx`] to supply the call's context explicitly.
     ///
     /// On a network channel this dials the server over native HTTP/2, sends
     /// the request (`Req` must be the codec's `Encode` type), and waits for
@@ -1710,7 +1732,32 @@ impl<C: Codec> GrpcClient<C> {
         Ok(Response::with_metadata(stream, metadata))
     }
 
+    /// Start a client-streaming RPC under an explicit capability context.
+    ///
+    /// Setup and interceptors run under `cx`, with the previous ambient context
+    /// restored after each poll and on unwind. The returned native request sink
+    /// and response future share one call that retains `cx` for subsequent
+    /// writes, reads, cancellation, and deadlines, even when the handles are
+    /// polled separately by other tasks or without any ambient context.
+    ///
+    /// This preserves [`Self::client_streaming`]'s message limits, backpressure,
+    /// half-close, terminal metadata, loopback behavior, and drop semantics.
+    /// It creates no background task.
+    pub async fn client_streaming_with_cx<Req, Resp>(
+        &mut self,
+        cx: &crate::cx::Cx,
+        path: &str,
+    ) -> Result<(RequestSink<Req>, ResponseFuture<Resp>), Status>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+    {
+        with_explicit_call_context(cx, self.client_streaming(path)).await
+    }
+
     /// Start a client streaming RPC call.
+    ///
+    /// Use [`Self::client_streaming_with_cx`] to supply the call's context explicitly.
     ///
     /// On a network channel this dials the server over native HTTP/2 and
     /// flushes the request headers; it does not wait for response headers.
@@ -1784,7 +1831,32 @@ impl<C: Codec> GrpcClient<C> {
         Ok((sink, future))
     }
 
+    /// Start a bidirectional RPC under an explicit capability context.
+    ///
+    /// Setup and interceptors use `cx`, restoring the previous ambient context
+    /// after every poll and on unwind. Both returned native handles retain the
+    /// supplied context through their shared call, so later upload and response
+    /// polling keep its cancellation and deadline even after setup returns.
+    ///
+    /// [`Self::bidi_streaming`]'s bounded buffering, full-duplex progress, terminal
+    /// trailers, loopback behavior, and drop semantics are unchanged. The sink
+    /// and response stream may be polled in different tasks; this method starts
+    /// no background task.
+    pub async fn bidi_streaming_with_cx<Req, Resp>(
+        &mut self,
+        cx: &crate::cx::Cx,
+        path: &str,
+    ) -> Result<(RequestSink<Req>, ResponseStream<Resp>), Status>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+    {
+        with_explicit_call_context(cx, self.bidi_streaming(path)).await
+    }
+
     /// Start a bidirectional streaming RPC call.
+    ///
+    /// Use [`Self::bidi_streaming_with_cx`] to supply the call's context explicitly.
     ///
     /// On a network channel this dials the server over native HTTP/2 and
     /// flushes the request headers. Messages sent through the sink (`Req`
@@ -1938,6 +2010,20 @@ impl<C: Codec> GrpcClient<C> {
         }
         Ok(LegacyNativeCall::new(Box::new(stream), shape))
     }
+}
+
+/// Install explicit call authority only while the delegated future is polled.
+///
+/// Streaming setup clones this context into its native owner before returning
+/// handles. Keeping the guard inside the poll also prevents capability state
+/// from leaking while setup is suspended or when an interceptor unwinds.
+async fn with_explicit_call_context<F: Future>(cx: &crate::cx::Cx, future: F) -> F::Output {
+    let mut call = std::pin::pin!(future);
+    std::future::poll_fn(|task| {
+        let _current = cx.clone().set_current_restricted();
+        call.as_mut().poll(task)
+    })
+    .await
 }
 
 /// The `Cx` a legacy streaming call runs under: the caller's ambient one.
