@@ -624,6 +624,160 @@
         }
     }
 
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
+    #[test]
+    fn framed_read_grpc_hint_accepts_large_inbound_message_with_small_outbound_limit() {
+        use crate::grpc::codec::GrpcCodec;
+
+        let payload_len = DEFAULT_MAX_BUFFER_LEN + 17;
+        let mut wire = vec![0];
+        wire.extend_from_slice(&u32::try_from(payload_len).unwrap().to_be_bytes());
+        wire.resize(5 + payload_len, b'g');
+        wire.extend_from_slice(&[0, 0, 0, 0, 2, b'o', b'k']);
+        let reader = SliceReader { data: wire, pos: 0 };
+        let codec = GrpcCodec::with_message_size_limits(1, payload_len);
+        let mut framed = FramedRead::new(reader, codec);
+        assert_eq!(framed.effective_max_buffer_len(), payload_len + 5);
+
+        let message = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert!(!message.compressed);
+        assert_eq!(message.data.len(), payload_len);
+        assert!(message.data.iter().all(|byte| *byte == b'g'));
+        let next = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(&next.data[..], b"ok");
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn framed_read_atp_hint_tracks_configured_total_frame_size() {
+        use crate::codec::Encoder;
+        use crate::net::atp::protocol::codec::AtpFrameCodec;
+        use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+
+        let payload_len = DEFAULT_MAX_BUFFER_LEN + 17;
+        let frame = Frame::new(
+            ProtocolVersion::V0,
+            FrameType::ObjectData,
+            vec![b'a'; payload_len],
+        )
+        .unwrap();
+        let frame_len = frame.encoded_len();
+        let maximum = u64::try_from(frame_len).unwrap();
+        let mut codec = AtpFrameCodec::with_max_frame_size(maximum);
+        let mut wire = BytesMut::new();
+        codec.encode(frame, &mut wire).unwrap();
+        codec
+            .encode(Frame::empty(FrameType::KeepAlive).unwrap(), &mut wire)
+            .unwrap();
+        let reader = SliceReader {
+            data: wire.to_vec(),
+            pos: 0,
+        };
+        let mut framed = FramedRead::new(reader, AtpFrameCodec::new());
+        *framed.decoder_mut() = AtpFrameCodec::with_max_frame_size(maximum);
+        assert_eq!(framed.effective_max_buffer_len(), frame_len);
+
+        let decoded = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(decoded.frame_type(), FrameType::ObjectData);
+        assert_eq!(decoded.payload().len(), payload_len);
+        assert!(decoded.payload().iter().all(|byte| *byte == b'a'));
+        let next = next_with_bounded_polls(&mut framed).unwrap().unwrap();
+        assert_eq!(next.frame_type(), FrameType::KeepAlive);
+        assert!(next.payload().is_empty());
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
+    #[test]
+    fn framed_read_grpc_hint_preserves_explicit_cap_and_terminal_error() {
+        use crate::grpc::codec::GrpcCodec;
+
+        let mut wire = vec![0, 0, 0, 0, 96];
+        wire.resize(101, b'g');
+        let reader = SliceReader { data: wire, pos: 0 };
+        let mut framed = FramedRead::new(reader, GrpcCodec::with_max_size(16 * 1024 * 1024))
+            .with_max_buffer_len(64);
+        assert_eq!(framed.effective_max_buffer_len(), 64);
+        let error = next_with_bounded_polls(&mut framed).unwrap().unwrap_err();
+        assert!(error.to_string().contains("max_buffer_len"));
+        assert_eq!(framed.read_buffer().len(), 64);
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn framed_read_atp_hint_preserves_explicit_cap_and_terminal_error() {
+        use crate::net::atp::protocol::codec::AtpFrameCodec;
+        use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+
+        let frame = Frame::new(
+            ProtocolVersion::V0,
+            FrameType::ObjectData,
+            vec![b'a'; 96],
+        )
+        .unwrap();
+        let reader = SliceReader {
+            data: frame.to_wire_bytes().unwrap(),
+            pos: 0,
+        };
+        let mut framed = FramedRead::new(
+            reader,
+            AtpFrameCodec::with_max_frame_size(16 * 1024 * 1024),
+        )
+        .with_max_buffer_len(64);
+        assert_eq!(framed.effective_max_buffer_len(), 64);
+        let error = next_with_bounded_polls(&mut framed).unwrap().unwrap_err();
+        assert!(error.to_string().contains("max_buffer_len"));
+        assert_eq!(framed.read_buffer().len(), 64);
+        assert!(next_with_bounded_polls(&mut framed).is_none());
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
+    #[test]
+    fn framed_read_protocol_hints_respect_wire_and_platform_bounds() {
+        use crate::grpc::codec::GrpcCodec;
+        use crate::net::atp::protocol::codec::AtpFrameCodec;
+
+        assert_eq!(
+            GrpcCodec::with_message_size_limits(usize::MAX, 16).max_buffered_frame_len(),
+            Some(21),
+        );
+        let grpc = FramedRead::new(
+            SliceReader::new(b""),
+            GrpcCodec::with_max_size(usize::MAX),
+        );
+        let expected = if usize::BITS > 32 {
+            Some(4_294_967_300_u64 as usize)
+        } else {
+            None
+        };
+        assert_eq!(grpc.decoder().max_buffered_frame_len(), expected);
+        assert_eq!(
+            grpc.effective_max_buffer_len(),
+            expected.unwrap_or(DEFAULT_MAX_BUFFER_LEN),
+        );
+        let atp = FramedRead::new(
+            SliceReader::new(b""),
+            AtpFrameCodec::with_max_frame_size(0),
+        );
+        assert_eq!(atp.decoder().max_buffered_frame_len(), Some(0));
+        assert_eq!(atp.effective_max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
+        assert_eq!(
+            AtpFrameCodec::with_max_frame_size(u64::MAX).max_buffered_frame_len(),
+            usize::try_from(u64::MAX).ok(),
+        );
+    }
+
     #[test]
     fn framed_read_with_max_buffer_len_overrides_default() {
         let reader = SliceReader::new(b"");

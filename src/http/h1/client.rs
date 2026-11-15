@@ -264,6 +264,14 @@ impl crate::codec::Decoder for Http1ClientCodec {
     type Item = Response;
     type Error = HttpError;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        super::codec::max_buffered_message_len(
+            self.max_headers_size,
+            self.max_body_size,
+            self.max_trailers_size,
+        )
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
         match self.decode_inner(src) {
             Err(e) => {

@@ -120,6 +120,15 @@ impl Decoder for GrpcCodec {
     type Item = GrpcMessage;
     type Error = GrpcError;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        // Only the inbound limit controls read buffering. Even an unbounded
+        // local setting cannot admit a payload beyond the u32 wire length.
+        let wire_limit = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        self.max_decode_message_size
+            .min(wire_limit)
+            .checked_add(MESSAGE_HEADER_SIZE)
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // Need at least the header
         if src.len() < MESSAGE_HEADER_SIZE {

@@ -19,6 +19,84 @@
         buf.to_vec()
     }
 
+    fn next_framed_request(
+        reader: &mut crate::codec::FramedRead<&[u8], Http1Codec>,
+    ) -> Option<Result<Request, HttpError>> {
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        let mut task = Context::from_waker(Waker::noop());
+        for _ in 0..4096 {
+            if let Poll::Ready(item) = Pin::new(&mut *reader).poll_next(&mut task) {
+                return item;
+            }
+        }
+        panic!("always-ready HTTP/1 request reader exhausted its poll budget");
+    }
+
+    #[test]
+    fn framed_request_accepts_large_content_length_and_chunks() {
+        let body_len = crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN + 1;
+        for chunked in [false, true] {
+            let mut wire = if chunked {
+                format!(
+                    "POST /large HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{body_len:X}\r\n"
+                )
+                .into_bytes()
+            } else {
+                format!("POST /large HTTP/1.1\r\nContent-Length: {body_len}\r\n\r\n")
+                    .into_bytes()
+            };
+            wire.resize(wire.len() + body_len, b'x');
+            if chunked {
+                wire.extend_from_slice(b"\r\n0\r\n\r\n");
+            }
+            wire.extend_from_slice(b"GET /next HTTP/1.1\r\n\r\n");
+
+            let mut reader = crate::codec::FramedRead::new(wire.as_slice(), Http1Codec::new());
+            let request = next_framed_request(&mut reader)
+                .expect("large request")
+                .expect("body within the codec limit");
+            assert_eq!(request.uri, "/large");
+            assert_eq!(request.body.len(), body_len);
+            assert!(request.body.iter().all(|&byte| byte == b'x'));
+
+            let next = next_framed_request(&mut reader)
+                .expect("pipelined request")
+                .expect("next request boundary");
+            assert_eq!(next.uri, "/next");
+            assert!(next.body.is_empty());
+            assert!(next_framed_request(&mut reader).is_none());
+        }
+    }
+
+    #[test]
+    fn framed_request_buffer_limit_preserves_override_and_overflow_fallback() {
+        let mut wire = b"POST / HTTP/1.1\r\nContent-Length: 129\r\n\r\n".to_vec();
+        wire.resize(wire.len() + 129, b'x');
+        let mut reader = crate::codec::FramedRead::new(wire.as_slice(), Http1Codec::new())
+            .with_max_buffer_len(128);
+        assert_eq!(reader.effective_max_buffer_len(), 128);
+        let error = next_framed_request(&mut reader)
+            .expect("buffer cap error")
+            .expect_err("explicit cap must remain authoritative");
+        assert!(
+            matches!(&error, HttpError::Io(error) if error.kind() == io::ErrorKind::InvalidData),
+            "{error:?}"
+        );
+        assert!(next_framed_request(&mut reader).is_none());
+
+        let reader = crate::codec::FramedRead::new(
+            &b""[..],
+            Http1Codec::new().max_body_size(usize::MAX),
+        );
+        assert_eq!(
+            reader.effective_max_buffer_len(),
+            crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN
+        );
+    }
+
     #[test]
     fn decode_eof_rejects_truncated_requests_at_every_input_split() {
         // Several chunk states consume all available bytes while still

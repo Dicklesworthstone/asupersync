@@ -12,6 +12,91 @@
     use std::pin::Pin;
     use std::task::{Context, Waker};
 
+    fn next_framed_response(
+        reader: &mut crate::codec::Framed<TestIo, Http1ClientCodec>,
+    ) -> Option<Result<Response, HttpError>> {
+        use crate::stream::Stream;
+
+        let mut task = Context::from_waker(Waker::noop());
+        for _ in 0..4096 {
+            if let Poll::Ready(item) = Pin::new(&mut *reader).poll_next(&mut task) {
+                return item;
+            }
+        }
+        panic!("always-ready HTTP/1 response reader exhausted its poll budget");
+    }
+
+    #[test]
+    fn framed_response_accepts_large_content_length_and_eof_bodies() {
+        let body_len = crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN + 1;
+        for eof_delimited in [false, true] {
+            let mut wire = if eof_delimited {
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec()
+            } else {
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\n\r\n").into_bytes()
+            };
+            wire.resize(wire.len() + body_len, b'x');
+            if !eof_delimited {
+                wire.extend_from_slice(b"HTTP/1.1 204 No Content\r\n\r\n");
+            }
+            let io = TestIo {
+                read: std::io::Cursor::new(wire),
+                written: Vec::new(),
+            };
+            let mut reader = crate::codec::Framed::new(io, Http1ClientCodec::new());
+            let response = next_framed_response(&mut reader)
+                .expect("large response")
+                .expect("body within the codec limit");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body.len(), body_len);
+            assert!(response.body.iter().all(|&byte| byte == b'x'));
+
+            if !eof_delimited {
+                let next = next_framed_response(&mut reader)
+                    .expect("pipelined response")
+                    .expect("next response boundary");
+                assert_eq!(next.status, 204);
+                assert!(next.body.is_empty());
+            }
+            assert!(next_framed_response(&mut reader).is_none());
+        }
+    }
+
+    #[test]
+    fn framed_response_buffer_limit_preserves_override_and_trailer_bound() {
+        let mut wire = b"HTTP/1.1 200 OK\r\nContent-Length: 129\r\n\r\n".to_vec();
+        wire.resize(wire.len() + 129, b'x');
+        let mut reader = crate::codec::Framed::new(TestIo::new(&wire), Http1ClientCodec::new())
+            .with_max_buffer_len(128);
+        assert_eq!(reader.effective_max_buffer_len(), 128);
+        let error = next_framed_response(&mut reader)
+            .expect("buffer cap error")
+            .expect_err("explicit cap must remain authoritative");
+        assert!(
+            matches!(&error, HttpError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData),
+            "{error:?}"
+        );
+        assert!(next_framed_response(&mut reader).is_none());
+
+        let trailers_limit = crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN + 1024;
+        let reader = crate::codec::Framed::new(
+            TestIo::new(&[]),
+            Http1ClientCodec::new()
+                .max_body_size(1)
+                .max_trailers_size(trailers_limit),
+        );
+        assert_eq!(reader.effective_max_buffer_len(), trailers_limit + 2);
+
+        let reader = crate::codec::Framed::new(
+            TestIo::new(&[]),
+            Http1ClientCodec::new().max_trailers_size(usize::MAX),
+        );
+        assert_eq!(
+            reader.effective_max_buffer_len(),
+            crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN
+        );
+    }
+
     #[test]
     fn decode_simple_response() {
         let mut codec = Http1ClientCodec::new();

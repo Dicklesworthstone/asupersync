@@ -277,6 +277,13 @@ impl Decoder for AtpFrameCodec {
     type Item = Frame;
     type Error = FrameError;
 
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        // This limit already includes the encoded header and extensions.
+        // An unrepresentable configuration keeps the transport's finite
+        // default; it must not become an implicit unlimited buffer.
+        usize::try_from(self.max_frame_size).ok()
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let max_frame_size = self.max_frame_size;
         loop {

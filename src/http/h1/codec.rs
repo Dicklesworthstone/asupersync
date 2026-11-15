@@ -1180,6 +1180,23 @@ impl<'a> Iterator for PreviewHeaderIter<'a> {
 
 const MAX_CHUNK_LINE_LEN: usize = 1024;
 
+/// Bound the input retained during any one HTTP/1 decoding phase.
+///
+/// Heads are consumed before bodies, and completed chunks and trailers move
+/// into decoder-owned storage. Reserve room for a line or chunk's CRLF without
+/// making an overflowing configuration disable the framed transport's cap.
+pub(super) fn max_buffered_message_len(
+    max_headers_size: usize,
+    max_body_size: usize,
+    max_trailers_size: usize,
+) -> Option<usize> {
+    max_headers_size
+        .max(max_body_size)
+        .max(max_trailers_size)
+        .max(MAX_CHUNK_LINE_LEN)
+        .checked_add(2)
+}
+
 /// Extension bytes and redundant size padding allowed beyond decoded data.
 pub(super) const CHUNK_METADATA_ALLOWANCE_BYTES: u64 = 16 * 1024;
 
@@ -1689,6 +1706,14 @@ fn take_head(state: DecodeState) -> (Method, String, Version, Vec<(String, Strin
 impl Decoder for Http1Codec {
     type Item = Request;
     type Error = HttpError;
+
+    fn max_buffered_frame_len(&self) -> Option<usize> {
+        max_buffered_message_len(
+            self.max_headers_size,
+            self.max_body_size,
+            self.max_headers_size,
+        )
+    }
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
         match self.decode_inner(src) {
