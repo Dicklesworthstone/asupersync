@@ -74,6 +74,7 @@
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
     mod native_server_config_tests {
         use super::*;
         use std::net::SocketAddr;
@@ -138,6 +139,196 @@
             assert_eq!(config.bind_addr.port(), 8080);
             assert_eq!(config.listener.max_connections, Some(50_000));
             assert_eq!(config.http.max_body_size, 8 * 1024 * 1024);
+        }
+
+        #[test]
+        fn server_config_resolves_http_and_shutdown_precedence_without_mutating_inputs() {
+            fn clock() -> crate::types::Time {
+                crate::types::Time::from_nanos(73)
+            }
+
+            let config = ServerConfig::default()
+                .http(
+                    Http1Config::default()
+                        .max_body_size(123)
+                        .max_headers_size(456)
+                        .keep_alive(false)
+                        .max_requests(Some(7)),
+                )
+                .listener(
+                    Http1ListenerConfig::default()
+                        .http_config(Http1Config::default().max_body_size(999))
+                        .max_connections(Some(3))
+                        .drain_timeout(Duration::from_secs(9))
+                        .hard_drain_timeout(Duration::from_secs(20))
+                        .lb_compat_keep_socket(true)
+                        .time_getter(clock),
+                )
+                .shutdown_timeout(Duration::from_secs(4));
+
+            let resolved = config.listener_config().expect("valid server config");
+            assert_eq!(resolved.http_config.max_body_size, 123);
+            assert_eq!(resolved.http_config.max_headers_size, 456);
+            assert_eq!(resolved.http_config.max_requests_per_connection, Some(7));
+            assert!(!resolved.http_config.keep_alive);
+            assert_eq!(resolved.max_connections, Some(3));
+            assert!(resolved.lb_compat_keep_socket);
+            assert_eq!((resolved.time_getter)(), clock());
+            assert_eq!(resolved.drain_timeout, Duration::from_secs(4));
+            assert_eq!(resolved.hard_drain_timeout, Duration::from_secs(4));
+            assert_eq!(config.listener.http_config.max_body_size, 999);
+            assert_eq!(config.listener.drain_timeout, Duration::from_secs(9));
+            assert_eq!(config.listener.hard_drain_timeout, Duration::from_secs(20));
+
+            let shorter_soft = config.listener(
+                Http1ListenerConfig::default().drain_timeout(Duration::from_secs(1)),
+            );
+            let resolved = shorter_soft.listener_config().unwrap();
+            assert_eq!(resolved.drain_timeout, Duration::from_secs(1));
+            assert_eq!(resolved.hard_drain_timeout, Duration::from_secs(4));
+        }
+
+        #[test]
+        fn server_config_binding_refuses_invalid_or_unauthorized_contexts() {
+            use crate::cx::{Cx, cap};
+            use crate::http::h1::types::Response;
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("runtime context");
+                // Occupy a concrete address: invalid configuration must be
+                // rejected before the bind can instead report AddrInUse.
+                let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let invalid = ServerConfig::default()
+                    .bind_addr(occupied.local_addr().unwrap())
+                    .worker_threads(Some(0));
+                assert!(matches!(
+                    invalid.runtime_builder(),
+                    Err(ConfigError::InvalidParallelism)
+                ));
+                assert!(matches!(
+                    invalid.listener_config(),
+                    Err(ConfigError::InvalidParallelism)
+                ));
+                let result = invalid
+                    .bind_http1(&cx, |_| async { Response::new(200, "OK", Vec::new()) })
+                    .await;
+                assert_eq!(
+                    result.err().expect("invalid config").kind(),
+                    std::io::ErrorKind::InvalidInput
+                );
+
+                let config = ServerConfig::from_profile(ServerProfile::Testing);
+                let restricted = cx.restrict::<cap::None>();
+                let result = config
+                    .bind_http1(&restricted, |_| async { Response::new(200, "OK", Vec::new()) })
+                    .await;
+                let error = result.err().expect("explicit context must control binding");
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(
+                    error.get_ref().unwrap().downcast_ref::<crate::cx::IoCapabilityDenied>().is_some()
+                );
+
+                let cancelled = Cx::for_testing();
+                cancelled.set_cancel_requested(true);
+                let result = config
+                    .bind_http1(&cancelled, |_| async { Response::new(200, "OK", Vec::new()) })
+                    .await;
+                assert_eq!(
+                    result.err().expect("cancelled binding").kind(),
+                    std::io::ErrorKind::Interrupted
+                );
+                assert!(crate::cx::io_gate::require_ambient_io("test after refusal").is_ok());
+            });
+        }
+
+        #[test]
+        fn server_config_native_listener_enforces_http_limits_and_drains() {
+            use crate::cx::Cx;
+            use crate::http::h1::server::HostPolicy;
+            use crate::http::h1::types::Response;
+            use crate::io::{AsyncReadExt, AsyncWriteExt};
+            use crate::net::tcp::stream::TcpStream;
+            use crate::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+
+            for workers in [1, 2] {
+                let config = ServerConfig::from_profile(ServerProfile::Testing)
+                    .worker_threads(Some(workers))
+                    .http(
+                        Http1Config::default()
+                            .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                            .max_body_size(3)
+                            .keep_alive(false),
+                    );
+                let runtime = config
+                    .runtime_builder()
+                    .unwrap()
+                    .build()
+                    .expect("server runtime");
+                assert_eq!(runtime.config().worker_threads, workers);
+                let runtime_handle = runtime.handle();
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("runtime context");
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let handler_calls = Arc::clone(&calls);
+                    let listener = config
+                        .bind_http1(&cx, move |_request| {
+                            handler_calls.fetch_add(1, Ordering::SeqCst);
+                            async { Response::new(200, "OK", b"accepted".to_vec()) }
+                        })
+                        .await
+                        .expect("configured bind");
+                    let address = listener.local_addr().unwrap();
+                    assert_eq!(address.ip(), config.bind_addr.ip());
+                    assert_ne!(address.port(), 0);
+                    let manager = listener.connection_manager().clone();
+                    let shutdown = listener.shutdown_signal();
+                    let serving = runtime_handle
+                        .try_spawn(async move {
+                            let serving_cx = Cx::current().expect("serving context");
+                            listener.run_owned_in(&serving_cx).await
+                        })
+                        .expect("listener task");
+
+                    let requests: [(&[u8], &[u8]); 3] = [
+                        (b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc", b"HTTP/1.1 200"),
+                        (b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd", b"HTTP/1.1 413"),
+                        (b"GET / HTTP/1.1\r\nHost: forbidden.example\r\nConnection: close\r\n\r\n", b"HTTP/1.1 421"),
+                    ];
+                    for (request, status) in requests {
+                        let response = crate::time::timeout(cx.now(), Duration::from_secs(5), async {
+                            let mut stream = TcpStream::connect(address).await.expect("connect");
+                            stream.write_all(request).await.expect("request");
+                            let mut response = Vec::new();
+                            stream.read_to_end(&mut response).await.expect("response");
+                            response
+                        })
+                        .await
+                        .expect("bounded response");
+                        assert!(
+                            response.starts_with(status),
+                            "workers={workers}: {}",
+                            String::from_utf8_lossy(&response)
+                        );
+                    }
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        1,
+                        "refusals must not reach the handler"
+                    );
+                    assert!(shutdown.begin_drain(config.shutdown_timeout));
+                    let stats = crate::time::timeout(cx.now(), Duration::from_secs(5), serving)
+                        .await
+                        .expect("bounded listener drain")
+                        .expect("listener result");
+                    assert_eq!(stats.force_closed, 0);
+                    assert_eq!(manager.active_count(), 0);
+                    assert_eq!(shutdown.phase(), crate::server::shutdown::ShutdownPhase::Stopped);
+                });
+            }
         }
 
         #[test]
