@@ -241,6 +241,7 @@ use parking_lot::Mutex as PoolMutex;
 use smallvec::SmallVec;
 
 use crate::cx::Cx;
+use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 
 use super::waiter::DeferredWaker;
 
@@ -397,6 +398,73 @@ pub enum PoolReturn<R> {
     },
 }
 
+/// Private transport keeps causal evidence attached to its exact resource.
+/// Public custom-pool return messages and their exhaustive variants stay intact.
+#[derive(Debug)]
+struct GenericPoolReturn<R> {
+    message: PoolReturn<R>,
+    publication: Option<Box<PoolPublication>>,
+}
+
+#[derive(Debug)]
+struct PoolPublication {
+    runtime: u64,
+    time: LogicalTime,
+}
+
+enum PoolReturnRoute<R> {
+    Custom(PoolReturnSender<R>),
+    Generic(mpsc::Sender<GenericPoolReturn<R>>),
+}
+
+impl<R> PoolReturnRoute<R> {
+    fn send(
+        &self,
+        message: PoolReturn<R>,
+        publication: Option<Box<PoolPublication>>,
+    ) -> Result<(), mpsc::SendError<PoolReturn<R>>> {
+        match self {
+            Self::Custom(sender) => sender.send(message),
+            Self::Generic(sender) => sender
+                .send(GenericPoolReturn {
+                    message,
+                    publication,
+                })
+                .map_err(|error| mpsc::SendError(error.0.message)),
+        }
+    }
+}
+
+/// Retained only for an opt-in checkout. The clock is observational state;
+/// unwinding cannot invalidate physical return or obligation accounting.
+/// AssertUnwindSafe preserves the wrapper's preexisting auto-trait surface.
+#[derive(Debug)]
+struct PoolCausalOwner {
+    runtime: u64,
+    clock: std::panic::AssertUnwindSafe<LogicalClockHandle>,
+    allow_host_fallback: bool,
+}
+
+impl PoolCausalOwner {
+    fn from_cx<Caps>(cx: &Cx<Caps>) -> Option<Self> {
+        cx.task_causality_runtime().map(|runtime| Self {
+            runtime,
+            clock: std::panic::AssertUnwindSafe(cx.logical_clock_handle()),
+            allow_host_fallback: false,
+        })
+    }
+
+    fn for_acquire(cx: Option<&Cx>) -> Option<Self> {
+        // A present, untracked task also wins over a tracked explicit Cx.
+        Cx::with_current(Self::from_cx).unwrap_or_else(|| {
+            cx.and_then(Self::from_cx).map(|mut owner| {
+                owner.allow_host_fallback = true;
+                owner
+            })
+        })
+    }
+}
+
 #[derive(Debug)]
 struct ReturnObligation {
     discharged: bool,
@@ -427,7 +495,11 @@ impl ReturnObligation {
 pub struct PooledResource<R> {
     resource: Option<R>,
     return_obligation: ReturnObligation,
-    return_tx: PoolReturnSender<R>,
+    return_tx: PoolReturnRoute<R>,
+    /// An unchecked internal acquisition retains its prior release for rollback.
+    publication: Option<Box<PoolPublication>>,
+    causal_owner: Option<Box<PoolCausalOwner>>,
+    handoff_complete: bool,
     acquired_at: Instant,
     created_at: Instant,
     time_getter: fn() -> Instant,
@@ -469,7 +541,13 @@ impl<R> PooledResource<R> {
         time_getter: fn() -> Instant,
     ) -> Self {
         let now = time_getter();
-        Self::new_with_timestamps(resource, return_tx, now, now, time_getter)
+        Self::new_with_timestamps(
+            resource,
+            PoolReturnRoute::Custom(return_tx),
+            now,
+            now,
+            time_getter,
+        )
     }
 
     /// Creates a pooled resource wrapper from already-snapshotted timestamps.
@@ -478,7 +556,7 @@ impl<R> PooledResource<R> {
     /// remain guarded until the wrapper is complete.
     fn new_with_timestamps(
         resource: R,
-        return_tx: PoolReturnSender<R>,
+        return_tx: PoolReturnRoute<R>,
         acquired_at: Instant,
         created_at: Instant,
         time_getter: fn() -> Instant,
@@ -487,6 +565,9 @@ impl<R> PooledResource<R> {
             resource: Some(resource),
             return_obligation: ReturnObligation::new(),
             return_tx,
+            publication: None,
+            causal_owner: None,
+            handoff_complete: false,
             acquired_at,
             created_at,
             time_getter,
@@ -511,6 +592,49 @@ impl<R> PooledResource<R> {
     fn with_closed(mut self, closed: Arc<AtomicBool>) -> Self {
         self.closed = Some(closed);
         self
+    }
+
+    fn with_publication(mut self, publication: Option<Box<PoolPublication>>) -> Self {
+        self.publication = publication;
+        self
+    }
+
+    /// Called only after every acquisition/admission refusal has been passed.
+    fn complete_handoff(&mut self, cx: Option<&Cx>) {
+        let owner = PoolCausalOwner::for_acquire(cx);
+        if let (Some(owner), Some(publication)) = (&owner, &self.publication)
+            && owner.runtime == publication.runtime
+        {
+            let _ = owner.clock.receive(&publication.time);
+        }
+        self.publication = None;
+        self.causal_owner = owner.map(Box::new);
+        self.handoff_complete = true;
+    }
+
+    fn take_return_publication(&mut self) -> Option<Box<PoolPublication>> {
+        if matches!(&self.return_tx, PoolReturnRoute::Custom(_)) {
+            return None;
+        }
+        if !self.handoff_complete {
+            // Checked admission failed: this resource was never exposed, so
+            // preserve its prior release without attributing a failed checkout.
+            return self.publication.take();
+        }
+        let owner = Cx::with_current(PoolCausalOwner::from_cx).unwrap_or_else(|| {
+            self.causal_owner
+                .take()
+                .filter(|owner| owner.allow_host_fallback)
+                .map(|owner| *owner)
+        });
+        self.causal_owner = None;
+        owner.map(|owner| {
+            // A fixed snapshot excludes later source work. Do not tick in Drop.
+            Box::new(PoolPublication {
+                runtime: owner.runtime,
+                time: owner.clock.now(),
+            })
+        })
     }
 
     /// Access the resource.
@@ -651,12 +775,17 @@ impl<R> PooledResource<R> {
         let mut panics = CheckedPoolCleanupPanics::new();
         let mut hold_duration = Duration::ZERO;
         panics.run(|| hold_duration = self.held_duration());
+        let mut publication = None;
+        panics.run(|| publication = self.take_return_publication());
         if let Some(resource) = self.resource.take() {
-            let _ = self.return_tx.send(PoolReturn::Return {
-                resource,
-                hold_duration,
-                created_at: self.created_at,
-            });
+            let _ = self.return_tx.send(
+                PoolReturn::Return {
+                    resource,
+                    hold_duration,
+                    created_at: self.created_at,
+                },
+                publication,
+            );
         }
 
         self.return_obligation.discharge();
@@ -680,7 +809,9 @@ impl<R> PooledResource<R> {
         // active slot is reusable, and blocked acquirers must already have
         // been notified, before that destructor runs.
         let discarded = self.resource.take();
-        let _ = self.return_tx.send(PoolReturn::Discard { hold_duration });
+        let _ = self
+            .return_tx
+            .send(PoolReturn::Discard { hold_duration }, None);
         self.return_obligation.discharge();
         // Wake pool waiters — a discard frees a creation slot.
         self.notify_return_wakers();
@@ -742,8 +873,8 @@ impl<R> std::ops::DerefMut for PooledResource<R> {
     }
 }
 
-// PooledResource is auto-derived as Send when R: Send because all fields
-// (Option<R>, ReturnObligation, mpsc::Sender<PoolReturn<R>>, Instant) are Send.
+// PooledResource is auto-derived as Send when R: Send: both return transports
+// and the optional observational clock state are Send.
 // No manual unsafe impl needed.
 
 /// A pool checkout whose return liability was admitted before acquisition
@@ -756,7 +887,7 @@ impl<R> std::ops::DerefMut for PooledResource<R> {
 /// even on abort. Moving this wrapper does not transfer its original holder's
 /// liability. An explicitly stateless context has no runtime token.
 ///
-/// This separate wrapper leaves the legacy [`PooledResource`] representation
+/// This separate wrapper leaves the legacy [`PooledResource`] public API
 /// and auto traits unchanged. A resource need only be `Send`, not `Sync`, to
 /// move the checked checkout between threads.
 #[must_use = "a checked pool resource must be returned or dropped"]
@@ -774,6 +905,11 @@ impl<R> CheckedPooledResource<R> {
         };
         checked.obligation =
             cx.try_register_obligation_checked(crate::record::ObligationKind::Lease, cx.task_id())?;
+        checked
+            .pooled
+            .as_mut()
+            .expect("active checked checkout")
+            .complete_handoff(Some(cx));
         Ok(checked)
     }
 
@@ -858,7 +994,11 @@ impl<R> CheckedPooledResource<R> {
                 created_at: pooled.created_at,
             }
         };
-        let returned = match pooled.return_tx.send(message) {
+        let mut publication = None;
+        if !discard && !pool_closed {
+            panics.run(|| publication = pooled.take_return_publication());
+        }
+        let returned = match pooled.return_tx.send(message, publication) {
             Ok(()) => true,
             Err(mpsc::SendError(PoolReturn::Return { resource: lost, .. })) => {
                 resource = Some(lost);
@@ -1179,6 +1319,7 @@ pub enum CheckedPoolError {
 #[derive(Debug)]
 struct IdleResource<R> {
     resource: R,
+    publication: Option<Box<PoolPublication>>,
     idle_since: Instant,
     created_at: Instant,
 }
@@ -1624,9 +1765,9 @@ where
     /// Internal state.
     state: PoolMutex<GenericPoolState<R>>,
     /// Channel for returning resources.
-    return_tx: PoolReturnSender<R>,
+    return_tx: mpsc::Sender<GenericPoolReturn<R>>,
     /// Channel receiver for returned resources.
-    return_rx: PoolMutex<PoolReturnReceiver<R>>,
+    return_rx: PoolMutex<mpsc::Receiver<GenericPoolReturn<R>>>,
     /// Time source for lifecycle bookkeeping that should remain deterministic
     /// in tests and virtual-time harnesses.
     time_getter: fn() -> Instant,
@@ -1717,7 +1858,7 @@ where
         cx: &'a Cx,
     ) -> PoolFuture<'a, Result<CheckedPooledResource<R>, CheckedPoolError>> {
         Box::pin(async move {
-            let pooled = self.acquire(cx).await?;
+            let pooled = self.acquire_inner(cx, false).await?;
             CheckedPooledResource::admit(pooled, cx)
         })
     }
@@ -1735,7 +1876,7 @@ where
         if self.closed.load(Ordering::Acquire) {
             return Err(PoolError::Closed.into());
         }
-        match self.try_acquire() {
+        match self.try_acquire_inner(false) {
             Some(pooled) => CheckedPooledResource::admit(pooled, cx).map(Some),
             None if self.closed.load(Ordering::Acquire) => Err(PoolError::Closed.into()),
             None => Ok(None),
@@ -1915,7 +2056,7 @@ where
     }
 
     /// Detach one return message from the receiver lock.
-    fn try_recv_return(&self) -> Result<PoolReturn<R>, mpsc::TryRecvError> {
+    fn try_recv_return(&self) -> Result<GenericPoolReturn<R>, mpsc::TryRecvError> {
         let rx = self.return_rx.lock();
         rx.try_recv()
     }
@@ -1928,7 +2069,7 @@ where
         // payload. A closed-pool Return may destroy arbitrary R state, and that
         // destructor must never run while return_rx is locked.
         while let Ok(ret) = self.try_recv_return() {
-            match ret {
+            match ret.message {
                 PoolReturn::Return {
                     resource,
                     hold_duration,
@@ -1957,6 +2098,7 @@ where
                     let idle_since = (self.time_getter)();
                     pending_idle = Some(IdleResource {
                         resource,
+                        publication: ret.publication,
                         idle_since,
                         created_at,
                     });
@@ -2001,7 +2143,7 @@ where
     }
 
     /// Try to get an idle resource, returning its original creation time.
-    fn try_get_idle(&self, waiter_id: Option<u64>) -> Option<(R, Instant)> {
+    fn try_get_idle(&self, waiter_id: Option<u64>) -> Option<IdleResource<R>> {
         // Snapshot time before locking so an injected clock can neither reenter
         // state nor strand a detached resource during unwind.
         let now = (self.time_getter)();
@@ -2103,7 +2245,7 @@ where
                 state.total_acquisitions = total_acquisitions;
                 // Waiter remains queued until acquire succeeds, or stays when
                 // a health check fails so FIFO position is preserved.
-                Some((idle.resource, idle.created_at))
+                Some(idle)
             } else {
                 None
             };
@@ -2216,6 +2358,7 @@ where
             let now = (self.time_getter)();
             pending_idle = Some(IdleResource {
                 resource,
+                publication: None,
                 idle_since: now,
                 created_at: now,
             });
@@ -2403,20 +2546,18 @@ where
     }
 }
 
-impl<R, F> Pool for GenericPool<R, F>
+impl<R, F> GenericPool<R, F>
 where
     R: Send + 'static,
     F: AsyncResourceFactory<Resource = R>,
 {
-    type Resource = R;
-    type Error = PoolError;
-
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     #[allow(clippy::too_many_lines)]
-    fn acquire<'a>(
+    fn acquire_inner<'a>(
         &'a self,
         cx: &'a Cx,
-    ) -> PoolFuture<'a, Result<PooledResource<Self::Resource>, Self::Error>> {
+        complete_handoff: bool,
+    ) -> PoolFuture<'a, Result<PooledResource<R>, PoolError>> {
         Box::pin(async move {
             struct WaiterCleanup<'a, R, F>
             where
@@ -2513,7 +2654,9 @@ where
                 }
 
                 // Try to get a healthy idle resource.
-                while let Some((resource, created_at)) = self.try_get_idle(cleanup.waiter_id) {
+                while let Some(IdleResource { resource, created_at, publication, .. }) =
+                    self.try_get_idle(cleanup.waiter_id)
+                {
                     let mut checkout = ActiveCheckoutGuard::new(self);
                     let is_healthy = if self.config.health_check_on_acquire {
                         checkout.begin_health_check();
@@ -2546,15 +2689,16 @@ where
                     if cx.checkpoint().is_err() {
                         return Err(PoolError::Cancelled);
                     }
-                    let pooled = PooledResource::new_with_timestamps(
+                    let mut pooled = PooledResource::new_with_timestamps(
                         resource,
-                        self.return_tx.clone(),
+                        PoolReturnRoute::Generic(self.return_tx.clone()),
                         acquired_at,
                         created_at,
                         self.time_getter,
                     )
                     .with_return_notify(Arc::clone(&self.return_wakers))
-                    .with_closed(Arc::clone(&self.closed));
+                    .with_closed(Arc::clone(&self.closed))
+                    .with_publication(publication);
                     checkout.commit();
 
                     // Count the acquisition only after responsibility has
@@ -2565,6 +2709,12 @@ where
                         self.update_metrics_gauges();
                     }
 
+                    // Cleanup can dispatch other returns and run user callbacks.
+                    // Finish it before importing evidence for a successful result.
+                    drop(cleanup);
+                    if complete_handoff {
+                        pooled.complete_handoff(Some(cx));
+                    }
                     return Ok(pooled);
                 }
 
@@ -2658,9 +2808,9 @@ where
                     if cx.checkpoint().is_err() {
                         return Err(PoolError::Cancelled);
                     }
-                    let pooled = PooledResource::new_with_timestamps(
+                    let mut pooled = PooledResource::new_with_timestamps(
                         resource,
-                        self.return_tx.clone(),
+                        PoolReturnRoute::Generic(self.return_tx.clone()),
                         acquired_at,
                         acquired_at,
                         self.time_getter,
@@ -2679,6 +2829,10 @@ where
                         self.update_metrics_gauges();
                     }
 
+                    drop(cleanup);
+                    if complete_handoff {
+                        pooled.complete_handoff(Some(cx));
+                    }
                     return Ok(pooled);
                 }
 
@@ -2746,7 +2900,7 @@ where
     }
 
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-    fn try_acquire(&self) -> Option<PooledResource<Self::Resource>> {
+    fn try_acquire_inner(&self, complete_handoff: bool) -> Option<PooledResource<R>> {
         let acquire_start = (self.time_getter)();
 
         self.process_returns();
@@ -2755,7 +2909,13 @@ where
             return None;
         }
 
-        while let Some((resource, created_at)) = self.try_get_idle(None) {
+        while let Some(IdleResource {
+            resource,
+            created_at,
+            publication,
+            ..
+        }) = self.try_get_idle(None)
+        {
             let mut checkout = ActiveCheckoutGuard::new(self);
             let is_healthy = if self.config.health_check_on_acquire {
                 checkout.begin_health_check();
@@ -2778,15 +2938,16 @@ where
                 .map(|_| (self.time_getter)().saturating_duration_since(acquire_start));
 
             let acquired_at = (self.time_getter)();
-            let pooled = PooledResource::new_with_timestamps(
+            let mut pooled = PooledResource::new_with_timestamps(
                 resource,
-                self.return_tx.clone(),
+                PoolReturnRoute::Generic(self.return_tx.clone()),
                 acquired_at,
                 created_at,
                 self.time_getter,
             )
             .with_return_notify(Arc::clone(&self.return_wakers))
-            .with_closed(Arc::clone(&self.closed));
+            .with_closed(Arc::clone(&self.closed))
+            .with_publication(publication);
             checkout.commit();
 
             // Count the acquisition only after responsibility has transferred
@@ -2797,10 +2958,33 @@ where
                 self.update_metrics_gauges();
             }
 
+            if complete_handoff {
+                pooled.complete_handoff(None);
+            }
             return Some(pooled);
         }
 
         None
+    }
+}
+
+impl<R, F> Pool for GenericPool<R, F>
+where
+    R: Send + 'static,
+    F: AsyncResourceFactory<Resource = R>,
+{
+    type Resource = R;
+    type Error = PoolError;
+
+    fn acquire<'a>(
+        &'a self,
+        cx: &'a Cx,
+    ) -> PoolFuture<'a, Result<PooledResource<Self::Resource>, Self::Error>> {
+        self.acquire_inner(cx, true)
+    }
+
+    fn try_acquire(&self) -> Option<PooledResource<Self::Resource>> {
+        self.try_acquire_inner(true)
     }
 
     fn stats(&self) -> PoolStats {

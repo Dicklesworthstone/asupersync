@@ -1758,6 +1758,7 @@ mod tests {
             state.idle.reserve(1);
             state.idle.push_back(IdleResource {
                 resource,
+                publication: None,
                 idle_since: now,
                 created_at: now,
             });
@@ -1787,6 +1788,7 @@ mod tests {
             state.idle.reserve(1);
             state.idle.push_back(IdleResource {
                 resource,
+                publication: None,
                 idle_since: now,
                 created_at: now,
             });
@@ -1815,10 +1817,13 @@ mod tests {
         let (resource, drop_rx) = pool_resource_lock_probe(&pool);
         let sent = pool
             .return_tx
-            .send(PoolReturn::Return {
-                resource,
-                hold_duration: Duration::ZERO,
-                created_at: test_pool_time_now(),
+            .send(GenericPoolReturn {
+                message: PoolReturn::Return {
+                    resource,
+                    hold_duration: Duration::ZERO,
+                    created_at: test_pool_time_now(),
+                },
+                publication: None,
             })
             .is_ok();
         assert!(sent, "return channel remains connected after pool close");
@@ -5452,10 +5457,13 @@ mod tests {
         let (resource, drop_rx) = pool_resource_lock_probe(&pool);
         let sent = pool
             .return_tx
-            .send(PoolReturn::Return {
-                resource,
-                hold_duration: Duration::ZERO,
-                created_at: test_pool_time_now(),
+            .send(GenericPoolReturn {
+                message: PoolReturn::Return {
+                    resource,
+                    hold_duration: Duration::ZERO,
+                    created_at: test_pool_time_now(),
+                },
+                publication: None,
             })
             .is_ok();
         assert!(sent, "the return is queued before the close");
@@ -5706,5 +5714,532 @@ mod tests {
         let stats = pool.stats();
         assert_eq!((stats.active, stats.idle), (0, 0));
         finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    mod causality {
+        use super::*;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::remote::NodeId;
+        use crate::trace::distributed::{CausalOrder, LogicalClockMode};
+        use crate::trace::{TraceData, TraceEvent};
+        use futures_lite::future::block_on;
+
+        fn tracked(runtime: u64, node: &str) -> Cx {
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::starting_at(
+                Time::ZERO,
+            )));
+            test_cx_with_timer(timer)
+                .with_logical_clock(
+                    LogicalClockMode::Vector {
+                        node: NodeId::new(node),
+                    }
+                    .build_handle(None),
+                )
+                .with_task_causality_runtime(Some(runtime))
+        }
+
+        #[test]
+        fn all_return_and_checkout_forms_transfer_only_the_released_past() {
+            let _host = Cx::set_current(None);
+            for release in 0..4 {
+                for acquire in 0..4 {
+                    let source = tracked(97, "source");
+                    let observer = tracked(97, "observer");
+                    let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+                    let released = if release < 2 {
+                        let resource = block_on(pool.acquire(&source)).unwrap();
+                        let released = source.logical_tick();
+                        if release == 0 {
+                            resource.return_to_pool();
+                        } else {
+                            drop(resource);
+                        }
+                        released
+                    } else {
+                        let resource = block_on(pool.acquire_checked(&source)).unwrap();
+                        let released = source.logical_tick();
+                        if release == 2 {
+                            resource.return_to_pool();
+                        } else {
+                            drop(resource);
+                        }
+                        released
+                    };
+                    let later = source.logical_tick();
+                    {
+                        let _current = Cx::set_current(Some(observer.clone()));
+                        match acquire {
+                            0 => assert_eq!(*block_on(pool.acquire(&observer)).unwrap(), 42),
+                            1 => assert_eq!(*pool.try_acquire().unwrap(), 42),
+                            2 => {
+                                assert_eq!(*block_on(pool.acquire_checked(&observer)).unwrap(), 42)
+                            }
+                            _ => assert_eq!(
+                                *pool.try_acquire_checked(&observer).unwrap().unwrap(),
+                                42
+                            ),
+                        }
+                    }
+                    let observed = observer.logical_tick();
+                    assert_eq!(
+                        released.causal_order(&observed),
+                        CausalOrder::Before,
+                        "release={release} acquire={acquire}"
+                    );
+                    assert_eq!(
+                        later.causal_order(&observed),
+                        CausalOrder::Concurrent,
+                        "release={release} acquire={acquire}: later work leaked"
+                    );
+                    assert_eq!(source.logical_now(), later);
+                    assert_eq!(pool.stats().idle, 1);
+                }
+            }
+        }
+
+        #[test]
+        fn distinct_resources_keep_distinct_release_histories_across_return_order() {
+            let _host = Cx::set_current(None);
+            let pool = GenericPool::new(
+                counting_factory(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+                PoolConfig::with_max_size(2),
+            );
+            let first = tracked(97, "first");
+            let second = tracked(97, "second");
+            let read_second = tracked(97, "read-second");
+            let read_first = tracked(97, "read-first");
+            let a = block_on(pool.acquire(&first)).unwrap();
+            let b = block_on(pool.acquire(&second)).unwrap();
+            assert_eq!((*a, *b), (0, 1));
+            let before_a = first.logical_tick();
+            let before_b = second.logical_tick();
+            assert_eq!(before_a.causal_order(&before_b), CausalOrder::Concurrent);
+            b.return_to_pool();
+            a.return_to_pool();
+            let after_a = first.logical_tick();
+            let after_b = second.logical_tick();
+            {
+                let _current = Cx::set_current(Some(read_second.clone()));
+                let before_stats = read_second.logical_now();
+                assert_eq!(pool.stats().idle, 2);
+                assert_eq!(
+                    read_second.logical_now(),
+                    before_stats,
+                    "stats never receives"
+                );
+            }
+            let b = block_on(pool.acquire(&read_second)).unwrap();
+            let a = block_on(pool.acquire(&read_first)).unwrap();
+            assert_eq!((*a, *b), (0, 1));
+            let saw_b = read_second.logical_tick();
+            let saw_a = read_first.logical_tick();
+            assert_eq!(before_b.causal_order(&saw_b), CausalOrder::Before);
+            assert_eq!(before_a.causal_order(&saw_b), CausalOrder::Concurrent);
+            assert_eq!(before_a.causal_order(&saw_a), CausalOrder::Before);
+            assert_eq!(before_b.causal_order(&saw_a), CausalOrder::Concurrent);
+            assert_eq!(after_a.causal_order(&saw_a), CausalOrder::Concurrent);
+            assert_eq!(after_b.causal_order(&saw_b), CausalOrder::Concurrent);
+            assert_eq!(saw_a.causal_order(&saw_b), CausalOrder::Concurrent);
+            drop((a, b));
+        }
+
+        #[test]
+        fn actual_poller_and_returner_override_explicit_and_captured_contexts() {
+            let _host = Cx::set_current(None);
+            let constructor = tracked(97, "constructor");
+            let acquirer = tracked(97, "acquirer");
+            let returner = tracked(97, "returner");
+            let reader = tracked(97, "reader");
+            let constructor_before = constructor.logical_tick();
+            let acquirer_before = acquirer.logical_tick();
+            let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+            let resource = {
+                let _current = Cx::set_current(Some(acquirer.clone()));
+                block_on(pool.acquire(&constructor)).unwrap()
+            };
+            let released = returner.logical_tick();
+            {
+                let _current = Cx::set_current(Some(returner.clone()));
+                drop(resource);
+            }
+            let later = returner.logical_tick();
+            {
+                let _current = Cx::set_current(Some(reader.clone()));
+                drop(block_on(pool.acquire(&constructor)).unwrap());
+            }
+            let read = reader.logical_tick();
+            assert_eq!(released.causal_order(&read), CausalOrder::Before);
+            for unrelated in [&later, &constructor_before, &acquirer_before] {
+                assert_eq!(unrelated.causal_order(&read), CausalOrder::Concurrent);
+            }
+            assert_eq!(constructor.logical_now(), constructor_before);
+            assert_eq!(acquirer.logical_now(), acquirer_before);
+
+            // An ambient acquisition cannot name a later off-task destructor.
+            let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+            let resource = {
+                let _current = Cx::set_current(Some(acquirer.clone()));
+                block_on(pool.acquire(&constructor)).unwrap()
+            };
+            let _ = acquirer.logical_tick();
+            drop(resource);
+            assert_eq!(pool.stats().idle, 1);
+            assert!(pool.state.lock().idle[0].publication.is_none());
+        }
+
+        #[test]
+        fn foreign_and_untracked_owners_do_not_republish_stale_resource_evidence() {
+            let _host = Cx::set_current(None);
+            for foreign in [false, true] {
+                let source = tracked(97, "source");
+                let observer = tracked(97, "observer");
+                let intervening = if foreign {
+                    tracked(98, "source")
+                } else {
+                    Cx::for_testing()
+                };
+                let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+                let resource = block_on(pool.acquire(&source)).unwrap();
+                let _ = source.logical_tick();
+                drop(resource);
+                let before = intervening.logical_now();
+                let source_before = source.logical_now();
+                {
+                    let _current = Cx::set_current(Some(intervening.clone()));
+                    drop(block_on(pool.acquire(&source)).unwrap());
+                }
+                assert_eq!(intervening.logical_now(), before);
+                assert_eq!(
+                    source.logical_now(),
+                    source_before,
+                    "no captured-Cx fallback"
+                );
+                let before = observer.logical_now();
+                drop(block_on(pool.acquire(&observer)).unwrap());
+                assert_eq!(observer.logical_now(), before);
+            }
+
+            let untracked = Cx::for_testing();
+            let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+            let resource = block_on(pool.acquire(&untracked)).unwrap();
+            assert!(resource.causal_owner.is_none());
+            assert!(resource.publication.is_none());
+            drop(resource);
+            assert_eq!(pool.stats().idle, 1);
+            assert!(
+                pool.state.lock().idle[0].publication.is_none(),
+                "no default sidecar"
+            );
+        }
+
+        #[test]
+        fn failed_checked_admission_keeps_prior_release_without_observing_it() {
+            let _host = Cx::set_current(None);
+            for immediate in [false, true] {
+                let (mut lab, holder, mut handle) = checked_pool_fixture(0);
+                let refused = holder
+                    .clone()
+                    .with_logical_clock(
+                        LogicalClockMode::Vector {
+                            node: NodeId::new("refused"),
+                        }
+                        .build_handle(None),
+                    )
+                    .with_task_causality_runtime(Some(97));
+                let source = tracked(97, "source");
+                let follower = tracked(97, "follower");
+                let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+                let resource = block_on(pool.acquire(&source)).unwrap();
+                let released = source.logical_tick();
+                drop(resource);
+                let before = refused.logical_tick();
+                let failed = if immediate {
+                    matches!(
+                        pool.try_acquire_checked(&refused),
+                        Err(CheckedPoolError::Admission(_))
+                    )
+                } else {
+                    matches!(
+                        block_on(pool.acquire_checked(&refused)),
+                        Err(CheckedPoolError::Admission(_))
+                    )
+                };
+                assert!(failed);
+                assert_eq!(refused.logical_now(), before);
+                assert_eq!((pool.stats().active, pool.stats().idle), (0, 1));
+                let held = block_on(pool.acquire(&follower)).unwrap();
+                let received = follower.logical_tick();
+                assert_eq!(released.causal_order(&received), CausalOrder::Before);
+                assert_eq!(before.causal_order(&received), CausalOrder::Concurrent);
+                drop(held);
+                lab.scheduler.lock().schedule(holder.task_id(), 0);
+                lab.run_until_quiescent();
+                assert_eq!(handle.try_join().unwrap(), Some(()));
+                assert_eq!(lab.state.pending_obligation_count(), 0);
+                assert_eq!(lab.state.leak_count(), 0);
+            }
+        }
+
+        #[test]
+        fn cancelled_or_dropped_waiter_does_not_receive_the_return_it_missed() {
+            let _host = Cx::set_current(None);
+            for cancel in [false, true] {
+                let source = tracked(97, "source");
+                let refused = tracked(97, "refused");
+                let follower = tracked(97, "follower");
+                let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+                let resource = block_on(pool.acquire(&source)).unwrap();
+                let before = refused.logical_tick();
+                let mut waiting = pool.acquire(&refused);
+                let mut context = Context::from_waker(Waker::noop());
+                assert!(waiting.as_mut().poll(&mut context).is_pending());
+                assert_eq!(pool.stats().waiters, 1);
+                let released = source.logical_tick();
+                drop(resource);
+                if cancel {
+                    refused.cancel_fast(crate::types::CancelKind::User);
+                    assert!(matches!(
+                        waiting.as_mut().poll(&mut context),
+                        Poll::Ready(Err(PoolError::Cancelled))
+                    ));
+                }
+                drop(waiting);
+                assert_eq!(refused.logical_now(), before);
+                let held = block_on(pool.acquire(&follower)).unwrap();
+                assert_eq!(
+                    released.causal_order(&follower.logical_now()),
+                    CausalOrder::Before
+                );
+                assert_eq!(pool.stats().waiters, 0);
+                drop(held);
+            }
+        }
+
+        #[test]
+        fn cleanup_panic_before_handoff_preserves_unobserved_resource_history() {
+            let _host = Cx::set_current(None);
+            for checked in [false, true] {
+                reset_test_pool_time();
+                let source = tracked(97, "source");
+                let refused = tracked(97, "refused");
+                let follower = tracked(97, "follower");
+                let pending = Arc::new(std::sync::Mutex::new(None::<PooledResource<usize>>));
+                let return_during_check = Arc::clone(&pending);
+                let pool = GenericPool::with_time_getter(
+                    counting_factory(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+                    PoolConfig::with_max_size(2).health_check_on_acquire(true),
+                    panic_once_test_pool_time_now,
+                )
+                .with_health_check(move |_| {
+                    let other = return_during_check.lock().unwrap().take();
+                    if let Some(other) = other {
+                        // This return becomes visible only after the acquire's
+                        // initial dispatch. Cleanup will process it after the
+                        // candidate's final timestamp has been sampled.
+                        drop(other);
+                        panic_test_pool_time_on_call(2);
+                    }
+                    true
+                });
+                let candidate = block_on(pool.acquire(&source)).unwrap();
+                let other = block_on(pool.acquire(&source)).unwrap();
+                let released = source.logical_tick();
+                drop(candidate);
+                assert_eq!(pool.stats().idle, 1);
+                *pending.lock().unwrap() = Some(other);
+                let before = refused.logical_tick();
+                let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if checked {
+                        drop(block_on(pool.acquire_checked(&refused)).unwrap());
+                    } else {
+                        drop(block_on(pool.acquire(&refused)).unwrap());
+                    }
+                }));
+                let (_, pending_panic) = test_pool_time_probe_state();
+                disarm_test_pool_time_panic();
+                assert!(failure.is_err(), "cleanup must exercise the injected panic");
+                assert_eq!(pending_panic, None);
+                assert_eq!(
+                    refused.logical_now(),
+                    before,
+                    "failed checkout never receives"
+                );
+                assert_eq!((pool.stats().active, pool.stats().idle), (0, 1));
+                let held = block_on(pool.acquire(&follower)).unwrap();
+                assert_eq!(*held, 0, "unexposed candidate is still reusable");
+                let observed = follower.logical_tick();
+                assert_eq!(released.causal_order(&observed), CausalOrder::Before);
+                assert_eq!(before.causal_order(&observed), CausalOrder::Concurrent);
+                drop(held);
+            }
+        }
+
+        #[test]
+        fn discarded_expired_and_unhealthy_resources_do_not_order_replacements() {
+            let _host = Cx::set_current(None);
+            for path in 0..5 {
+                reset_test_pool_time();
+                let source = tracked(97, "source");
+                let observer = tracked(97, "observer");
+                let config = PoolConfig::with_max_size(1)
+                    .health_check_on_acquire(path == 2)
+                    .idle_timeout(if path == 3 {
+                        Duration::from_millis(10)
+                    } else {
+                        Duration::from_secs(10)
+                    })
+                    .max_lifetime(if path == 4 {
+                        Duration::from_millis(10)
+                    } else {
+                        Duration::from_secs(10)
+                    });
+                let pool = GenericPool::with_time_getter(
+                    counting_factory(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+                    config,
+                    test_pool_time_now,
+                )
+                .with_health_check(move |id| path != 2 || *id != 0);
+                let mut resource = block_on(pool.acquire(&source)).unwrap();
+                assert_eq!(*resource, 0);
+                let released = source.logical_tick();
+                match path {
+                    0 => resource.discard(),
+                    1 => {
+                        resource.mark_broken();
+                        drop(resource);
+                    }
+                    _ => drop(resource),
+                }
+                // Process returns before advancing idle age.
+                let _ = pool.stats();
+                advance_test_pool_time(Duration::from_millis(20));
+                let before = observer.logical_now();
+                let replacement = block_on(pool.acquire(&observer)).unwrap();
+                assert_eq!(*replacement, 1, "path={path}");
+                assert_eq!(observer.logical_now(), before, "path={path}");
+                let observed = observer.logical_tick();
+                assert_eq!(released.causal_order(&observed), CausalOrder::Concurrent);
+                drop(replacement);
+            }
+        }
+
+        fn event_time(events: &[TraceEvent], name: &str) -> LogicalTime {
+            events
+                .iter()
+                .find(|event| matches!(&event.data, TraceData::Message(message) if message == name))
+                .and_then(|event| event.logical_time.clone())
+                .unwrap_or_else(|| panic!("missing logical time for {name}"))
+        }
+
+        fn admitted_handoff_trace(checked: bool) -> Vec<TraceEvent> {
+            let _host = Cx::set_current(None);
+            let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let pool = Arc::new(GenericPool::new(
+                simple_factory,
+                PoolConfig::with_max_size(1),
+            ));
+            let source_pool = Arc::clone(&pool);
+            let (release, mut gate) = crate::channel::oneshot::channel();
+            let (source, mut source_join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    if checked {
+                        let resource = source_pool.acquire_checked(&cx).await.unwrap();
+                        gate.recv(&cx).await.unwrap();
+                        cx.trace("pool-release");
+                        resource.return_to_pool();
+                    } else {
+                        let resource = source_pool.acquire(&cx).await.unwrap();
+                        gate.recv(&cx).await.unwrap();
+                        cx.trace("pool-release");
+                        drop(resource);
+                    }
+                    cx.trace("pool-source-after");
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(source, 0);
+            lab.step_for_test();
+            assert_eq!(pool.stats().active, 1);
+            let reader_pool = Arc::clone(&pool);
+            let (reader, mut reader_join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    if checked {
+                        let resource = reader_pool.acquire_checked(&cx).await.unwrap();
+                        assert_eq!(*resource, 42);
+                        cx.trace("pool-read");
+                        resource.return_to_pool();
+                    } else {
+                        let resource = reader_pool.acquire(&cx).await.unwrap();
+                        assert_eq!(*resource, 42);
+                        cx.trace("pool-read");
+                        drop(resource);
+                    }
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(reader, 0);
+            lab.step_for_test();
+            assert_eq!(
+                pool.stats().waiters,
+                1,
+                "reader is truly parked before return"
+            );
+            release.send_blocking(()).unwrap();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(report.lab_test_passed(), "{report:?}");
+            assert!(lab.is_quiescent());
+            assert_eq!(source_join.try_join().unwrap(), Some(()));
+            assert_eq!(reader_join.try_join().unwrap(), Some(()));
+            assert_eq!(
+                (pool.stats().active, pool.stats().idle, pool.stats().waiters),
+                (0, 1, 0)
+            );
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert_eq!(lab.state.leak_count(), 0);
+            lab.trace().snapshot()
+        }
+
+        #[test]
+        fn admitted_lab_handoff_orders_actual_tasks_and_replays_deterministically() {
+            for checked in [false, true] {
+                let events = admitted_handoff_trace(checked);
+                let released = event_time(&events, "pool-release");
+                let later = event_time(&events, "pool-source-after");
+                let read = event_time(&events, "pool-read");
+                assert_eq!(released.causal_order(&read), CausalOrder::Before);
+                assert_eq!(later.causal_order(&read), CausalOrder::Concurrent);
+                let repeated = admitted_handoff_trace(checked);
+                assert_eq!(released, event_time(&repeated, "pool-release"));
+                assert_eq!(read, event_time(&repeated, "pool-read"));
+            }
+        }
+
+        #[test]
+        fn custom_return_protocol_and_wrapper_auto_traits_remain_compatible() {
+            fn traits<
+                T: Send + Sync + Unpin + std::panic::UnwindSafe + std::panic::RefUnwindSafe,
+            >() {
+            }
+            fn send_unwind<T: Send + Unpin + std::panic::UnwindSafe>() {}
+            traits::<PooledResource<u32>>();
+            send_unwind::<PooledResource<Cell<u32>>>();
+            let _host = Cx::set_current(Some(tracked(97, "custom")));
+            let (sender, receiver): (PoolReturnSender<u32>, PoolReturnReceiver<u32>) =
+                mpsc::channel();
+            PooledResource::new(41, sender).return_to_pool();
+            match receiver.recv().unwrap() {
+                PoolReturn::Return {
+                    resource,
+                    hold_duration: _,
+                    created_at: _,
+                } => assert_eq!(resource, 41),
+                PoolReturn::Discard { hold_duration: _ } => {
+                    panic!("healthy custom resource was discarded")
+                }
+            }
+        }
     }
 }
