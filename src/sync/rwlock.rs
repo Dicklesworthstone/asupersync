@@ -515,35 +515,72 @@ impl<T> RwLock<T> {
         }
     }
 
+    /// Reserves the next turn after the last active or pregranted slot is
+    /// released. Every handoff must compare the remaining queues: cancelling
+    /// an older writer can leave readers ahead of the next writer even when
+    /// the released slot belonged to a reader (asupersync-c11v6v, item 8).
+    #[inline]
+    fn grant_next_waiters(&self, state: &mut State) -> (Option<Waker>, SmallVec<[Waker; 4]>) {
+        debug_assert_eq!(state.readers, 0);
+        debug_assert!(!state.writer_active);
+
+        if self.is_poisoned() {
+            // Poisoned waiters must observe the error while their queue
+            // registrations remain intact; do not reserve acquisition slots.
+            return (None, Self::queued_waiter_wakers(state));
+        }
+
+        // br-asupersync-4j40bb: after N writer handoffs while readers waited,
+        // admit exactly one oldest reader. With no queued writer, admit all
+        // readers instead, preserving their ability to run concurrently.
+        let force_reader_turn = state.consecutive_writers_served
+            >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
+            && !state.reader_waiters.is_empty()
+            && !state.writer_queue.is_empty();
+
+        if !force_reader_turn && Self::should_wake_writer(state) {
+            let waker = Self::pop_writer_waiter(state);
+            if waker.is_some() {
+                state.writer_active = true;
+                // Only count writer handoffs while readers actually wait.
+                if state.reader_waiters.is_empty() {
+                    state.consecutive_writers_served = 0;
+                } else {
+                    state.consecutive_writers_served =
+                        state.consecutive_writers_served.saturating_add(1);
+                }
+            }
+            (waker, SmallVec::new())
+        } else {
+            let wakers = if force_reader_turn {
+                Self::take_forced_reader_turn(state)
+            } else {
+                // Readers younger than the head writer remain queued, so a
+                // cancelled predecessor cannot let them bypass that writer.
+                Self::take_eligible_reader_waiters(state)
+            };
+            state.readers += wakers.len();
+            if !wakers.is_empty() {
+                state.consecutive_writers_served = 0;
+            }
+            (None, wakers)
+        }
+    }
+
     #[inline]
     fn release_reader(&self, causal_owner: Option<RwLockCausalOwner>) {
         let causal_owner = RwLockCausalOwner::for_release(causal_owner);
-        let waker = {
+        let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
             state.release_read_causality(causal_owner.as_ref());
             state.readers = state.readers.saturating_sub(1);
-            if state.readers == 0 && state.writer_waiters > 0 {
-                let waker = Self::pop_writer_waiter(&mut state);
-                if waker.is_some() {
-                    state.writer_active = true;
-                    // br-asupersync-4j40bb: track writer hand-offs while
-                    // readers are queued so the streak count is accurate
-                    // when release_writer eventually fires.
-                    if !state.reader_waiters.is_empty() {
-                        state.consecutive_writers_served =
-                            state.consecutive_writers_served.saturating_add(1);
-                    } else {
-                        state.consecutive_writers_served = 0;
-                    }
-                }
-                waker
+            if state.readers == 0 {
+                self.grant_next_waiters(&mut state)
             } else {
-                None
+                (None, SmallVec::new())
             }
         };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
     }
 
     #[inline]
@@ -553,72 +590,7 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock();
             state.release_write_causality(causal_owner.as_ref());
             state.writer_active = false;
-
-            if self.is_poisoned() {
-                let wakers = Self::queued_waiter_wakers(&mut state);
-                drop(state);
-                (None, wakers)
-            } else {
-                // br-asupersync-4j40bb: bounded reader starvation. After N
-                // consecutive writer hand-offs while readers were also
-                // queued, force one reader turn and reset the counter before
-                // any further writer can proceed. Waking a single queued
-                // reader bounds the gap between forced reader turns without
-                // postponing the head writer behind an arbitrary tail of
-                // younger readers.
-                //
-                // The forced turn is ONLY for cutting a reader in front of
-                // waiting writers. When the writer queue is empty there is no
-                // starvation to bound, and forcing a single-reader turn would
-                // strand every other queued reader: `take_forced_reader_turn`
-                // wakes exactly one, and `release_reader` only ever wakes
-                // writers, so a second queued reader would hang forever with
-                // the lock fully free. Require a non-empty writer queue so the
-                // empty-queue case falls through to `take_eligible_reader_waiters`
-                // (which drains ALL readers when no writer is queued).
-                let force_reader_batch = state.consecutive_writers_served
-                    >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
-                    && !state.reader_waiters.is_empty()
-                    && !state.writer_queue.is_empty();
-
-                let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
-                if wake_writer {
-                    let waker = Self::pop_writer_waiter(&mut state);
-                    if waker.is_some() {
-                        state.writer_active = true;
-                        // Only count as "writer served while readers waited"
-                        // if there are actually queued readers — otherwise
-                        // there's no starvation to bound.
-                        if !state.reader_waiters.is_empty() {
-                            state.consecutive_writers_served =
-                                state.consecutive_writers_served.saturating_add(1);
-                        } else {
-                            state.consecutive_writers_served = 0;
-                        }
-                    }
-                    (waker, SmallVec::new())
-                } else if force_reader_batch {
-                    // Forced turn: admit exactly one queued reader, then
-                    // leave the writer queue intact so the head writer runs
-                    // immediately after that reader releases.
-                    let wakers = Self::take_forced_reader_turn(&mut state);
-                    state.readers += wakers.len();
-                    state.consecutive_writers_served = 0;
-                    drop(state);
-                    (None, wakers)
-                } else {
-                    // Only readers older than the first queued writer can proceed.
-                    // Younger readers must remain queued behind that writer to
-                    // preserve the lock's documented writer-preference policy.
-                    let wakers = Self::take_eligible_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    if !wakers.is_empty() {
-                        state.consecutive_writers_served = 0;
-                    }
-                    drop(state);
-                    (None, wakers)
-                }
-            }
+            self.grant_next_waiters(&mut state)
         };
         Self::wake_released_waiters(writer_waker, reader_wakers);
     }
@@ -632,40 +604,26 @@ impl<T> RwLock<T> {
         // Declared before the state guard so unwinding always releases the
         // guard before destroying a user-controlled RawWaker payload.
         let retired_waker;
-        let writer_waker = {
+        let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
             retired_waker = state.reader_waiters.remove(waiter_id);
             if retired_waker.is_some() {
-                None
+                (None, SmallVec::new())
             } else {
                 // We were granted the lock but never took the guard.
                 // Lock-order acquisition is recorded only when the future
                 // observes this grant on its next poll, so nothing is released here.
                 state.readers = state.readers.saturating_sub(1);
 
-                if state.readers == 0 && state.writer_waiters > 0 {
-                    let waker = Self::pop_writer_waiter(&mut state);
-                    if waker.is_some() {
-                        state.writer_active = true;
-                        // br-asupersync-4j40bb: track writer hand-offs while
-                        // readers are queued so the streak count is accurate.
-                        if !state.reader_waiters.is_empty() {
-                            state.consecutive_writers_served =
-                                state.consecutive_writers_served.saturating_add(1);
-                        } else {
-                            state.consecutive_writers_served = 0;
-                        }
-                    }
-                    waker
+                if state.readers == 0 {
+                    self.grant_next_waiters(&mut state)
                 } else {
-                    None
+                    (None, SmallVec::new())
                 }
             }
         };
 
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
         drop(retired_waker);
     }
 
@@ -704,45 +662,7 @@ impl<T> RwLock<T> {
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     state.writer_active = false;
 
-                    if poisoned {
-                        let wakers = Self::queued_waiter_wakers(&mut state);
-                        (None, wakers)
-                    } else {
-                        // See release_writer: the forced-reader turn only makes
-                        // sense with waiting writers to cut in front of. With an
-                        // empty writer queue it would strand all but one reader.
-                        let force_reader_batch = state.consecutive_writers_served
-                            >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
-                            && !state.reader_waiters.is_empty()
-                            && !state.writer_queue.is_empty();
-
-                        let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
-                        if wake_writer {
-                            let waker = Self::pop_writer_waiter(&mut state);
-                            if waker.is_some() {
-                                state.writer_active = true;
-                                if !state.reader_waiters.is_empty() {
-                                    state.consecutive_writers_served =
-                                        state.consecutive_writers_served.saturating_add(1);
-                                } else {
-                                    state.consecutive_writers_served = 0;
-                                }
-                            }
-                            (waker, SmallVec::<[Waker; 4]>::new())
-                        } else if force_reader_batch {
-                            let wakers = Self::take_forced_reader_turn(&mut state);
-                            state.readers += wakers.len();
-                            state.consecutive_writers_served = 0;
-                            (None, wakers)
-                        } else {
-                            let wakers = Self::take_eligible_reader_waiters(&mut state);
-                            state.readers += wakers.len();
-                            if !wakers.is_empty() {
-                                state.consecutive_writers_served = 0;
-                            }
-                            (None, wakers)
-                        }
-                    }
+                    self.grant_next_waiters(&mut state)
                 }
             } else {
                 // We incremented writer_waiters but never enqueued successfully.

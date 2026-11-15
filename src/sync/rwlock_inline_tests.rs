@@ -1909,6 +1909,248 @@
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ReaderRelease {
+        Guard,
+        DroppedGrant,
+        CancelledGrant,
+    }
+
+    /// asupersync-c11v6v item 8: removing W1 from W1,R1,R2,W2,R3 must
+    /// preserve the older reader cohort's turn on every reader release path.
+    fn assert_reader_turn_after_writer_removal(
+        owned: bool,
+        release: ReaderRelease,
+        cancel_writer: bool,
+    ) {
+        let cx = test_cx();
+        let writer_cancel_cx = test_cx_with_slot(24);
+        let reader_cancel_cx = test_cx_with_slot(25);
+        let lock = StdArc::new(RwLock::new(0_u32));
+        let held_reader: Option<Box<dyn Deref<Target = u32> + '_>> =
+            if matches!(release, ReaderRelease::Guard) {
+                Some(if owned {
+                    Box::new(OwnedRwLockReadGuard::try_read(StdArc::clone(&lock)).unwrap())
+                } else {
+                    Box::new(lock.try_read().unwrap())
+                })
+            } else {
+                None
+            };
+        let other_held_reader = held_reader.as_ref().map(|_| lock.try_read().unwrap());
+        let held_writer = held_reader.is_none().then(|| lock.try_write().unwrap());
+
+        // A queued reader before W1 receives a grant when the initial writer
+        // releases. Do not poll that grant before exercising cancellation/drop.
+        let mut read_grant = (!owned && held_writer.is_some())
+            .then(|| lock.read(&reader_cancel_cx));
+        let mut owned_read_grant = (owned && held_writer.is_some()).then(|| {
+            OwnedRwLockReadGuard::read(StdArc::clone(&lock), &reader_cancel_cx)
+        });
+        if let Some(future) = read_grant.as_mut() {
+            assert!(poll_once(future).is_none());
+        }
+        if let Some(future) = owned_read_grant.as_mut() {
+            assert!(poll_once(future).is_none());
+        }
+
+        let mut first_writer = Some(lock.write(&writer_cancel_cx));
+        assert!(poll_once(first_writer.as_mut().unwrap()).is_none());
+
+        let wake_counts: [_; 4] = std::array::from_fn(|_| {
+            StdArc::new(std::sync::atomic::AtomicUsize::new(0))
+        });
+        let wakers = wake_counts.each_ref().map(|count| {
+            Waker::from(StdArc::new(CountWaker(StdArc::clone(count))))
+        });
+        let mut first_reader = lock.read(&cx);
+        let mut second_reader = lock.read(&cx);
+        let mut next_writer = lock.write(&cx);
+        let mut younger_reader = lock.read(&cx);
+        assert!(poll_with_waker(&mut first_reader, &wakers[0]).is_pending());
+        assert!(poll_with_waker(&mut second_reader, &wakers[1]).is_pending());
+        assert!(poll_with_waker(&mut next_writer, &wakers[2]).is_pending());
+        assert!(poll_with_waker(&mut younger_reader, &wakers[3]).is_pending());
+
+        drop(held_writer);
+        if cancel_writer {
+            writer_cancel_cx.set_cancel_requested(true);
+            assert!(matches!(
+                poll_once(first_writer.as_mut().unwrap()),
+                Some(Err(RwLockError::Cancelled))
+            ));
+        } else {
+            drop(first_writer.take());
+        }
+
+        // Releasing a nonfinal active reader must not dispatch any waiter.
+        drop(other_held_reader);
+        assert_eq!(lock.debug_state().readers, 1);
+        assert_eq!(lock.debug_state().writer_waiters, 1);
+        for count in &wake_counts {
+            assert_eq!(count.load(AtomicOrdering::SeqCst), 0);
+        }
+
+        match release {
+            ReaderRelease::Guard => drop(held_reader),
+            ReaderRelease::DroppedGrant => {
+                drop(read_grant.take());
+                drop(owned_read_grant.take());
+            }
+            ReaderRelease::CancelledGrant => {
+                reader_cancel_cx.set_cancel_requested(true);
+                if let Some(future) = read_grant.as_mut() {
+                    assert!(matches!(poll_once(future), Some(Err(RwLockError::Cancelled))));
+                }
+                if let Some(future) = owned_read_grant.as_mut() {
+                    assert!(matches!(poll_once(future), Some(Err(RwLockError::Cancelled))));
+                }
+            }
+        }
+
+        // The old reader release paths granted W2 here, despite R1/R2 having
+        // arrived earlier. Reservations and wakes must agree before any poll.
+        let state = lock.debug_state();
+        assert_eq!(state.readers, 2, "both older readers receive reserved slots");
+        assert!(!state.writer_active, "later writer must not steal their turn");
+        assert_eq!(state.writer_waiters, 1);
+        assert_eq!(state.consecutive_writers_served, 0);
+        assert_eq!(wake_counts[0].load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(wake_counts[1].load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(wake_counts[2].load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(wake_counts[3].load(AtomicOrdering::SeqCst), 0);
+        assert!(poll_with_waker(&mut next_writer, &wakers[2]).is_pending());
+        assert!(poll_with_waker(&mut younger_reader, &wakers[3]).is_pending());
+        assert!(matches!(lock.try_write(), Err(TryWriteError::Locked)));
+        assert!(matches!(lock.try_read(), Err(TryReadError::Locked)));
+
+        let first_guard = poll_once(&mut first_reader).unwrap().unwrap();
+        let second_guard = poll_once(&mut second_reader).unwrap().unwrap();
+        drop(first_guard);
+        assert_eq!(lock.debug_state().readers, 1);
+        assert_eq!(wake_counts[2].load(AtomicOrdering::SeqCst), 0);
+        drop(second_guard);
+
+        assert_eq!(wake_counts[2].load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(wake_counts[3].load(AtomicOrdering::SeqCst), 0);
+        let mut writer_guard = poll_once(&mut next_writer).unwrap().unwrap();
+        *writer_guard = 1;
+        assert!(poll_with_waker(&mut younger_reader, &wakers[3]).is_pending());
+        drop(writer_guard);
+
+        assert_eq!(wake_counts[3].load(AtomicOrdering::SeqCst), 1);
+        let last_guard = poll_once(&mut younger_reader).unwrap().unwrap();
+        assert_eq!(*last_guard, 1, "younger reader follows the remaining writer");
+        drop(last_guard);
+        drop(first_writer);
+        drop(read_grant);
+        drop(owned_read_grant);
+
+        let state = lock.debug_state();
+        assert_eq!(state.readers, 0);
+        assert!(!state.writer_active);
+        assert_eq!(state.writer_waiters, 0);
+        assert!(state.reader_waiters.is_empty());
+        assert!(state.writer_queue.is_empty());
+        assert!(lock.try_write().is_ok());
+        for count in &wake_counts {
+            assert_eq!(count.load(AtomicOrdering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn last_reader_release_preserves_arrival_order_after_writer_removal() {
+        init_test("last_reader_release_preserves_arrival_order_after_writer_removal");
+        for owned in [false, true] {
+            for cancel_writer in [false, true] {
+                assert_reader_turn_after_writer_removal(owned, ReaderRelease::Guard, cancel_writer);
+            }
+        }
+        crate::test_complete!("last_reader_release_preserves_arrival_order_after_writer_removal");
+    }
+
+    #[test]
+    fn dropped_reader_pregrant_preserves_arrival_order_after_writer_removal() {
+        init_test("dropped_reader_pregrant_preserves_arrival_order_after_writer_removal");
+        for owned in [false, true] {
+            for cancel_writer in [false, true] {
+                assert_reader_turn_after_writer_removal(
+                    owned,
+                    ReaderRelease::DroppedGrant,
+                    cancel_writer,
+                );
+            }
+        }
+        crate::test_complete!("dropped_reader_pregrant_preserves_arrival_order_after_writer_removal");
+    }
+
+    #[test]
+    fn cancelled_reader_pregrant_preserves_arrival_order_after_writer_removal() {
+        init_test("cancelled_reader_pregrant_preserves_arrival_order_after_writer_removal");
+        for owned in [false, true] {
+            for cancel_writer in [false, true] {
+                assert_reader_turn_after_writer_removal(
+                    owned,
+                    ReaderRelease::CancelledGrant,
+                    cancel_writer,
+                );
+            }
+        }
+        crate::test_complete!("cancelled_reader_pregrant_preserves_arrival_order_after_writer_removal");
+    }
+
+    #[test]
+    fn reader_release_fanout_panic_still_wakes_older_readers() {
+        struct PanicWaker;
+        impl std::task::Wake for PanicWaker {
+            fn wake(self: StdArc<Self>) {
+                panic!("hostile reader waker panics on wake");
+            }
+        }
+
+        init_test("reader_release_fanout_panic_still_wakes_older_readers");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+        let held_reader = lock.try_read().unwrap();
+        let mut first_writer = lock.write(&cx);
+        assert!(poll_once(&mut first_writer).is_none());
+
+        let panic_waker = Waker::from(StdArc::new(PanicWaker));
+        let counter = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_waker = Waker::from(StdArc::new(CountWaker(StdArc::clone(&counter))));
+        let mut first_reader = lock.read(&cx);
+        let mut second_reader = lock.read(&cx);
+        let mut next_writer = lock.write(&cx);
+        assert!(poll_with_waker(&mut first_reader, &panic_waker).is_pending());
+        assert!(poll_with_waker(&mut second_reader, &count_waker).is_pending());
+        assert!(poll_once(&mut next_writer).is_none());
+        drop(first_writer);
+
+        let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(held_reader)));
+        assert!(released.is_err(), "reader handoff resumes the first wake panic");
+        assert_eq!(counter.load(AtomicOrdering::SeqCst), 1);
+        assert!(!lock.is_poisoned(), "reader release does not poison the lock");
+        assert_eq!(lock.debug_state().readers, 2);
+        assert!(!lock.debug_state().writer_active);
+        assert!(poll_once(&mut next_writer).is_none());
+
+        let first_guard = poll_once(&mut first_reader).unwrap().unwrap();
+        let second_guard = poll_once(&mut second_reader).unwrap().unwrap();
+        drop(first_guard);
+        assert!(poll_once(&mut next_writer).is_none());
+        drop(second_guard);
+        drop(poll_once(&mut next_writer).unwrap().unwrap());
+
+        let state = lock.debug_state();
+        assert_eq!(state.readers, 0);
+        assert!(!state.writer_active);
+        assert_eq!(state.writer_waiters, 0);
+        assert!(state.reader_waiters.is_empty());
+        assert!(state.writer_queue.is_empty());
+        assert!(lock.try_write().is_ok());
+        crate::test_complete!("reader_release_fanout_panic_still_wakes_older_readers");
+    }
+
     #[test]
     fn test_drop_queued_writer_wakes_readers_when_readers_active() {
         init_test("test_drop_queued_writer_wakes_readers_when_readers_active");
