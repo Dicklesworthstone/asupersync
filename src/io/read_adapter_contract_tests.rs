@@ -2,7 +2,8 @@
 //! invalid reader entirely in safe Rust, without leaked test allocations.
 
 use super::ReadBuf;
-use crate::io::{AsyncRead, AsyncReadVectored, Take};
+use crate::io::{AsyncRead, AsyncReadVectored, ReaderStream, Take};
+use crate::stream::Stream;
 use std::io::{self, IoSliceMut};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -73,6 +74,102 @@ impl AsyncRead for Reader {
 }
 
 impl AsyncReadVectored for Reader {}
+
+#[test]
+fn reader_stream_emits_pending_progress_once_without_a_provider_wake() {
+    let source = Reader::new(Status::Pending);
+    let polls = Arc::clone(&source.polls);
+    let mut stream = ReaderStream::with_capacity(source, 2);
+    let mut cx = Context::from_waker(Waker::noop());
+    for expected in [b"ab", b"cd", b"ef", b"gh", b"ij"] {
+        let chunk = match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(chunk))) => chunk,
+            other => panic!("pending read progress was lost: {other:?}"),
+        };
+        assert_eq!(chunk, expected);
+    }
+    for _ in 0..3 {
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+    assert_eq!(polls.load(Ordering::SeqCst), 6, "EOF must fuse the source");
+    assert!(stream.get_ref().bytes.is_empty());
+}
+
+#[test]
+fn reader_stream_yields_error_progress_before_the_original_error_and_fuses() {
+    let source = Reader::new(Status::Error);
+    let polls = Arc::clone(&source.polls);
+    let mut stream = ReaderStream::with_capacity(source, 8);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut cx),
+        Poll::Ready(Some(Ok(chunk))) if chunk == b"abc"
+    ));
+    let error = match Pin::new(&mut stream).poll_next(&mut cx) {
+        Poll::Ready(Some(Err(error))) => error,
+        other => panic!("the original read error was lost: {other:?}"),
+    };
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    assert_eq!(error.to_string(), "original bounded provider error");
+    for _ in 0..3 {
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    assert_eq!(stream.into_inner().bytes, b"defghij");
+}
+
+#[test]
+fn reader_stream_rejects_substituted_storage_for_every_provider_status() {
+    for status in [Status::Ready, Status::Pending, Status::Error] {
+        let mut source = Reader::new(status);
+        source.shifted = true;
+        let polls = Arc::clone(&source.polls);
+        let mut stream = ReaderStream::with_capacity(source, 4);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(Err(error))) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                Poll::Ready(None)
+            ));
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn reader_stream_propagates_provider_panic_then_fences_unknown_progress() {
+    let mut source = Reader::new(Status::Ready);
+    source.panics = true;
+    let polls = Arc::clone(&source.polls);
+    let mut stream = ReaderStream::with_capacity(source, 4);
+    let mut cx = Context::from_waker(Waker::noop());
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = Pin::new(&mut stream).poll_next(&mut cx);
+    }));
+    let payload = failure.expect_err("provider panic must propagate");
+    let message = payload.downcast_ref::<&str>().copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    assert_eq!(message, Some("bounded provider panic sentinel"));
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut cx),
+        Poll::Ready(Some(Err(error))) if error.kind() == io::ErrorKind::InvalidData
+    ));
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut cx),
+        Poll::Ready(None)
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+}
 
 #[test]
 fn take_charges_pending_progress_and_preserves_the_callers_prefix() {

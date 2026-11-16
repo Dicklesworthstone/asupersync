@@ -57,6 +57,147 @@
         crate::test_complete!("reader_stream_yields_chunks");
     }
 
+    enum ReaderStep {
+        Pending,
+        Data(&'static [u8], bool),
+        Error(&'static [u8], io::Error),
+        Eof,
+    }
+
+    struct ScriptedReader {
+        steps: std::collections::VecDeque<ReaderStep>,
+        polls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl AsyncRead for ScriptedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.polls.set(self.polls.get() + 1);
+            match self.steps.pop_front().expect("reader polled after terminal state") {
+                ReaderStep::Pending => Poll::Pending,
+                ReaderStep::Data(bytes, pending) => {
+                    buf.put_slice(bytes);
+                    if pending {
+                        // Deliberately no wake: the adapter already has data.
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Ok(()))
+                    }
+                }
+                ReaderStep::Error(bytes, error) => {
+                    buf.put_slice(bytes);
+                    Poll::Ready(Err(error))
+                }
+                ReaderStep::Eof => Poll::Ready(Ok(())),
+            }
+        }
+    }
+
+    #[test]
+    fn reader_stream_dropped_empty_wait_preserves_later_pending_bytes() {
+        use crate::stream::StreamExt;
+        use std::future::Future;
+
+        let polls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = ScriptedReader {
+            steps: [
+                ReaderStep::Pending,
+                ReaderStep::Data(b"ab", true),
+                ReaderStep::Data(b"cd", false),
+                ReaderStep::Eof,
+            ].into(),
+            polls: std::rc::Rc::clone(&polls),
+        };
+        let mut stream = ReaderStream::with_capacity(source, 2);
+        let mut task = Context::from_waker(Waker::noop());
+        {
+            let mut next = std::pin::pin!(stream.next());
+            assert!(next.as_mut().poll(&mut task).is_pending());
+        }
+        for expected in [b"ab", b"cd"] {
+            let mut next = std::pin::pin!(stream.next());
+            assert!(matches!(
+                next.as_mut().poll(&mut task),
+                Poll::Ready(Some(Ok(chunk))) if chunk == expected
+            ));
+        }
+        for _ in 0..3 {
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut task),
+                Poll::Ready(None)
+            ));
+        }
+        assert_eq!(polls.get(), 4);
+    }
+
+    #[test]
+    fn reader_stream_round_trip_preserves_prefix_and_error_payload_identity() {
+        #[derive(Debug)]
+        struct Marker(std::sync::Arc<()>);
+
+        impl std::fmt::Display for Marker {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("original reader error payload")
+            }
+        }
+
+        impl std::error::Error for Marker {}
+
+        let marker = std::sync::Arc::new(());
+        let polls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = ScriptedReader {
+            steps: [ReaderStep::Error(
+                b"abc",
+                io::Error::new(io::ErrorKind::ConnectionReset, Marker(std::sync::Arc::clone(&marker))),
+            )].into(),
+            polls: std::rc::Rc::clone(&polls),
+        };
+        let mut reader = StreamReader::new(ReaderStream::with_capacity(source, 4));
+        let mut storage = [0xa5; 8];
+        assert!(matches!(poll_read(&mut reader, &mut storage), Poll::Ready(Ok(3))));
+        assert_eq!(&storage[..3], b"abc");
+        assert_eq!(&storage[3..], &[0xa5; 5]);
+        let error = match poll_read(&mut reader, &mut storage) {
+            Poll::Ready(Err(error)) => error,
+            other => panic!("deferred read error was lost: {other:?}"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let preserved = error.get_ref().and_then(|error| error.downcast_ref::<Marker>())
+            .expect("original error payload");
+        assert!(std::sync::Arc::ptr_eq(&preserved.0, &marker));
+        assert!(matches!(poll_read(&mut reader, &mut storage), Poll::Ready(Ok(0))));
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn reader_stream_empty_errors_fuse_and_zero_capacity_still_reads() {
+        let polls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let source = ScriptedReader {
+            steps: [ReaderStep::Error(b"", io::ErrorKind::BrokenPipe.into())].into(),
+            polls: std::rc::Rc::clone(&polls),
+        };
+        let mut stream = ReaderStream::with_capacity(source, 0);
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut task),
+            Poll::Ready(Some(Err(error))) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert!(matches!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None)));
+        assert_eq!(polls.get(), 1);
+
+        let mut stream = ReaderStream::with_capacity(b"xy".as_slice(), 0);
+        for expected in [b"x", b"y"] {
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut task),
+                Poll::Ready(Some(Ok(chunk))) if chunk == expected
+            ));
+        }
+        assert!(matches!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None)));
+    }
+
     #[test]
     fn stream_reader_reads_across_multiple_chunks() {
         init_test("stream_reader_reads_across_multiple_chunks");

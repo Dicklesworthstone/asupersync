@@ -16,12 +16,24 @@ use std::task::{Context, Poll};
 const DEFAULT_CHUNK_SIZE: usize = 8 * 1024;
 
 /// Adapts an [`AsyncRead`] into a stream of byte chunks.
+///
+/// Any in-place read progress is yielded exactly once, including bytes filled
+/// before a provider returns `Pending`. If a read fills bytes and returns an
+/// error, those bytes are yielded first and the original error on the next
+/// poll. An error or clean EOF then fuses the stream without polling the reader
+/// again. Empty pending reads are not EOF.
+///
+/// A reader panic propagates and fences this adapter if the caller catches the
+/// unwind; a substituted destination buffer also terminates it with
+/// `InvalidData`. Neither case retries an input position with unknown effects.
 #[derive(Debug)]
 pub struct ReaderStream<R> {
     reader: R,
     chunk_size: usize,
     done: bool,
     scratch: Vec<u8>,
+    pending_error: Option<io::Error>,
+    poisoned: bool,
 }
 
 impl<R> ReaderStream<R> {
@@ -40,6 +52,8 @@ impl<R> ReaderStream<R> {
             chunk_size,
             done: false,
             scratch: vec![0; chunk_size],
+            pending_error: None,
+            poisoned: false,
         }
     }
 
@@ -55,6 +69,10 @@ impl<R> ReaderStream<R> {
     }
 
     /// Consumes the adapter and returns the inner reader.
+    ///
+    /// Any deferred error is discarded; chunks already yielded remain owned
+    /// by their recipients. A pending operation inside the reader retains that
+    /// reader's own resume/drop contract.
     #[must_use]
     pub fn into_inner(self) -> R {
         self.reader
@@ -69,26 +87,57 @@ impl<R: AsyncRead + Unpin> Stream for ReaderStream<R> {
         if this.done {
             return Poll::Ready(None);
         }
+        if let Some(error) = this.pending_error.take() {
+            this.done = true;
+            return Poll::Ready(Some(Err(error)));
+        }
+        if this.poisoned {
+            this.done = true;
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream reader has unknown effects after a provider failure",
+            ))));
+        }
 
         if this.scratch.len() != this.chunk_size {
             this.scratch.resize(this.chunk_size, 0);
         }
 
-        let mut read_buf = ReadBuf::new(&mut this.scratch);
-        match Pin::new(&mut this.reader).poll_read(cx, &mut read_buf) {
+        let start = this.scratch.as_ptr();
+        let offered = this.scratch.len();
+        // Arm before invoking provider code: a caught unwind must not re-read
+        // a source whose position may have changed without a usable count.
+        this.poisoned = true;
+        let (result, filled) = {
+            let mut read_buf = ReadBuf::new(&mut this.scratch);
+            let result = Pin::new(&mut this.reader).poll_read(cx, &mut read_buf);
+            if !super::transfer_session::filled_in_place(read_buf.filled(), start, offered) {
+                this.done = true;
+                return Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream reader replaced its destination buffer",
+                ))));
+            }
+            (result, read_buf.filled().len())
+        };
+        this.poisoned = false;
+
+        if filled != 0 {
+            if let Poll::Ready(Err(error)) = result {
+                this.pending_error = Some(error);
+            }
+            return Poll::Ready(Some(Ok(this.scratch[..filled].to_vec())));
+        }
+
+        match result {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => {
                 this.done = true;
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(Ok(())) => {
-                let filled = read_buf.filled();
-                if filled.is_empty() {
-                    this.done = true;
-                    Poll::Ready(None)
-                } else {
-                    Poll::Ready(Some(Ok(filled.to_vec())))
-                }
+                this.done = true;
+                Poll::Ready(None)
             }
         }
     }
