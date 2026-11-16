@@ -105,6 +105,13 @@ artifacts.
   panics become `INTERNAL`. The original deadline includes admission and
   interceptor time, and nested cancellation causes retain deadline or budget
   status without rewriting application errors. (`br-asupersync-m8xsjx`.)
+- **Callable gRPC reflection builder:** `enable_reflection_rpc` installs the
+  native v1 and v1alpha protobuf services from an explicit descriptor catalog.
+  Both built-in versions share bounded admission, use the final authorization
+  policy regardless of builder call order, and include services registered
+  later. Explicit reflection handlers retain precedence. Requires
+  `http2-streaming` and a registered duplex listener.
+  (`br-asupersync-grpc-client-server-audit-jq0c7j`, item 11.)
 
 ### Fixed
 

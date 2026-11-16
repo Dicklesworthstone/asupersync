@@ -5,6 +5,56 @@
 //! the older v1alpha service name. Register either or both with `ServerBuilder`
 //! and serve via `bind_registered_duplex_http2` / `serve_duplex_http2`.
 //!
+//! # Register a precompiled schema with the server
+//!
+//! Enable the `http2-streaming` feature. Produce a complete descriptor set
+//! during your application's build with `protoc --include_imports`, and pass
+//! those bytes (for example, from `include_bytes!`) into this setup function:
+//!
+//! ```no_run
+//! use asupersync::cx::Cx;
+//! use asupersync::grpc::{
+//!     NamedService, ReflectionDescriptorSet, ReflectionRpcConfig, Server,
+//!     ServiceHandler, Status,
+//! };
+//!
+//! fn server_with_reflection<S, F>(
+//!     application: S,
+//!     precompiled_descriptor_set: &[u8],
+//!     authorize: F,
+//! ) -> Result<Server, Status>
+//! where
+//!     S: NamedService + ServiceHandler + 'static,
+//!     F: Fn(&Cx, &str) -> Result<(), Status> + Send + Sync + 'static,
+//! {
+//!     let descriptors = ReflectionDescriptorSet::decode(precompiled_descriptor_set)?;
+//!     Ok(Server::builder()
+//!         .add_service(application)
+//!         .enable_reflection_with_auth(authorize)
+//!         .enable_reflection_rpc(
+//!             descriptors,
+//!             ReflectionRpcConfig {
+//!                 max_streams: 8,
+//!                 max_queries_per_stream: 128,
+//!                 ..ReflectionRpcConfig::default()
+//!             },
+//!         )?
+//!         .build())
+//! }
+//! ```
+//!
+//! Serve this server through
+//! [`bind_registered_duplex_http2`](super::Server::bind_registered_duplex_http2)
+//! or [`serve_duplex_http2`](super::Server::serve_duplex_http2). The builder adds
+//! both callable protocol versions with one shared admission cap and includes
+//! application services added later. Its final reflection authorization policy
+//! applies in either builder-call order; without one, reflection stays locked.
+//! The serving context must carry REMOTE authority, and normal server
+//! interceptors still authenticate the request. Explicitly added reflection
+//! services keep their own policies. For per-query metadata-aware authorization,
+//! configure a [`ReflectionRpcService`] directly instead.
+//!
+//!
 //! The registry's existing `ListServices` authorization gate protects EVERY
 //! query, under the explicit request context, and a descriptor lookup must
 //! also pass its `DescribeService` gate. The default remains locked and
@@ -110,6 +160,19 @@ impl Default for ReflectionRpcConfig {
 }
 
 impl ReflectionRpcConfig {
+    /// Validate limits shared by direct registration and the server builder.
+    pub(crate) fn validate(&self) -> Result<(), Status> {
+        if self.max_request_bytes == 0
+            || self.max_response_bytes == 0
+            || self.max_queries_per_stream == 0
+        {
+            return Err(Status::invalid_argument(
+                "reflection message and query limits must be positive",
+            ));
+        }
+        Ok(())
+    }
+
     /// Configure reflection RPC limits honoring the server's configured message limits.
     #[must_use]
     pub fn for_server(config: &super::ServerConfig) -> Self {
@@ -173,10 +236,7 @@ impl ReflectionService {
         descriptors: ReflectionDescriptorSet,
         config: ReflectionRpcConfig,
     ) -> Result<ReflectionRpcService, Status> {
-        if config.max_request_bytes == 0 || config.max_response_bytes == 0
-            || config.max_queries_per_stream == 0 {
-            return Err(Status::invalid_argument("reflection message and query limits must be positive"));
-        }
+        config.validate()?;
         Ok(ReflectionRpcService {
             shared: Arc::new(Shared {
                 registry: self.clone(), descriptors, config, active: AtomicUsize::new(0),

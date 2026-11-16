@@ -959,6 +959,12 @@ pub struct ServerBuilder {
     services: BTreeMap<String, Arc<dyn ServiceHandler>>,
     /// Optional reflection registry.
     reflection: Option<ReflectionService>,
+    /// Validated callable reflection configuration, installed with final auth at build.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    reflection_rpc: Option<(
+        super::reflection_descriptor::ReflectionDescriptorSet,
+        super::reflection_rpc::ReflectionRpcConfig,
+    )>,
     /// Whether an explicit v1alpha reflection service was registered via add_service.
     explicit_v1alpha_service: bool,
     /// br-asupersync-mfk14i: interceptor chain. Each registered
@@ -992,6 +998,8 @@ impl ServerBuilder {
             config: ServerConfig::default(),
             services: BTreeMap::new(),
             reflection: None,
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            reflection_rpc: None,
             explicit_v1alpha_service: false,
             interceptors: Vec::new(),
         }
@@ -1192,7 +1200,10 @@ impl ServerBuilder {
         self
     }
 
-    /// Enable the built-in reflection service with authentication callback.
+    /// Enable the reflection metadata facade with an authentication callback.
+    ///
+    /// Use `enable_reflection_rpc` with an explicit descriptor catalog to serve
+    /// the native protobuf reflection protocol.
     ///
     /// SECURITY: This method requires an explicit authentication callback to gate
     /// reflection access. The callback receives the current Cx and method name
@@ -1258,12 +1269,78 @@ impl ServerBuilder {
         self
     }
 
+    /// Register callable protobuf reflection for native v1 and v1alpha clients.
+    ///
+    /// The descriptor catalog must contain the complete imports emitted by
+    /// `protoc --include_imports`; Rust method metadata is never substituted for
+    /// protobuf schemas. Register application services normally with
+    /// [`Self::add_service`], before or after this call. Both built-in protocol
+    /// views share the configured active-stream cap.
+    ///
+    /// The final policy selected by [`Self::enable_reflection_with_auth`] applies
+    /// regardless of call order. Without that explicit policy, both views stay
+    /// locked. The REMOTE capability and server interceptor gates remain in
+    /// force. Explicitly registered v1 or v1alpha services take precedence in
+    /// either call order and retain their own policies and admission caps.
+    ///
+    /// Serve the result with [`Server::bind_registered_duplex_http2`] or
+    /// [`Server::serve_duplex_http2`]. Other listeners do not implement this
+    /// bidirectional protocol. Native server message limits still apply in
+    /// addition to `config`. Repeated calls replace the pending catalog and
+    /// limits; registration itself opens no sockets and creates no tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_ARGUMENT` when a message or query limit is zero. A zero
+    /// stream cap is valid and deliberately refuses new reflection streams.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub fn enable_reflection_rpc(
+        mut self,
+        descriptors: super::reflection_descriptor::ReflectionDescriptorSet,
+        config: super::reflection_rpc::ReflectionRpcConfig,
+    ) -> Result<Self, Status> {
+        config.validate()?;
+        self.reflection.get_or_insert_with(ReflectionService::new);
+        self.reflection_rpc = Some((descriptors, config));
+        Ok(self)
+    }
+
     /// Build the server.
     #[must_use]
     pub fn build(self) -> Server {
+        #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+        let services = {
+            let mut services = self.services;
+            if let Some((descriptors, config)) = self.reflection_rpc {
+                let reflection = self
+                    .reflection
+                    .expect("callable reflection configuration retains its registry");
+                let rpc = reflection
+                    .rpc_service(descriptors, config)
+                    .expect("callable reflection limits were validated at configuration");
+                let alpha = rpc.v1alpha();
+                services
+                    .entry(super::reflection_rpc::ReflectionRpcService::NAME.to_owned())
+                    .or_insert_with(|| Arc::new(rpc));
+                if !self.explicit_v1alpha_service {
+                    services.insert(
+                        super::reflection_rpc::ReflectionRpcV1AlphaService::NAME.to_owned(),
+                        Arc::new(alpha),
+                    );
+                }
+                // Capture final registrations, including both protocol views.
+                // This does not synthesize protobuf descriptors for those services.
+                for service in services.values() {
+                    reflection.register_handler(service.as_ref());
+                }
+            }
+            services
+        };
+        #[cfg(not(all(feature = "http2-streaming", not(target_arch = "wasm32"))))]
+        let services = self.services;
         Server {
             config: self.config,
-            services: self.services,
+            services,
             interceptors: self.interceptors,
             connection_registry: Arc::new(ConnectionRegistry::new()),
         }
