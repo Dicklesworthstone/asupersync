@@ -1170,19 +1170,29 @@ impl fmt::Debug for RateLimiter {
 // =========================================================================
 
 /// Sliding window rate limiter for smoother rate enforcement.
+///
+/// Admission timestamps are rounded down to milliseconds and `policy.period`
+/// is rounded up to milliseconds, preserving the synchronous window's time
+/// resolution. All callers must share a clock domain; backwards observations
+/// cannot refill quota or reorder the expiry log.
+/// [`Self::acquire_async_bounded`] adds cancellation-aware, bounded FIFO
+/// waiting, while [`Self::acquire_permit`] returns refundable quota immediately.
 pub struct SlidingWindowRateLimiter {
     policy: RateLimitPolicy,
 
     /// Recent operations and their summed cost, under one lock.
     window: RwLock<SlidingWindow>,
+    changed: Notify,
 
     // Atomic counters
     total_allowed: AtomicU64,
     total_rejected: AtomicU64,
+    total_waited: AtomicU64,
+    total_wait_time_ms: AtomicU64,
+    max_wait_time_ms: AtomicU64,
 }
 
 /// The operations a sliding window still counts, with their total cost.
-#[derive(Default)]
 struct SlidingWindow {
     /// Timestamps of recent operations: (timestamp_millis, cost).
     entries: VecDeque<(u64, u32)>,
@@ -1190,6 +1200,83 @@ struct SlidingWindow {
     /// same lock: an atomic shadow counter beside the lock used to race, and
     /// re-summing the entries cost O(rate) on every call.
     cost: u64,
+    observed: Time,
+    // Never reuse a reset generation. Exhaustion disables refunds rather
+    // than allowing an old permit to credit a new reservation.
+    generation: Option<u64>,
+    queue: VecDeque<SlidingWindowQueueEntry>,
+    next_id: Option<u64>,
+}
+
+impl Default for SlidingWindow {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cost: 0,
+            observed: Time::ZERO,
+            generation: Some(0),
+            queue: VecDeque::new(),
+            next_id: Some(0),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SlidingWindowGrant {
+    admitted_millis: u64,
+    generation: Option<u64>,
+}
+
+struct SlidingWindowQueueEntry {
+    id: u64,
+    cost: u32,
+    enqueued_at: Time,
+    deadline: Option<Time>,
+    result: Option<Result<SlidingWindowGrant, RejectionReason>>,
+    waited: Duration,
+}
+
+enum SlidingWindowAdmission<'a> {
+    Immediate(SlidingWindowRateLimitPermit<'a>),
+    Queued(SlidingWindowQueueOwner<'a>),
+}
+
+struct SlidingWindowQueueOwner<'a> {
+    limiter: &'a SlidingWindowRateLimiter,
+    entry_id: Option<u64>,
+    driver: crate::time::TimerDriverHandle,
+}
+
+/// A reservation charged at its original sliding-window admission time.
+///
+/// Drop refunds exactly its cost while its admission is still in the window.
+/// Expiry or reset makes a later refund a no-op. [`Self::commit`] keeps the
+/// charge until normal expiry; holding a permit never moves its charge to a
+/// newer window. Admissions subsequently refunded still count in metrics.
+#[must_use = "dropping the permit refunds its unexpired reservation"]
+pub struct SlidingWindowRateLimitPermit<'a> {
+    limiter: &'a SlidingWindowRateLimiter,
+    cost: u32,
+    grant: SlidingWindowGrant,
+    refund: bool,
+}
+
+impl SlidingWindowRateLimitPermit<'_> {
+    /// Consume the reservation for the protected operation.
+    pub fn commit(mut self) {
+        self.refund = false;
+    }
+}
+
+impl Drop for SlidingWindowRateLimitPermit<'_> {
+    fn drop(&mut self) {
+        if self.refund {
+            let changed = self.limiter.window.write().refund(self.cost, self.grant);
+            if changed {
+                self.limiter.notify_change();
+            }
+        }
+    }
 }
 
 impl SlidingWindow {
@@ -1205,6 +1292,69 @@ impl SlidingWindow {
             }
         }
     }
+
+    fn observe(&mut self, now: Time, period_millis: u64) {
+        self.observed = self.observed.max(now);
+        self.expire(self.observed.as_millis(), period_millis);
+    }
+
+    fn reserve(&mut self, cost: u32) -> SlidingWindowGrant {
+        let admitted_millis = self.observed.as_millis();
+        if cost != 0 {
+            self.entries.push_back((admitted_millis, cost));
+            self.cost += u64::from(cost);
+        }
+        SlidingWindowGrant {
+            admitted_millis,
+            generation: self.generation,
+        }
+    }
+
+    fn refund(&mut self, cost: u32, grant: SlidingWindowGrant) -> bool {
+        if cost == 0 || grant.generation.is_none() || grant.generation != self.generation {
+            return false;
+        }
+        // Equal timestamp/cost records are interchangeable quota charges:
+        // they expire together. Remove one record, never retain a tombstone.
+        // Reset generations and monotone timestamps prevent an expired owner
+        // from matching a later reservation. Cancellation alone pays this
+        // scan; ordinary admission/expiry keep their existing O(1) accounting.
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| *entry == (grant.admitted_millis, cost))
+        else {
+            return false;
+        };
+        let _ = self.entries.remove(index);
+        self.cost -= u64::from(cost);
+        true
+    }
+
+    fn capacity_at(&self, cost: u32, rate: u32, period_millis: u64) -> Option<Time> {
+        if cost > rate {
+            return None;
+        }
+        if self.cost + u64::from(cost) <= u64::from(rate) {
+            return Some(self.observed);
+        }
+        if period_millis == 0 {
+            return None;
+        }
+        let needed = self.cost + u64::from(cost) - u64::from(rate);
+        let mut freed = 0;
+        for &(at, charged) in &self.entries {
+            freed += u64::from(charged);
+            if freed >= needed {
+                return u64::try_from(
+                    (u128::from(at) + u128::from(period_millis)) * 1_000_000,
+                )
+                .ok()
+                .map(Time::from_nanos);
+            }
+        }
+        None
+    }
 }
 
 impl SlidingWindowRateLimiter {
@@ -1217,8 +1367,12 @@ impl SlidingWindowRateLimiter {
             // Grow with actual accepted operations so extreme but valid limits
             // cannot force a multi-gigabyte constructor allocation.
             window: RwLock::new(SlidingWindow::default()),
+            changed: Notify::new(),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
+            total_waited: AtomicU64::new(0),
+            total_wait_time_ms: AtomicU64::new(0),
+            max_wait_time_ms: AtomicU64::new(0),
         }
     }
 
@@ -1232,27 +1386,34 @@ impl SlidingWindowRateLimiter {
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
-        let now_millis = now.as_millis();
-        let period_millis = period_to_millis_ceil(self.policy.period);
-
-        // Single lock acquisition: cleanup expired + check usage + add entry
-        let mut window = self.window.write();
-        window.expire(now_millis, period_millis);
-        let usage = window.cost;
-
-        if usage.saturating_add(u64::from(cost)) <= u64::from(self.policy.rate) {
-            if cost > 0 {
-                window.entries.push_back((now_millis, cost));
-                window.cost += u64::from(cost);
+        match self.acquire_permit(cost, now) {
+            Ok(permit) => {
+                permit.commit();
+                true
             }
-            drop(window);
-            self.total_allowed.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            drop(window);
-            self.total_rejected.fetch_add(1, Ordering::Relaxed);
-            false
+            Err(_) => false,
         }
+    }
+
+    /// Reserve quota without waiting, refunding on drop until committed.
+    /// Positive-cost calls cannot bypass pending FIFO owners.
+    pub fn acquire_permit(
+        &self,
+        cost: u32,
+        now: Time,
+    ) -> Result<SlidingWindowRateLimitPermit<'_>, RateLimitError<()>> {
+        let mut window = self.window.write();
+        window.observe(now, period_to_millis_ceil(self.policy.period));
+        let changed = self.process_queue_locked(&mut window);
+        let permit = self.try_reserve_locked(&mut window, cost);
+        drop(window);
+        if changed {
+            self.notify_change();
+        }
+        permit.ok_or_else(|| {
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
+            RateLimitError::RateLimitExceeded
+        })
     }
 
     /// Try to acquire with default cost.
@@ -1261,40 +1422,58 @@ impl SlidingWindowRateLimiter {
         self.try_acquire(self.policy.default_cost, now)
     }
 
-    /// Get time until capacity available.
+    /// Estimate time until capacity is available after current FIFO demand.
+    /// Refunds or reset can make admission earlier; new arrivals are excluded.
     #[must_use]
     #[allow(clippy::cast_possible_truncation, clippy::significant_drop_tightening)]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
-        let now_millis = now.as_millis();
         let period_millis = period_to_millis_ceil(self.policy.period);
-
         let mut window = self.window.write();
-        window.expire(now_millis, period_millis);
-
-        let usage = window.cost;
-        let requested = usage.saturating_add(u64::from(cost));
-        if requested <= u64::from(self.policy.rate) {
-            return Duration::ZERO;
-        }
-
-        if period_millis == 0 {
-            return Duration::MAX;
-        }
-
-        // Find when enough capacity frees up
-        let needed = requested.saturating_sub(u64::from(self.policy.rate));
-        let mut freed = 0u64;
-        for (t, c) in &window.entries {
-            freed = freed.saturating_add(u64::from(*c));
-            if freed >= needed {
-                // This entry will expire at t + period
-                let expire_at = t.saturating_add(period_millis);
-                return Duration::from_millis(expire_at.saturating_sub(now_millis));
+        window.observe(now, period_millis);
+        let changed = self.process_queue_locked(&mut window);
+        let observed = window.observed;
+        let available = if cost == 0 || !window.queue.iter().any(|entry| entry.result.is_none()) {
+            window.capacity_at(cost, self.policy.rate, period_millis)
+        } else {
+            // Retry estimates are off the admission hot path. Simulate only
+            // the finite pending FIFO against the same expiry accounting.
+            let mut future = SlidingWindow {
+                entries: window.entries.clone(),
+                cost: window.cost,
+                observed: window.observed,
+                ..SlidingWindow::default()
+            };
+            let mut possible = true;
+            for entry in window.queue.iter().filter(|entry| entry.result.is_none()) {
+                let at = future.capacity_at(entry.cost, self.policy.rate, period_millis);
+                if let Some(deadline) = entry.deadline
+                    && at.is_none_or(|at| at > deadline)
+                {
+                    future.observe(deadline, period_millis);
+                    continue;
+                }
+                let Some(at) = at else {
+                    possible = false;
+                    break;
+                };
+                future.observe(at, period_millis);
+                future.reserve(entry.cost);
             }
+            possible
+                .then(|| future.capacity_at(cost, self.policy.rate, period_millis))
+                .flatten()
+        };
+        drop(window);
+        if changed {
+            self.notify_change();
         }
-
-        // Should not happen if rate > 0
-        Duration::MAX
+        available.map_or(Duration::MAX, |at| {
+            if at == observed {
+                Duration::ZERO
+            } else {
+                Duration::from_nanos(at.as_nanos().saturating_sub(now.as_nanos()))
+            }
+        })
     }
 
     /// Get retry-after duration.
@@ -1306,19 +1485,380 @@ impl SlidingWindowRateLimiter {
     /// Get metrics.
     #[must_use]
     pub fn metrics(&self) -> RateLimitMetrics {
+        let total_waited = self.total_waited.load(Ordering::Relaxed);
+        let waited_ms = self.total_wait_time_ms.load(Ordering::Relaxed);
         RateLimitMetrics {
             total_allowed: self.total_allowed.load(Ordering::Relaxed),
             total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_waited,
+            total_wait_time: Duration::from_millis(waited_ms),
+            avg_wait_time: waited_ms
+                .checked_div(total_waited)
+                .map_or(Duration::ZERO, Duration::from_millis),
+            max_wait_time: Duration::from_millis(self.max_wait_time_ms.load(Ordering::Relaxed)),
             ..RateLimitMetrics::default()
         }
     }
 
-    /// Reset the sliding window.
+    /// Reset quota without rewinding time, and invalidate queued acquisitions.
+    /// Old permits remain usable but cannot refund into the new generation.
     pub fn reset(&self) {
         let mut window = self.window.write();
         window.entries.clear();
         window.cost = 0;
+        window.generation = window.generation.and_then(|value| value.checked_add(1));
+        window.queue.clear();
         drop(window);
+        self.notify_change();
+    }
+
+    /// Retained queue entries, including grants and timeouts not yet claimed.
+    #[must_use]
+    pub fn queued_count(&self) -> usize {
+        self.window.read().queue.len()
+    }
+}
+
+impl SlidingWindowRateLimiter {
+    fn try_reserve_locked(
+        &self,
+        window: &mut SlidingWindow,
+        cost: u32,
+    ) -> Option<SlidingWindowRateLimitPermit<'_>> {
+        if window.cost + u64::from(cost) > u64::from(self.policy.rate)
+            || (cost != 0 && window.queue.iter().any(|entry| entry.result.is_none()))
+        {
+            return None;
+        }
+        let grant = window.reserve(cost);
+        self.total_allowed.fetch_add(1, Ordering::Relaxed);
+        Some(SlidingWindowRateLimitPermit {
+            limiter: self,
+            cost,
+            grant,
+            refund: true,
+        })
+    }
+
+    fn record_wait(&self, waited: Duration) {
+        let millis = duration_to_millis_saturating(waited);
+        let mut total = self.total_wait_time_ms.load(Ordering::Relaxed);
+        loop {
+            match self.total_wait_time_ms.compare_exchange_weak(
+                total,
+                total.saturating_add(millis),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => total = observed,
+            }
+        }
+        self.max_wait_time_ms.fetch_max(millis, Ordering::Relaxed);
+    }
+
+    fn process_queue_locked(&self, window: &mut SlidingWindow) -> bool {
+        let now = window.observed;
+        let mut changed = false;
+        let mut blocked = false;
+        for index in 0..window.queue.len() {
+            let entry = &window.queue[index];
+            if entry.result.is_some() {
+                continue;
+            }
+            let expired = entry.deadline.is_some_and(|deadline| now > deadline);
+            let result = if !expired
+                && !blocked
+                && window.cost + u64::from(entry.cost) <= u64::from(self.policy.rate)
+            {
+                let cost = entry.cost;
+                self.total_allowed.fetch_add(1, Ordering::Relaxed);
+                Ok(window.reserve(cost))
+            } else if entry.deadline.is_some_and(|deadline| now >= deadline) {
+                Err(RejectionReason::Timeout)
+            } else {
+                blocked = true;
+                continue;
+            };
+            let entry = &mut window.queue[index];
+            entry.result = Some(result);
+            entry.waited = Duration::from_nanos(
+                now.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()),
+            );
+            self.record_wait(entry.waited);
+            changed = true;
+        }
+        changed
+    }
+
+    fn notify_change(&self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.changed.notify_waiters()))
+            && let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload)))
+        {
+            std::mem::forget(secondary);
+        }
+    }
+
+    fn begin_async_acquire(
+        &self,
+        cost: u32,
+        now: Time,
+        max_queued: usize,
+        driver: crate::time::TimerDriverHandle,
+    ) -> Result<SlidingWindowAdmission<'_>, RateLimitError<()>> {
+        let mut window = self.window.write();
+        window.observe(now, period_to_millis_ceil(self.policy.period));
+        let changed = self.process_queue_locked(&mut window);
+        let admission = (|| {
+            if let Some(permit) = self.try_reserve_locked(&mut window, cost) {
+                return Ok(SlidingWindowAdmission::Immediate(permit));
+            }
+            if cost > self.policy.rate
+                || matches!(self.policy.wait_strategy, WaitStrategy::Reject)
+                || window.queue.len() >= max_queued
+            {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::RateLimitExceeded);
+            }
+            let Some(id) = window.next_id else {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::QueueIdExhausted);
+            };
+            window.next_id = id.checked_add(1);
+            let enqueued_at = window.observed;
+            let deadline = match self.policy.wait_strategy {
+                WaitStrategy::BlockWithTimeout(timeout) => u64::try_from(
+                    u128::from(enqueued_at.as_nanos()) + timeout.as_nanos(),
+                )
+                .ok()
+                .map(Time::from_nanos),
+                WaitStrategy::Block | WaitStrategy::Reject => None,
+            };
+            window.queue.push_back(SlidingWindowQueueEntry {
+                id,
+                cost,
+                enqueued_at,
+                deadline,
+                result: None,
+                waited: Duration::ZERO,
+            });
+            self.total_waited.fetch_add(1, Ordering::Relaxed);
+            Ok(SlidingWindowAdmission::Queued(SlidingWindowQueueOwner {
+                limiter: self,
+                entry_id: Some(id),
+                driver,
+            }))
+        })();
+        drop(window);
+        if changed || matches!(&admission, Ok(SlidingWindowAdmission::Queued(_))) {
+            self.notify_change();
+        }
+        admission
+    }
+
+    fn next_async_wake(&self) -> Option<Time> {
+        let window = self.window.read();
+        let head = window.queue.iter().find(|entry| entry.result.is_none())?;
+        let capacity = window.capacity_at(
+            head.cost,
+            self.policy.rate,
+            period_to_millis_ceil(self.policy.period),
+        );
+        let timeout = window
+            .queue
+            .iter()
+            .filter(|entry| entry.result.is_none())
+            .filter_map(|entry| entry.deadline)
+            .min();
+        capacity.into_iter().chain(timeout).min()
+    }
+
+    /// Reserve weighted sliding-window quota through a bounded FIFO.
+    ///
+    /// Waiting uses only the supplied context's timer and cancellation. Credit
+    /// expires at the original admission's rolling-window boundary, rather
+    /// than at an epoch boundary. Dropping a wait removes its entry and refunds
+    /// an unclaimed grant; a returned permit refunds until committed.
+    ///
+    /// Immediate grants need no queue slot. Every retained entry, including
+    /// granted or timed-out entries awaiting collection, counts against
+    /// `max_queued`. Use the same bound on every call for a limiter-wide cap.
+    /// Positive-cost synchronous acquisitions cannot bypass queued owners.
+    /// `Reject` refuses without waiting; `BlockWithTimeout` bounds total queue
+    /// residence. Quota available exactly at that deadline may be granted,
+    /// while a late poll never creates a new expired grant. Reset invalidates
+    /// queued owners without allowing their old permits to refund new quota.
+    ///
+    /// Without a timer, only recorded free capacity can be claimed and time
+    /// never advances. Zero-period policies wait only for a refund, reset,
+    /// cancellation or queue deadline. Boundaries beyond `Time::MAX` do not
+    /// create a periodic poll or permanently-ready timer. Cancellation has
+    /// precedence before handoff and respects the context's mask.
+    ///
+    /// # Errors
+    /// Returns the queue refusal/timeout, typed caller cancellation, or
+    /// [`RateLimitAcquireError::TimerUnavailable`] before parking without time
+    /// authority. Costs above the full quota are refused immediately.
+    pub async fn acquire_async_bounded<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        cost: u32,
+        max_queued: usize,
+    ) -> Result<SlidingWindowRateLimitPermit<'_>, RateLimitAcquireError>
+    where
+        Caps: HasTime,
+    {
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let Some(driver) = cx.timer_driver() else {
+            let permit = self.try_reserve_locked(&mut self.window.write(), cost);
+            if let Some(permit) = permit {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            if cost > self.policy.rate {
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::RateLimitExceeded.into());
+            }
+            return Err(RateLimitAcquireError::TimerUnavailable);
+        };
+        let now = driver.now();
+        cx.checkpoint()
+            .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+        let mut owner = match self.begin_async_acquire(cost, now, max_queued, driver.clone())? {
+            SlidingWindowAdmission::Immediate(permit) => {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            SlidingWindowAdmission::Queued(owner) => owner,
+        };
+        let mut cancellation = super::AdmissionCancellation::new(cx);
+        loop {
+            let mut changed = std::pin::pin!(self.changed.notified());
+            changed.as_mut().enable();
+            let now = driver.now();
+            cx.checkpoint()
+                .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+            if let Some(permit) = owner.claim(now)? {
+                cx.checkpoint()
+                    .map_err(|_| RateLimitAcquireError::cancelled(cx))?;
+                return Ok(permit);
+            }
+            let queue_wake = self.next_async_wake();
+            if queue_wake.is_some_and(|deadline| deadline <= now) {
+                continue;
+            }
+            let owner_deadline = cx.budget().deadline.filter(|deadline| *deadline > now);
+            let wake_at = queue_wake.into_iter().chain(owner_deadline).min();
+            let mut timer = std::pin::pin!(wake_at.map(|deadline| {
+                crate::time::Sleep::with_timer_driver(deadline, driver.clone())
+            }));
+            poll_fn(|task| {
+                cancellation.register(task.waker());
+                if cx.checkpoint().is_err() || changed.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(());
+                }
+                if let Some(timer) = timer.as_mut().as_pin_mut()
+                    && timer.poll_deadline(task).is_ready()
+                {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+}
+
+impl<'a> SlidingWindowQueueOwner<'a> {
+    fn claim(
+        &mut self,
+        now: Time,
+    ) -> Result<Option<SlidingWindowRateLimitPermit<'a>>, RateLimitError<()>> {
+        let Some(id) = self.entry_id else {
+            return Err(RateLimitError::Cancelled);
+        };
+        let mut window = self.limiter.window.write();
+        window.observe(now, period_to_millis_ceil(self.limiter.policy.period));
+        let changed = self.limiter.process_queue_locked(&mut window);
+        let result = if let Some(index) = window.queue.iter().position(|entry| entry.id == id) {
+            match window.queue[index].result {
+                Some(result) => {
+                    let entry = window
+                        .queue
+                        .remove(index)
+                        .expect("located sliding-window entry");
+                    self.entry_id = None;
+                    match result {
+                        Ok(grant) => Ok(Some(SlidingWindowRateLimitPermit {
+                            limiter: self.limiter,
+                            cost: entry.cost,
+                            grant,
+                            refund: true,
+                        })),
+                        Err(RejectionReason::Timeout) => {
+                            Err(RateLimitError::Timeout { waited: entry.waited })
+                        }
+                    }
+                }
+                None => Ok(None),
+            }
+        } else {
+            self.entry_id = None;
+            Err(RateLimitError::Cancelled)
+        };
+        drop(window);
+        if changed {
+            self.limiter.notify_change();
+        }
+        result
+    }
+}
+
+impl Drop for SlidingWindowQueueOwner<'_> {
+    fn drop(&mut self) {
+        let Some(id) = self.entry_id.take() else {
+            return;
+        };
+        // Sample outside the lock. Even a panicking custom clock must not
+        // strand the owner's entry or grant; without fresh time, wake followers
+        // to recheck instead of granting from a stale timeout observation.
+        let sampled = catch_unwind(AssertUnwindSafe(|| self.driver.now()));
+        let mut window = self.limiter.window.write();
+        if let Ok(now) = &sampled {
+            window.observe(*now, period_to_millis_ceil(self.limiter.policy.period));
+        }
+        let removed = if let Some(index) = window.queue.iter().position(|entry| entry.id == id) {
+            let entry = window
+                .queue
+                .remove(index)
+                .expect("located sliding-window owner");
+            match entry.result {
+                Some(Ok(grant)) => {
+                    window.refund(entry.cost, grant);
+                }
+                None => self.limiter.record_wait(Duration::from_nanos(
+                    window
+                        .observed
+                        .as_nanos()
+                        .saturating_sub(entry.enqueued_at.as_nanos()),
+                )),
+                Some(Err(_)) => {}
+            }
+            true
+        } else {
+            false
+        };
+        let changed = sampled.is_ok() && self.limiter.process_queue_locked(&mut window);
+        drop(window);
+        if removed || changed {
+            self.limiter.notify_change();
+        }
+        if let Err(payload) = sampled {
+            resume_unwind(payload);
+        }
     }
 }
 

@@ -208,7 +208,7 @@ pub use race::{
 pub use rate_limit::{
     FixedWindowRateLimitPermit, FixedWindowRateLimiter, RateLimitAcquireError, RateLimitAlgorithm,
     RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder, RateLimiter,
-    RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
+    RateLimiterRegistry, SlidingWindowRateLimitPermit, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
     AlwaysRetry, NeverRetry, RateLimitedRetryPolicy, Retry, RetryBudget, RetryError, RetryFailure,

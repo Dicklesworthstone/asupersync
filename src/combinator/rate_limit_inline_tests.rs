@@ -1884,6 +1884,117 @@ mod queued_acquisition_ownership {
     }
 }
 
+mod sliding_window_permit_tests {
+    use super::*;
+
+    fn sliding(rate: u32) -> SlidingWindowRateLimiter {
+        SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate,
+            period: Duration::from_millis(100),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn sliding_refunds_one_equivalent_charge_without_returning_committed_quota() {
+        let limiter = sliding(7);
+        let first = limiter.acquire_permit(2, Time::from_millis(20)).unwrap();
+        let second = limiter.acquire_permit(2, Time::from_millis(20)).unwrap();
+        assert!(limiter.try_acquire(3, Time::from_millis(20)));
+        assert!(!limiter.try_acquire(1, Time::from_millis(20)));
+
+        drop(second);
+        assert_eq!(limiter.window.read().cost, 5);
+        assert!(limiter.try_acquire(2, Time::from_millis(20)));
+        drop(first);
+        assert_eq!(limiter.window.read().cost, 5);
+        assert!(limiter.try_acquire(2, Time::from_millis(20)));
+        assert!(!limiter.try_acquire(1, Time::from_millis(119)));
+        assert!(limiter.try_acquire(7, Time::from_millis(120)));
+    }
+
+    #[test]
+    fn sliding_expired_permit_cannot_refund_new_quota_after_clock_rewind() {
+        let limiter = sliding(1);
+        let old = limiter.acquire_permit(1, Time::from_millis(20)).unwrap();
+        assert!(limiter.try_acquire(1, Time::from_millis(120)));
+        assert!(!limiter.try_acquire(1, Time::from_millis(20)));
+        drop(old);
+        assert!(!limiter.try_acquire(1, Time::from_millis(20)));
+        assert_eq!(limiter.window.read().cost, 1);
+        assert_eq!(
+            limiter.retry_after(1, Time::from_millis(20)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(limiter.retry_after(0, Time::ZERO), Duration::ZERO);
+        assert!(!limiter.try_acquire(1, Time::from_millis(219)));
+        assert!(limiter.try_acquire(1, Time::from_millis(220)));
+
+        limiter.reset();
+        assert_eq!(limiter.retry_after(1, Time::ZERO), Duration::ZERO);
+        assert!(limiter.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn sliding_permits_preserve_millisecond_admission_resolution() {
+        let limiter = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_micros(1_100),
+            ..Default::default()
+        });
+        let old = limiter.acquire_permit(1, Time::from_nanos(999_999)).unwrap();
+        assert!(!limiter.try_acquire(1, Time::from_nanos(1_999_999)));
+        assert_eq!(
+            limiter.retry_after(1, Time::from_nanos(1_999_999)),
+            Duration::from_nanos(1)
+        );
+        assert!(limiter.try_acquire(1, Time::from_millis(2)));
+        drop(old);
+        assert!(!limiter.try_acquire(1, Time::from_millis(2)));
+    }
+
+    #[test]
+    fn sliding_reset_and_generation_exhaustion_never_alias_old_permits() {
+        let limiter = sliding(1);
+        let before_reset = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        limiter.reset();
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        drop(before_reset);
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+
+        limiter.reset();
+        limiter.window.write().generation = Some(u64::MAX);
+        let last = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        limiter.reset();
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        drop(last);
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+        limiter.reset();
+        let terminal = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        drop(terminal);
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+        assert!(limiter.try_acquire(1, Time::from_millis(100)));
+    }
+
+    #[test]
+    fn sliding_cancelled_reservations_leave_no_tombstone_log() {
+        let limiter = sliding(3);
+        let first = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut moving = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        for time in 1..80 {
+            let next = limiter.acquire_permit(1, Time::from_millis(time)).unwrap();
+            drop(moving);
+            moving = next;
+            assert_eq!(limiter.window.read().entries.len(), 2);
+            assert_eq!(limiter.window.read().cost, 2);
+        }
+        drop(moving);
+        drop(first);
+        assert!(limiter.window.read().entries.is_empty());
+        assert_eq!(limiter.window.read().cost, 0);
+    }
+}
+
 mod fixed_window_tests {
     use super::*;
 
@@ -2181,6 +2292,347 @@ mod async_admission_tests {
             None,
         );
         (cx, clock)
+    }
+
+    fn sliding_stalled(rate: u32) -> SlidingWindowRateLimiter {
+        SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate,
+            period: Duration::ZERO,
+            ..Default::default()
+        })
+    }
+
+    fn assert_sliding_empty(limiter: &SlidingWindowRateLimiter, used: u64) {
+        assert_eq!(limiter.queued_count(), 0);
+        assert_eq!(limiter.changed.waiter_count(), 0);
+        let window = limiter.window.read();
+        assert_eq!(window.cost, used);
+        assert_eq!(
+            window.entries.iter().map(|entry| u64::from(entry.1)).sum::<u64>(),
+            used
+        );
+    }
+
+    #[test]
+    fn sliding_async_fifo_retains_grants_in_the_bound_and_drop_refunds_them() {
+        let (cx, _) = virtual_context(Budget::INFINITE);
+        let limiter = sliding_stalled(3);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        let mut head = Box::pin(limiter.acquire_async_bounded(&cx, 3, 2));
+        let mut follower = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(head.as_mut().poll(&mut task).is_pending());
+        assert!(follower.as_mut().poll(&mut task).is_pending());
+        assert!(!limiter.try_acquire(1, Time::ZERO), "pending FIFO head cannot be bypassed");
+
+        drop(held);
+        assert!(follower.as_mut().poll(&mut task).is_pending());
+        assert_eq!(limiter.window.read().cost, 3);
+        assert_eq!(limiter.queued_count(), 2, "unclaimed grant retains its slot");
+        let mut overflow = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(matches!(
+            overflow.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(RateLimitError::RateLimitExceeded)))
+        ));
+        drop(overflow);
+        drop(head);
+        match follower.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit.commit(),
+            _ => panic!("dropping an unclaimed grant must admit its FIFO successor"),
+        }
+        drop(follower);
+        assert_sliding_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn sliding_async_expired_unclaimed_grant_cannot_refund_new_work() {
+        let (cx, clock) = virtual_context(Budget::INFINITE);
+        let limiter = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: 3,
+            period: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        let mut head = Box::pin(limiter.acquire_async_bounded(&cx, 3, 2));
+        let mut follower = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(head.as_mut().poll(&mut task).is_pending());
+        assert!(follower.as_mut().poll(&mut task).is_pending());
+        assert_eq!(limiter.retry_after(1, Time::ZERO), Duration::from_millis(200));
+        drop(held);
+        assert!(follower.as_mut().poll(&mut task).is_pending());
+
+        clock.advance_to(Time::from_millis(100));
+        assert!(limiter.try_acquire(2, cx.now()));
+        drop(head);
+        assert_eq!(limiter.window.read().cost, 3);
+        match follower.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit.commit(),
+            _ => panic!("rolling expiry must reserve the FIFO successor before synchronous work"),
+        }
+        drop(follower);
+        assert_sliding_empty(&limiter, 3);
+    }
+
+    #[test]
+    fn sliding_async_timeout_precedes_late_credit_but_equal_boundary_admits() {
+        for observed in [100, 101] {
+            let (cx, clock) = virtual_context(Budget::INFINITE);
+            let limiter = SlidingWindowRateLimiter::new(RateLimitPolicy {
+                rate: 1,
+                period: Duration::from_millis(100),
+                wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
+                ..Default::default()
+            });
+            assert!(limiter.try_acquire(1, Time::ZERO));
+            let mut task = Context::from_waker(Waker::noop());
+            let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            clock.advance_to(Time::from_millis(observed));
+            match waiting.as_mut().poll(&mut task) {
+                Poll::Ready(Ok(permit)) if observed == 100 => permit.commit(),
+                Poll::Ready(Err(RateLimitAcquireError::Admission(RateLimitError::Timeout { waited })))
+                    if observed == 101 => assert_eq!(waited, Duration::from_millis(101)),
+                _ => panic!("unexpected sliding admission at {observed}ms"),
+            }
+            drop(waiting);
+            assert_sliding_empty(&limiter, u64::from(observed == 100));
+        }
+    }
+
+    #[test]
+    fn sliding_async_without_timer_claims_existing_quota_but_never_advances_time() {
+        type TimeOnly = crate::cx::cap::CapSet<false, true, false, false, false>;
+        let cx = Cx::for_testing().restrict::<TimeOnly>();
+        let limiter = sliding_stalled(1);
+        let mut task = Context::from_waker(Waker::noop());
+        let mut immediate = Box::pin(limiter.acquire_async_bounded(&cx, 1, 0));
+        match immediate.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit.commit(),
+            _ => panic!("existing quota needs no clock"),
+        }
+        drop(immediate);
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::TimerUnavailable))
+        ));
+        drop(waiting);
+        let mut impossible = Box::pin(limiter.acquire_async_bounded(&cx, 2, 1));
+        assert!(matches!(
+            impossible.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(RateLimitError::RateLimitExceeded)))
+        ));
+        drop(impossible);
+        cx.cancel_fast(CancelKind::User);
+        let mut cancelled = Box::pin(limiter.acquire_async_bounded(&cx, 0, 0));
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::User
+        ));
+        drop(cancelled);
+        assert_sliding_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn sliding_async_terminal_expiry_parks_until_cancellation_without_self_waking() {
+        let (cx, clock) = virtual_context(Budget::INFINITE);
+        clock.advance_to(Time::MAX);
+        let limiter = SlidingWindowRateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            ..Default::default()
+        });
+        assert!(limiter.try_acquire(1, Time::MAX));
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        assert!(waiting.as_mut().poll(&mut task).is_pending());
+        assert_eq!(limiter.next_async_wake(), None);
+        assert_eq!(counter.0.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.changed.waiter_count(), 1);
+        cx.cancel_fast(CancelKind::User);
+        assert!(counter.0.load(Ordering::Acquire) > 0);
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::User
+        ));
+        drop(waiting);
+        assert_sliding_empty(&limiter, 1);
+    }
+
+    #[test]
+    fn sliding_async_queue_ids_never_wrap_or_restart_after_reset() {
+        let (cx, _) = virtual_context(Budget::INFINITE);
+        let limiter = sliding_stalled(1);
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        limiter.window.write().next_id = Some(u64::MAX);
+        let mut task = Context::from_waker(Waker::noop());
+        let mut last = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(last.as_mut().poll(&mut task).is_pending());
+        let mut overflow = Box::pin(limiter.acquire_async_bounded(&cx, 1, 2));
+        assert!(matches!(
+            overflow.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(RateLimitError::QueueIdExhausted)))
+        ));
+        drop(overflow);
+        limiter.reset();
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        assert!(matches!(
+            last.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Admission(RateLimitError::Cancelled)))
+        ));
+        drop(last);
+        assert_sliding_empty(&limiter, 1);
+        assert!(limiter.window.read().next_id.is_none());
+    }
+
+    #[test]
+    fn sliding_async_cancellation_after_grant_refunds_before_handoff() {
+        let (cancelled_cx, _) = virtual_context(Budget::INFINITE);
+        let (surviving_cx, _) = virtual_context(Budget::INFINITE);
+        let limiter = sliding_stalled(3);
+        let held = limiter.acquire_permit(3, Time::ZERO).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        let mut first = Box::pin(limiter.acquire_async_bounded(&cancelled_cx, 1, 2));
+        let mut second = Box::pin(limiter.acquire_async_bounded(&surviving_cx, 2, 2));
+        assert!(first.as_mut().poll(&mut task).is_pending());
+        assert!(second.as_mut().poll(&mut task).is_pending());
+        drop(held);
+        match second.as_mut().poll(&mut task) {
+            Poll::Ready(Ok(permit)) => permit.commit(),
+            _ => panic!("refunded credit must grant both FIFO owners"),
+        }
+        drop(second);
+        assert_eq!(limiter.window.read().cost, 3);
+        cancelled_cx.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            first.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::User
+        ));
+        drop(first);
+        assert_sliding_empty(&limiter, 2);
+        assert!(limiter.try_acquire(1, Time::ZERO));
+        assert!(!limiter.try_acquire(1, Time::ZERO));
+    }
+
+    #[test]
+    fn sliding_async_masked_expired_context_parks_until_unmask() {
+        let (cx, clock) = virtual_context(
+            Budget::new().with_deadline(Time::from_millis(1)),
+        );
+        let limiter = sliding_stalled(1);
+        let held = limiter.acquire_permit(1, Time::ZERO).unwrap();
+        let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 1, 1));
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut task = Context::from_waker(&waker);
+        clock.advance_to(Time::from_millis(2));
+        cx.masked(|| {
+            for _ in 0..3 {
+                assert!(waiting.as_mut().poll(&mut task).is_pending());
+                assert_eq!(counter.0.load(Ordering::Acquire), 0);
+                assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+            }
+        });
+        assert_eq!(limiter.changed.waiter_count(), 1);
+        assert!(counter.0.load(Ordering::Acquire) > 0);
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Err(RateLimitAcquireError::Cancelled(reason)))
+                if reason.kind == CancelKind::Deadline
+        ));
+        drop(waiting);
+        assert_sliding_empty(&limiter, 1);
+        drop(held);
+        assert_sliding_empty(&limiter, 0);
+    }
+
+    #[test]
+    fn sliding_native_cancel_reset_and_refund_wake_actually_parked_owners() {
+        for workers in [1, 2] {
+            native(workers, |cx| async move {
+                for mode in 0..3 {
+                    let limiter = Arc::new(sliding_stalled(1));
+                    let mut held = Some(limiter.acquire_permit(1, cx.now()).unwrap());
+                    let child_limiter = Arc::clone(&limiter);
+                    let mut child = cx.spawn(move |owner| async move {
+                        let result = child_limiter.acquire_async_bounded(&owner, 1, 1).await;
+                        match mode {
+                            0 => assert!(matches!(
+                                result, Err(RateLimitAcquireError::Cancelled(reason))
+                                    if reason.kind == CancelKind::User
+                            )),
+                            1 => assert!(matches!(
+                                result, Err(RateLimitAcquireError::Admission(RateLimitError::Cancelled))
+                            )),
+                            _ => result.unwrap().commit(),
+                        }
+                    }).unwrap();
+                    while limiter.changed.waiter_count() != 1 {
+                        yield_now().await;
+                    }
+                    assert_eq!(limiter.queued_count(), 1);
+                    match mode {
+                        0 => {
+                            child = std::thread::spawn(move || {
+                                child.abort();
+                                child
+                            }).join().unwrap();
+                        }
+                        1 => limiter.reset(),
+                        _ => std::thread::scope(|scope| {
+                            scope.spawn(|| drop(held.take())).join().unwrap();
+                        }),
+                    }
+                    child.join(&cx).await.unwrap();
+                    drop(held);
+                    assert_sliding_empty(&limiter, u64::from(mode == 2));
+                    assert_eq!(limiter.metrics().total_waited, 1);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn sliding_lab_waits_for_rolling_weighted_expiry_without_a_queue_driver() {
+        use crate::{LabConfig, LabRuntime};
+        for seed in [17, 41, 93] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async {
+                let cx = Cx::current().unwrap();
+                let limiter = SlidingWindowRateLimiter::new(RateLimitPolicy {
+                    rate: 3,
+                    period: Duration::from_millis(100),
+                    ..Default::default()
+                });
+                crate::time::sleep(cx.now(), Duration::from_millis(20)).await;
+                assert!(limiter.try_acquire(1, cx.now()));
+                crate::time::sleep(cx.now(), Duration::from_millis(17)).await;
+                assert!(limiter.try_acquire(2, cx.now()));
+                let mut waiting = Box::pin(limiter.acquire_async_bounded(&cx, 2, 1));
+                poll_fn(|task| {
+                    assert!(waiting.as_mut().poll(task).is_pending());
+                    assert_eq!(limiter.changed.waiter_count(), 1);
+                    Poll::Ready(())
+                }).await;
+                waiting.await.unwrap().commit();
+                assert_eq!(cx.now(), Time::from_millis(137));
+                assert_sliding_empty(&limiter, 2);
+            }).unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let virtual_time = lab.run_with_auto_advance();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(matches!(join.try_join(), Ok(Some(()))), "{virtual_time:?} {report:?}");
+            assert!(lab.state.tasks_is_empty());
+            assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
+            assert!(report.lab_test_passed(), "{report:?}");
+        }
     }
 
     fn fixed_stalled(rate: u32) -> FixedWindowRateLimiter {
