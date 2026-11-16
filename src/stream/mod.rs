@@ -71,6 +71,8 @@
 //! - [`Count`]: Counts the number of items
 //! - [`Any`]: Checks if any item matches a predicate
 //! - [`All`]: Checks if all items match a predicate
+//! - [`SinkForwardSession`]: Resumable forwarding into a native sink
+//! - [`TrySinkForwardSession`]: Forward successful items with separate source and sink errors
 //!
 //! ## Bounded Concurrency
 //!
@@ -209,6 +211,7 @@ pub use receiver_stream::ReceiverStream;
 pub use scan::Scan;
 pub use sink_forward::{
     SinkForwardError, SinkForwardProgress, SinkForwardSession, SinkForwardStage,
+    TrySinkForwardError, TrySinkForwardSession,
 };
 pub use skip::{Skip, SkipWhile};
 pub use stream::Stream;

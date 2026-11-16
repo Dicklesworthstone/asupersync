@@ -5,6 +5,7 @@
 
 use super::{Sink, Stream};
 use crate::cx::{CancelWakerToken, Cx};
+use std::convert::Infallible;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
@@ -15,7 +16,7 @@ const SENDS_PER_POLL: usize = 64;
 /// Provider operation at which a forwarding session stopped permanently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkForwardStage {
-    /// Polling the source; only a provider panic can fail this operation.
+    /// Polling the source. An infallible source can only fail here by panicking.
     Source,
     /// Waiting for the sink to accept another item.
     Ready,
@@ -74,6 +75,63 @@ impl<E: std::error::Error + 'static> std::error::Error for SinkForwardError<E> {
     }
 }
 
+/// Why one invocation of [`TrySinkForwardSession::run`] stopped.
+///
+/// Source and sink errors retain their original, independently typed values.
+/// Neither error is retried automatically; inspect the session's progress and
+/// recover its parts before deciding how to handle an accepted prefix.
+#[derive(Debug)]
+pub enum TrySinkForwardError<SourceError, SinkError> {
+    /// Context cancellation stopped this run. The session can resume under an
+    /// active context without discarding its staged item or provider state.
+    Cancelled(crate::Error),
+    /// The source yielded an error. No further source or sink operation runs,
+    /// including flush or close; the accepted prefix may still be buffered.
+    Source(SourceError),
+    /// A sink operation failed. A failed `Send` already consumed its item.
+    Sink {
+        /// Operation that failed.
+        stage: SinkForwardStage,
+        /// Original sink error.
+        error: SinkError,
+    },
+    /// An earlier provider error or panic prevents further automatic polling.
+    Failed {
+        /// Operation whose result is failed or uncertain.
+        stage: SinkForwardStage,
+    },
+}
+
+impl<S: std::fmt::Display, K: std::fmt::Display> std::fmt::Display
+    for TrySinkForwardError<S, K>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled(error) => write!(f, "sink forwarding cancelled: {error}"),
+            Self::Source(error) => write!(f, "sink forwarding source failed: {error}"),
+            Self::Sink { stage, error } => {
+                write!(f, "sink forwarding failed during {stage:?}: {error}")
+            }
+            Self::Failed { stage } => {
+                write!(f, "sink forwarding is fenced after {stage:?}")
+            }
+        }
+    }
+}
+
+impl<S: std::error::Error + 'static, K: std::error::Error + 'static> std::error::Error
+    for TrySinkForwardError<S, K>
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cancelled(error) => Some(error),
+            Self::Source(error) => Some(error),
+            Self::Sink { error, .. } => Some(error),
+            Self::Failed { .. } => None,
+        }
+    }
+}
+
 /// Cumulative forwarding progress, independent of any one borrowing run future.
 ///
 /// Counts saturate at `u64::MAX`. They describe successful Sink operations,
@@ -91,7 +149,7 @@ pub struct SinkForwardProgress {
     pub source_exhausted: bool,
     /// EOF, flush and sink close all completed successfully.
     pub complete: bool,
-    /// A sink error or provider panic prevents further automatic progress.
+    /// A provider error or panic prevents further automatic progress.
     pub failed: Option<SinkForwardStage>,
 }
 
@@ -131,7 +189,8 @@ enum Phase {
 /// `Pin<&mut _>` to use pinned `!Unpin` providers through their forwarding impls.
 /// Items have no `Unpin`, `Clone`, `Send`, or `'static` bound. A source yielding
 /// `Result<T, E>` forwards those values as ordinary items; it is not implicitly
-/// unwrapped or treated as a separate error channel.
+/// unwrapped or treated as a separate error channel. Use
+/// [`TrySinkForwardSession`] to forward only successful items to a `Sink<T>`.
 ///
 /// ```no_run
 /// # async fn example(cx: &asupersync::Cx, writer: asupersync::io::DuplexStream) {
@@ -147,7 +206,11 @@ enum Phase {
 pub struct SinkForwardSession<S: Stream, K> {
     source: S,
     sink: K,
-    pending: Option<S::Item>,
+    state: ForwardState<S::Item>,
+}
+
+struct ForwardState<T> {
+    pending: Option<T>,
     phase: Phase,
     source_exhausted: bool,
     needs_flush: bool,
@@ -162,29 +225,14 @@ impl<S: Stream, K> SinkForwardSession<S, K> {
         Self {
             source,
             sink,
-            pending: None,
-            phase: Phase::Forward,
-            source_exhausted: false,
-            needs_flush: false,
-            accepted_items: 0,
-            flushed_items: 0,
+            state: ForwardState::new(),
         }
     }
 
     /// Returns cumulative progress without polling either provider.
     #[must_use]
     pub fn progress(&self) -> SinkForwardProgress {
-        SinkForwardProgress {
-            accepted_items: self.accepted_items,
-            flushed_items: self.flushed_items,
-            has_pending: self.pending.is_some(),
-            source_exhausted: self.source_exhausted,
-            complete: matches!(self.phase, Phase::Complete),
-            failed: match self.phase {
-                Phase::Failed(stage) => Some(stage),
-                _ => None,
-            },
-        }
+        self.state.progress()
     }
 
     /// Borrows the retained source and sink for inspection.
@@ -200,7 +248,7 @@ impl<S: Stream, K> SinkForwardSession<S, K> {
     /// them. A failed `start_send` item cannot be recovered by this adapter.
     #[must_use]
     pub fn into_parts(self) -> (S, K, Option<S::Item>) {
-        (self.source, self.sink, self.pending)
+        (self.source, self.sink, self.state.pending)
     }
 }
 
@@ -220,11 +268,177 @@ where
         &mut self,
         cx: &Cx<Caps>,
     ) -> Result<SinkForwardProgress, SinkForwardError<K::Error>> {
+        let mut source = InfallibleSource(&mut self.source);
+        self.state
+            .run(cx, &mut source, &mut self.sink)
+            .await
+            .map_err(|error| match error {
+                TrySinkForwardError::Cancelled(error) => SinkForwardError::Cancelled(error),
+                TrySinkForwardError::Source(never) => match never {},
+                TrySinkForwardError::Sink { stage, error } => {
+                    SinkForwardError::Sink { stage, error }
+                }
+                TrySinkForwardError::Failed { stage } => SinkForwardError::Failed { stage },
+            })
+    }
+}
+
+/// Forward successful items from a fallible stream into a native sink.
+///
+/// This connects sources such as [`ReaderStream`](crate::io::ReaderStream) and
+/// [`FramedRead`](crate::codec::FramedRead) directly to a `Sink<T>`, without
+/// discarding source errors or requiring the destination to accept `Result`s.
+/// Source and sink errors need not have the same type.
+///
+/// Like [`SinkForwardSession`], the session owns at most one extracted item,
+/// checks backpressure before sending, flushes an accepted prefix when the
+/// source parks, and flushes then closes on EOF. Dropping a borrowing
+/// [`run`](Self::run) future or cancelling its `Cx` preserves this state for a
+/// later run. No task or intermediate queue is spawned.
+///
+/// A source error is terminal, not EOF: it is returned once, immediately,
+/// without polling the destination again. The accepted prefix may still be
+/// buffered in the sink. Use [`progress`](Self::progress) and
+/// [`into_parts`](Self::into_parts) to decide whether to flush, close, or abort
+/// it. Subsequent runs return [`TrySinkForwardError::Failed`] without polling
+/// either provider. Sink errors and caught provider panics fence the session
+/// in the same way. Cancellation alone does not fence it.
+///
+/// `S` and `K` must be `Unpin` to run; pinned pointers work for `!Unpin`
+/// providers. Items and errors need no `Clone`, `Send`, `Unpin`, or `'static`
+/// bounds. Dropping the session itself discards its retained state without
+/// asynchronously flushing or closing the sink.
+///
+/// ```no_run
+/// # async fn example(cx: &asupersync::Cx, reader: asupersync::io::DuplexStream,
+/// #                  writer: asupersync::io::DuplexStream) {
+/// use asupersync::codec::{FramedRead, FramedWrite, LinesCodec};
+/// use asupersync::stream::TrySinkForwardSession;
+/// let source = FramedRead::new(reader, LinesCodec::new());
+/// let sink = FramedWrite::new(writer, LinesCodec::new());
+/// let mut transfer = TrySinkForwardSession::new(source, sink);
+/// let progress = transfer.run(cx).await.expect("decode, forward, and finish");
+/// assert!(progress.complete);
+/// # }
+/// ```
+pub struct TrySinkForwardSession<S, K, T> {
+    source: S,
+    sink: K,
+    state: ForwardState<T>,
+}
+
+impl<S, K, T, E> TrySinkForwardSession<S, K, T>
+where
+    S: Stream<Item = Result<T, E>>,
+{
+    /// Creates a transfer without polling either provider or performing I/O.
+    #[must_use]
+    pub fn new(source: S, sink: K) -> Self {
+        Self {
+            source,
+            sink,
+            state: ForwardState::new(),
+        }
+    }
+
+    /// Returns cumulative progress, including the first failed operation.
+    /// A source error sets `failed` to `Source`, not `source_exhausted`.
+    #[must_use]
+    pub fn progress(&self) -> SinkForwardProgress {
+        self.state.progress()
+    }
+
+    /// Borrows the retained source and destination for inspection.
+    #[must_use]
+    pub fn get_ref(&self) -> (&S, &K) {
+        (&self.source, &self.sink)
+    }
+
+    /// Returns the providers and any item not yet passed to `start_send`.
+    ///
+    /// Source errors are returned by `run`, not retained here. Accepted items
+    /// remain the sink's responsibility. Inspect `progress` before consuming
+    /// the session if recovery needs the failure stage or progress counters.
+    #[must_use]
+    pub fn into_parts(self) -> (S, K, Option<T>) {
+        (self.source, self.sink, self.state.pending)
+    }
+}
+
+impl<S, K, T, E> TrySinkForwardSession<S, K, T>
+where
+    S: Stream<Item = Result<T, E>> + Unpin,
+    K: Sink<T> + Unpin,
+{
+    /// Drives the transfer to EOF and sink close, or returns a typed failure.
+    ///
+    /// Cancellation wakes parked waits, honors masks, and leaves extracted
+    /// successful items in the session. Always-ready pipelines yield after a
+    /// bounded number of sends. A source error observed during a poll is
+    /// preserved even if that poll also requests cancellation.
+    pub async fn run<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+    ) -> Result<SinkForwardProgress, TrySinkForwardError<E, K::Error>> {
+        self.state.run(cx, &mut self.source, &mut self.sink).await
+    }
+}
+
+/// Both public sessions drive the same state machine. This borrowed adapter
+/// preserves the ordinary session's Result-as-item contract without buffering.
+struct InfallibleSource<'a, S>(&'a mut S);
+
+impl<S: Stream + Unpin> Stream for InfallibleSource<'_, S> {
+    type Item = Result<S::Item, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut *self.get_mut().0)
+            .poll_next(task)
+            .map(|item| item.map(Ok))
+    }
+}
+
+impl<T> ForwardState<T> {
+    fn new() -> Self {
+        Self {
+            pending: None,
+            phase: Phase::Forward,
+            source_exhausted: false,
+            needs_flush: false,
+            accepted_items: 0,
+            flushed_items: 0,
+        }
+    }
+
+    fn progress(&self) -> SinkForwardProgress {
+        SinkForwardProgress {
+            accepted_items: self.accepted_items,
+            flushed_items: self.flushed_items,
+            has_pending: self.pending.is_some(),
+            source_exhausted: self.source_exhausted,
+            complete: matches!(self.phase, Phase::Complete),
+            failed: match self.phase {
+                Phase::Failed(stage) => Some(stage),
+                _ => None,
+            },
+        }
+    }
+
+    async fn run<Caps, S, K, E>(
+        &mut self,
+        cx: &Cx<Caps>,
+        source: &mut S,
+        sink: &mut K,
+    ) -> Result<SinkForwardProgress, TrySinkForwardError<E, K::Error>>
+    where
+        S: Stream<Item = Result<T, E>> + Unpin,
+        K: Sink<T> + Unpin,
+    {
         let mut cancellation = ForwardCancellation {
             cx,
             registration: None,
         };
-        poll_fn(|task| match self.poll_run(cx, task) {
+        poll_fn(|task| match self.poll_run(cx, task, source, sink) {
             Poll::Ready(result) => {
                 cancellation.clear();
                 Poll::Ready(result)
@@ -235,7 +449,7 @@ where
                 if cx.is_cancel_requested() {
                     if let Err(error) = cx.checkpoint() {
                         cancellation.clear();
-                        return Poll::Ready(Err(SinkForwardError::Cancelled(error)));
+                        return Poll::Ready(Err(TrySinkForwardError::Cancelled(error)));
                     }
                 }
                 Poll::Pending
@@ -244,11 +458,17 @@ where
         .await
     }
 
-    fn poll_run<Caps>(
+    fn poll_run<Caps, S, K, E>(
         &mut self,
         cx: &Cx<Caps>,
         task: &mut Context<'_>,
-    ) -> Poll<Result<SinkForwardProgress, SinkForwardError<K::Error>>> {
+        source: &mut S,
+        sink: &mut K,
+    ) -> Poll<Result<SinkForwardProgress, TrySinkForwardError<E, K::Error>>>
+    where
+        S: Stream<Item = Result<T, E>> + Unpin,
+        K: Sink<T> + Unpin,
+    {
         let mut sent = 0usize;
         // A new poll must refresh the source's task waker after resuming a
         // flush. Only a Pending observed in THIS poll can safely park us.
@@ -257,12 +477,12 @@ where
             match self.phase {
                 Phase::Complete => return Poll::Ready(Ok(self.progress())),
                 Phase::Failed(stage) => {
-                    return Poll::Ready(Err(SinkForwardError::Failed { stage }));
+                    return Poll::Ready(Err(TrySinkForwardError::Failed { stage }));
                 }
                 _ => {}
             }
             if let Err(error) = cx.checkpoint() {
-                return Poll::Ready(Err(SinkForwardError::Cancelled(error)));
+                return Poll::Ready(Err(TrySinkForwardError::Cancelled(error)));
             }
 
             match self.phase {
@@ -270,10 +490,13 @@ where
                     // Fence before invoking provider code. A panic may follow
                     // side effects, so only normal returns permit another run.
                     self.phase = Phase::Failed(SinkForwardStage::Source);
-                    match Pin::new(&mut self.source).poll_next(task) {
-                        Poll::Ready(Some(item)) => {
+                    match Pin::new(&mut *source).poll_next(task) {
+                        Poll::Ready(Some(Ok(item))) => {
                             self.pending = Some(item);
                             self.phase = Phase::Forward;
+                        }
+                        Poll::Ready(Some(Err(error))) => {
+                            return Poll::Ready(Err(TrySinkForwardError::Source(error)));
                         }
                         Poll::Ready(None) => {
                             self.source_exhausted = true;
@@ -291,13 +514,13 @@ where
                 }
                 Phase::Forward => {
                     self.phase = Phase::Failed(SinkForwardStage::Ready);
-                    match Pin::new(&mut self.sink).poll_ready(task) {
+                    match Pin::new(&mut *sink).poll_ready(task) {
                         Poll::Pending => {
                             self.phase = Phase::Forward;
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(error)) => {
-                            return Poll::Ready(Err(SinkForwardError::Sink {
+                            return Poll::Ready(Err(TrySinkForwardError::Sink {
                                 stage: SinkForwardStage::Ready,
                                 error,
                             }));
@@ -307,12 +530,12 @@ where
                     // Readiness itself may publish cancellation. Keep the item
                     // until the final checkpoint before transferring ownership.
                     if let Err(error) = cx.checkpoint() {
-                        return Poll::Ready(Err(SinkForwardError::Cancelled(error)));
+                        return Poll::Ready(Err(TrySinkForwardError::Cancelled(error)));
                     }
                     self.phase = Phase::Failed(SinkForwardStage::Send);
                     let item = self.pending.take().expect("staged item precedes admission");
-                    if let Err(error) = Pin::new(&mut self.sink).start_send(item) {
-                        return Poll::Ready(Err(SinkForwardError::Sink {
+                    if let Err(error) = Pin::new(&mut *sink).start_send(item) {
+                        return Poll::Ready(Err(TrySinkForwardError::Sink {
                             stage: SinkForwardStage::Send,
                             error,
                         }));
@@ -328,13 +551,13 @@ where
                 }
                 Phase::Flush => {
                     self.phase = Phase::Failed(SinkForwardStage::Flush);
-                    match Pin::new(&mut self.sink).poll_flush(task) {
+                    match Pin::new(&mut *sink).poll_flush(task) {
                         Poll::Pending => {
                             self.phase = Phase::Flush;
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(error)) => {
-                            return Poll::Ready(Err(SinkForwardError::Sink {
+                            return Poll::Ready(Err(TrySinkForwardError::Sink {
                                 stage: SinkForwardStage::Flush,
                                 error,
                             }));
@@ -355,13 +578,13 @@ where
                 }
                 Phase::Close => {
                     self.phase = Phase::Failed(SinkForwardStage::Close);
-                    match Pin::new(&mut self.sink).poll_close(task) {
+                    match Pin::new(&mut *sink).poll_close(task) {
                         Poll::Pending => {
                             self.phase = Phase::Close;
                             return Poll::Pending;
                         }
                         Poll::Ready(Err(error)) => {
-                            return Poll::Ready(Err(SinkForwardError::Sink {
+                            return Poll::Ready(Err(TrySinkForwardError::Sink {
                                 stage: SinkForwardStage::Close,
                                 error,
                             }));

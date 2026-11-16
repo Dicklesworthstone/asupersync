@@ -742,3 +742,398 @@ fn native_idle_channel_flushes_before_more_input_is_available() {
     });
     assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
 }
+
+#[derive(Debug)]
+struct SourceFailure(Rc<()>);
+
+impl std::fmt::Display for SourceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original source failure")
+    }
+}
+
+impl std::error::Error for SourceFailure {}
+
+#[test]
+fn try_forward_source_error_retains_unflushed_prefix_and_fences_both_providers() {
+    let cx = Cx::for_testing();
+    let marker = Rc::new(());
+    let input = source([Ok(10), Err(SourceFailure(Rc::clone(&marker))), Ok(20)], true);
+    let input_state = Rc::clone(&input.0);
+    let output = sink();
+    let output_state = Rc::clone(&output.0);
+    let mut session = TrySinkForwardSession::new(input, output);
+    let mut run = Box::pin(session.run(&cx));
+    let error = match poll_once(run.as_mut()) {
+        Poll::Ready(Err(error)) => error,
+        other => panic!("source failure must terminate forwarding: {other:?}"),
+    };
+    let preserved = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<SourceFailure>())
+        .expect("source error remains available through Error::source");
+    assert!(Rc::ptr_eq(&preserved.0, &marker));
+    assert!(matches!(error, TrySinkForwardError::Source(_)));
+    drop(run);
+    assert_eq!(session.progress(), SinkForwardProgress {
+        accepted_items: 1,
+        flushed_items: 0,
+        has_pending: false,
+        source_exhausted: false,
+        complete: false,
+        failed: Some(SinkForwardStage::Source),
+    });
+    assert_eq!(output_state.borrow().items, [10]);
+    assert_eq!(output_state.borrow().calls, [1, 1, 0, 0]);
+    assert_eq!(input_state.borrow().polls, 2);
+    cx.cancel_fast(CancelKind::User);
+    let mut run = Box::pin(session.run(&cx));
+    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Err(
+        TrySinkForwardError::Failed { stage: SinkForwardStage::Source }
+    ))));
+    drop(run);
+    assert_eq!(output_state.borrow().calls, [1, 1, 0, 0]);
+    assert_eq!(input_state.borrow().polls, 2);
+    let (input, _, pending) = session.into_parts();
+    assert_eq!(pending, None);
+    assert!(matches!(input.0.borrow().items.front(), Some(Ok(20))));
+}
+
+#[test]
+fn try_forward_sink_errors_keep_their_type_stage_and_ownership_boundary() {
+    for stage in [
+        SinkForwardStage::Ready,
+        SinkForwardStage::Send,
+        SinkForwardStage::Flush,
+        SinkForwardStage::Close,
+    ] {
+        let cx = Cx::for_testing();
+        let input = source([Ok::<_, SourceFailure>(10), Ok(20)], true);
+        let input_state = Rc::clone(&input.0);
+        let output = sink();
+        let output_state = Rc::clone(&output.0);
+        output_state.borrow_mut().fail = Some(stage);
+        let mut session = TrySinkForwardSession::new(input, output);
+        let mut run = Box::pin(session.run(&cx));
+        match poll_once(run.as_mut()) {
+            Poll::Ready(Err(TrySinkForwardError::Sink { stage: actual, error })) => {
+                assert_eq!(actual, stage);
+                assert_eq!(error.kind(), io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "scripted sink failure");
+            }
+            other => panic!("sink failure was misclassified: {other:?}"),
+        }
+        drop(run);
+        let progress = session.progress();
+        assert_eq!(progress.failed, Some(stage));
+        assert!(!progress.complete);
+        assert_eq!(progress.has_pending, stage == SinkForwardStage::Ready);
+        assert_eq!(
+            progress.accepted_items,
+            if matches!(stage, SinkForwardStage::Ready | SinkForwardStage::Send) {
+                0
+            } else {
+                2
+            }
+        );
+        assert_eq!(
+            progress.flushed_items,
+            if stage == SinkForwardStage::Close { 2 } else { 0 }
+        );
+        let calls = output_state.borrow().calls;
+        let polls = input_state.borrow().polls;
+        let mut run = Box::pin(session.run(&cx));
+        assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Err(
+            TrySinkForwardError::Failed { stage: actual }
+        )) if actual == stage));
+        drop(run);
+        assert_eq!(output_state.borrow().calls, calls);
+        assert_eq!(input_state.borrow().polls, polls);
+        let (_, _, pending) = session.into_parts();
+        assert_eq!(pending, (stage == SinkForwardStage::Ready).then_some(10));
+        if stage == SinkForwardStage::Send {
+            assert_eq!(output_state.borrow().items, [10], "failed send already consumed the item");
+        }
+    }
+}
+
+#[test]
+fn try_forward_cancellation_during_source_error_preserves_the_original_error() {
+    struct CancellingSource {
+        cx: Cx,
+        error: Option<SourceFailure>,
+        polls: Rc<Cell<usize>>,
+    }
+    impl Stream for CancellingSource {
+        type Item = Result<u8, SourceFailure>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.set(self.polls.get() + 1);
+            self.cx.cancel_fast(CancelKind::User);
+            Poll::Ready(Some(Err(self.error.take().expect("source must not be retried"))))
+        }
+    }
+
+    let cx = Cx::for_testing();
+    let marker = Rc::new(());
+    let polls = Rc::new(Cell::new(0));
+    let input = CancellingSource {
+        cx: cx.clone(),
+        error: Some(SourceFailure(Rc::clone(&marker))),
+        polls: Rc::clone(&polls),
+    };
+    let output = sink();
+    let output_state = Rc::clone(&output.0);
+    let mut session = TrySinkForwardSession::new(input, output);
+    let mut run = Box::pin(session.run(&cx));
+    match poll_once(run.as_mut()) {
+        Poll::Ready(Err(TrySinkForwardError::Source(error))) => {
+            assert!(Rc::ptr_eq(&error.0, &marker));
+        }
+        other => panic!("cancellation erased a source result: {other:?}"),
+    }
+    drop(run);
+    assert!(cx.is_cancel_requested());
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    let active = Cx::for_testing();
+    let mut run = Box::pin(session.run(&active));
+    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Err(
+        TrySinkForwardError::Failed { stage: SinkForwardStage::Source }
+    ))));
+    drop(run);
+    assert_eq!(polls.get(), 1);
+    assert_eq!(output_state.borrow().calls, [0; 4]);
+}
+
+#[test]
+fn try_forward_drop_cancel_and_resume_retains_one_borrowed_non_unpin_item() {
+    struct Item<'a>(&'a str, Rc<()>, PhantomPinned);
+
+    let text = String::from("one owned item, borrowed contents");
+    let marker = Rc::new(());
+    let cx = Cx::for_testing();
+    let input = source(
+        [Ok::<_, SourceFailure>(Item(&text, Rc::clone(&marker), PhantomPinned))],
+        true,
+    );
+    let input_state = Rc::clone(&input.0);
+    let output = sink();
+    let output_state = Rc::clone(&output.0);
+    output_state.borrow_mut().ready = false;
+    let mut session = TrySinkForwardSession::new(input, output);
+    for _ in 0..2 {
+        let mut run = Box::pin(session.run(&cx));
+        assert!(poll_once(run.as_mut()).is_pending());
+        drop(run);
+        assert!(session.progress().has_pending);
+        assert_eq!(input_state.borrow().polls, 1);
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+    let (wakes, waker) = counter();
+    let mut task = Context::from_waker(&waker);
+    let mut run = Box::pin(session.run(&cx));
+    assert!(run.as_mut().poll(&mut task).is_pending());
+    cx.cancel_fast(CancelKind::User);
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(
+        run.as_mut().poll(&mut task),
+        Poll::Ready(Err(TrySinkForwardError::Cancelled(_)))
+    ));
+    drop(run);
+    assert!(session.progress().has_pending);
+    assert_eq!(session.progress().accepted_items, 0);
+    assert_eq!(session.progress().failed, None);
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+
+    output_state.borrow_mut().ready = true;
+    let active = Cx::for_testing();
+    let mut run = Box::pin(session.run(&active));
+    let Poll::Ready(Ok(progress)) = poll_once(run.as_mut()) else {
+        panic!("active context must resume the same retained item");
+    };
+    drop(run);
+    assert!(progress.complete);
+    assert_eq!(progress.accepted_items, 1);
+    assert_eq!(progress.flushed_items, 1);
+    assert_eq!(input_state.borrow().polls, 2);
+    let state = output_state.borrow();
+    assert_eq!(state.items.len(), 1);
+    assert_eq!(state.items[0].0, text);
+    assert!(Rc::ptr_eq(&state.items[0].1, &marker));
+}
+
+#[test]
+fn try_forward_idle_flush_and_eof_close_resume_at_the_same_boundaries() {
+    let cx = Cx::for_testing();
+    let input = source([Ok::<_, SourceFailure>(5)], false);
+    let input_state = Rc::clone(&input.0);
+    let output = sink();
+    let output_state = Rc::clone(&output.0);
+    output_state.borrow_mut().flush_ready = false;
+    let mut session = TrySinkForwardSession::new(input, output);
+    let mut run = Box::pin(session.run(&cx));
+    assert!(poll_once(run.as_mut()).is_pending());
+    drop(run);
+    assert_eq!(session.progress().accepted_items, 1);
+    assert_eq!(session.progress().flushed_items, 0);
+    assert!(!session.progress().source_exhausted);
+    assert_eq!(output_state.borrow().calls[3], 0);
+
+    output_state.borrow_mut().flush_ready = true;
+    let (wakes, waker) = counter();
+    let mut run = Box::pin(session.run(&cx));
+    assert!(run.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    drop(run);
+    assert_eq!(session.progress().flushed_items, 1);
+    assert_eq!(input_state.borrow().polls, 3, "resume must refresh the source wake");
+    let source_waker = {
+        let mut state = input_state.borrow_mut();
+        state.items.push_back(Ok(6));
+        state.finished = true;
+        state.waker.take().expect("source registered its new wake")
+    };
+    source_waker.wake();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    output_state.borrow_mut().close_ready = false;
+    let mut run = Box::pin(session.run(&cx));
+    assert!(poll_once(run.as_mut()).is_pending());
+    drop(run);
+    assert!(session.progress().source_exhausted);
+    assert!(!session.progress().complete);
+    assert_eq!(session.progress().flushed_items, 2);
+    assert_eq!(input_state.borrow().polls, 5);
+    output_state.borrow_mut().close_ready = true;
+    let mut run = Box::pin(session.run(&cx));
+    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Ok(progress)) if progress.complete));
+    drop(run);
+    let calls = output_state.borrow().calls;
+    let mut run = Box::pin(session.run(&cx));
+    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Ok(progress)) if progress.complete));
+    drop(run);
+    assert_eq!(output_state.borrow().calls, calls);
+    assert_eq!(output_state.borrow().items, [5, 6]);
+    assert_eq!(input_state.borrow().polls, 5, "close never repolls EOF");
+}
+
+#[test]
+fn ordinary_forward_preserves_result_items_including_errors() {
+    let cx = Cx::for_testing();
+    let input = source([Ok(1), Err("ordinary item"), Ok(2)], true);
+    let output = sink();
+    let state = Rc::clone(&output.0);
+    let mut session = SinkForwardSession::new(input, output);
+    let mut run = Box::pin(session.run(&cx));
+    let Poll::Ready(Ok(progress)) = poll_once(run.as_mut()) else {
+        panic!("the ordinary forwarding API must not reinterpret Result items");
+    };
+    assert!(progress.complete);
+    assert_eq!(progress.accepted_items, 3);
+    assert_eq!(progress.flushed_items, 3);
+    assert_eq!(state.borrow().items, [Ok(1), Err("ordinary item"), Ok(2)]);
+    assert_eq!(state.borrow().calls, [3, 3, 1, 1]);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_try_forward_reader_stream_preserves_bytes_and_half_close() {
+    use crate::codec::{BytesCodec, FramedWrite};
+    use crate::io::{AsyncReadExt, AsyncWriteExt, ReaderStream, duplex};
+    use crate::runtime::RuntimeBuilder;
+
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+        };
+        runtime.block_on(async {
+            let cx = Cx::for_testing();
+            let (mut producer, reader) = duplex(3);
+            let (writer, mut peer) = duplex(2);
+            let source = ReaderStream::with_capacity(reader, 4);
+            let sink = FramedWrite::new(writer, BytesCodec::new()).with_backpressure_boundary(1);
+            let mut session = TrySinkForwardSession::new(source, sink);
+            let mut run = Box::pin(session.run(&cx));
+            assert!(poll_once(run.as_mut()).is_pending());
+            drop(run);
+            assert_eq!(session.progress().accepted_items, 0);
+            let expected = b"native fallible streams retain every byte across backpressure";
+            let sending = async {
+                producer.write_all(expected).await.unwrap();
+                producer.shutdown().await.unwrap();
+            };
+            let receiving = async {
+                let mut bytes = Vec::new();
+                peer.read_to_end(&mut bytes).await.unwrap();
+                bytes
+            };
+            let ((result, ()), bytes) = futures_lite::future::zip(
+                futures_lite::future::zip(session.run(&cx), sending), receiving
+            ).await;
+            let progress = result.unwrap();
+            assert!(progress.complete);
+            assert!(progress.accepted_items > 1);
+            assert_eq!(progress.accepted_items, progress.flushed_items);
+            assert_eq!(bytes, expected);
+            let (_, mut sink, pending) = session.into_parts();
+            assert!(pending.is_none());
+            assert!(sink.write_buffer().is_empty());
+            // Closing the forwarded sending side must leave reverse I/O open.
+            peer.write_all(b"ok").await.unwrap();
+            let mut reply = [0; 2];
+            sink.get_mut().read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"ok");
+        });
+        assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_try_forward_decodes_and_reencodes_lines_with_bounded_duplex_io() {
+    use crate::codec::{FramedRead, FramedWrite, LinesCodec};
+    use crate::io::{AsyncReadExt, AsyncWriteExt, duplex};
+    use crate::runtime::RuntimeBuilder;
+
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+        };
+        runtime.block_on(async {
+            let cx = Cx::for_testing();
+            let (mut producer, reader) = duplex(3);
+            let (writer, mut peer) = duplex(2);
+            let source = FramedRead::new(reader, LinesCodec::new());
+            let sink = FramedWrite::new(writer, LinesCodec::new()).with_backpressure_boundary(1);
+            let mut session = TrySinkForwardSession::new(source, sink);
+            let expected = b"alpha\nbeta\nlast\n";
+            let sending = async {
+                producer.write_all(expected).await.unwrap();
+                producer.shutdown().await.unwrap();
+            };
+            let receiving = async {
+                let mut bytes = Vec::new();
+                peer.read_to_end(&mut bytes).await.unwrap();
+                bytes
+            };
+            let ((result, ()), bytes) = futures_lite::future::zip(
+                futures_lite::future::zip(session.run(&cx), sending), receiving
+            ).await;
+            let progress = result.unwrap();
+            assert!(progress.complete);
+            assert!(progress.source_exhausted);
+            assert_eq!(progress.accepted_items, 3);
+            assert_eq!(progress.flushed_items, 3);
+            assert_eq!(bytes, expected);
+            let (_, mut sink, pending) = session.into_parts();
+            assert!(pending.is_none());
+            assert!(sink.write_buffer().is_empty());
+            peer.write_all(b"ok").await.unwrap();
+            let mut reply = [0; 2];
+            sink.get_mut().read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"ok");
+        });
+        assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
+    }
+}
