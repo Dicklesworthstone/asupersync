@@ -133,6 +133,154 @@
     }
 
     #[test]
+    fn graph_v2_verifier_detects_metadata_tampering_legacy_root_omits() {
+        let verifier = AtpVerifier::default();
+        let mut file = Object::file(b"trusted payload".to_vec());
+        let mut graph = ObjectGraph::new();
+        graph.add_root(file.clone()).unwrap();
+        let expected = MerkleRoot::from_graph_v2(&graph);
+        let legacy_expected = MerkleRoot::from_graph(&graph);
+        let evidence = verifier.verify_graph_v2(&graph, &expected).unwrap();
+        assert_eq!(evidence.stage, VerificationStage::GraphMerkle);
+        assert_eq!(evidence.digest, Some(ContentId::new(*expected.hash())));
+        assert!(evidence.summary.contains("encoding=v2"));
+
+        file.metadata.platform.unix_mode = Some(0o777);
+        graph.add_root(file).unwrap();
+        verifier.verify_graph(&graph, &legacy_expected).unwrap();
+        let err = verifier.verify_graph_v2(&graph, &expected).unwrap_err();
+        assert!(matches!(err, VerificationError::MerkleRootMismatch { .. }));
+    }
+
+    #[test]
+    fn graph_v2_verifier_validates_topology_even_with_a_matching_digest() {
+        let verifier = AtpVerifier::default();
+        let mut missing_child = ObjectGraph::new();
+        missing_child.add_root(Object::directory(vec![ObjectEdge::new(
+            ObjectId::Content(ContentId::new([7; 32])), "missing".into(),
+        )])).unwrap();
+        let matching = MerkleRoot::from_graph_v2(&missing_child);
+        assert!(verifier.verify_graph_v2(&missing_child, &matching).is_err());
+
+        let mut cycle = Object::directory(Vec::new());
+        cycle.children.push(ObjectEdge::new(cycle.id.clone(), "self".into()));
+        let mut cyclic_graph = ObjectGraph::new();
+        cyclic_graph.add_root(cycle).unwrap();
+        let matching = MerkleRoot::from_graph_v2(&cyclic_graph);
+        assert!(verifier.verify_graph_v2(&cyclic_graph, &matching).is_err());
+
+        let empty = ObjectGraph::new();
+        verifier.verify_graph_v2(&empty, &MerkleRoot::from_graph_v2(&empty)).unwrap();
+    }
+
+    #[test]
+    fn v2_verifier_rejects_roots_for_a_different_representation() {
+        let verifier = AtpVerifier::default();
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"same source".to_vec())).unwrap();
+        let manifest = Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap();
+        let graph_root = MerkleRoot::from_graph_v2(&graph);
+        let manifest_root = MerkleRoot::from_manifest_v2(&manifest);
+        assert!(matches!(
+            verifier.verify_graph_v2(&graph, &manifest_root),
+            Err(VerificationError::MerkleRootMismatch { .. })
+        ));
+        assert!(matches!(
+            verifier.verify_manifest_v2(&manifest, &graph_root),
+            Err(VerificationError::MerkleRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn manifest_v2_verifier_checks_trusted_envelope_without_rewriting_v1() {
+        let verifier = AtpVerifier::default();
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"manifest".to_vec())).unwrap();
+        let mut manifest = Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap();
+        let original_bytes = manifest.to_canonical_bytes();
+        let original_legacy_root = manifest.merkle_root.clone();
+        let expected = MerkleRoot::from_manifest_v2(&manifest);
+        let evidence = verifier.verify_manifest_v2(&manifest, &expected).unwrap();
+        assert_eq!(evidence.stage, VerificationStage::Manifest);
+        assert_eq!(evidence.digest, Some(ContentId::new(*expected.hash())));
+        assert!(evidence.summary.contains("encoding=v2 representation=manifest"));
+        assert_eq!(manifest.to_canonical_bytes(), original_bytes);
+        assert_eq!(manifest.merkle_root, original_legacy_root);
+
+        manifest.created_timestamp_nanos = 123;
+        verifier.verify_manifest(&manifest).unwrap();
+        assert!(matches!(
+            verifier.verify_manifest_v2(&manifest, &expected),
+            Err(VerificationError::MerkleRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn manifest_v2_verifier_preserves_legacy_validation_with_a_matching_digest() {
+        use crate::atp::manifest::{FieldType, ManifestVersion, UnknownField};
+
+        let verifier = AtpVerifier::default();
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"manifest".to_vec())).unwrap();
+        let baseline = Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap();
+        let mutations: &[fn(&mut Manifest)] = &[
+            |m| m.version = ManifestVersion(100),
+            |m| m.roots.push(ObjectId::Content(ContentId::new([9; 32]))),
+            |m| m.hash_algorithms.clear(),
+            |m| m.merkle_root = MerkleRoot::zero(),
+            |m| m.unknown_optional_fields.push(UnknownField {
+                name: "unsupported".into(),
+                field_type: FieldType::Critical,
+                data: Vec::new(),
+            }),
+        ];
+        for mutate in mutations {
+            let mut malformed = baseline.clone();
+            mutate(&mut malformed);
+            let matching = MerkleRoot::from_manifest_v2(&malformed);
+            assert!(verifier.verify_manifest_v2(&malformed, &matching).is_err());
+        }
+    }
+
+    #[test]
+    fn manifest_v2_verifier_keeps_repair_groups_bound_to_legacy_root() {
+        use crate::atp::manifest::{HashAlgorithm, RaptorQRepairLayout, SubBlock};
+
+        let verifier = AtpVerifier::default();
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"repair payload".to_vec())).unwrap();
+        let mut manifest = Manifest::from_graph_with_policies(
+            &graph,
+            MetadataPolicy::default(),
+            vec![HashAlgorithm::Sha256],
+            None,
+            Some(RaptorQRepairLayout {
+                source_symbols: 1000,
+                total_symbols: 1200,
+                symbol_size: 1024,
+                overhead_ratio: 0.2,
+                sub_blocks: vec![SubBlock {
+                    index: 0, source_symbols: 1000, esi_range: (0, 1199),
+                }],
+            }),
+            None, None, None, None, None,
+        ).unwrap();
+        let expected = MerkleRoot::from_manifest_v2(&manifest);
+        verifier.verify_manifest_v2(&manifest, &expected).unwrap();
+        assert!(manifest.repair_groups.values().all(|group| {
+            group.manifest_root == manifest.merkle_root
+        }));
+
+        // The v2 digest is detached: putting it into a v1 binding is invalid,
+        // even if a caller computes a matching v2 digest for that bad input.
+        manifest.repair_groups.values_mut().next().unwrap().manifest_root =
+            MerkleRoot::new(*expected.hash());
+        let malformed_root = MerkleRoot::from_manifest_v2(&manifest);
+        assert_ne!(malformed_root, expected);
+        assert!(verifier.verify_manifest_v2(&manifest, &malformed_root).is_err());
+    }
+
+    #[test]
     fn commit_verifier_rejects_tampered_commit_id() {
         let verifier = AtpVerifier::default();
         let mut graph = ObjectGraph::new();

@@ -1,5 +1,435 @@
     use super::*;
-    use crate::atp::object::{ContentId, Object};
+    use crate::atp::object::{ApplicationMetadata, ContentId, ManifestId, Object, ObjectEdge};
+
+    fn v2_test_manifest() -> Manifest {
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"v2".to_vec())).unwrap();
+        Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap()
+    }
+
+    fn legacy_component_root(manifest: &Manifest) -> MerkleRoot {
+        MerkleRoot::from_manifest_components(
+            &manifest.objects,
+            &manifest.chunk_plan,
+            &manifest.raptorq_layout,
+            &manifest.compression_policy,
+            &manifest.encryption_policy,
+            &manifest.capability_policy,
+            &manifest.transform_order,
+            &manifest.transform_proof_policy,
+            &manifest.repair_groups,
+        )
+    }
+
+    fn v2_component_root(manifest: &Manifest) -> MerkleRootV2 {
+        MerkleRoot::from_manifest_components_v2(
+            &manifest.objects,
+            &manifest.chunk_plan,
+            &manifest.raptorq_layout,
+            &manifest.compression_policy,
+            &manifest.encryption_policy,
+            &manifest.capability_policy,
+            &manifest.transform_order,
+            &manifest.transform_proof_policy,
+            &manifest.repair_groups,
+        )
+    }
+
+    #[test]
+    fn merkle_v2_empty_representations_have_fixed_distinct_domains() {
+        // Independent hashlib vectors: SHA256(prefix || u64be(domain.len)
+        // || domain || body). Empty graph body is two zero u64 counts;
+        // empty components body is a zero count, seven None bytes, zero count.
+        let graph = ObjectGraph::new();
+        let manifest = Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap();
+        let graph_root = MerkleRoot::from_graph_v2(&graph);
+        let components = v2_component_root(&manifest);
+        let full_manifest = MerkleRoot::from_manifest_v2(&manifest);
+        assert_eq!(
+            graph_root.to_hex(),
+            "d71d5aa22dba730b3f5df67fa899352cc92a307dafdfe483798ef9b1c51e33f0"
+        );
+        assert_eq!(
+            components.to_hex(),
+            "74ba05f890846707c971e04d72417a3fcfe52d012eb84f36170c3bb2a9bca3ee"
+        );
+        assert_eq!(
+            full_manifest.to_hex(),
+            "56ee6846e6e4aee687dac026f6f0076f26f6ebf8c7b4759ffd7a1d4a882f2b7c"
+        );
+        assert_ne!(graph_root, components);
+        assert_ne!(graph_root, full_manifest);
+        assert_ne!(components, full_manifest);
+        assert_eq!(MerkleRootV2::new(*graph_root.hash()), graph_root);
+        assert_eq!(graph_root.to_string(), format!("merkle-v2:{}", graph_root.to_hex()));
+        // V2 does not silently migrate even an empty v1 commitment.
+        assert_eq!(
+            MerkleRoot::from_graph(&graph).to_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn merkle_v2_small_graph_and_manifest_have_fixed_vectors() {
+        // Independently derived with Python hashlib and struct-width byte
+        // concatenation, including the existing content-id domain separator.
+        // These lock the field order and distinct graph/manifest content-hash
+        // representations, not merely repeated calls to the same encoder.
+        let mut graph = ObjectGraph::new();
+        graph.add_root(Object::file(b"v2".to_vec())).unwrap();
+        let manifest = Manifest::from_graph(&graph, MetadataPolicy::default()).unwrap();
+        assert_eq!(
+            MerkleRoot::from_graph_v2(&graph).to_hex(),
+            "e2c6d7278123ee70710ef2395c70153d64482a730a017c7d5008e0ceb9042203"
+        );
+        assert_eq!(
+            v2_component_root(&manifest).to_hex(),
+            "0cec30a28d079c71d5600982671d42e9125c5794d3419162f8e358e3c8c9fcad"
+        );
+        assert_eq!(
+            MerkleRoot::from_manifest_v2(&manifest).to_hex(),
+            "f7623e24facf100630ab69812def45e72a573d5675d62b01c3ea287adbe6fd47"
+        );
+        assert_eq!(
+            manifest.merkle_root.to_hex(),
+            "4c17ab5381aa9a3d8513c045808f32f2d504755cd1be912c90aa434896cb915c"
+        );
+    }
+
+    #[test]
+    fn merkle_v2_separates_legacy_size_child_and_content_hash_collision() {
+        // In v1 both objects encode id || kind || b"abcdefgh" || child_id.
+        // A child name can consume the absent size's bytes, and its ID can
+        // consume the absent content hash's bytes. No SHA collision is needed.
+        let id = ObjectId::Content(ContentId::new([1; 32]));
+        let child_id = ObjectId::Content(ContentId::new([2; 32]));
+        let mut left = Manifest::from_graph(&ObjectGraph::new(), MetadataPolicy::default()).unwrap();
+        left.objects.insert(id.clone(), ManifestObject {
+            id: id.clone(),
+            kind: ObjectKind::DirectoryObject,
+            size_bytes: None,
+            children: BTreeMap::from([("abcdefgh".to_string(), child_id.clone())]),
+            content_hash: None,
+            chunk_boundaries: Vec::new(),
+            raptorq_symbols: Vec::new(),
+            compression_metadata: None,
+            encryption_metadata: None,
+        });
+        let mut right = left.clone();
+        let object = right.objects.get_mut(&id).unwrap();
+        object.size_bytes = Some(u64::from_be_bytes(*b"abcdefgh"));
+        object.children.clear();
+        object.content_hash = Some(*child_id.hash_bytes());
+
+        assert_eq!(legacy_component_root(&left), legacy_component_root(&right));
+        assert_ne!(v2_component_root(&left), v2_component_root(&right));
+        assert_ne!(MerkleRoot::from_manifest_v2(&left), MerkleRoot::from_manifest_v2(&right));
+        assert_eq!(
+            legacy_component_root(&left).to_hex(),
+            "ec5cc021b742dd997e949dbed123cb0e07b713ecf7076ecbfe0861557175318a"
+        );
+        assert_eq!(
+            v2_component_root(&left).to_hex(),
+            "68b3f528f48e04a4e68f8cc37408b14034e7d98a23c31dbbf8f75ab3c83b60dc"
+        );
+        assert_eq!(
+            v2_component_root(&right).to_hex(),
+            "a1417cd60eef73cad58a86a256271971aa24b5b491925f4edad0a9b841ac71fc"
+        );
+    }
+
+    #[test]
+    fn merkle_v2_graph_binds_metadata_omitted_by_legacy_root() {
+        let file = Object::file(b"metadata".to_vec());
+        let mut baseline = ObjectGraph::new();
+        baseline.add_root(file.clone()).unwrap();
+        let legacy = MerkleRoot::from_graph(&baseline);
+        let root = MerkleRoot::from_graph_v2(&baseline);
+        let mutations: &[fn(&mut Object)] = &[
+            |o| o.metadata.platform.unix_mode = Some(0),
+            |o| o.metadata.platform.windows_attributes = Some(0),
+            |o| { o.metadata.platform.extended_attributes.insert("x".into(), Vec::new()); },
+            |o| o.metadata.platform.created_time_nanos = Some(0),
+            |o| o.metadata.platform.modified_time_nanos = Some(0),
+            |o| o.metadata.platform.accessed_time_nanos = Some(0),
+            |o| o.metadata.application = Some(ApplicationMetadata {
+                extension_type: String::new(),
+                schema_version: 0,
+                metadata: BTreeMap::new(),
+            }),
+        ];
+        for mutate in mutations {
+            let mut changed = file.clone();
+            mutate(&mut changed);
+            let mut graph = ObjectGraph::new();
+            graph.add_root(changed).unwrap();
+            assert_eq!(MerkleRoot::from_graph(&graph), legacy);
+            assert_ne!(MerkleRoot::from_graph_v2(&graph), root);
+        }
+    }
+
+    #[test]
+    fn merkle_v2_graph_binds_id_variant_and_root_membership() {
+        let file = Object::file(b"identity".to_vec());
+        let mut content_graph = ObjectGraph::new();
+        content_graph.add_root(file.clone()).unwrap();
+        let mut manifest_object = file.clone();
+        manifest_object.id = ObjectId::Manifest(ManifestId::new(*file.id.hash_bytes()));
+        let mut manifest_graph = ObjectGraph::new();
+        manifest_graph.add_root(manifest_object).unwrap();
+        assert_eq!(MerkleRoot::from_graph(&content_graph), MerkleRoot::from_graph(&manifest_graph));
+        assert_ne!(MerkleRoot::from_graph_v2(&content_graph), MerkleRoot::from_graph_v2(&manifest_graph));
+
+        let directory = Object::directory(vec![ObjectEdge::new(file.id.clone(), "file".into())]);
+        content_graph.add_root(directory).unwrap();
+        let before = MerkleRoot::from_graph_v2(&content_graph);
+        let legacy_before = MerkleRoot::from_graph(&content_graph);
+        content_graph.add_root(file).unwrap();
+        assert_eq!(MerkleRoot::from_graph(&content_graph), legacy_before);
+        assert_ne!(MerkleRoot::from_graph_v2(&content_graph), before);
+    }
+
+    #[test]
+    fn merkle_v2_graph_order_is_canonical_even_for_equivalent_path_spellings() {
+        let first = Object::file(b"first".to_vec());
+        let second = Object::file(b"second".to_vec());
+        let directory = Object::directory(vec![
+            ObjectEdge::symlink(first.id.clone(), "link".into(), "a//b".into()),
+            ObjectEdge::symlink(first.id.clone(), "link".into(), "a/b".into()),
+            ObjectEdge::new(second.id.clone(), "other".into()),
+        ]);
+        let mut left = ObjectGraph::new();
+        left.add_object(first.clone()).unwrap();
+        left.add_object(second.clone()).unwrap();
+        left.add_root(directory.clone()).unwrap();
+        let mut reordered = directory.clone();
+        reordered.children.reverse();
+        let mut right = ObjectGraph::new();
+        right.add_root(reordered).unwrap();
+        right.add_object(second).unwrap();
+        right.add_object(first).unwrap();
+        assert!(left.validate().is_ok());
+        assert!(right.validate().is_ok());
+        assert_eq!(MerkleRoot::from_graph_v2(&left), MerkleRoot::from_graph_v2(&right));
+
+        let mut duplicate = directory;
+        duplicate.children.push(duplicate.children[0].clone());
+        right.add_root(duplicate).unwrap();
+        assert_ne!(MerkleRoot::from_graph_v2(&left), MerkleRoot::from_graph_v2(&right));
+    }
+
+    #[test]
+    fn merkle_v2_distinguishes_absent_and_empty_symlink_targets() {
+        let file = Object::file(b"target".to_vec());
+        let mut directory = Object::directory(vec![ObjectEdge::symlink(
+            file.id.clone(), "link".into(), "".into(),
+        )]);
+        let mut present = ObjectGraph::new();
+        present.add_object(file.clone()).unwrap();
+        present.add_root(directory.clone()).unwrap();
+        directory.children[0].symlink_target = None;
+        let mut absent = ObjectGraph::new();
+        absent.add_object(file).unwrap();
+        absent.add_root(directory).unwrap();
+        assert_eq!(MerkleRoot::from_graph(&present), MerkleRoot::from_graph(&absent));
+        assert_ne!(MerkleRoot::from_graph_v2(&present), MerkleRoot::from_graph_v2(&absent));
+    }
+
+    #[test]
+    fn merkle_v2_unicode_path_order_uses_utf8_on_every_platform() {
+        // UTF-16 code-unit order reverses this pair. Unicode path sorting must
+        // agree with UTF-8 on Windows too, not the native OsStr ordering.
+        let first = Some(std::path::PathBuf::from("\u{e000}"));
+        let second = Some(std::path::PathBuf::from("\u{10000}"));
+        assert_eq!(MerkleV2Hasher::compare_paths(&first, &second), std::cmp::Ordering::Less);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merkle_v2_non_unicode_unix_paths_preserve_raw_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'a', 0xfe]));
+        let second = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'a', 0xff]));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        let mut first_hash = MerkleV2Hasher::new(b"path-test");
+        first_hash.path(&first);
+        let mut second_hash = MerkleV2Hasher::new(b"path-test");
+        second_hash.path(&second);
+        assert_ne!(first_hash.finish(), second_hash.finish());
+        assert_eq!(
+            MerkleV2Hasher::compare_paths(&Some(first), &Some(second)),
+            std::cmp::Ordering::Less,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn merkle_v2_non_unicode_windows_paths_preserve_unpaired_surrogates() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let first = std::path::PathBuf::from(std::ffi::OsString::from_wide(&[0xd800]));
+        let second = std::path::PathBuf::from(std::ffi::OsString::from_wide(&[0xd801]));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        let mut first_hash = MerkleV2Hasher::new(b"path-test");
+        first_hash.path(&first);
+        let mut second_hash = MerkleV2Hasher::new(b"path-test");
+        second_hash.path(&second);
+        assert_ne!(first_hash.finish(), second_hash.finish());
+        assert_eq!(
+            MerkleV2Hasher::compare_paths(&Some(first), &Some(second)),
+            std::cmp::Ordering::Less,
+        );
+    }
+
+    #[test]
+    fn merkle_v2_fieldless_enum_tags_are_frozen() {
+        assert_eq!(ObjectKind::ALL.map(|kind| kind as u8), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!([HashAlgorithm::Sha256 as u8, HashAlgorithm::Blake3 as u8], [0, 1]);
+        assert_eq!([
+            ChunkStrategy::FixedSize as u8, ChunkStrategy::ContentDefined as u8,
+            ChunkStrategy::ObjectSpecific as u8,
+        ], [0, 1, 2]);
+        assert_eq!([
+            CompressionAlgorithm::None as u8, CompressionAlgorithm::Lz4 as u8,
+            CompressionAlgorithm::Gzip as u8, CompressionAlgorithm::Brotli as u8,
+        ], [0, 1, 2, 3]);
+        assert_eq!([
+            EncryptionAlgorithm::None as u8, EncryptionAlgorithm::ChaCha20Poly1305 as u8,
+            EncryptionAlgorithm::Aes256Gcm as u8,
+        ], [0, 1, 2]);
+        assert_eq!([
+            KeyDerivationFunction::Direct as u8, KeyDerivationFunction::Pbkdf2Sha256 as u8,
+            KeyDerivationFunction::Argon2id as u8, KeyDerivationFunction::HkdfSha256 as u8,
+        ], [0, 1, 2, 3]);
+        assert_eq!([FieldType::Critical as u8, FieldType::Optional as u8], [0, 1]);
+        assert_eq!([
+            ThroughputTier::Tail as u8, ThroughputTier::Standard as u8, ThroughputTier::Bulk as u8,
+        ], [0, 1, 2]);
+        assert_eq!([
+            ProofStrength::Basic as u8, ProofStrength::Enhanced as u8,
+            ProofStrength::Cryptographic as u8,
+        ], [0, 1, 2]);
+        assert_eq!([
+            AuthenticationAlgorithm::HmacSha256 as u8, AuthenticationAlgorithm::EdDsa as u8,
+            AuthenticationAlgorithm::X25519Ecdh as u8,
+        ], [0, 1, 2]);
+        assert_eq!([
+            TransformType::Chunking as u8, TransformType::Compression as u8,
+            TransformType::Encryption as u8, TransformType::ErrorCorrection as u8,
+        ], [0, 1, 2, 3]);
+        assert_eq!([
+            HashPoint::Plaintext as u8, HashPoint::PostCompression as u8,
+            HashPoint::Ciphertext as u8, HashPoint::MultiPoint as u8,
+        ], [0, 1, 2, 3]);
+        assert_eq!([
+            VerificationLevel::None as u8, VerificationLevel::TransferIntegrity as u8,
+            VerificationLevel::ContentHash as u8, VerificationLevel::FullVerification as u8,
+        ], [0, 1, 2, 3]);
+        assert_eq!([
+            PrivacyLevel::Public as u8, PrivacyLevel::MetadataVisible as u8,
+            PrivacyLevel::SizeVisible as u8, PrivacyLevel::FullPrivacy as u8,
+        ], [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn merkle_v2_frames_capability_strings_and_collection_boundaries() {
+        let mut left = v2_test_manifest();
+        left.capability_policy = Some(CapabilityPolicy {
+            read_capabilities: vec!["ab".into(), "c".into()],
+            write_capabilities: Vec::new(),
+            verify_capabilities: Vec::new(),
+            delegation_rules: Vec::new(),
+        });
+        let mut right = left.clone();
+        right.capability_policy.as_mut().unwrap().read_capabilities = vec!["a".into(), "bc".into()];
+        assert_eq!(legacy_component_root(&left), legacy_component_root(&right));
+        assert_ne!(v2_component_root(&left), v2_component_root(&right));
+        let policy = right.capability_policy.as_mut().unwrap();
+        policy.write_capabilities = std::mem::take(&mut policy.read_capabilities);
+        assert_eq!(legacy_component_root(&left), legacy_component_root(&right));
+        assert_ne!(v2_component_root(&left), v2_component_root(&right));
+    }
+
+    #[test]
+    fn merkle_v2_full_manifest_covers_the_envelope() {
+        let baseline = v2_test_manifest();
+        let full_root = MerkleRoot::from_manifest_v2(&baseline);
+        let component_root = v2_component_root(&baseline);
+        let mutations: &[fn(&mut Manifest)] = &[
+            |m| m.version = ManifestVersion(0),
+            |m| m.merkle_root = MerkleRoot::zero(),
+            |m| m.metadata_policy.verify_metadata = false,
+            |m| m.roots.clear(),
+            |m| m.hash_algorithms.push(HashAlgorithm::Blake3),
+            |m| m.unknown_optional_fields.push(UnknownField {
+                name: "extension".into(), field_type: FieldType::Optional, data: vec![1],
+            }),
+            |m| m.created_timestamp_nanos = 1,
+            |m| m.schema_id.push_str(".extension"),
+        ];
+        for mutate in mutations {
+            let mut changed = baseline.clone();
+            mutate(&mut changed);
+            assert_eq!(v2_component_root(&changed), component_root);
+            assert_ne!(MerkleRoot::from_manifest_v2(&changed), full_root);
+        }
+        assert_ne!(component_root, full_root);
+    }
+
+    #[test]
+    fn merkle_v2_commits_to_nested_metadata_and_float_bits() {
+        let mut baseline = v2_test_manifest();
+        let object = baseline.objects.values_mut().next().unwrap();
+        object.chunk_boundaries.push(ChunkBoundary {
+            index: 0, byte_offset: 0, size_bytes: 2, content_hash: [3; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: Some(ChunkMetadata::SparseImage {
+                is_sparse_hole: true,
+                hole_metadata: Some(SparseHoleMetadata {
+                    hole_size: 2, hole_type: "hole".into(), attributes: BTreeMap::new(),
+                }),
+            }),
+        });
+        object.raptorq_symbols.push(RaptorQSymbol {
+            index: 0, esi: 0, size_bytes: 2, content_hash: [4; 32], is_source: true,
+            repair_group_id: None, auth_tag: None,
+        });
+        object.compression_metadata = Some(CompressionMetadata {
+            algorithm: CompressionAlgorithm::None, level: 0, original_size: 2,
+            compressed_size: 2, compression_ratio: 0.0,
+        });
+        object.encryption_metadata = Some(EncryptionMetadata {
+            algorithm: EncryptionAlgorithm::None, iv: Vec::new(), auth_tag: Vec::new(),
+            key_derivation: KeyDerivation {
+                kdf: KeyDerivationFunction::Direct, salt: Vec::new(), iterations: None,
+            },
+        });
+        let root = v2_component_root(&baseline);
+        let full_root = MerkleRoot::from_manifest_v2(&baseline);
+        let mutations: &[fn(&mut ManifestObject)] = &[
+            |o| o.id = ObjectId::Manifest(ManifestId::new(*o.id.hash_bytes())),
+            |o| o.chunk_boundaries[0].byte_offset = 1,
+            |o| o.chunk_boundaries[0].metadata = None,
+            |o| o.raptorq_symbols[0].auth_tag = Some([0; 32]),
+            |o| o.compression_metadata.as_mut().unwrap().compression_ratio = -0.0,
+            |o| o.encryption_metadata.as_mut().unwrap().iv.push(0),
+            |o| o.encryption_metadata.as_mut().unwrap().auth_tag.push(0),
+            |o| o.encryption_metadata.as_mut().unwrap().key_derivation.iterations = Some(0),
+        ];
+        for mutate in mutations {
+            let mut changed = baseline.clone();
+            mutate(changed.objects.values_mut().next().unwrap());
+            assert_ne!(v2_component_root(&changed), root);
+            assert_ne!(MerkleRoot::from_manifest_v2(&changed), full_root);
+        }
+        let mut other_nan = baseline.clone();
+        baseline.objects.values_mut().next().unwrap().compression_metadata.as_mut().unwrap()
+            .compression_ratio = f32::from_bits(0x7fc0_0001);
+        other_nan.objects.values_mut().next().unwrap().compression_metadata.as_mut().unwrap()
+            .compression_ratio = f32::from_bits(0x7fc0_0002);
+        assert_ne!(v2_component_root(&baseline), v2_component_root(&other_nan));
+    }
 
     #[test]
     fn manifest_version_support_check_works() {

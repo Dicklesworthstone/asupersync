@@ -255,6 +255,504 @@ pub struct MerkleRoot {
     hash: [u8; 32],
 }
 
+/// A domain-separated v2 commitment, kept distinct from legacy wire roots.
+///
+/// Construct with [`MerkleRoot::from_graph_v2`],
+/// [`MerkleRoot::from_manifest_components_v2`], or
+/// [`MerkleRoot::from_manifest_v2`]. Each commits to a different representation
+/// and therefore uses a different domain. These values authenticate data only
+/// when the expected digest comes from a trusted source.
+///
+/// This is an additive, out-of-band format. It does not change `Manifest`'s
+/// embedded legacy root, repair-symbol authentication, ATP negotiation, or any
+/// existing transport. Persist the format and representation alongside the
+/// digest; a bare 32-byte value cannot identify either. There is deliberately
+/// no implicit conversion to [`MerkleRoot`].
+///
+/// The frozen v2 schema uses SHA-256 with the prefix
+/// `asupersync.atp.merkle.v2\0`, followed by the u64 big-endian byte length of
+/// the representation domain and the domain bytes (`object-graph`,
+/// `manifest-components`, or `manifest`). Fields follow the encoder's explicit
+/// order, with big-endian fixed-width integers, u64 lengths/counts, and one-byte
+/// booleans and option tags (0 absent, 1 present). Object IDs carry tag 0 for
+/// content or 1 for manifest before their 32 bytes. Fieldless enum discriminants
+/// are the existing v1 tags, pinned by regression tests; reordering those tags
+/// or changing field order requires a new commitment version. Maps use key
+/// order, graph edges use canonical order, and other vectors retain order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MerkleRootV2 {
+    hash: [u8; 32],
+}
+
+impl MerkleRootV2 {
+    /// Restore a trusted v2 digest whose representation is known to the caller.
+    #[must_use]
+    pub const fn new(hash: [u8; 32]) -> Self {
+        Self { hash }
+    }
+
+    /// Borrow the SHA-256 digest bytes.
+    #[must_use]
+    pub const fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    /// Encode the complete digest as lowercase hexadecimal.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.hash)
+    }
+}
+
+impl fmt::Display for MerkleRootV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "merkle-v2:{}", self.to_hex())
+    }
+}
+
+/// Fixed-schema encoding streamed directly into SHA-256. All variable fields
+/// and collections have a u64 big-endian length/count; every Option has a
+/// presence byte, and every sum type has its own variant discriminant. Floats
+/// retain their IEEE bits, including signed zero and NaN payloads. The schema
+/// fixes scalar widths and field order, so no field can borrow its neighbour's
+/// bytes. No complete serialized graph or manifest is allocated.
+struct MerkleV2Hasher(Sha256);
+
+impl MerkleV2Hasher {
+    fn new(domain: &[u8]) -> Self {
+        let mut this = Self(Sha256::new());
+        this.0.update(b"asupersync.atp.merkle.v2\0");
+        this.bytes(domain);
+        this
+    }
+
+    fn finish(self) -> MerkleRootV2 {
+        MerkleRootV2 {
+            hash: self.0.finalize().into(),
+        }
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.0.update([value]);
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.byte(u8::from(value));
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn count(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.count(value.len());
+        self.0.update(value);
+    }
+
+    fn string(&mut self, value: &str) {
+        self.bytes(value.as_bytes());
+    }
+
+    fn option<T>(&mut self, value: &Option<T>, encode: impl FnOnce(&mut Self, &T)) {
+        self.boolean(value.is_some());
+        if let Some(value) = value {
+            encode(self, value);
+        }
+    }
+
+    fn sequence<T>(&mut self, values: &[T], mut encode: impl FnMut(&mut Self, &T)) {
+        self.count(values.len());
+        for value in values {
+            encode(self, value);
+        }
+    }
+
+    fn id(&mut self, value: &ObjectId) {
+        self.byte(match value {
+            ObjectId::Content(_) => 0,
+            ObjectId::Manifest(_) => 1,
+        });
+        self.0.update(value.hash_bytes());
+    }
+
+    fn attributes(&mut self, values: &BTreeMap<String, Vec<u8>>) {
+        self.count(values.len());
+        for (name, value) in values {
+            self.string(name);
+            self.bytes(value);
+        }
+    }
+
+    fn path(&mut self, value: &std::path::Path) {
+        if let Some(text) = value.to_str() {
+            self.byte(0);
+            self.string(text);
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            self.byte(1);
+            self.bytes(value.as_os_str().as_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            self.byte(2);
+            self.count(value.as_os_str().encode_wide().count());
+            for unit in value.as_os_str().encode_wide() {
+                self.0.update(unit.to_be_bytes());
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            // Other platforms do not expose a stable non-Unicode encoding.
+            // This tagged fallback is only comparable within the same target
+            // and Rust toolchain; Unicode paths still use portable tag 0.
+            self.byte(3);
+            self.string(std::env::consts::OS);
+            self.string(std::env::consts::ARCH);
+            self.bytes(value.as_os_str().as_encoded_bytes());
+        }
+    }
+
+    fn compare_paths(
+        left: &Option<std::path::PathBuf>,
+        right: &Option<std::path::PathBuf>,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        let (left, right) = match (left, right) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) => (left.as_os_str(), right.as_os_str()),
+        };
+        // Match the path encoding's tags before comparing payloads. Unicode
+        // paths sort by UTF-8 on every platform, including Windows.
+        match (left.to_str(), right.to_str()) {
+            (Some(left), Some(right)) => left.cmp(right),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStrExt;
+                    left.as_bytes().cmp(right.as_bytes())
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStrExt;
+                    left.encode_wide().cmp(right.encode_wide())
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    left.as_encoded_bytes().cmp(right.as_encoded_bytes())
+                }
+            }
+        }
+    }
+
+    fn object(&mut self, object: &crate::atp::object::Object) {
+        self.id(&object.id);
+        let metadata = &object.metadata;
+        self.byte(metadata.kind as u8);
+        self.option(&metadata.size_bytes, |h, value| h.u64(*value));
+        let platform = &metadata.platform;
+        self.option(&platform.unix_mode, |h, value| h.u32(*value));
+        self.option(&platform.windows_attributes, |h, value| h.u32(*value));
+        self.attributes(&platform.extended_attributes);
+        self.option(&platform.created_time_nanos, |h, value| h.u64(*value));
+        self.option(&platform.modified_time_nanos, |h, value| h.u64(*value));
+        self.option(&platform.accessed_time_nanos, |h, value| h.u64(*value));
+        self.option(&metadata.application, |h, application| {
+            h.string(&application.extension_type);
+            h.u32(application.schema_version);
+            h.attributes(&application.metadata);
+        });
+        let mut children: Vec<_> = object.children.iter().collect();
+        children.sort_unstable_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.child_id.cmp(&right.child_id))
+                .then_with(|| left.is_symlink.cmp(&right.is_symlink))
+                .then_with(|| {
+                    // Path ordering normalizes separators, while the digest
+                    // binds the original bytes. Break every tie by those bytes
+                    // so even equivalent path spellings have a stable order.
+                    Self::compare_paths(&left.symlink_target, &right.symlink_target)
+                })
+        });
+        self.count(children.len());
+        for edge in children {
+            self.string(&edge.name);
+            self.id(&edge.child_id);
+            self.boolean(edge.is_symlink);
+            self.option(&edge.symlink_target, |h, target| h.path(target));
+        }
+        self.option(&object.content, |h, content| {
+            h.count(content.len());
+            h.0.update(Sha256::digest(content));
+        });
+    }
+
+    fn key_derivation(&mut self, value: &KeyDerivation) {
+        self.byte(value.kdf as u8);
+        self.bytes(&value.salt);
+        self.option(&value.iterations, |h, iterations| h.u32(*iterations));
+    }
+
+    fn capability_policy(&mut self, value: &CapabilityPolicy) {
+        self.sequence(&value.read_capabilities, |h, name| h.string(name));
+        self.sequence(&value.write_capabilities, |h, name| h.string(name));
+        self.sequence(&value.verify_capabilities, |h, name| h.string(name));
+        self.sequence(&value.delegation_rules, |h, rule| {
+            h.string(&rule.capability);
+            h.string(&rule.target);
+            h.sequence(&rule.constraints, |h, constraint| h.string(constraint));
+            h.option(&rule.expires_at, |h, expiry| h.u64(*expiry));
+        });
+    }
+
+    fn transform_order(&mut self, value: &TransformOrder) {
+        self.sequence(&value.transforms, |h, transform| h.byte(*transform as u8));
+        self.byte(value.hash_point as u8);
+        let boundary = &value.verification_boundary;
+        self.byte(boundary.relay_verifiable as u8);
+        self.byte(boundary.mailbox_verifiable as u8);
+        self.boolean(boundary.e2e_verification_required);
+        self.byte(boundary.privacy_level as u8);
+    }
+
+    fn chunk_metadata(&mut self, value: &ChunkMetadata) {
+        match value {
+            ChunkMetadata::BulkFile { throughput_tier } => {
+                self.byte(0);
+                self.byte(*throughput_tier as u8);
+            }
+            ChunkMetadata::SyncTree {
+                boundary_hash,
+                similarity_score,
+            } => {
+                self.byte(1);
+                self.u64(*boundary_hash);
+                self.u32(*similarity_score);
+            }
+            ChunkMetadata::Media {
+                is_keyframe_boundary,
+                decoding_priority,
+            } => {
+                self.byte(2);
+                self.boolean(*is_keyframe_boundary);
+                self.byte(*decoding_priority);
+            }
+            ChunkMetadata::SparseImage {
+                is_sparse_hole,
+                hole_metadata,
+            } => {
+                self.byte(3);
+                self.boolean(*is_sparse_hole);
+                self.option(hole_metadata, |h, hole| {
+                    h.u64(hole.hole_size);
+                    h.string(&hole.hole_type);
+                    h.attributes(&hole.attributes);
+                });
+            }
+            ChunkMetadata::Artifact {
+                build_context,
+                proof_strength,
+            } => {
+                self.byte(4);
+                self.string(&build_context.build_system);
+                self.option(&build_context.build_timestamp, |h, value| h.u64(*value));
+                self.0.update(build_context.environment_hash);
+                self.string(&build_context.toolchain_version);
+                self.byte(*proof_strength as u8);
+            }
+            ChunkMetadata::Stream {
+                sequence,
+                early_consumption_safe,
+            } => {
+                self.byte(5);
+                self.u64(*sequence);
+                self.boolean(*early_consumption_safe);
+            }
+        }
+    }
+
+    fn manifest_object(&mut self, object: &ManifestObject) {
+        self.id(&object.id);
+        self.byte(object.kind as u8);
+        self.option(&object.size_bytes, |h, value| h.u64(*value));
+        self.count(object.children.len());
+        for (name, id) in &object.children {
+            self.string(name);
+            self.id(id);
+        }
+        self.option(&object.content_hash, |h, hash| h.0.update(hash));
+        self.sequence(&object.chunk_boundaries, |h, chunk| {
+            h.u32(chunk.index);
+            h.u64(chunk.byte_offset);
+            h.u64(chunk.size_bytes);
+            h.0.update(chunk.content_hash);
+            h.byte(chunk.strategy as u8);
+            h.option(&chunk.metadata, Self::chunk_metadata);
+        });
+        self.sequence(&object.raptorq_symbols, |h, symbol| {
+            h.u32(symbol.index);
+            h.u32(symbol.esi);
+            h.u32(symbol.size_bytes);
+            h.0.update(symbol.content_hash);
+            h.boolean(symbol.is_source);
+            h.option(&symbol.repair_group_id, |h, group| {
+                h.0.update(group.as_bytes());
+            });
+            h.option(&symbol.auth_tag, |h, tag| h.0.update(tag));
+        });
+        self.option(&object.compression_metadata, |h, compression| {
+            h.byte(compression.algorithm as u8);
+            h.byte(compression.level);
+            h.u64(compression.original_size);
+            h.u64(compression.compressed_size);
+            h.u32(compression.compression_ratio.to_bits());
+        });
+        self.option(&object.encryption_metadata, |h, encryption| {
+            h.byte(encryption.algorithm as u8);
+            h.bytes(&encryption.iv);
+            h.bytes(&encryption.auth_tag);
+            h.key_derivation(&encryption.key_derivation);
+        });
+    }
+
+    fn repair_group(&mut self, group: &RepairGroup) {
+        self.0.update(group.group_id.as_bytes());
+        self.id(&group.object_id);
+        self.u32(group.source_block_number);
+        self.u32(group.chunk_range.start_chunk);
+        self.u32(group.chunk_range.end_chunk);
+        self.u64(group.chunk_range.start_offset);
+        self.u64(group.chunk_range.end_offset);
+        self.u32(group.source_symbols_k);
+        self.u32(group.k_prime);
+        self.u32(group.symbol_size);
+        let layout = &group.repair_layout;
+        self.u32(layout.total_repair_symbols);
+        self.u32(layout.overhead_ratio.to_bits());
+        self.u32(layout.systematic_config.systematic_rows);
+        self.u32(layout.systematic_config.sub_symbols);
+        self.u32(layout.systematic_config.alignment);
+        self.u32(layout.interleaving.block_size);
+        self.u32(layout.interleaving.depth);
+        match layout.interleaving.pattern_type {
+            InterleavingType::None => self.byte(0),
+            InterleavingType::Block => self.byte(1),
+            InterleavingType::Matrix => self.byte(2),
+            InterleavingType::Randomized(seed) => {
+                self.byte(3);
+                self.u32(seed);
+            }
+        }
+        self.string(&group.hash_domain.domain_id);
+        self.byte(group.hash_domain.hash_algorithm as u8);
+        self.bytes(&group.hash_domain.context);
+        self.option(&group.transform_policy, Self::transform_order);
+        let auth = &group.auth_domain;
+        self.string(&auth.domain_id);
+        self.byte(auth.required_proof_strength as u8);
+        self.byte(auth.auth_algorithm as u8);
+        self.boolean(auth.peer_identity_required);
+        self.boolean(auth.transfer_identity_binding);
+        self.boolean(auth.session_binding);
+        self.option(&group.capability_policy, Self::capability_policy);
+        // This is the existing v1 binding, not the detached v2 digest.
+        // Committing its bytes and symbol tags introduces no fixed point.
+        self.0.update(group.manifest_root.hash());
+    }
+
+    fn components(
+        &mut self,
+        objects: &BTreeMap<ObjectId, ManifestObject>,
+        chunk_plan: &Option<ChunkPlan>,
+        raptorq_layout: &Option<RaptorQRepairLayout>,
+        compression_policy: &Option<CompressionPolicy>,
+        encryption_policy: &Option<EncryptionPolicy>,
+        capability_policy: &Option<CapabilityPolicy>,
+        transform_order: &Option<TransformOrder>,
+        transform_proof_policy: &Option<TransformProofPolicy>,
+        repair_groups: &BTreeMap<RepairGroupId, RepairGroup>,
+    ) {
+        self.count(objects.len());
+        for (id, object) in objects {
+            self.id(id);
+            self.manifest_object(object);
+        }
+        self.option(chunk_plan, |h, plan| {
+            h.byte(plan.strategy as u8);
+            h.u64(plan.target_chunk_size);
+            h.u64(plan.min_chunk_size);
+            h.u64(plan.max_chunk_size);
+            h.option(&plan.cdc_params, |h, cdc| {
+                h.u32(cdc.window_size);
+                h.u64(cdc.average_chunk_size);
+                h.u64(cdc.normalization);
+            });
+        });
+        self.option(raptorq_layout, |h, layout| {
+            h.u32(layout.source_symbols);
+            h.u32(layout.total_symbols);
+            h.u32(layout.symbol_size);
+            h.u32(layout.overhead_ratio.to_bits());
+            h.sequence(&layout.sub_blocks, |h, block| {
+                h.u32(block.index);
+                h.u32(block.source_symbols);
+                h.u32(block.esi_range.0);
+                h.u32(block.esi_range.1);
+            });
+        });
+        self.option(compression_policy, |h, compression| {
+            h.byte(compression.algorithm as u8);
+            h.byte(compression.level);
+            h.u64(compression.min_size_threshold);
+            h.sequence(&compression.apply_to_kinds, |h, kind| h.byte(*kind as u8));
+        });
+        self.option(encryption_policy, |h, encryption| {
+            h.byte(encryption.algorithm as u8);
+            h.key_derivation(&encryption.key_derivation);
+            h.sequence(&encryption.apply_to_kinds, |h, kind| h.byte(*kind as u8));
+            h.boolean(encryption.encrypt_metadata);
+        });
+        self.option(capability_policy, Self::capability_policy);
+        self.option(transform_order, Self::transform_order);
+        self.option(transform_proof_policy, |h, proof| {
+            h.boolean(proof.enforce_transform_order);
+            h.boolean(proof.require_deterministic_transforms);
+            h.boolean(proof.allow_lossy_transforms);
+            h.boolean(proof.require_plaintext_hash);
+            h.option(&proof.max_compression_ratio, |h, ratio| h.u32(ratio.to_bits()));
+            h.sequence(&proof.encryption_domains, |h, domain| {
+                h.string(&domain.domain_id);
+                h.sequence(&domain.allowed_kdfs, |h, kdf| h.byte(*kdf as u8));
+                h.boolean(domain.relay_privacy);
+                h.boolean(domain.mailbox_privacy);
+            });
+            h.byte(proof.minimum_proof_strength as u8);
+        });
+        self.count(repair_groups.len());
+        for (id, group) in repair_groups {
+            self.0.update(id.as_bytes());
+            self.repair_group(group);
+        }
+    }
+}
+
 /// Deterministic big-endian byte serialization for f32.
 ///
 /// Converts NaN to canonical form (0x7fc0_0000) and normalizes signed zero.
@@ -346,7 +844,131 @@ impl MerkleRoot {
         Self { hash: [0u8; 32] }
     }
 
+    /// Commit to the complete graph with the unambiguous v2 encoding.
+    ///
+    /// Includes roots, ID variants, all platform/application metadata, sorted
+    /// child edges and their symlink targets, and optional content length/hash.
+    /// Object/map insertion order and child-edge order do not matter; duplicate
+    /// edges retain their multiplicity. Unicode paths use portable UTF-8;
+    /// non-Unicode paths use stable Unix bytes or Windows UTF-16 code units.
+    /// On other targets only, non-Unicode paths use an implementation-native
+    /// encoding comparable within the same target and Rust toolchain.
+    ///
+    /// This computes a commitment, not structural validation. Use
+    /// [`AtpVerifier::verify_graph_v2`](crate::atp::verifier::AtpVerifier::verify_graph_v2)
+    /// with a trusted expected root before accepting a graph.
+    /// Unlike a graph, a manifest omits platform/application/symlink metadata;
+    /// its v2 representation deliberately has a different domain and digest.
+    #[must_use]
+    pub fn from_graph_v2(graph: &ObjectGraph) -> MerkleRootV2 {
+        let mut hasher = MerkleV2Hasher::new(b"object-graph");
+        hasher.count(graph.roots().count());
+        for root in graph.roots() {
+            hasher.id(root);
+        }
+        hasher.count(graph.object_count());
+        for (id, object) in graph.objects() {
+            hasher.id(id);
+            hasher.object(object);
+        }
+        hasher.finish()
+    }
+
+    /// Commit to manifest components without changing any legacy binding.
+    ///
+    /// Unlike [`Self::from_manifest_components`], every optional field,
+    /// collection boundary, ID variant and metadata value is encoded. Existing
+    /// repair-group roots and symbol authentication tags are included as data;
+    /// they must remain their legacy values, not this detached v2 digest.
+    /// The shared encoder is also used by [`Self::from_manifest_v2`].
+    ///
+    /// This low-level commitment excludes the manifest envelope (roots,
+    /// version, metadata policy, schema, extensions, timestamp and embedded v1
+    /// root). Use [`Self::from_manifest_v2`] to authenticate a whole manifest.
+    /// Computing a digest does not validate its input.
+    #[must_use]
+    pub fn from_manifest_components_v2(
+        objects: &BTreeMap<ObjectId, ManifestObject>,
+        chunk_plan: &Option<ChunkPlan>,
+        raptorq_layout: &Option<RaptorQRepairLayout>,
+        compression_policy: &Option<CompressionPolicy>,
+        encryption_policy: &Option<EncryptionPolicy>,
+        capability_policy: &Option<CapabilityPolicy>,
+        transform_order: &Option<TransformOrder>,
+        transform_proof_policy: &Option<TransformProofPolicy>,
+        repair_groups: &BTreeMap<RepairGroupId, RepairGroup>,
+    ) -> MerkleRootV2 {
+        let mut hasher = MerkleV2Hasher::new(b"manifest-components");
+        hasher.components(
+            objects,
+            chunk_plan,
+            raptorq_layout,
+            compression_policy,
+            encryption_policy,
+            capability_policy,
+            transform_order,
+            transform_proof_policy,
+            repair_groups,
+        );
+        hasher.finish()
+    }
+
+    /// Authenticate an entire existing manifest with a detached v2 commitment.
+    ///
+    /// Includes every manifest field and its legacy root/authentication
+    /// bindings. No field is replaced, so the original manifest still validates
+    /// and remains readable by existing peers. Store or exchange this digest
+    /// separately through an authenticated, explicitly v2-labelled channel.
+    /// Existing ATP transports neither negotiate nor verify it automatically.
+    ///
+    /// Maps are canonical by key; manifest vectors retain their stored order.
+    /// Floats retain their exact IEEE bits. This is not the digest produced by
+    /// [`Self::from_graph_v2`] or [`Self::from_manifest_components_v2`]. Use
+    /// [`AtpVerifier::verify_manifest_v2`](crate::atp::verifier::AtpVerifier::verify_manifest_v2)
+    /// to check both ordinary manifest validity and a trusted v2 expectation.
+    #[must_use]
+    pub fn from_manifest_v2(manifest: &Manifest) -> MerkleRootV2 {
+        let mut hasher = MerkleV2Hasher::new(b"manifest");
+        hasher.u32(manifest.version.0);
+        hasher.0.update(manifest.merkle_root.hash());
+        let policy = &manifest.metadata_policy;
+        hasher.boolean(policy.preserve_unix_permissions);
+        hasher.boolean(policy.preserve_windows_attributes);
+        hasher.boolean(policy.preserve_extended_attributes);
+        hasher.boolean(policy.preserve_symlinks);
+        hasher.boolean(policy.preserve_timestamps);
+        hasher.boolean(policy.record_platform_metadata);
+        hasher.boolean(policy.verify_metadata);
+        hasher.sequence(&manifest.roots, MerkleV2Hasher::id);
+        hasher.sequence(&manifest.hash_algorithms, |h, algorithm| {
+            h.byte(*algorithm as u8);
+        });
+        hasher.components(
+            &manifest.objects,
+            &manifest.chunk_plan,
+            &manifest.raptorq_layout,
+            &manifest.compression_policy,
+            &manifest.encryption_policy,
+            &manifest.capability_policy,
+            &manifest.transform_order,
+            &manifest.transform_proof_policy,
+            &manifest.repair_groups,
+        );
+        hasher.sequence(&manifest.unknown_optional_fields, |h, field| {
+            h.string(&field.name);
+            h.byte(field.field_type as u8);
+            h.bytes(&field.data);
+        });
+        hasher.u64(manifest.created_timestamp_nanos);
+        hasher.string(&manifest.schema_id);
+        hasher.finish()
+    }
+
     /// Compute Merkle root from an object graph.
+    ///
+    /// This preserves the legacy wire encoding. For externally trusted graph
+    /// commitments use [`Self::from_graph_v2`], which frames every field and
+    /// commits to metadata omitted by this historical representation.
     #[must_use]
     pub fn from_graph(graph: &ObjectGraph) -> Self {
         let mut hasher = Sha256::new();
@@ -391,6 +1013,10 @@ impl MerkleRoot {
     }
 
     /// Compute Merkle root from manifest components.
+    ///
+    /// This is the legacy encoding used by existing manifests and transports.
+    /// Use [`Self::from_manifest_v2`] for a complete detached commitment without
+    /// changing that encoding or its repair-symbol authentication bindings.
     #[must_use]
     pub fn from_manifest_components(
         objects: &BTreeMap<ObjectId, ManifestObject>,

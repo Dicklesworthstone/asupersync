@@ -7,7 +7,7 @@
 //! repair symbols, proof bundles, and finalizer evidence before those lower
 //! layers are complete.
 
-use crate::atp::manifest::{GraphCommit, Manifest, ManifestError, MerkleRoot};
+use crate::atp::manifest::{GraphCommit, Manifest, ManifestError, MerkleRoot, MerkleRootV2};
 use crate::atp::object::{ContentId, Object, ObjectGraph, ObjectGraphError, ObjectId, ObjectKind};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -717,6 +717,67 @@ impl AtpVerifier {
         Ok(VerificationEvidence::new(
             VerificationStage::GraphMerkle,
             format!("objects={}", graph.object_count()),
+            Some(ContentId::new(*computed.hash())),
+        ))
+    }
+
+    /// Verify graph structure and a trusted complete v2 graph commitment.
+    ///
+    /// The expected value must use [`MerkleRoot::from_graph_v2`], not either
+    /// manifest representation. The separate type prevents accidentally using
+    /// this digest with legacy verification or transport roots. This checks
+    /// topology and the graph commitment; individual content-addressed object
+    /// identities still use [`Self::verify_object`], as on the legacy path.
+    pub fn verify_graph_v2(
+        &self,
+        graph: &ObjectGraph,
+        expected_root: &MerkleRootV2,
+    ) -> Result<VerificationEvidence, VerificationError> {
+        graph.validate().map_err(map_graph_error)?;
+        let computed = MerkleRoot::from_graph_v2(graph);
+        if &computed != expected_root {
+            return Err(VerificationError::MerkleRootMismatch {
+                expected: MerkleRoot::new(*expected_root.hash()),
+                computed: MerkleRoot::new(*computed.hash()),
+            });
+        }
+        Ok(VerificationEvidence::new(
+            VerificationStage::GraphMerkle,
+            format!(
+                "encoding=v2 representation=object-graph objects={}",
+                graph.object_count()
+            ),
+            Some(ContentId::new(*computed.hash())),
+        ))
+    }
+
+    /// Verify a legacy manifest and its trusted detached v2 commitment.
+    ///
+    /// The manifest must still pass every ordinary structural, policy,
+    /// embedded-root and repair-group check. The v2 digest additionally binds
+    /// the complete manifest envelope and metadata that legacy root encoding
+    /// omits. Compute it with [`MerkleRoot::from_manifest_v2`]; component or
+    /// graph roots cannot substitute. No field or wire format is rewritten.
+    pub fn verify_manifest_v2(
+        &self,
+        manifest: &Manifest,
+        expected_root: &MerkleRootV2,
+    ) -> Result<VerificationEvidence, VerificationError> {
+        manifest.validate().map_err(map_manifest_error)?;
+        let computed = MerkleRoot::from_manifest_v2(manifest);
+        if &computed != expected_root {
+            return Err(VerificationError::MerkleRootMismatch {
+                expected: MerkleRoot::new(*expected_root.hash()),
+                computed: MerkleRoot::new(*computed.hash()),
+            });
+        }
+        Ok(VerificationEvidence::new(
+            VerificationStage::Manifest,
+            format!(
+                "encoding=v2 representation=manifest objects={} roots={}",
+                manifest.objects.len(),
+                manifest.roots.len()
+            ),
             Some(ContentId::new(*computed.hash())),
         ))
     }
