@@ -8,6 +8,7 @@ pub mod compression;
 pub mod delta;
 mod file_hash;
 pub mod filter;
+pub(crate) mod merkle;
 pub mod metadata;
 pub mod mirror;
 pub mod multi_object;
@@ -54,5 +55,6 @@ pub use progress::{
 };
 pub use streaming::{
     EntryDigest, SourceEntry, StagedEntryReceive, StreamingError, collect_entries,
-    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+    flat_merkle_root_from_digests, flat_merkle_root_from_slices, flat_merkle_root_v2_from_digests,
+    flat_merkle_root_v2_from_slices, hash_file_streaming, hex_encode,
 };

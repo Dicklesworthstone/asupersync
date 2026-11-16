@@ -60,6 +60,7 @@ use crate::net::atp::transport_common::codec::{
     self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
+use crate::net::atp::transport_common::merkle;
 use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
@@ -511,6 +512,9 @@ struct FrameTransport<S> {
     /// The payload codec both sides agreed on in the handshake, if any. Only
     /// then may data frames carry compressed chunks.
     chunk_codec: Option<CodecAccept>,
+    /// Supplemental, negotiated v2 commitment from this transfer's manifest.
+    /// Legacy payload roots and resume/delta identities remain unchanged.
+    expected_merkle_v2: Option<String>,
     /// What the sender asked for, which decides the chunks it tries to
     /// compress once a codec is agreed (br-asupersync-t1fblr.24).
     compression: CompressionMode,
@@ -531,6 +535,7 @@ where
             rbuf: BytesMut::new(),
             decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
             chunk_codec: None,
+            expected_merkle_v2: None,
             compression: CompressionMode::Off,
             compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
@@ -1958,6 +1963,9 @@ struct ReceiverDeltaBaseline {
     store: DeltaPlannerStore,
     chunks_by_content: BTreeMap<DeltaContentKey, delta_storage::BaselineChunk>,
     metadata_matches_sender: bool,
+    /// Computed while hashing the existing files, only for negotiated v2.
+    /// The no-op path must verify the new commitment even when no data follows.
+    merkle_root_v2: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2280,6 +2288,7 @@ async fn build_receiver_delta_state(
     dest_dir: &Path,
     manifest: &TransferManifest,
     config: &TransferConfig,
+    expected_merkle_v2: Option<&str>,
 ) -> Result<ReceiverDeltaState, TransportError> {
     let Some(delta_manifest) = manifest.delta_manifest.as_ref() else {
         return Ok(ReceiverDeltaState {
@@ -2316,6 +2325,7 @@ async fn build_receiver_delta_state(
         delta_manifest,
         config,
         MAX_RECEIVER_DELTA_BASELINE_CHUNKS,
+        expected_merkle_v2.is_some(),
     )
     .await?
     else {
@@ -2330,6 +2340,14 @@ async fn build_receiver_delta_state(
     };
 
     let plan = plan_incremental_resync(&sender_manifest, Some(&baseline.manifest), &baseline.store);
+    if matches!(plan.mode, DeltaResyncMode::AlreadyInSync)
+        && let Some(expected) = expected_merkle_v2
+        && baseline.merkle_root_v2.as_deref() != Some(expected)
+    {
+        return Err(TransportError::Integrity(
+            "delta baseline v2 merkle-root mismatch".to_string(),
+        ));
+    }
     let receiver_merkle_root_hex = Some(baseline.manifest.merkle_root.to_hex());
     let request = match plan.mode {
         DeltaResyncMode::AlreadyInSync if !baseline.metadata_matches_sender => {
@@ -2578,6 +2596,7 @@ async fn build_receiver_delta_baseline(
     delta_manifest: &DeltaManifestWire,
     config: &TransferConfig,
     max_chunks: u64,
+    compute_merkle_v2: bool,
 ) -> Result<Option<ReceiverDeltaBaseline>, TransportError> {
     let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     if !base.exists() {
@@ -2643,6 +2662,11 @@ async fn build_receiver_delta_baseline(
     }
 
     let receiver_tree_id = flat_merkle_root_from_digests(&digests);
+    let merkle_root_v2 = compute_merkle_v2
+        .then(|| {
+            crate::net::atp::transport_common::streaming::flat_merkle_root_v2_from_digests(&digests)
+        })
+        .transpose()?;
     let receiver_manifest = PersistentChunkManifest::new(receiver_tree_id, planner_chunks)
         .map_err(|err| TransportError::Frame(format!("build receiver delta manifest: {err}")))?;
     let metadata_matches_sender =
@@ -2656,6 +2680,7 @@ async fn build_receiver_delta_baseline(
         store,
         chunks_by_content,
         metadata_matches_sender,
+        merkle_root_v2,
     }))
 }
 
@@ -2787,7 +2812,15 @@ async fn send_receipt_and_close<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    let proof = json_frame(FrameType::Proof, receipt)?;
+    let mut proof = json_frame(FrameType::Proof, receipt)?;
+    if receipt.committed
+        && let Some(root) = transport.expected_merkle_v2.as_deref()
+    {
+        // A successful negotiated receipt names the commitment verified before
+        // publication. A missing or different root is not success to the sender.
+        merkle::attach_root_v2(&mut proof, root)
+            .map_err(|error| TransportError::Frame(error.to_string()))?;
+    }
     let mut send = std::pin::pin!(crate::combinator::try_commit_section(
         cx,
         RECEIPT_MASKED_POLLS,
@@ -3887,8 +3920,8 @@ pub async fn send_path_with_options(
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut transport = FrameTransport::new(stream);
 
-    // Handshake. A compression offer rides in a frame-header extension, which
-    // receivers that predate it never read.
+    // Optional capabilities ride in frame-header extensions. Old receivers
+    // ignore these offers and receive the unchanged legacy manifest payload.
     let mut hello = json_frame(
         FrameType::Handshake,
         &Hello {
@@ -3897,6 +3930,7 @@ pub async fn send_path_with_options(
             peer_id: peer_id.to_string(),
         },
     )?;
+    merkle::offer_v2(&mut hello);
     let offer = codec::local_offer(options.compression, config.chunk_size);
     transport.compression = options.compression;
     transport.compression_parallelism = options.compression_parallelism;
@@ -3932,6 +3966,8 @@ pub async fn send_path_with_options(
             ack.reason.unwrap_or_else(|| "no reason given".to_string()),
         ));
     }
+    let merkle_v2 = merkle::accepted_v2(&ack_frame)
+        .map_err(|error| TransportError::Frame(error.to_string()))?;
     // Compress only after an accept that fits what this sender offered.
     transport.chunk_codec = offer.and_then(|offer| {
         ack_frame
@@ -3943,7 +3979,16 @@ pub async fn send_path_with_options(
     });
 
     // Manifest.
-    let manifest_frame = json_frame(FrameType::ObjectManifest, &manifest)?;
+    let mut manifest_frame = json_frame(FrameType::ObjectManifest, &manifest)?;
+    let expected_merkle_v2 = if merkle_v2 {
+        let root =
+            crate::net::atp::transport_common::streaming::flat_merkle_root_v2_from_digests(&digests)?;
+        merkle::attach_root_v2(&mut manifest_frame, &root)
+            .map_err(|error| TransportError::Frame(error.to_string()))?;
+        Some(root)
+    } else {
+        None
+    };
     with_transport_timeout(
         cx,
         config.idle_timeout,
@@ -4037,6 +4082,13 @@ pub async fn send_path_with_options(
     .await;
 
     sender_validation::validate_receipt(&manifest, bytes_sent, &receipt)?;
+    let proof_root = merkle::expected_root_v2(&receipt_frame, merkle_v2)
+        .map_err(|error| TransportError::Frame(error.to_string()))?;
+    if proof_root != expected_merkle_v2 {
+        return Err(TransportError::Integrity(
+            "receipt v2 merkle-root mismatch".to_string(),
+        ));
+    }
 
     Ok(SendReport {
         transfer_id,
@@ -4417,7 +4469,8 @@ where
         .all(|(digest, entry)| {
             digest.size == entry.size && hex_encode(&digest.content_sha256) == entry.sha256_hex
         });
-    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
+    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex
+        && merkle::verify_root_v2(&digests, transport.expected_merkle_v2.as_deref()).is_ok();
     let metadata_ok = transfer_manifest_metadata_commitment(manifest) == manifest.metadata_root_hex;
 
     let mut committed_paths = Vec::new();
@@ -4553,6 +4606,7 @@ where
             },
         },
     )?;
+    let merkle_v2 = accepted && merkle::accept_v2(&hello_frame, &mut handshake_ack);
     // Accept a compression offer this build can decode. Senders that predate
     // compression make no offer and get no accept, so they stay raw.
     if accepted {
@@ -4599,13 +4653,21 @@ where
         });
     }
     let manifest: TransferManifest = parse_json(&manifest_frame)?;
+    transport.expected_merkle_v2 = merkle::expected_root_v2(&manifest_frame, merkle_v2)
+        .map_err(|error| TransportError::Frame(error.to_string()))?;
     // The manifest is attacker-controlled — validate its bounds before
     // allocating any receive buffers.
     validate_manifest(&manifest, &config)?;
     // Reject symlink-traversal escapes (writing a nested entry through a
     // manifest-declared symlink) before any filesystem mutation.
     reject_symlink_traversal(&manifest)?;
-    let delta_state = build_receiver_delta_state(dest_dir, &manifest, &config).await?;
+    let delta_state = build_receiver_delta_state(
+        dest_dir,
+        &manifest,
+        &config,
+        transport.expected_merkle_v2.as_deref(),
+    )
+    .await?;
     let request_frame = json_frame(FrameType::ObjectRequest, &delta_state.request)?;
     with_transport_timeout(
         cx,
@@ -4879,7 +4941,8 @@ where
     }
 
     let rebuilt_root = flat_merkle_root_from_digests(&digests);
-    let merkle_ok = rebuilt_root == manifest.merkle_root_hex;
+    let merkle_ok = rebuilt_root == manifest.merkle_root_hex
+        && merkle::verify_root_v2(&digests, transport.expected_merkle_v2.as_deref()).is_ok();
 
     // Recompute the metadata commitment over the received manifest and verify it
     // against the sender's, so a corrupted metadata block fails closed exactly

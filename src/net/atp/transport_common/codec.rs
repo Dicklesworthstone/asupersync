@@ -28,8 +28,9 @@ pub const CODEC_ACCEPT_EXTENSION: u16 = 0x0102;
 /// whose payload is compressed.
 pub const CHUNK_CODEC_EXTENSION: u16 = 0x0103;
 
-/// Every frame-header extension id that ATP assigns. Ids must be unique; a
-/// new extension takes an id that is not listed here.
+/// Frame-header extension ids assigned to payload codecs. These retain their
+/// original public array shape; other extension families reserve disjoint ids
+/// and check uniqueness against this list.
 pub const ASSIGNED_EXTENSION_IDS: [u16; 3] = [
     CODEC_OFFER_EXTENSION,
     CODEC_ACCEPT_EXTENSION,

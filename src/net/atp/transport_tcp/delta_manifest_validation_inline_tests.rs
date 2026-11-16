@@ -206,18 +206,18 @@ fn receiver_negotiation_cannot_noop_new_content_with_a_replayed_old_delta_plan()
             metadata_policy: MetadataPolicy::portable(),
             ..TransferConfig::default()
         };
-        let unchanged = build_receiver_delta_state(&destination, &old, &config)
+        let unchanged = build_receiver_delta_state(&destination, &old, &config, None)
             .await
             .expect("real unchanged-file baseline");
         assert_eq!(unchanged.request.mode, DeltaWireMode::AlreadyInSync);
-        let changed = build_receiver_delta_state(&destination, &wanted, &config)
+        let changed = build_receiver_delta_state(&destination, &wanted, &config, None)
             .await
             .expect("real changed-file baseline");
         assert_ne!(changed.request.mode, DeltaWireMode::AlreadyInSync);
 
         let mut replayed = wanted;
         replayed.delta_manifest = old.delta_manifest;
-        let rejected = build_receiver_delta_state(&destination, &replayed, &config).await;
+        let rejected = build_receiver_delta_state(&destination, &replayed, &config, None).await;
         assert!(matches!(
             rejected,
             Err(TransportError::Frame(message)) if message.contains("transfer content root")
@@ -240,7 +240,7 @@ fn commitment_mismatch_is_rejected_even_when_delta_reuse_is_disabled() {
         ..TransferConfig::default()
     };
     let refused = futures_lite::future::block_on(build_receiver_delta_state(
-        &missing, &wanted, &config,
+        &missing, &wanted, &config, None,
     ));
     assert!(matches!(
         refused,

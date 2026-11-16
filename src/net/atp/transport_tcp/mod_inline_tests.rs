@@ -661,24 +661,22 @@
         committed: Vec<u8>,
     }
 
-    /// Rewrites one data frame on its way to the receiver.
-    #[cfg(feature = "zstd")]
+    /// Rewrites one selected frame on its way to the receiver.
     type Tamper = Box<dyn FnOnce(Frame) -> Frame + Send>;
 
-    /// Hands a receive the frames read from `stream`, with the first data
-    /// frame replaced by `tamper`'s: a sender that turns hostile once the
-    /// handshake is over.
-    #[cfg(feature = "zstd")]
+    /// Hands a receive the frames read from `stream`, with the first frame of
+    /// `target` type replaced by `tamper`'s. The ordinary framing decoder and
+    /// both native endpoints still run.
     struct TamperingStream<S> {
         stream: S,
         codec: AtpFrameCodec,
         incoming: BytesMut,
         outgoing: Vec<u8>,
         served: usize,
+        target: FrameType,
         tamper: Option<Tamper>,
     }
 
-    #[cfg(feature = "zstd")]
     impl<S: crate::io::AsyncRead + Unpin> crate::io::AsyncRead for TamperingStream<S> {
         fn poll_read(
             self: std::pin::Pin<&mut Self>,
@@ -700,7 +698,7 @@
                     .decode(&mut this.incoming)
                     .map_err(|error| std::io::Error::other(error.to_string()))?
                 {
-                    if frame.frame_type() == FrameType::ObjectData
+                    if frame.frame_type() == this.target
                         && let Some(tamper) = this.tamper.take()
                     {
                         frame = tamper(frame);
@@ -728,7 +726,6 @@
         }
     }
 
-    #[cfg(feature = "zstd")]
     impl<S: crate::io::AsyncWrite + Unpin> crate::io::AsyncWrite for TamperingStream<S> {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
@@ -750,6 +747,224 @@
             task: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
             std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
+        }
+    }
+
+    /// Runs both production endpoints over TCP. A selected incoming frame can
+    /// be rewritten after the sender serialized it, so integrity failures reach
+    /// the receiver through its ordinary wire decoder and publication path.
+    fn run_merkle_transfer(
+        source: std::path::PathBuf,
+        dest: &Path,
+        config: TransferConfig,
+        tamper: Option<(FrameType, Tamper)>,
+    ) -> (
+        Result<SendReport, TransportError>,
+        Result<ReceiveReport, TransportError>,
+    ) {
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+        let sender_config = config.clone();
+        let sender = std::thread::spawn(move || {
+            let addr = addr_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("Merkle receiver address");
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .expect("Merkle sender runtime");
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("Merkle sender context");
+                send_path_with_options(
+                    &cx,
+                    addr,
+                    &source,
+                    sender_config,
+                    "merkle-sender",
+                    &FilterSet::new(),
+                    SendOptions::new(),
+                    |_, _| {},
+                )
+                .await
+            }))
+        });
+        let dest = dest.to_path_buf();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("Merkle receiver runtime");
+        let received = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("Merkle receiver context");
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            addr_tx
+                .send(listener.local_addr().expect("listener address"))
+                .expect("publish receiver address");
+            let (stream, peer) = with_transport_timeout(
+                &cx,
+                config.accept_timeout,
+                "accept Merkle test sender",
+                listener.accept(),
+            )
+            .await
+            .expect("accept sender");
+            let (target, tamper) = tamper.map_or((FrameType::ObjectManifest, None), |(ty, hook)| {
+                (ty, Some(hook))
+            });
+            let transport = FrameTransport::new(TamperingStream {
+                stream,
+                codec: AtpFrameCodec::new(),
+                incoming: BytesMut::new(),
+                outgoing: Vec::new(),
+                served: 0,
+                target,
+                tamper,
+            });
+            receive_on_transport(&cx, transport, peer, &dest, config, "merkle-receiver").await
+        }));
+        (sender.join().expect("Merkle sender thread"), received)
+    }
+
+    fn merkle_transfer_config() -> TransferConfig {
+        TransferConfig {
+            chunk_size: 4096,
+            metadata_policy: MetadataPolicy::portable(),
+            enable_delta: true,
+            idle_timeout: Duration::from_secs(10),
+            accept_timeout: Duration::from_secs(10),
+            ..TransferConfig::default()
+        }
+    }
+
+    #[test]
+    fn negotiated_v2_native_full_delta_and_noop_transfers_preserve_legacy_identity() {
+        let root = canonical_test_root("atp-tcp-merkle-v2-paths");
+        let source = root.join("payload.bin");
+        let dest = root.join("inbox");
+        std::fs::create_dir(&dest).expect("destination");
+        let mut payload = vec![b'a'; 3 * 4096];
+        std::fs::write(&source, &payload).expect("source");
+
+        let (full, received) =
+            run_merkle_transfer(source.clone(), &dest, merkle_transfer_config(), None);
+        let full = full.expect("full transfer");
+        assert!(received.expect("full receive").committed);
+        assert_eq!(full.bytes_sent, payload.len() as u64);
+        assert!(full.receipt.sha_ok && full.receipt.merkle_ok && full.receipt.committed);
+        let legacy = flat_merkle_root_from_slices([("payload.bin", payload.as_slice())]);
+        assert_eq!(full.merkle_root_hex, legacy);
+        assert_eq!(
+            full.transfer_id,
+            transfer_id_hex(&legacy, payload.len() as u64, 1)
+        );
+
+        payload[4096..8192].fill(b'b');
+        std::fs::write(&source, &payload).expect("changed source");
+        let (delta, received) =
+            run_merkle_transfer(source.clone(), &dest, merkle_transfer_config(), None);
+        let delta = delta.expect("delta transfer");
+        assert!(received.expect("delta receive").committed);
+        assert_eq!(
+            delta.bytes_sent, 4096,
+            "only the changed chunk crosses the wire"
+        );
+        assert!(delta.receipt.sha_ok && delta.receipt.merkle_ok && delta.receipt.committed);
+        assert_eq!(std::fs::read(dest.join("payload.bin")).unwrap(), payload);
+
+        let (noop, received) = run_merkle_transfer(source, &dest, merkle_transfer_config(), None);
+        let noop = noop.expect("already-in-sync transfer");
+        assert!(received.expect("already-in-sync receive").committed);
+        assert_eq!(noop.bytes_sent, 0);
+        assert!(noop.receipt.sha_ok && noop.receipt.merkle_ok && noop.receipt.committed);
+        assert_eq!(noop.transfer_id, delta.transfer_id);
+        assert_eq!(std::fs::read(dest.join("payload.bin")).unwrap(), payload);
+    }
+
+    #[test]
+    fn negotiated_v2_mismatch_refuses_full_delta_and_noop_publication() {
+        let previous = vec![b'a'; 3 * 4096];
+        let mut payload = previous.clone();
+        payload[4096..8192].fill(b'b');
+        for (label, existing) in [
+            ("full", None),
+            ("delta", Some(previous.clone())),
+            ("noop", Some(payload.clone())),
+        ] {
+            let root = canonical_test_root(&format!("atp-tcp-merkle-v2-refuse-{label}"));
+            let source = root.join("payload.bin");
+            let dest = root.join("inbox");
+            std::fs::create_dir(&dest).expect("destination");
+            std::fs::write(&source, &payload).expect("source");
+            let target = dest.join("payload.bin");
+            if let Some(bytes) = &existing {
+                std::fs::write(&target, bytes).expect("existing baseline");
+            }
+            let tamper: Tamper = Box::new(|mut frame| {
+                let record = frame
+                    .header
+                    .extensions
+                    .get_mut(&merkle::MERKLE_V2_ROOT_EXTENSION)
+                    .expect("new endpoints negotiated v2 before the manifest");
+                assert_eq!(record.len(), 34, "version, algorithm, and digest");
+                *record.last_mut().unwrap() ^= 0x80;
+                frame
+            });
+            let (sent, received) = run_merkle_transfer(
+                source,
+                &dest,
+                merkle_transfer_config(),
+                Some((FrameType::ObjectManifest, tamper)),
+            );
+            assert!(sent.is_err(), "{label}: false sender success");
+            assert!(
+                matches!(received, Err(TransportError::Integrity(ref message)) if message.contains("merkle")),
+                "{label}: expected a commitment mismatch, got {received:?}",
+            );
+            if let Some(expected) = existing {
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    expected,
+                    "{label}: overwrote baseline"
+                );
+            } else {
+                assert!(!target.exists(), "full receive published unverified bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn negotiated_v2_missing_or_malformed_manifest_root_fails_before_mutation() {
+        for replacement in [None, Some(vec![1, 2])] {
+            let root = canonical_test_root("atp-tcp-merkle-v2-invalid-record");
+            let source = root.join("payload.bin");
+            let dest = root.join("inbox");
+            std::fs::create_dir(&dest).expect("destination");
+            std::fs::write(&source, b"must not be published").expect("source");
+            let tamper: Tamper = Box::new(move |mut frame| {
+                assert!(
+                    frame
+                        .header
+                        .extensions
+                        .contains_key(&merkle::MERKLE_V2_ROOT_EXTENSION)
+                );
+                if let Some(record) = replacement {
+                    frame
+                        .header
+                        .extensions
+                        .insert(merkle::MERKLE_V2_ROOT_EXTENSION, record);
+                } else {
+                    frame
+                        .header
+                        .extensions
+                        .remove(&merkle::MERKLE_V2_ROOT_EXTENSION);
+                }
+                frame
+            });
+            let (sent, received) = run_merkle_transfer(
+                source,
+                &dest,
+                merkle_transfer_config(),
+                Some((FrameType::ObjectManifest, tamper)),
+            );
+            assert!(sent.is_err());
+            assert!(matches!(received, Err(TransportError::Frame(_))), "{received:?}");
+            assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
         }
     }
 
@@ -861,6 +1076,7 @@
                     incoming: BytesMut::new(),
                     outgoing: Vec::new(),
                     served: 0,
+                    target: FrameType::ObjectData,
                     tamper: Some(tamper),
                 });
                 return receive_on_transport(
@@ -3078,7 +3294,7 @@ fn a_baseline_finer_than_the_chunk_budget_falls_back_to_a_full_transfer() {
                 chunks: Vec::new(),
             };
             let config = TransferConfig::default();
-            build_receiver_delta_baseline(&root, &manifest, &delta, &config, 8)
+            build_receiver_delta_baseline(&root, &manifest, &delta, &config, 8, false)
                 .await
                 .expect("scan the existing destination")
                 .map(|baseline| baseline.manifest.chunks.len())
