@@ -2275,6 +2275,168 @@ fn remote_tls_v3_start_decodes_admission_rejection_as_terminal() {
 
 #[cfg(feature = "tls")]
 #[test]
+fn remote_tls_admission_hides_grants_and_pins_until_identity_is_verified() {
+    const COMPUTATION: &str = "proof.private-admission";
+    for version in [
+        RemoteProtocolVersion::V1,
+        RemoteProtocolVersion::V2,
+        RemoteProtocolVersion::V3,
+        RemoteProtocolVersion::V4,
+    ] {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let handler_dispatches = Arc::clone(&dispatches);
+        let mut computations = RemoteComputationRegistry::new();
+        computations
+            .register::<Vec<u8>, Vec<u8>, _, _>(COMPUTATION, move |_cx, invocation| {
+                handler_dispatches.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(RemoteOutcome::Success(
+                        invocation.into_request().input.into_data(),
+                    ))
+                }
+            })
+            .expect("private admission handler should register");
+        let verified_peer = NodeId::new("verified-admission-peer");
+        let wrong_pin_peer = NodeId::new("configured-private-peer");
+        let mut policy = pinned_policy(version, &computations, &verified_peer, COMPUTATION);
+        let private_pin = CertificatePin::spki_sha256(vec![0xA5; 32])
+            .expect("wrong pin should have valid structure");
+        policy
+            .grant_tls_peer(
+                wrong_pin_peer.clone(),
+                CertificatePinSet::new().with_pin(private_pin),
+                [COMPUTATION],
+            )
+            .expect("private grant should validate");
+        let other_version = if version.major() >= 3 {
+            RemoteProtocolVersion::V2
+        } else {
+            RemoteProtocolVersion::V3
+        };
+        let requests = [
+            (
+                version,
+                remote_service_wire_request(
+                    policy.hello_for(NodeId::new("unknown-admission-peer")),
+                    COMPUTATION,
+                    7310,
+                ),
+            ),
+            (
+                version,
+                remote_service_wire_request(policy.hello_for(wrong_pin_peer), COMPUTATION, 7311),
+            ),
+            (
+                other_version,
+                remote_service_wire_request(
+                    RemotePeerHello::new(
+                        verified_peer.clone(),
+                        other_version,
+                        computations.schema_registry().fingerprint(),
+                    ),
+                    COMPUTATION,
+                    7312,
+                ),
+            ),
+            (
+                version,
+                remote_service_wire_request(
+                    RemotePeerHello::new(
+                        verified_peer,
+                        version,
+                        ComputationRegistryFingerprint::from_bytes([0xDD; 32]),
+                    ),
+                    COMPUTATION,
+                    7313,
+                ),
+            ),
+        ];
+        let (acceptor, connector) = remote_client_test_mtls_pair();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("private admission runtime should build");
+        let service = runtime
+            .block_on(RemoteComputationService::bind(
+                "127.0.0.1:0",
+                acceptor,
+                policy,
+                computations,
+                RemoteComputationServiceConfig::new().with_max_connections(Some(8)),
+            ))
+            .expect("private admission service should bind");
+        let endpoint = service
+            .local_addr()
+            .expect("service should expose its address");
+        let operator = service.handle();
+        let client_operator = operator.clone();
+        let client = RemoteComputationClient::new(
+            endpoint,
+            "localhost",
+            connector,
+            RemoteComputationClientConfig::new()
+                .with_max_attempts(1)
+                .with_attempt_timeout(Duration::from_secs(5)),
+        )
+        .expect("private admission client should build");
+        let client_thread = thread::spawn(move || {
+            let mut responses = Vec::new();
+            for (presented, request) in requests {
+                let response = if presented.major() >= 3 {
+                    block_on(client.start_session(&Cx::for_testing(), &request))
+                        .map_err(|error| error.to_string())
+                        .and_then(|started| match started {
+                            RemoteComputationSessionStart::Terminal(response) => Ok(response),
+                            _ => Err("unadmitted request started an execution session".to_owned()),
+                        })
+                } else {
+                    block_on(client.call(&Cx::for_testing(), &request))
+                        .map_err(|error| error.to_string())
+                };
+                responses.push(response);
+            }
+            let _ = client_operator.begin_drain();
+            responses
+        });
+        let report = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("native admission context should exist");
+                service.run(&cx).await
+            })
+            .expect("private admission service should drain");
+        let responses = client_thread
+            .join()
+            .expect("private admission client should not panic");
+        let mut diagnostics = Vec::new();
+        for (index, response) in responses.into_iter().enumerate() {
+            match response.expect("authenticated TLS should deliver a typed wire refusal") {
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id,
+                    code: RemoteServiceRejectionCode::AdmissionDenied,
+                    diagnostic,
+                } => {
+                    assert_eq!(remote_task_id, 7310 + u64::try_from(index).unwrap());
+                    diagnostics.push(diagnostic);
+                }
+                other => panic!("unexpected admission response for {version}: {other:?}"),
+            }
+        }
+        assert_eq!(diagnostics[0], "remote TLS peer identity was not admitted");
+        assert_eq!(
+            diagnostics[1], diagnostics[0],
+            "unknown grants and mismatched pins must be indistinguishable on the wire"
+        );
+        assert!(diagnostics[2].contains("protocol version mismatch"));
+        assert!(diagnostics[3].contains("computation registry mismatch"));
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(report.accepted_connections(), 4);
+        assert_eq!(report.completed_connections(), 4);
+        assert_eq!(operator.active_connections(), 0);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+    }
+}
+
+#[cfg(feature = "tls")]
+#[test]
 fn remote_tls_v3_disconnect_cancels_drains_and_replays_without_redispatch() {
     let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
     let peer_certificate = certificates
@@ -4965,6 +5127,13 @@ fn configured_remote_service_hosts_application_registry_over_mtls_and_drains() {
         &spki_pin,
         &[ALPHA, ZETA],
     );
+    let configured = fs::read_to_string(&config_path)
+        .expect("configured application file should be readable");
+    fs::write(
+        &config_path,
+        format!("write_progress_timeout_ms = 1000\n{configured}"),
+    )
+    .expect("configured application should opt into a write-stall budget");
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let service_thread = thread::spawn(move || {
         let runtime = RuntimeBuilder::current_thread()

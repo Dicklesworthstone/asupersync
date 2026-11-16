@@ -2077,6 +2077,7 @@ server_private_key = "/run/secrets/remote-server.key"
 client_ca_bundle = "/run/secrets/client-ca.crt"
 max_frame_bytes = 1048576
 max_connections = 256
+write_progress_timeout_ms = 10000
 tls_handshake_timeout_ms = 5000
 initial_frame_timeout_ms = 5000
 drain_timeout_ms = 30000
@@ -2088,6 +2089,16 @@ node_id = "origin-a"
 spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
 computations = ["asupersync.remote.echo.v1"]
 ```
+
+`write_progress_timeout_ms` optionally bounds a continuous transport write
+stall, including encrypted TLS handshake, control, and response bytes. Successful
+nonempty socket writes renew the budget; incoming traffic and buffering
+plaintext do not. Omitting it preserves the unbounded write policy; `0` permits
+immediate writes but rejects the first stalled write. A timed-out connection
+drains through the normal cleanup path, and an already committed result remains
+available to an authenticated idempotent retry. Refusals before the client
+certificate matches its logical peer grant use one generic wire diagnostic;
+local policy errors retain their detailed certificate and pin diagnostics.
 
 Application binaries built with `remote-service` can apply that exact strict
 boundary to a caller-provided, statically linked registry:

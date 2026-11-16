@@ -5213,7 +5213,7 @@ where
         Err(error) => RemoteServiceWireResponse::Rejected {
             remote_task_id,
             code: RemoteServiceRejectionCode::AdmissionDenied,
-            diagnostic: error.to_string(),
+            diagnostic: remote_service_admission_diagnostic(&error),
         }
         .with_no_commit(),
         Ok(session)
@@ -5300,6 +5300,22 @@ where
     let encoded = encoded?;
     send_remote_service_frame(cx, &mut framed, &encoded).await?;
     Ok(response)
+}
+
+/// Keep certificate/grant diagnostics local until the asserted identity has
+/// been authenticated. In particular, pin-validation errors include the
+/// configured pin set, and distinguishing an unknown node from a pin mismatch
+/// would let any CA-trusted client enumerate logical peer grants.
+#[cfg(feature = "tls")]
+fn remote_service_admission_diagnostic(error: &RemotePeerAdmissionError) -> String {
+    match error {
+        // admit_tls_peer reaches these checks only after the client certificate
+        // has matched the asserted peer's enforcing pin set. Preserve the
+        // actionable negotiation diagnostics for that authenticated peer.
+        RemotePeerAdmissionError::ProtocolVersionMismatch { .. }
+        | RemotePeerAdmissionError::RegistryFingerprintMismatch { .. } => error.to_string(),
+        _ => "remote TLS peer identity was not admitted".to_owned(),
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -9663,6 +9679,8 @@ struct RemoteComputationServiceFileConfig {
     max_connections_per_ip: Option<u32>,
     #[serde(default)]
     max_exchanges_per_peer: Option<usize>,
+    #[serde(default)]
+    write_progress_timeout_ms: Option<u64>,
     tls_handshake_timeout_ms: u64,
     initial_frame_timeout_ms: u64,
     drain_timeout_ms: u64,
@@ -10088,6 +10106,7 @@ impl RemoteComputationServiceBootstrap {
         let mut service_config = RemoteComputationServiceConfig::new()
             .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
             .with_max_connections(Some(config.max_connections))
+            .with_write_progress_timeout(config.write_progress_timeout_ms.map(Duration::from_millis))
             .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
             .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
             .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))

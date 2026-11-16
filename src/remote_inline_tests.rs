@@ -402,6 +402,119 @@ peers = []
         assert_eq!(config_default.max_connections_per_ip, None);
     }
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn wire_admission_diagnostics_hide_identity_configuration_only() {
+        let peer = NodeId::new("private-logical-peer");
+        for error in [
+            RemotePeerAdmissionError::UnauthorizedPeer { peer: peer.clone() },
+            RemotePeerAdmissionError::TlsAuthenticationRequired { peer: peer.clone() },
+            RemotePeerAdmissionError::TlsIdentityNotConfigured { peer: peer.clone() },
+            RemotePeerAdmissionError::TlsPeerCertificateMissing { peer: peer.clone() },
+            RemotePeerAdmissionError::TlsPeerCertificateRejected {
+                peer: peer.clone(),
+                detail: "expected secret-pin-one, secret-pin-two; got presented-pin".to_owned(),
+            },
+        ] {
+            assert!(error.to_string().contains(peer.as_str()));
+            assert_eq!(
+                remote_service_admission_diagnostic(&error),
+                "remote TLS peer identity was not admitted",
+            );
+        }
+        for error in [
+            RemotePeerAdmissionError::ProtocolVersionMismatch {
+                accepted: RemoteProtocolVersion::V4,
+                presented: RemoteProtocolVersion::V3,
+            },
+            RemotePeerAdmissionError::RegistryFingerprintMismatch {
+                expected: ComputationRegistryFingerprint::from_bytes([1; 32]),
+                presented: ComputationRegistryFingerprint::from_bytes([2; 32]),
+            },
+        ] {
+            assert_eq!(
+                remote_service_admission_diagnostic(&error),
+                error.to_string()
+            );
+        }
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn configured_write_progress_timeout_reaches_the_listener_policy() {
+        use crate::tls::CertificatePin;
+
+        let temp = tempfile::tempdir().unwrap();
+        let certificate_pem = include_bytes!("../tests/fixtures/tls/server.crt");
+        std::fs::write(temp.path().join("server.crt"), certificate_pem).unwrap();
+        std::fs::write(
+            temp.path().join("server.key"),
+            include_bytes!("../tests/fixtures/tls/server.key"),
+        )
+        .unwrap();
+        let certificate = Certificate::from_pem(certificate_pem).unwrap().remove(0);
+        let pin = CertificatePin::compute_spki_sha256(&certificate)
+            .unwrap()
+            .to_base64();
+        let mut computations = RemoteComputationRegistry::new();
+        computations
+            .register::<Vec<u8>, Vec<u8>, _, _>(
+                "proof.configured-write-budget",
+                |_cx, invocation| async move {
+                    Ok(RemoteOutcome::Success(
+                        invocation.into_request().input.into_data(),
+                    ))
+                },
+            )
+            .unwrap();
+        let baseline = format!(
+            r#"
+schema_version = 2
+protocol = "3.0"
+listen = "127.0.0.1:0"
+listen_scope = "loopback_only"
+server_certificate_chain = "server.crt"
+server_private_key = "server.key"
+client_ca_bundle = "server.crt"
+max_frame_bytes = 65536
+max_connections = 8
+tls_handshake_timeout_ms = 1000
+initial_frame_timeout_ms = 2000
+drain_timeout_ms = 2000
+idempotency_retention_ms = 30000
+max_idempotency_records_per_peer = 32
+[[peers]]
+node_id = "write-budget-peer"
+spki_sha256 = ["{pin}"]
+computations = ["proof.configured-write-budget"]
+"#
+        );
+        let path = temp.path().join("service.toml");
+        for timeout in [None, Some(0), Some(1250), Some(i64::MAX as u64)] {
+            let setting = timeout.map_or_else(String::new, |timeout| {
+                format!("write_progress_timeout_ms = {timeout}\n")
+            });
+            std::fs::write(&path, format!("{setting}{baseline}")).unwrap();
+            let bootstrap =
+                RemoteComputationServiceBootstrap::from_toml_file(&path, computations.clone()).unwrap();
+            assert_eq!(
+                bootstrap.service_config.write_progress_timeout(),
+                timeout.map(Duration::from_millis),
+            );
+        }
+        for invalid in ["-1", "1.5", "true", "\"1000\"", "18446744073709551616"] {
+            std::fs::write(
+                &path,
+                format!("write_progress_timeout_ms = {invalid}\n{baseline}"),
+            )
+            .unwrap();
+            assert!(matches!(
+                RemoteComputationServiceBootstrap::from_toml_file(&path, computations.clone()),
+                Err(RemoteComputationServiceBootstrapError::Decode { .. }),
+            ));
+        }
+    }
+
     #[cfg(all(feature = "tls", not(target_arch = "wasm32"), any(unix, windows)))]
     #[test]
     fn accept_resource_exhaustion_retries_native_errors() {
