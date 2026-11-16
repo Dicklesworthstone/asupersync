@@ -1594,6 +1594,46 @@ impl Server {
         + Sync
         + 'static,
     > {
+        self.registered_unary_handler_with_scope(None)
+    }
+
+    /// The registered unary HTTP/2 handler with independent request ownership.
+    ///
+    /// This plugs into the same native or shared-port listeners as
+    /// [`Self::registered_unary_handler`]. Each accepted call runs through
+    /// [`Self::dispatch_registered_unary_with_trailers_scoped`]: handler
+    /// children and finalizers retire before a response or terminal status is
+    /// encoded. The listener's ambient context supplies the parent region,
+    /// capabilities, cancellation, and clock; no runtime root is substituted.
+    ///
+    /// `drain_grace` bounds the handler's cancellation-drain window. Returning
+    /// still requires actual subtree quiescence, so a non-cooperative child can
+    /// delay a response indefinitely. Existing unscoped handlers retain their
+    /// established behavior.
+    ///
+    /// # Errors
+    /// Refuses a server without services or with invalid transport limits.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn registered_unary_scoped_handler(
+        self: &Arc<Self>,
+        drain_grace: Duration,
+    ) -> io::Result<
+        impl Fn(HttpRequest) -> Pin<Box<dyn Future<Output = HttpResponse> + Send>>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    > {
+        self.registered_unary_handler_with_scope(Some(drain_grace))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn registered_unary_handler_with_scope(
+        self: &Arc<Self>,
+        drain_grace: Option<Duration>,
+    ) -> io::Result<
+        impl Fn(HttpRequest) -> GrpcHttp2Future + Clone + Send + Sync + 'static,
+    > {
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1604,7 +1644,11 @@ impl Server {
         let server = Arc::clone(self);
         Ok(move |request: HttpRequest| -> GrpcHttp2Future {
             let server = Arc::clone(&server);
-            Box::pin(async move { server.dispatch_http2_registered_unary(request).await })
+            Box::pin(async move {
+                server
+                    .dispatch_http2_registered_unary_with_scope(request, drain_grace)
+                    .await
+            })
         })
     }
 
@@ -1686,7 +1730,20 @@ impl Server {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn dispatch_http2_registered_unary(&self, request: HttpRequest) -> HttpResponse {
+    async fn dispatch_http2_registered_unary(
+        self: &Arc<Self>,
+        request: HttpRequest,
+    ) -> HttpResponse {
+        self.dispatch_http2_registered_unary_with_scope(request, None)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn dispatch_http2_registered_unary_with_scope(
+        self: &Arc<Self>,
+        request: HttpRequest,
+        drain_grace: Option<Duration>,
+    ) -> HttpResponse {
         if let Some(refusal) = refuse_unless_http2(&request) {
             return refusal;
         }
@@ -1700,9 +1757,27 @@ impl Server {
             ));
         };
         let compression = self.response_compression(request.metadata());
-        let result = self
-            .dispatch_registered_unary_with_trailers(&cx, &path, request, trailing_metadata)
-            .await;
+        let result = match drain_grace {
+            Some(drain_grace) => {
+                self.dispatch_registered_unary_with_trailers_scoped(
+                    &cx,
+                    &path,
+                    request,
+                    trailing_metadata,
+                    drain_grace,
+                )
+                .await
+            }
+            None => {
+                self.dispatch_registered_unary_with_trailers(
+                    &cx,
+                    &path,
+                    request,
+                    trailing_metadata,
+                )
+                .await
+            }
+        };
         match result {
             Ok(response) => match self.encode_http2_unary_response(&response, compression) {
                 Ok(response) => response,
@@ -2069,7 +2144,7 @@ impl Server {
     /// region; minting another context would discard its spawn authority.
     async fn dispatch_intercepted<H, F>(
         &self,
-        mut request: Request<Bytes>,
+        request: Request<Bytes>,
         handler: H,
         admitted_deadline: bool,
     ) -> Result<Response<Bytes>, Status>
@@ -2077,6 +2152,24 @@ impl Server {
         H: FnOnce(Request<Bytes>) -> F,
         F: Future<Output = Result<Response<Bytes>, Status>>,
     {
+        self.dispatch_intercepted_with_cancel_causes(request, handler, admitted_deadline, false)
+            .await
+    }
+
+    async fn dispatch_intercepted_with_cancel_causes<H, F>(
+        &self,
+        mut request: Request<Bytes>,
+        handler: H,
+        admitted_deadline: bool,
+        preserve_cancel_causes: bool,
+    ) -> Result<Response<Bytes>, Status>
+    where
+        H: FnOnce(Request<Bytes>) -> F,
+        F: Future<Output = Result<Response<Bytes>, Status>>,
+    {
+        #[cfg(target_arch = "wasm32")]
+        let _ = preserve_cancel_causes;
+
         // br-asupersync-7u4r72: enforce ServerConfig::max_metadata_size
         // BEFORE the interceptor chain runs. Pre-fix the
         // enforce_metadata_size_limit helper existed (see line ~106)
@@ -2146,7 +2239,7 @@ impl Server {
         // implementations should use async APIs and yield regularly to respect
         // client deadlines and prevent resource exhaustion.
         let response_result = if admitted_deadline {
-            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            #[cfg(not(target_arch = "wasm32"))]
             {
                 let cx = Cx::current().ok_or_else(|| {
                     Status::internal("admitted gRPC dispatch requires its request context")
@@ -2163,21 +2256,30 @@ impl Server {
                     let mut inner = cx.inner.write();
                     inner.budget = deadline.budget(inner.budget);
                 }
-                match server_streaming::poll_cancellable(
-                    &cx,
-                    &cx,
-                    async move { handler(request).await },
-                    Some(&deadline),
-                )
-                .await
-                {
+                let dispatched = if preserve_cancel_causes {
+                    Self::poll_scoped_unary(
+                        &cx,
+                        async move { handler(request).await },
+                        &deadline,
+                    )
+                    .await
+                } else {
+                    server_streaming::poll_cancellable(
+                        &cx,
+                        &cx,
+                        async move { handler(request).await },
+                        Some(&deadline),
+                    )
+                    .await
+                };
+                match dispatched {
                     Ok(result) => result,
                     Err(status) => Err(status),
                 }
             }
-            #[cfg(not(all(feature = "http2-streaming", not(target_arch = "wasm32"))))]
+            #[cfg(target_arch = "wasm32")]
             {
-                return Err(Status::internal("admitted gRPC streaming is unavailable"));
+                return Err(Status::internal("admitted gRPC dispatch is unavailable"));
             }
         } else if call_context.deadline().is_some() {
             // Sample the runtime clock before the wall clock so translating the
@@ -2493,6 +2595,210 @@ impl Server {
                 .await
         });
         poll_with_current_cx(cx.clone(), dispatch).await
+    }
+
+    /// Dispatch a registered unary RPC in its own child region.
+    ///
+    /// This opt-in counterpart to [`Self::dispatch_registered_unary`] owns the
+    /// interceptor pipeline, handler, spawned descendants, and finalizers
+    /// independently of the calling connection or service region. It returns
+    /// only after that subtree closes, including when the handler fails or its
+    /// caller is cancelled. A completed application response or status is
+    /// retained through cancellation; a descendant panic or failed finalizer
+    /// takes precedence and becomes gRPC `INTERNAL`.
+    ///
+    /// The original call deadline is frozen before region admission and met
+    /// with `cx`'s budget. Interceptors can tighten it but cannot extend it.
+    /// Request routing, metadata/body limits, authentication, and response/error
+    /// interceptors use the same pipeline as the established dispatch API.
+    ///
+    /// `drain_grace` bounds how long a cancelled handler may finish its
+    /// protocol work. It does not turn unfinished descendant cleanup into
+    /// quiescence: a non-cooperative descendant can delay return indefinitely.
+    /// Dropping this future requests subtree close; its ancestor remains
+    /// responsible for observing the eventual drain. An unpolled call admits
+    /// no work. The returned response must not retain obligations that prevent
+    /// its request region from closing.
+    ///
+    /// A native runtime gateway and timer are required. Missing wiring yields
+    /// `FAILED_PRECONDITION`, capacity refusals yield `RESOURCE_EXHAUSTED`, and
+    /// runtime shutdown yields `UNAVAILABLE`; no detached context is created.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn dispatch_registered_unary_scoped(
+        self: &Arc<Self>,
+        cx: &Cx,
+        path: &str,
+        request: Request<Bytes>,
+        drain_grace: Duration,
+    ) -> Result<Response<Bytes>, Status> {
+        self.dispatch_registered_unary_with_trailers_scoped(
+            cx,
+            path,
+            request,
+            Metadata::new(),
+            drain_grace,
+        )
+        .await
+    }
+
+    /// [`Self::dispatch_registered_unary_scoped`] with separate request trailers.
+    ///
+    /// Trailer ordering is preserved through the registered service hook; the
+    /// trailers are never merged into initial metadata. This is also the
+    /// ownership path used by [`Self::registered_unary_scoped_handler`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn dispatch_registered_unary_with_trailers_scoped(
+        self: &Arc<Self>,
+        cx: &Cx,
+        path: &str,
+        request: Request<Bytes>,
+        trailing_metadata: Metadata,
+        drain_grace: Duration,
+    ) -> Result<Response<Bytes>, Status> {
+        use crate::types::CancelKind;
+        use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion};
+
+        let polling_cx = Cx::current();
+        let deadline = server_streaming::StreamDeadline::capture(cx, request.metadata(), &self.config);
+        let server = Arc::clone(self);
+        let path = path.to_owned();
+        let result = ServerRequestRegion::run_scoped(
+            cx,
+            "h2-grpc-scoped",
+            deadline.budget(cx.budget()),
+            deadline.source,
+            drain_grace,
+            move |request_cx| async move {
+                let service = server.resolve_registered_unary(&path)?;
+                let handler_cx = request_cx.clone();
+                let dispatch = server.dispatch_intercepted_with_cancel_causes(
+                    request,
+                    move |request| async move {
+                        service
+                            .call_unary(&handler_cx, &path, request, trailing_metadata)
+                            .await
+                    },
+                    true,
+                    true,
+                );
+                poll_with_current_cx(request_cx, dispatch).await
+            },
+        )
+        .await
+        .map_err(Self::scoped_unary_ownership_status)?;
+        match result {
+            ServerHopOutcome::Ok(result) => result,
+            ServerHopOutcome::DeadlineExceeded => {
+                Err(Status::deadline_exceeded("gRPC request deadline exceeded"))
+            }
+            ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost => {
+                let exhausted = std::iter::once(cx)
+                    .chain(polling_cx.as_ref())
+                    .filter_map(Cx::cancel_reason)
+                    .any(|reason| {
+                        reason.chain().any(|cause| {
+                            matches!(cause.kind, CancelKind::PollQuota | CancelKind::CostBudget)
+                        })
+                    });
+                Err(if exhausted {
+                    Status::resource_exhausted("gRPC request budget exhausted")
+                } else {
+                    Status::cancelled("gRPC request cancelled")
+                })
+            }
+            ServerHopOutcome::Panicked(message) => {
+                cx.trace(&format!("grpc.scoped_request.panicked: {message}"));
+                Err(Status::internal("gRPC request or cleanup panicked"))
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped_unary_cancellation_status(cx: &Cx) -> Status {
+        use crate::types::CancelKind;
+
+        let reason = cx.cancel_reason();
+        if reason
+            .as_ref()
+            .is_some_and(|reason| reason.chain().any(|cause| cause.is_time_exceeded()))
+        {
+            Status::deadline_exceeded("gRPC request deadline exceeded")
+        } else if reason.as_ref().is_some_and(|reason| {
+            reason.chain().any(|cause| {
+                matches!(cause.kind, CancelKind::PollQuota | CancelKind::CostBudget)
+            })
+        }) {
+            Status::resource_exhausted("gRPC request budget exhausted")
+        } else {
+            Status::cancelled("gRPC request cancelled")
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn poll_scoped_unary<F: Future>(
+        cx: &Cx,
+        future: F,
+        deadline: &server_streaming::StreamDeadline,
+    ) -> Result<F::Output, Status> {
+        use std::task::Poll;
+
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut future = std::pin::pin!(future);
+        let mut wait = std::pin::pin!(deadline.timer());
+        std::future::poll_fn(|task| {
+            if cx.checkpoint().is_err() || cancelled.as_mut().poll(task).is_ready() {
+                // This is one request context. Propagating cancellation back
+                // to itself could replace the original attribution chain.
+                return Poll::Ready(Err(Self::scoped_unary_cancellation_status(cx)));
+            }
+            if deadline.expired()
+                || wait
+                    .as_mut()
+                    .as_pin_mut()
+                    .is_some_and(|wait| wait.poll(task).is_ready())
+            {
+                cx.cancel_with(
+                    crate::types::CancelKind::Timeout,
+                    Some("gRPC request deadline exceeded"),
+                );
+                return Poll::Ready(Err(Status::deadline_exceeded(
+                    "gRPC request deadline exceeded",
+                )));
+            }
+            // Application results remain distinct from runtime cancellation.
+            future.as_mut().poll(task).map(Ok)
+        })
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped_unary_ownership_status(
+        error: crate::web::request_region::ScopedServerRequestError,
+    ) -> Status {
+        use crate::cx::ChildRegionError;
+        use crate::runtime::SpawnError;
+        use crate::runtime::region_table::RegionCreateError;
+        use crate::web::request_region::ScopedServerRequestError;
+
+        let message = format!("gRPC request ownership unavailable: {error}");
+        match error {
+            ScopedServerRequestError::MissingTimer
+            | ScopedServerRequestError::Region(ChildRegionError::NoRuntimeGateway) => {
+                Status::failed_precondition(message)
+            }
+            ScopedServerRequestError::Region(ChildRegionError::Create(
+                RegionCreateError::ParentAtCapacity { .. }
+                | RegionCreateError::ResourcePressure { .. }
+                | RegionCreateError::CapabilityBudgetRefused { .. },
+            ))
+            | ScopedServerRequestError::Spawn(SpawnError::RegionAtCapacity { .. }) => {
+                Status::resource_exhausted(message)
+            }
+            ScopedServerRequestError::Spawn(SpawnError::AuthorizationDenied { .. }) => {
+                Status::permission_denied(message)
+            }
+            _ => Status::unavailable(message),
+        }
     }
 
     /// Get a service by name.

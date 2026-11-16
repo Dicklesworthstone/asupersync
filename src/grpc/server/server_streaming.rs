@@ -232,7 +232,7 @@ impl StreamDeadline {
         inherited
     }
 
-    fn timer(&self) -> Option<Sleep> {
+    pub(super) fn timer(&self) -> Option<Sleep> {
         self.at.map(|at| match &self.clock {
             Some(clock) => Sleep::with_timer_driver(at, clock.clone()),
             None => crate::time::sleep_until(at),

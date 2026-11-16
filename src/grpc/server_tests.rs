@@ -56,6 +56,621 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod scoped_unary_dispatch {
+        use super::*;
+        use crate::channel::oneshot;
+        use crate::cx::ChildRegionSpec;
+        use crate::grpc::service::{MethodDescriptor, ServiceHandlerFuture};
+        use crate::grpc::status::Code;
+        use crate::grpc::streaming::MetadataValue;
+        use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{CancelKind, CancelReason, RegionId, Time};
+        use std::future::{Future, poll_fn};
+        use std::pin::pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Mutex, mpsc};
+        use std::task::Poll;
+
+        const PATH: &str = "/test.Scoped/Unary";
+
+        struct ScopedService<F>(F);
+
+        impl<F> NamedService for ScopedService<F> {
+            const NAME: &'static str = "test.Scoped";
+        }
+
+        impl<F, Fut> ServiceHandler for ScopedService<F>
+        where
+            F: Fn(Cx, Request<Bytes>, Metadata) -> Fut + Send + Sync,
+            Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
+        {
+            fn descriptor(&self) -> &ServiceDescriptor {
+                static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary("Unary", PATH)];
+                static DESC: ServiceDescriptor =
+                    ServiceDescriptor::new("Scoped", "test", METHODS);
+                &DESC
+            }
+
+            fn method_names(&self) -> Vec<&str> {
+                vec!["Unary"]
+            }
+
+            fn call_unary<'a>(
+                &'a self,
+                cx: &'a Cx,
+                path: &'a str,
+                request: Request<Bytes>,
+                trailing_metadata: Metadata,
+            ) -> ServiceHandlerFuture<'a> {
+                assert_eq!(path, PATH);
+                Box::pin((self.0)(cx.clone(), request, trailing_metadata))
+            }
+        }
+
+        fn native<F, Fut>(scenario: F)
+        where
+            F: Fn(Cx) -> Fut + Clone + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            native_with_timer(None, scenario);
+        }
+
+        fn native_with_timer<F, Fut>(timer: Option<TimerDriverHandle>, scenario: F)
+        where
+            F: Fn(Cx) -> Fut + Clone + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            let (send, receive) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for workers in [1, 2] {
+                        let builder = if workers == 1 {
+                            RuntimeBuilder::current_thread()
+                        } else {
+                            RuntimeBuilder::new().worker_threads(workers)
+                        };
+                        let builder = if let Some(timer) = &timer {
+                            builder.with_timer_driver(timer.clone())
+                        } else {
+                            builder
+                        };
+                        let runtime = builder.build().unwrap();
+                        runtime.block_on(async {
+                            let root = Cx::current().unwrap();
+                            let mut task = root.spawn(scenario.clone()).unwrap();
+                            task.join(&root).await.unwrap();
+                        });
+                        let report = runtime.shutdown_drained(Duration::from_secs(5));
+                        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+                        assert_eq!(report.live_tasks, 0);
+                        assert_eq!(report.pending_spawns, 0);
+                        assert_eq!(report.pending_obligations, 0);
+                    }
+                }));
+                let _ = send.send(result);
+            });
+            // A watchdog only: readiness below is witnessed by actual Pending
+            // polls rather than inferred from elapsed wall time.
+            let result = receive
+                .recv_timeout(Duration::from_secs(30))
+                .expect("scoped gRPC dispatch must reach quiescence");
+            thread.join().unwrap();
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+
+        struct Dropped(Arc<AtomicUsize>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        async fn parked_until_cancelled(cx: &Cx, started: oneshot::Sender<()>) {
+            let mut started = Some(started);
+            let mut cancelled = pin!(cx.cancelled());
+            poll_fn(|task| match cancelled.as_mut().poll(task) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => {
+                    if let Some(started) = started.take() {
+                        started.send_blocking(()).unwrap();
+                    }
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(cx.checkpoint().is_err());
+        }
+
+        struct ScopedInterceptor {
+            parent_region: RegionId,
+            requests: Arc<AtomicUsize>,
+            responses: Arc<AtomicUsize>,
+        }
+
+        impl Interceptor for ScopedInterceptor {
+            fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                assert_ne!(Cx::current().unwrap().region_id(), self.parent_region);
+                self.requests.fetch_add(1, Ordering::SeqCst);
+                assert!(request.metadata_mut().insert("x-scoped", "request"));
+                Ok(())
+            }
+
+            fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
+                assert_ne!(Cx::current().unwrap().region_id(), self.parent_region);
+                self.responses.fetch_add(1, Ordering::SeqCst);
+                assert!(response.metadata_mut().insert("x-scoped-response", "response"));
+                Ok(())
+            }
+        }
+
+        async fn response_waits_for_cleanup(cx: Cx) {
+            let parent_region = cx.region_id();
+            let (cleanup_ready, mut cleanup) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let channels = Mutex::new(Some((cleanup_ready, released)));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let finalizers = Arc::new(AtomicUsize::new(0));
+            let finalizer_count = Arc::clone(&finalizers);
+            let requests = Arc::new(AtomicUsize::new(0));
+            let responses = Arc::new(AtomicUsize::new(0));
+            let cleanup_cx = cx.clone();
+            let server = Arc::new(
+                Server::builder()
+                    .interceptor(ScopedInterceptor {
+                        parent_region,
+                        requests: Arc::clone(&requests),
+                        responses: Arc::clone(&responses),
+                    })
+                    .add_service(ScopedService(
+                        move |request_cx: Cx, request: Request<Bytes>, trailers: Metadata| {
+                            let (cleanup_ready, mut released) =
+                                channels.lock().unwrap().take().unwrap();
+                            let child_drops = Arc::clone(&child_drops);
+                            let finalizer_count = Arc::clone(&finalizer_count);
+                            let cleanup_cx = cleanup_cx.clone();
+                            async move {
+                                assert_ne!(request_cx.region_id(), parent_region);
+                                let ambient = Cx::current().unwrap();
+                                assert_eq!(ambient.task_id(), request_cx.task_id());
+                                assert_eq!(ambient.region_id(), request_cx.region_id());
+                                assert!(matches!(
+                                    request.metadata().get("x-scoped"),
+                                    Some(MetadataValue::Ascii(value)) if value == "request"
+                                ));
+                                assert!(matches!(
+                                    trailers.get("x-tail"),
+                                    Some(MetadataValue::Ascii(value)) if value == "trailer"
+                                ));
+                                assert!(request.metadata().get("x-tail").is_none());
+                                assert!(
+                                    Runtime::current_handle().unwrap()
+                                        .register_sync_finalizer_for_testing(
+                                            request_cx.region_id(),
+                                            move || {
+                                                finalizer_count.fetch_add(1, Ordering::SeqCst);
+                                            },
+                                        )
+                                );
+                                let (started, mut child_started) = oneshot::channel();
+                                let _child = request_cx
+                                    .spawn(move |child_cx| async move {
+                                        let _dropped = Dropped(child_drops);
+                                        parked_until_cancelled(&child_cx, started).await;
+                                        let mut ready = Some(cleanup_ready);
+                                        let mut wait = pin!(released.recv(&cleanup_cx));
+                                        poll_fn(|task| match wait.as_mut().poll(task) {
+                                            Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                                            Poll::Pending => {
+                                                if let Some(ready) = ready.take() {
+                                                    ready.send_blocking(()).unwrap();
+                                                }
+                                                Poll::Pending
+                                            }
+                                        })
+                                        .await;
+                                    })
+                                    .unwrap();
+                                child_started.recv(&request_cx).await.unwrap();
+                                Ok(Response::new(request.into_inner()))
+                            }
+                        },
+                    ))
+                    .build(),
+            );
+            let mut trailers = Metadata::new();
+            assert!(trailers.insert("x-tail", "trailer"));
+            let mut request = Box::pin(server.dispatch_registered_unary_with_trailers_scoped(
+                &cx,
+                PATH,
+                Request::new(Bytes::from_static(b"committed")),
+                trailers,
+                Duration::from_secs(1),
+            ));
+            let mut cleanup_wait = pin!(cleanup.recv(&cx));
+            poll_fn(|task| {
+                assert!(
+                    request.as_mut().poll(task).is_pending(),
+                    "a response cannot escape while descendant cleanup is parked"
+                );
+                cleanup_wait.as_mut().poll(task)
+            })
+            .await
+            .unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 0);
+            release.send_blocking(()).unwrap();
+            let response = request.await.unwrap();
+            assert_eq!(response.get_ref().as_ref(), b"committed");
+            assert!(matches!(
+                response.metadata().get("x-scoped-response"),
+                Some(MetadataValue::Ascii(value)) if value == "response"
+            ));
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(responses.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+            assert!(!cx.is_cancel_requested());
+        }
+
+        #[test]
+        fn native_scoped_grpc_response_waits_for_children_and_finalizers() {
+            native(response_waits_for_cleanup);
+        }
+
+        async fn cancellation_drains_descendants(cx: Cx) {
+            for (reason, expected) in [
+                (CancelReason::new(CancelKind::User), Code::Cancelled),
+                (CancelReason::new(CancelKind::Deadline), Code::DeadlineExceeded),
+                (CancelReason::new(CancelKind::PollQuota), Code::ResourceExhausted),
+                (
+                    CancelReason::parent_cancelled()
+                        .with_cause(CancelReason::new(CancelKind::Deadline)),
+                    Code::DeadlineExceeded,
+                ),
+                (
+                    CancelReason::parent_cancelled()
+                        .with_cause(CancelReason::new(CancelKind::PollQuota)),
+                    Code::ResourceExhausted,
+                ),
+            ] {
+                for cancel_body_only in [false, true] {
+                    let connection =
+                        cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let owner = connection.cx().clone();
+                    let (parked, mut handler_started) = oneshot::channel();
+                    let parked = Mutex::new(Some(parked));
+                    let drops = Arc::new(AtomicUsize::new(0));
+                    let child_drops = Arc::clone(&drops);
+                    let server = Arc::new(
+                        Server::builder()
+                            .add_service(ScopedService(
+                                move |request_cx: Cx, _request: Request<Bytes>, _trailers: Metadata| {
+                                    let parked = parked.lock().unwrap().take().unwrap();
+                                    let child_drops = Arc::clone(&child_drops);
+                                    async move {
+                                        let (started, mut child_started) = oneshot::channel();
+                                        let _child = request_cx
+                                            .spawn(move |child_cx| async move {
+                                                let _dropped = Dropped(child_drops);
+                                                parked_until_cancelled(&child_cx, started).await;
+                                            })
+                                            .unwrap();
+                                        child_started.recv(&request_cx).await.unwrap();
+                                        let mut ready = Some(parked);
+                                        poll_fn(move |_task| {
+                                            if let Some(ready) = ready.take() {
+                                                ready.send_blocking(request_cx.clone()).unwrap();
+                                            }
+                                            Poll::<Result<Response<Bytes>, Status>>::Pending
+                                        })
+                                        .await
+                                    }
+                                },
+                            ))
+                            .build(),
+                    );
+                    let mut request = Box::pin(server.dispatch_registered_unary_scoped(
+                        &owner,
+                        PATH,
+                        Request::new(Bytes::new()),
+                        Duration::ZERO,
+                    ));
+                    let mut started = pin!(handler_started.recv(&cx));
+                    let body_cx = poll_fn(|task| {
+                        assert!(request.as_mut().poll(task).is_pending());
+                        started.as_mut().poll(task)
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(drops.load(Ordering::SeqCst), 0);
+                    let cancelled = if cancel_body_only { &body_cx } else { &owner };
+                    cancelled.cancel_with_reason(reason.clone());
+                    assert_eq!(
+                        request.await.unwrap_err().code(),
+                        expected,
+                        "{reason:?}, body_only={cancel_body_only}"
+                    );
+                    assert_eq!(drops.load(Ordering::SeqCst), 1);
+                    assert!(!cx.is_cancel_requested());
+                    if cancel_body_only {
+                        assert!(!owner.is_cancel_requested());
+                    }
+                    connection.close().await.unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn native_scoped_grpc_cancellation_preserves_status_and_drains_descendants() {
+            native(cancellation_drains_descendants);
+        }
+
+        async fn panics_override_response(cx: Cx) {
+            for phase in ["handler", "descendant", "finalizer"] {
+                let server = Arc::new(
+                    Server::builder()
+                        .add_service(ScopedService(
+                            move |request_cx: Cx, _request: Request<Bytes>, _trailers: Metadata| async move {
+                                match phase {
+                                    "handler" => panic!("scoped gRPC handler sentinel"),
+                                    "descendant" => {
+                                        let mut child = request_cx
+                                            .spawn(|_| async {
+                                                panic!("scoped gRPC descendant sentinel");
+                                            })
+                                            .unwrap();
+                                        assert!(matches!(
+                                            child.join(&request_cx).await,
+                                            Err(crate::runtime::JoinError::Panicked(_))
+                                        ));
+                                    }
+                                    "finalizer" => {
+                                        assert!(
+                                            Runtime::current_handle().unwrap()
+                                                .register_sync_finalizer_for_testing(
+                                                    request_cx.region_id(),
+                                                    || panic!("scoped gRPC finalizer sentinel"),
+                                                )
+                                        );
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                Ok(Response::new(Bytes::from_static(b"must not escape")))
+                            },
+                        ))
+                        .build(),
+                );
+                let status = server
+                    .dispatch_registered_unary_scoped(
+                        &cx,
+                        PATH,
+                        Request::new(Bytes::new()),
+                        Duration::ZERO,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.code(), Code::Internal, "{phase}");
+                assert!(!cx.is_cancel_requested());
+            }
+        }
+
+        #[test]
+        fn native_scoped_grpc_handler_descendant_and_finalizer_panics_become_internal() {
+            native(panics_override_response);
+        }
+
+        async fn statuses_and_admission(cx: Cx) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let server = Arc::new(
+                Server::builder()
+                    .max_request_body_bytes(8)
+                    .add_service(ScopedService(
+                        move |_cx: Cx, request: Request<Bytes>, _trailers: Metadata| {
+                            handler_calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                let code = if request.get_ref().as_ref() == b"cancel" {
+                                    Code::Cancelled
+                                } else {
+                                    Code::NotFound
+                                };
+                                Err(Status::with_details(
+                                    code,
+                                    "application status",
+                                    Bytes::from_static(b"details"),
+                                ))
+                            }
+                        },
+                    ))
+                    .build(),
+            );
+            for (body, code) in [
+                (Bytes::new(), Code::NotFound),
+                (Bytes::from_static(b"cancel"), Code::Cancelled),
+            ] {
+                let status = server
+                    .dispatch_registered_unary_scoped(
+                        &cx,
+                        PATH,
+                        Request::new(body),
+                        Duration::ZERO,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.code(), code);
+                assert_eq!(status.message(), "application status");
+                assert_eq!(status.details().unwrap().as_ref(), b"details");
+            }
+            for (path, body, expected) in [
+                ("/test.Missing/Unary", Bytes::new(), Code::Unimplemented),
+                (PATH, Bytes::from_static(b"oversized"), Code::ResourceExhausted),
+            ] {
+                let status = server
+                    .dispatch_registered_unary_scoped(
+                        &cx,
+                        path,
+                        Request::new(body),
+                        Duration::ZERO,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.code(), expected);
+            }
+            let mut expired = Request::new(Bytes::new());
+            assert!(expired.metadata_mut().insert("grpc-timeout", "0n"));
+            assert_eq!(
+                server
+                    .dispatch_registered_unary_scoped(&cx, PATH, expired, Duration::ZERO)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::DeadlineExceeded
+            );
+            let unpolled = server.dispatch_registered_unary_scoped(
+                &cx,
+                PATH,
+                Request::new(Bytes::new()),
+                Duration::ZERO,
+            );
+            drop(unpolled);
+            let detached = Cx::for_testing();
+            assert_eq!(
+                server
+                    .dispatch_registered_unary_scoped(
+                        &detached,
+                        PATH,
+                        Request::new(Bytes::new()),
+                        Duration::ZERO,
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::FailedPrecondition
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        #[test]
+        fn native_scoped_grpc_keeps_application_errors_limits_and_admission_rules() {
+            native(statuses_and_admission);
+        }
+
+        struct AdvanceToDeadline {
+            clock: Arc<VirtualClock>,
+        }
+
+        impl Interceptor for AdvanceToDeadline {
+            fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                let request_cx = Cx::current().unwrap();
+                let deadline = request_cx.budget().deadline.unwrap();
+                assert!(request_cx.now() < deadline);
+                // Admission and request middleware consume the original peer
+                // timeout. Extending the header cannot restart that timeout.
+                assert!(request.metadata_mut().insert("grpc-timeout", "1H"));
+                self.clock.advance_to(deadline);
+                assert_eq!(request_cx.now(), deadline);
+                Ok(())
+            }
+
+            fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+                panic!("an expired call cannot reach response interceptors");
+            }
+        }
+
+        async fn frozen_deadline_is_inclusive(cx: Cx, clock: Arc<VirtualClock>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let server = Arc::new(
+                Server::builder()
+                    .interceptor(AdvanceToDeadline { clock })
+                    .add_service(ScopedService(
+                        move |_cx: Cx, _request: Request<Bytes>, _trailers: Metadata| {
+                            handler_calls.fetch_add(1, Ordering::SeqCst);
+                            async { Ok(Response::new(Bytes::from_static(b"too late"))) }
+                        },
+                    ))
+                    .build(),
+            );
+            let mut request = Request::new(Bytes::new());
+            assert!(request.metadata_mut().insert("grpc-timeout", "10m"));
+            let status = server
+                .dispatch_registered_unary_scoped(&cx, PATH, request, Duration::ZERO)
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::DeadlineExceeded);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(!cx.is_cancel_requested());
+        }
+
+        #[test]
+        fn native_scoped_grpc_freezes_timeout_before_admission_and_rejects_exact_deadline() {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(50_000)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            native_with_timer(Some(timer), move |cx| {
+                frozen_deadline_is_inclusive(cx, Arc::clone(&clock))
+            });
+        }
+
+        async fn scoped_http2_adapter_drains(cx: Cx) {
+            let parent_region = cx.region_id();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let child_drops = Arc::clone(&drops);
+            let server = Arc::new(
+                Server::builder()
+                    .add_service(ScopedService(
+                        move |request_cx: Cx, request: Request<Bytes>, trailers: Metadata| {
+                            let child_drops = Arc::clone(&child_drops);
+                            async move {
+                                assert_ne!(request_cx.region_id(), parent_region);
+                                assert!(matches!(
+                                    trailers.get("x-wire-tail"),
+                                    Some(MetadataValue::Ascii(value)) if value == "wire"
+                                ));
+                                let (started, mut child_started) = oneshot::channel();
+                                let _child = request_cx
+                                    .spawn(move |child_cx| async move {
+                                        let _dropped = Dropped(child_drops);
+                                        parked_until_cancelled(&child_cx, started).await;
+                                    })
+                                    .unwrap();
+                                child_started.recv(&request_cx).await.unwrap();
+                                Ok(Response::new(request.into_inner()))
+                            }
+                        },
+                    ))
+                    .build(),
+            );
+            let handler = server
+                .registered_unary_scoped_handler(Duration::ZERO)
+                .unwrap();
+            let mut request = unary_http2_request(&server, PATH, Bytes::from_static(b"wire body"));
+            request.trailers = vec![("x-wire-tail".to_owned(), "wire".to_owned())];
+            let response = handler(request).await;
+            assert_eq!(response.status, 200);
+            assert_eq!(grpc_status_trailer(&response), Some("0"));
+            let mut body = BytesMut::from(response.body.as_slice());
+            let mut codec = server.framed_codec(crate::grpc::codec::IdentityCodec);
+            assert_eq!(
+                codec.decode_message(&mut body).unwrap().unwrap().as_ref(),
+                b"wire body"
+            );
+            assert!(body.is_empty());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(!cx.is_cancel_requested());
+        }
+
+        #[test]
+        fn native_scoped_grpc_http2_handler_round_trips_registered_service_and_drains() {
+            native(scoped_http2_adapter_drains);
+        }
+    }
+
     #[test]
     fn test_server_builder() {
         init_test("test_server_builder");

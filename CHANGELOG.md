@@ -97,6 +97,15 @@ artifacts.
 
 ## [Unreleased]
 
+### Added
+
+- **Scoped native gRPC unary requests:** Opt-in registered dispatch and
+  `registered_unary_scoped_handler` execute each call in a real child region.
+  Request children and finalizers retire before a response is returned; cleanup
+  panics become `INTERNAL`. The original deadline includes admission and
+  interceptor time, and nested cancellation causes retain deadline or budget
+  status without rewriting application errors. (`br-asupersync-m8xsjx`.)
+
 ### Fixed
 
 - **Native worker hooks:** Panics in configured start and stop hooks are
