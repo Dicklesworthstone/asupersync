@@ -35,6 +35,14 @@ const fail = (message: string): Failure => Object.freeze({ outcome: "err", failu
 const internal = (message: string): Failure => Object.freeze({ outcome: "err", failure: Object.freeze({
   code: "internal_failure", recoverability: "unknown", message,
 }) });
+// A normalized invalid envelope is an error for presentation, but never an
+// ordinary failed attempt that successful selection is allowed to tolerate.
+const INVALID_OUTCOMES = new WeakSet<object>();
+function invalidOutcome(message: string): Failure {
+  const outcome = internal(message);
+  INVALID_OUTCOMES.add(outcome);
+  return outcome;
+}
 const STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const LOCKED = STREAM && Object.getOwnPropertyDescriptor(STREAM.prototype, "locked")?.get;
 const GET_READER = STREAM?.prototype.getReader;
@@ -60,7 +68,7 @@ function cancellation(reason: string, signal = false): Failure {
 // stringify caller-controlled exceptions, headers, or response bodies.
 function checked<T>(value: unknown): Outcome<T> {
   try {
-    if (!value || typeof value !== "object") return internal("invalid fetch selection outcome");
+    if (!value || typeof value !== "object") return invalidOutcome("invalid fetch selection outcome");
     const outcome = value as Outcome<T>;
     switch (outcome.outcome) {
       case "ok": return ok(outcome.value);
@@ -91,7 +99,7 @@ function checked<T>(value: unknown): Outcome<T> {
       }
     }
   } catch { /* Malformed envelopes fail closed. */ }
-  return internal("invalid fetch selection outcome");
+  return invalidOutcome("invalid fetch selection outcome");
 }
 
 function responseSnapshot(value: BrowserFetchResponse): BrowserFetchResponse {
@@ -124,6 +132,8 @@ interface Member {
   response: () => Promise<Outcome<BrowserFetchResponse>>;
   closed: Promise<Outcome<void>>;
   retire?: () => Promise<Outcome<void>>;
+  responseOutcome?: Outcome<void>;
+  failedAttempt?: boolean;
   head?: BrowserFetchResponse;
   terminal?: Outcome<void>;
   draining?: Promise<void>;
@@ -177,6 +187,13 @@ interface Member {
 export function quorumFetchResponses(
   fetches: readonly FetchStreamHandle[], required: number, options: FetchSelectionOptions = {},
 ): Outcome<FetchSelection<readonly SelectedFetchResponse[]>> {
+  return selectFetchResponses(fetches, required, options, false);
+}
+
+function selectFetchResponses(
+  fetches: readonly FetchStreamHandle[], required: number, options: FetchSelectionOptions,
+  tolerateFailedAttempts: boolean,
+): Outcome<FetchSelection<readonly SelectedFetchResponse[]>> {
   const members: Member[] = [];
   let accept: NonNullable<FetchSelectionOptions["accept"]>;
   let signal: AbortSignal | undefined;
@@ -214,6 +231,9 @@ export function quorumFetchResponses(
       const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream, retire = fetch.retire;
       if (typeof response !== "function" || typeof convert !== "function" || !closed) return fail("invalid fetch selection member");
       if (retire !== undefined && typeof retire !== "function") return fail("invalid fetch retirement method");
+      if (tolerateFailedAttempts && typeof retire !== "function") {
+        return fail("successful fetch selection requires independent retirement receipts");
+      }
       inputs.push({ fetch, response, closed, convert, retire });
     }
     const bodies = new Set<ReadableStream<Uint8Array>>();
@@ -227,7 +247,11 @@ export function quorumFetchResponses(
       void Promise.resolve(Reflect.apply(CLOSED, reader, [])).catch(() => {});
       members.push({ fetch: input.fetch, body, reader,
         response: () => Reflect.apply(input.response, input.fetch, []),
-        closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch completion rejected")),
+        closed: Promise.resolve(input.closed).then((value) => {
+          const terminal = checked<void>(value);
+          return tolerateFailedAttempts && terminal.outcome === "ok" && terminal.value !== undefined
+            ? invalidOutcome("fetch completion returned a non-void success") : terminal;
+        }, () => invalidOutcome("fetch completion rejected")),
         retire: input.retire ? () => Reflect.apply(input.retire!, input.fetch, ["fetch selection member retired"]) : undefined,
       });
     }
@@ -261,6 +285,24 @@ export function quorumFetchResponses(
     decide();
     for (let index = 0; index < members.length; index += 1) void drain(index);
   }
+  function isFailedAttempt(member: Member, outcome: Outcome<unknown>): boolean {
+    const response = member.responseOutcome;
+    return tolerateFailedAttempts && response?.outcome === "err"
+      && !INVALID_OUTCOMES.has(response) && outcome.outcome === "err" && !INVALID_OUTCOMES.has(outcome)
+      && response.failure.code === outcome.failure.code
+      && response.failure.recoverability === outcome.failure.recoverability
+      && response.failure.message === outcome.failure.message;
+  }
+  function rejectAttempt(index: number): void {
+    const member = members[index];
+    if (member.failedAttempt || stopped || chosen) return;
+    member.failedAttempt = true;
+    waiting -= 1;
+    void drain(index);
+    if (accepted.length + waiting < required) {
+      stop(fail("not enough successful fetch responses to reach quorum"));
+    }
+  }
   function drain(index: number): Promise<void> {
     const member = members[index];
     if (member.draining) return member.draining;
@@ -285,13 +327,27 @@ export function quorumFetchResponses(
       catch { refused = true; }
       const terminal = await member.closed;
       member.terminal = terminal;
-      const failure = terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal
+      // Failed host fetches error their native stream, whose cancel() rejects
+      // with the existing operation error. Give a header receipt that was
+      // already settling time to arrive while joining the required retirement
+      // barrier. Never wait on a still-parked response merely for bookkeeping.
+      let retired: Outcome<void> | undefined;
+      if (tolerateFailedAttempts && terminal.outcome === "err"
+          && !INVALID_OUTCOMES.has(terminal) && member.responseOutcome === undefined) {
+        retired = await joinedRetirement;
+      }
+      const tolerated = isFailedAttempt(member, terminal);
+      const failure = tolerated ? undefined
+        : terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal
+        : tolerateFailedAttempts && member.responseOutcome?.outcome === "err"
+          && !INVALID_OUTCOMES.has(member.responseOutcome)
+          ? terminal.outcome === "cancelled" ? terminal : internal("failed fetch attempt completed without its operation error")
         : refused ? terminal.outcome === "cancelled" ? terminal
           : internal("fetch cancellation or terminal publication refused") : undefined;
       if (failure) noteCleanup(index, failure);
       // Recorded after the terminal: an equally severe operation failure keeps
       // its own, more specific cause.
-      const retired = await joinedRetirement;
+      retired ??= await joinedRetirement;
       if (retired.outcome !== "ok") noteCleanup(index, retired);
       resolve();
     })();
@@ -310,19 +366,50 @@ export function quorumFetchResponses(
     } catch { stop(internal("fetch selection signal observer failed")); }
   }
   // Register completion observers before invoking caller methods.
-  for (const member of members) {
+  for (let index = 0; index < members.length; index += 1) {
+    const member = members[index];
     void member.closed.then((terminal) => {
       member.terminal = terminal;
-      if (!member.draining && terminal.outcome !== "ok") stop(terminal);
+      if (!member.draining && terminal.outcome !== "ok") {
+        // An operation error can precede its header receipt by a microtask.
+        // Only that validated receipt, plus independent retirement, may make
+        // the attempt unavailable without ending a successful selection.
+        if (tolerateFailedAttempts && terminal.outcome === "err"
+            && !INVALID_OUTCOMES.has(terminal) && member.responseOutcome === undefined) {
+          void drain(index);
+          return;
+        }
+        if (isFailedAttempt(member, terminal)) rejectAttempt(index);
+        else stop(terminal);
+      }
     });
   }
   for (let index = 0; index < members.length; index += 1) {
     if (stopped) break;
     const member = members[index];
     const observe = (value: unknown) => {
-      if (finished || stopped || chosen) return;
+      if (finished || !tolerateFailedAttempts && (stopped || chosen)) return;
       const outcome = checked<BrowserFetchResponse>(value);
-      if (outcome.outcome !== "ok") { stop(outcome); return; }
+      // Keep only the receipt classification; rejected/unused response metadata
+      // must not become an unbounded retained header object after a decision.
+      member.responseOutcome = outcome.outcome === "ok" ? ok(undefined) : outcome;
+      // Keep a loser's receipt even if another member already met the quorum.
+      // Malformed envelopes and panics cannot become tolerable operation errors.
+      if (tolerateFailedAttempts && outcome.outcome !== "ok"
+          && (INVALID_OUTCOMES.has(outcome) || outcome.outcome === "panicked")) {
+        stop(outcome);
+        return;
+      }
+      if (finished || stopped || chosen) return;
+      if (outcome.outcome !== "ok") {
+        if (isFailedAttempt(member, outcome)) rejectAttempt(index);
+        else stop(outcome);
+        return;
+      }
+      if (tolerateFailedAttempts && member.terminal && member.terminal.outcome !== "ok") {
+        stop(member.terminal);
+        return;
+      }
       let matches: boolean;
       try {
         member.head = responseSnapshot(outcome.value);
@@ -347,8 +434,17 @@ export function quorumFetchResponses(
         stop(fail("not enough acceptable fetch responses to reach quorum"));
       }
     };
-    try { void Promise.resolve(member.response()).then(observe, () => stop(internal("fetch response rejected"))); }
-    catch { stop(internal("fetch response threw")); }
+    try {
+      void Promise.resolve(member.response()).then(observe, () => {
+        const failure = invalidOutcome("fetch response rejected");
+        member.responseOutcome = failure;
+        stop(failure);
+      });
+    } catch {
+      const failure = invalidOutcome("fetch response threw");
+      member.responseOutcome = failure;
+      stop(failure);
+    }
   }
   void (async () => {
     await decided;
@@ -390,6 +486,41 @@ export function firstAcceptableFetchResponse(
   fetches: readonly FetchStreamHandle[], options: FetchSelectionOptions = {},
 ): Outcome<FetchSelection<SelectedFetchResponse>> {
   const group = quorumFetchResponses(fetches, 1, options);
+  if (group.outcome !== "ok") return group;
+  return ok(Object.freeze({ result: group.value.result.then((outcome) => outcome.outcome === "ok" ? ok(outcome.value[0]) : outcome),
+    cancel: group.value.cancel,
+  }));
+}
+
+/**
+ * Select a header quorum while tolerating failed fetch attempts. Each input
+ * must expose an independent retire() cleanup receipt. A pre-header operation
+ * error removes one candidate; it does not cancel healthy alternatives while
+ * quorum remains reachable. Tolerance requires matching, valid response()/closed
+ * error fields and a successful independent retirement receipt. Inconsistent
+ * receipts, rejected/thrown methods, cleanup failure, cancellation, panic and
+ * failures after headers remain fatal. All losing work drains before the
+ * selected unread bodies transfer to the caller. There is no replacement of a
+ * selected body that fails while the other attempts drain.
+ *
+ * Shares quorumFetchResponses' bounds, predicate, input-order result, exclusive
+ * ownership and AbortSignal rules. It starts no retries or additional requests.
+ * A still-parked response promise is never an extra cleanup barrier: if cleanup
+ * has settled without an observed matching error receipt, the error is fatal.
+ * Retirement retains FetchStreamHandle's documented task-ABI proof boundary;
+ * it does not establish an independent owner-close acknowledgement.
+ */
+export function quorumSuccessfulFetchResponses(
+  fetches: readonly FetchStreamHandle[], required: number, options: FetchSelectionOptions = {},
+): Outcome<FetchSelection<readonly SelectedFetchResponse[]>> {
+  return selectFetchResponses(fetches, required, options, true);
+}
+
+/** First acceptable header response, tolerating independently retired failed attempts. */
+export function firstSuccessfulFetchResponse(
+  fetches: readonly FetchStreamHandle[], options: FetchSelectionOptions = {},
+): Outcome<FetchSelection<SelectedFetchResponse>> {
+  const group = quorumSuccessfulFetchResponses(fetches, 1, options);
   if (group.outcome !== "ok") return group;
   return ok(Object.freeze({ result: group.value.result.then((outcome) => outcome.outcome === "ok" ? ok(outcome.value[0]) : outcome),
     cancel: group.value.cancel,

@@ -41,12 +41,65 @@ scope cancellation remains effective even when all headers are parked. Cleanup
 panics take precedence over ordinary errors; equal-severity cleanup failures use
 input order. `cancel()` is idempotent and becomes inert after successful transfer.
 
-This is a **header quorum**, not replica agreement, response-body verification,
-automatic retry, or network-error-tolerant failover. Non-ok transport/task receipts
-fail the whole selection. The public fetch contract does not distinguish transport
-failure from cleanup/publication failure; guessing would hide ownership failures.
+These original entry points form a **strict header quorum**, not replica agreement,
+response-body verification, automatic retry, or network-error-tolerant failover.
+Non-ok transport/task receipts fail the whole selection. A `closed` receipt alone
+cannot distinguish transport failure from cleanup/publication failure.
 Cancellation cannot undo already-transmitted effects. A host that never settles
 cannot be forcibly drained, so the cleanup barrier remains pending honestly.
+
+## Surviving an unavailable mirror
+
+`quorumSuccessfulFetchResponses` and `firstSuccessfulFetchResponse` add an explicit
+alternative for independently authorized fetches where a failed attempt should
+not cancel healthy mirrors while enough acceptable responses remain:
+
+```ts
+import { quorumSuccessfulFetchResponses } from "@asupersync/browser/selection";
+
+const admitted = quorumSuccessfulFetchResponses(handles, 2);
+if (admitted.outcome === "ok") {
+  const result = await admitted.value.result;
+  if (result.outcome === "ok") {
+    // Two acceptable responses, in original input order, even if another
+    // attempt failed before receiving headers. Losing work has drained.
+    for (const selected of result.value) {
+      // Consume or cancel selected.body, then await selected.fetch.closed.
+    }
+  }
+}
+```
+
+Every input must supply `retire()`, which the actual SDK fetch manager provides.
+A missing method refuses setup before reader ownership is acquired. An attempt
+can be excluded only when its valid `response()` and `closed` error receipts have
+matching code, recoverability and message fields, and its independent retirement
+reports success. An errored native body may reject `reader.cancel()` with that
+existing operation error; the retirement receipt must still confirm cleanup and
+local admission release. It retains the fetch handle's documented task-ABI
+acknowledgement boundary, including the identical-error-echo ambiguity; it does
+not certify a separate runtime/scope close.
+
+Each failed attempt is counted once. If the remaining attempts cannot meet the
+quorum, selection promptly cancels and drains them. If a quorum remains possible,
+healthy requests continue and the failed attempt retires concurrently. Even after
+enough healthy headers arrive, their bodies do not transfer until every failed or
+unselected attempt has finished cleanup. No response body is read ahead.
+
+Cancellation, panic, malformed or inconsistent receipts, rejected/thrown methods,
+and retirement/publication failures remain fatal. A failure after successful
+headers is also fatal: the APIs do not replace a selected body that fails during
+loser drain. A still-parked `response()` promise is not an additional cleanup
+barrier; if cleanup ends without an observed matching error receipt, the attempt
+fails the group. Manual cancellation and AbortSignal cancellation use the same
+drain barrier and retain their precedence over ordinary errors.
+
+The original `quorumFetchResponses` and `firstAcceptableFetchResponse` retain
+their strict failure policy and support for older handles without `retire()`.
+The new functions use the same 64-member bound, synchronous HTTP predicate,
+input-order results and ownership-transfer rules. They start no new requests or
+automatic retries, and a header quorum still says nothing about agreement between
+replicas or correctness of the returned bodies.
 
 ## Executed coverage
 
@@ -60,9 +113,20 @@ or full-package integration evidence. The runner prints the tested source hash.
 Targeted negative controls that omit the loser-drain barrier or fail to cancel a
 proposed winner are rejected by the corresponding slow-cleanup tests.
 
+`scripts/test_browser_fetch_selection_retirement.mjs` additionally executes the
+actual fetch manager with an explicit core task-ABI double. Its successful-selection
+cases cover failed mirrors, exactly-once candidate exclusion, impossible quorum,
+gated retirement, caller cancellation, invalid and inconsistent receipts, refused
+publication, and post-header failure. A real loopback HTTP test disconnects one
+replica, holds a rejected 503 body open, and requires two healthy unread responses
+after cleanup. A control exposing the new names through the old strict engine
+fails all five selected availability scenarios; the new implementation passes
+them. This is Node/native Streams and HTTP evidence, not browser-engine, packaged
+WASM, or Rust runtime proof.
+
 ## Cancelling a selection through an AbortSignal
 
-Both entry points accept an optional borrowed native signal:
+All four entry points accept an optional borrowed native signal:
 
 ```ts
 const controller = new AbortController();

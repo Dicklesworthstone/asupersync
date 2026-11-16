@@ -45,6 +45,7 @@ function member(t, options = {}) {
     },
   }, { highWaterMark: 0 });
   const handle = { closed: closed.promise, response: () => headers.promise, toReadableStream: () => ok(stream) };
+  if (options.retire) handle.retire = options.retire;
   t.after(async () => { release.resolve(); if (!stream.locked) { try { await stream.cancel(); } catch {} } });
   return { handle, stream, started: started.promise, release: release.resolve, respond: headers.resolve,
     get cancelled() { return cancelledOnce; }, get pulls() { return pulls; } };
@@ -130,5 +131,46 @@ for (const first of [false, true]) {
     assert.equal(result.outcome, "ok"); assert.equal(a.cancelled, false);
     assert.equal(a.pulls, 0); assert.equal(a.stream.locked, false);
     assert.equal((await group.cancel()).outcome, "ok"); assert.equal(a.cancelled, false);
+  });
+  for (const afterTransfer of [false, true]) {
+    test(`${first ? "first" : "quorum"}: strict selection ignores late loser envelope accessors ${afterTransfer ? "after transfer" : "during drain"}`, { timeout: 2000 }, async t => {
+      const a = member(t), b = member(t, { held: true });
+      a.respond(ok(head));
+      const group = select([a, b], first);
+      await b.started;
+      await pending(group.result);
+      if (afterTransfer) {
+        b.release();
+        assert.equal((await group.result).outcome, "ok");
+      }
+      let reads = 0;
+      b.respond({ get outcome() { reads++; throw new Error("late envelope must remain unobserved"); } });
+      await turn();
+      assert.equal(reads, 0, "legacy selection stops inspecting header envelopes once its winner is chosen");
+      b.release();
+      assert.equal((await group.result).outcome, "ok");
+      assert.equal(a.cancelled, false);
+      assert.equal(a.pulls + b.pulls, 0);
+      assert.equal(a.stream.locked, false);
+      assert.equal(b.stream.locked, false);
+    });
+  }
+  test(`${first ? "first" : "quorum"}: successful selection never inspects loser envelopes after ownership transfer`, { timeout: 2000 }, async t => {
+    const retire = () => Promise.resolve(ok(undefined));
+    const a = member(t, { retire }), b = member(t, { retire });
+    a.respond(ok(head));
+    const admitted = first
+      ? api.firstSuccessfulFetchResponse([a.handle, b.handle])
+      : api.quorumSuccessfulFetchResponses([a.handle, b.handle], 1);
+    assert.equal(admitted.outcome, "ok");
+    const group = admitted.value;
+    assert.equal((await group.result).outcome, "ok");
+    let reads = 0;
+    b.respond({ get outcome() { reads++; throw new Error("transferred owner must not observe late envelopes"); } });
+    await turn();
+    assert.equal(reads, 0);
+    assert.equal((await group.cancel()).outcome, "ok");
+    assert.equal(a.cancelled, false);
+    assert.equal(a.pulls + b.pulls, 0);
   });
 }
