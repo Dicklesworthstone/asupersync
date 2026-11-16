@@ -30,8 +30,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::atp::manifest::GraphMerkleV2Hasher;
 use crate::atp::object::{
     ContentId, ContentIdHasher, MetadataPolicy, Object, ObjectEdge, ObjectId, ObjectKind,
+    ObjectMetadata, PlatformMetadata,
 };
 
 /// Failure from a transport-agnostic streaming/walk helper.
@@ -203,6 +205,102 @@ pub fn flat_merkle_root_from_slices<'a>(
         })
         .collect();
     flat_merkle_root_from_digests(&digests)
+}
+
+/// Compute the v2 flat object-graph commitment without materializing content.
+///
+/// Uses the same domain-separated, length-prefixed transcript as
+/// [`crate::atp::manifest::MerkleRoot::from_graph_v2`], including the root set,
+/// typed object ids, metadata, edge boundaries and optional content digests.
+/// Memory remains `O(number_of_entries)` regardless of content sizes. Legacy
+/// transfer identities continue to use [`flat_merkle_root_from_digests`].
+///
+/// # Errors
+///
+/// Rejects duplicate paths, non-content-addressed file ids, and contradictory
+/// size or SHA-256 claims for a shared content id. Silently keeping the first
+/// such claim would leave part of the supplied transfer outside the commitment.
+pub fn flat_merkle_root_v2_from_digests(
+    entries: &[EntryDigest],
+) -> Result<String, StreamingError> {
+    let mut sorted: Vec<&EntryDigest> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut files: BTreeMap<&ObjectId, &EntryDigest> = BTreeMap::new();
+    let mut edges = Vec::with_capacity(sorted.len());
+    let mut previous_path = None;
+    for entry in sorted {
+        if previous_path == Some(entry.rel_path.as_str()) {
+            return Err(StreamingError::new(format!(
+                "duplicate path in v2 Merkle commitment: {}",
+                entry.rel_path
+            )));
+        }
+        previous_path = Some(entry.rel_path.as_str());
+        if !entry.content_id.is_content_addressed() {
+            return Err(StreamingError::new(format!(
+                "non-content-addressed file in v2 Merkle commitment: {}",
+                entry.rel_path
+            )));
+        }
+        if let Some(previous) = files.get(&entry.content_id) {
+            if previous.size != entry.size || previous.content_sha256 != entry.content_sha256 {
+                return Err(StreamingError::new(format!(
+                    "conflicting content digests in v2 Merkle commitment: {}",
+                    entry.rel_path
+                )));
+            }
+        } else {
+            files.insert(&entry.content_id, entry);
+        }
+        edges.push(ObjectEdge::new(
+            entry.content_id.clone(),
+            entry.rel_path.clone(),
+        ));
+    }
+
+    let root = Object::directory(edges);
+    let mut hasher = GraphMerkleV2Hasher::new(std::slice::from_ref(&root.id), files.len() + 1);
+    // ObjectId orders Content before Manifest. Every file was checked above,
+    // so this is the same object order as the owned graph's BTreeMap.
+    for (id, entry) in files {
+        let metadata = ObjectMetadata {
+            kind: ObjectKind::FileObject,
+            size_bytes: Some(entry.size),
+            platform: PlatformMetadata::default(),
+            application: None,
+        };
+        hasher.object(
+            id,
+            &metadata,
+            &[],
+            Some((entry.size, entry.content_sha256)),
+        );
+    }
+    hasher.object(&root.id, &root.metadata, &root.children, None);
+    Ok(hasher.finish().to_hex())
+}
+
+/// Compute a v2 flat graph commitment from content already held in memory.
+///
+/// Streaming callers should use [`flat_merkle_root_v2_from_digests`] instead.
+///
+/// # Errors
+///
+/// Returns an error for duplicate paths or inconsistent content identities.
+pub fn flat_merkle_root_v2_from_slices<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Result<String, StreamingError> {
+    let digests: Vec<EntryDigest> = entries
+        .into_iter()
+        .map(|(rel_path, bytes)| EntryDigest {
+            rel_path: rel_path.to_string(),
+            size: bytes.len() as u64,
+            content_id: ObjectId::content(ContentId::from_bytes(bytes)),
+            content_sha256: Sha256::digest(bytes).into(),
+        })
+        .collect();
+    flat_merkle_root_v2_from_digests(&digests)
 }
 
 /// Lowercase hex encoding, two chars per byte. Shared so the merkle root and any

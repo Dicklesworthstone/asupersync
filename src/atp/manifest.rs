@@ -10,7 +10,9 @@
 //! - Self-describing: critical fields fail closed, optional fields preserve compatibility
 //! - Canonical: stable hash output across supported platforms
 
-use crate::atp::object::{MetadataPolicy, ObjectGraph, ObjectId, ObjectKind};
+use crate::atp::object::{
+    MetadataPolicy, ObjectEdge, ObjectGraph, ObjectId, ObjectKind, ObjectMetadata,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -461,9 +463,14 @@ impl MerkleV2Hasher {
         }
     }
 
-    fn object(&mut self, object: &crate::atp::object::Object) {
-        self.id(&object.id);
-        let metadata = &object.metadata;
+    fn object(
+        &mut self,
+        id: &ObjectId,
+        metadata: &ObjectMetadata,
+        children: &[ObjectEdge],
+        content: Option<(u64, [u8; 32])>,
+    ) {
+        self.id(id);
         self.byte(metadata.kind as u8);
         self.option(&metadata.size_bytes, |h, value| h.u64(*value));
         let platform = &metadata.platform;
@@ -478,7 +485,7 @@ impl MerkleV2Hasher {
             h.u32(application.schema_version);
             h.attributes(&application.metadata);
         });
-        let mut children: Vec<_> = object.children.iter().collect();
+        let mut children: Vec<_> = children.iter().collect();
         children.sort_unstable_by(|left, right| {
             left.name
                 .cmp(&right.name)
@@ -498,9 +505,9 @@ impl MerkleV2Hasher {
             self.boolean(edge.is_symlink);
             self.option(&edge.symlink_target, |h, target| h.path(target));
         }
-        self.option(&object.content, |h, content| {
-            h.count(content.len());
-            h.0.update(Sha256::digest(content));
+        self.option(&content, |h, (length, hash)| {
+            h.u64(*length);
+            h.0.update(hash);
         });
     }
 
@@ -753,6 +760,44 @@ impl MerkleV2Hasher {
     }
 }
 
+/// The graph v2 transcript shared by owned graphs and streaming flat graphs.
+///
+/// Content is represented by its byte length and SHA-256 digest, allowing
+/// callers to read bounded chunks instead of materializing whole files. Roots
+/// are sorted here; objects must arrive in strictly increasing ObjectId order.
+/// As in ObjectGraph, each object's map key must equal its own ID. The frozen
+/// transcript retains both copies of that ID.
+pub(crate) struct GraphMerkleV2Hasher(MerkleV2Hasher);
+
+impl GraphMerkleV2Hasher {
+    pub(crate) fn new(roots: &[ObjectId], object_count: usize) -> Self {
+        let mut hasher = MerkleV2Hasher::new(b"object-graph");
+        let mut roots: Vec<_> = roots.iter().collect();
+        roots.sort_unstable();
+        hasher.count(roots.len());
+        for root in roots {
+            hasher.id(root);
+        }
+        hasher.count(object_count);
+        Self(hasher)
+    }
+
+    pub(crate) fn object(
+        &mut self,
+        id: &ObjectId,
+        metadata: &ObjectMetadata,
+        children: &[ObjectEdge],
+        content: Option<(u64, [u8; 32])>,
+    ) {
+        self.0.id(id);
+        self.0.object(id, metadata, children, content);
+    }
+
+    pub(crate) fn finish(self) -> MerkleRootV2 {
+        self.0.finish()
+    }
+}
+
 /// Deterministic big-endian byte serialization for f32.
 ///
 /// Converts NaN to canonical form (0x7fc0_0000) and normalizes signed zero.
@@ -861,15 +906,14 @@ impl MerkleRoot {
     /// its v2 representation deliberately has a different domain and digest.
     #[must_use]
     pub fn from_graph_v2(graph: &ObjectGraph) -> MerkleRootV2 {
-        let mut hasher = MerkleV2Hasher::new(b"object-graph");
-        hasher.count(graph.roots().count());
-        for root in graph.roots() {
-            hasher.id(root);
-        }
-        hasher.count(graph.object_count());
+        let roots: Vec<_> = graph.roots().cloned().collect();
+        let mut hasher = GraphMerkleV2Hasher::new(&roots, graph.object_count());
         for (id, object) in graph.objects() {
-            hasher.id(id);
-            hasher.object(object);
+            let content = object
+                .content
+                .as_ref()
+                .map(|bytes| (bytes.len() as u64, Sha256::digest(bytes).into()));
+            hasher.object(id, &object.metadata, &object.children, content);
         }
         hasher.finish()
     }

@@ -102,6 +102,80 @@
     }
 
     #[test]
+    fn v2_streaming_matches_owned_graph_for_empty_and_deduplicated_content() {
+        use crate::atp::manifest::MerkleRoot;
+        use crate::atp::object::ObjectGraph;
+
+        let cases: Vec<Vec<(&str, &[u8])>> = vec![
+            vec![],
+            vec![("empty", b"")],
+            vec![("a", b"alpha"), ("b", b"bravo"), ("nested/dup", b"alpha")],
+            vec![("unicode/\u{e9}", b"\0\xff\x01"), ("prefix", b""), ("prefix-long", b"z")],
+        ];
+        for files in cases {
+            let mut graph = ObjectGraph::new();
+            let mut edges = Vec::new();
+            for (path, bytes) in &files {
+                let object = Object::file(bytes.to_vec());
+                let id = object.id.clone();
+                if !graph.contains_object(&id) {
+                    graph.add_object(object).expect("add distinct content");
+                }
+                edges.push(ObjectEdge::new(id, (*path).to_string()));
+            }
+            graph.add_root(Object::directory(edges)).expect("add root");
+            let digests: Vec<_> = files.iter().map(|(p, b)| digest_of(p, b)).collect();
+            let streamed = flat_merkle_root_v2_from_digests(&digests).expect("valid digests");
+            assert_eq!(streamed, MerkleRoot::from_graph_v2(&graph).to_hex());
+            assert_ne!(streamed, flat_merkle_root_from_digests(&digests));
+            assert_eq!(
+                streamed,
+                flat_merkle_root_v2_from_slices(files.iter().copied()).expect("valid slices")
+            );
+            let reversed: Vec<_> = digests.into_iter().rev().collect();
+            assert_eq!(
+                streamed,
+                flat_merkle_root_v2_from_digests(&reversed).expect("reordered digests")
+            );
+        }
+    }
+
+    #[test]
+    fn v2_streaming_rejects_ambiguous_entries_instead_of_ignoring_claims() {
+        let original = digest_of("a", b"same content");
+        let mut duplicate_path = original.clone();
+        duplicate_path.content_sha256 = [9; 32];
+        assert!(
+            flat_merkle_root_v2_from_digests(&[original.clone(), duplicate_path]).is_err()
+        );
+
+        for mutate_size in [false, true] {
+            let mut conflicting = original.clone();
+            conflicting.rel_path = "b".to_string();
+            if mutate_size {
+                conflicting.size += 1;
+            } else {
+                conflicting.content_sha256[0] ^= 1;
+            }
+            assert!(flat_merkle_root_v2_from_digests(&[original.clone(), conflicting]).is_err());
+        }
+
+        let mut wrong_id_kind = original;
+        wrong_id_kind.content_id = Object::directory(Vec::new()).id;
+        assert!(flat_merkle_root_v2_from_digests(&[wrong_id_kind]).is_err());
+    }
+
+    #[test]
+    fn v2_streaming_commits_sizes_without_allocating_content() {
+        let mut digest = digest_of("large", b"digest supplied by streaming I/O");
+        digest.size = u64::MAX;
+        let root = flat_merkle_root_v2_from_digests(std::slice::from_ref(&digest))
+            .expect("hashing a size does not materialize content");
+        digest.size -= 1;
+        assert_ne!(root, flat_merkle_root_v2_from_digests(&[digest]).expect("smaller size"));
+    }
+
+    #[test]
     fn staged_receive_finalizes_incremental_digest() {
         let mut recv = StagedEntryReceive::new(PathBuf::from("stage/0"));
         recv.mark_created();
