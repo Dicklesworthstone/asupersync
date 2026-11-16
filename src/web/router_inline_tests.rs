@@ -431,6 +431,401 @@
         }
     }
 
+    // br-asupersync-vftw38: duplicate mounts must not discard a body ceiling
+    // before buffered dispatch, streaming admission, or a later policy boundary.
+    mod merged_mount_body_policies {
+        use super::*;
+        use crate::web::extract::RawBody;
+
+        fn raw_handler(RawBody(body): RawBody) -> String {
+            body.len().to_string()
+        }
+
+        fn explicit_router(path: &str, limit: usize, source: &str) -> Router {
+            let policy = RequestBodyPolicy::new().max_total_body_size(limit);
+            let router = Router::new()
+                .without_default_trace()
+                .route(path, post(FnHandler::new(ok_handler)));
+            match source {
+                "router" => router.with_body_policy(policy),
+                "server" => router.with_server_body_policy(policy),
+                "extension" => router.with_state(policy),
+                "state" => router.with_state(RequestBodyPolicyState::from_policy(policy)),
+                _ => panic!("unknown policy source"),
+            }
+        }
+
+        fn merge(first: Router, second: Router, strict_first: bool) -> Router {
+            let router = Router::new().without_default_trace();
+            if strict_first {
+                router.nest("/api", first).nest("/api", second)
+            } else {
+                router.nest("/api", second).nest("/api", first)
+            }
+        }
+
+        fn assert_total_limit(router: &Router, path: &str, limit: usize) {
+            for length in [limit, limit + 1] {
+                let expected = if length == limit {
+                    StatusCode::OK
+                } else {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                };
+                for request in [
+                    Request::new("POST", path).with_header("content-length", length.to_string()),
+                    Request::new("POST", path).with_body(Bytes::from(vec![b'x'; length])),
+                ] {
+                    let response = router.handle(request);
+                    assert_eq!(response.status, expected, "{path}: length {length}");
+                    if length > limit {
+                        assert_eq!(
+                            response.body.as_ref(),
+                            format!("[ASUP-E505] request body too large (limit {limit})")
+                                .as_bytes(),
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn duplicate_mounts_meet_every_explicit_policy_source_in_both_orders() {
+            for source in ["router", "server", "extension", "state"] {
+                for strict_first in [false, true] {
+                    let router = merge(
+                        explicit_router("/strict", 4, source),
+                        explicit_router("/loose", 64, source),
+                        strict_first,
+                    );
+                    for path in ["/api/strict", "/api/loose"] {
+                        assert_total_limit(&router, path, 4);
+                    }
+                    let policies = router.route_body_policies();
+                    assert_eq!(policies.len(), 2);
+                    for entry in policies {
+                        assert_eq!(entry.route_policy, None);
+                        assert_eq!(
+                            entry.effective_policy,
+                            Some(RequestBodyPolicy::new().max_total_body_size(4).resolved()),
+                            "source={source}, strict_first={strict_first}",
+                        );
+                    }
+                }
+            }
+        }
+
+        fn legacy_router(path: &str, raw_limit: usize, parts: usize) -> Router {
+            Router::new()
+                .without_default_trace()
+                .with_state(BodyLimits::new().max_raw_body_size(raw_limit))
+                .with_state(MultipartLimits::new().max_parts(parts))
+                .route(path, post(FnHandler1::<_, RawBody>::new(raw_handler)))
+        }
+
+        #[test]
+        fn inherited_explicit_policy_preserves_both_mounts_legacy_limits() {
+            for strict_first in [false, true] {
+                let router = merge(
+                    legacy_router("/strict", 4, 20),
+                    legacy_router("/loose", 64, 3),
+                    strict_first,
+                )
+                .with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(128));
+                for path in ["/api/strict", "/api/loose"] {
+                    let boundary = router
+                        .handle(Request::new("POST", path).with_body(Bytes::from_static(b"1234")));
+                    assert_eq!(boundary.status, StatusCode::OK);
+                    assert_eq!(boundary.body.as_ref(), b"4");
+                    for request in [
+                        Request::new("POST", path).with_body(Bytes::from_static(b"12345")),
+                        Request::new("POST", path).with_header("content-length", "5"),
+                    ] {
+                        assert_eq!(router.handle(request).status, StatusCode::PAYLOAD_TOO_LARGE);
+                    }
+                }
+                for entry in router.route_body_policies() {
+                    let policy = entry.effective_policy.unwrap();
+                    assert_eq!(policy.max_total_body_size, 128);
+                    assert_eq!(policy.body_limits.max_raw_body_size, 4);
+                    assert_eq!(policy.multipart_limits.max_parts, 3);
+                }
+            }
+        }
+
+        #[test]
+        fn route_policy_activates_retained_limits_through_recursive_mounts() {
+            for strict_first in [false, true] {
+                let policy = RequestBodyPolicy::new().max_total_body_size(128);
+                let strict = Router::new()
+                    .with_state(BodyLimits::new().max_raw_body_size(4))
+                    .nest(
+                        "/v1",
+                        Router::new().route(
+                            "/upload",
+                            post(FnHandler1::<_, RawBody>::new(raw_handler))
+                                .with_body_policy(policy),
+                        ),
+                    );
+                let loose = Router::new()
+                    .with_state(BodyLimits::new().max_raw_body_size(64))
+                    .nest(
+                        "/v1",
+                        Router::new().route("/other", get(FnHandler::new(ok_handler))),
+                    );
+                let router = merge(strict, loose, strict_first);
+                let response = router.handle(
+                    Request::new("POST", "/api/v1/upload").with_body(Bytes::from_static(b"12345")),
+                );
+                assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+                let policies = router.route_body_policies();
+                let upload = policies
+                    .iter()
+                    .find(|entry| entry.method == "POST")
+                    .unwrap();
+                assert_eq!(upload.route_policy, Some(policy.resolved()));
+                assert_eq!(
+                    upload
+                        .effective_policy
+                        .unwrap()
+                        .body_limits
+                        .max_raw_body_size,
+                    4,
+                );
+                let other = policies.iter().find(|entry| entry.method == "GET").unwrap();
+                assert_eq!(other.effective_policy, None);
+            }
+        }
+
+        #[test]
+        fn later_merge_cannot_erase_a_prior_explicit_or_legacy_ceiling() {
+            let first = legacy_router("/first", 3, 8)
+                .with_state(RequestBodyPolicy::new().max_total_body_size(9));
+            let second = legacy_router("/second", 30, 16)
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(90));
+            let third = legacy_router("/third", 300, 32)
+                .with_state(RequestBodyPolicy::new().max_total_body_size(900));
+            let router = Router::new()
+                .without_default_trace()
+                .nest("/api", first)
+                .nest("/api", second)
+                .nest("/api", third);
+            for path in ["/api/first", "/api/second", "/api/third"] {
+                assert_eq!(
+                    router
+                        .handle(Request::new("POST", path).with_body(Bytes::from_static(b"1234")))
+                        .status,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                );
+            }
+            for entry in router.route_body_policies() {
+                let policy = entry.effective_policy.unwrap();
+                assert_eq!(policy.max_total_body_size, 9);
+                assert_eq!(policy.body_limits.max_raw_body_size, 3);
+                assert_eq!(policy.multipart_limits.max_parts, 8);
+            }
+        }
+
+        #[test]
+        fn legacy_only_mounts_keep_last_write_wins_without_a_phantom_policy() {
+            for strict_first in [false, true] {
+                let router = merge(
+                    legacy_router("/strict", 4, 3),
+                    legacy_router("/loose", 64, 20),
+                    strict_first,
+                );
+                for path in ["/api/strict", "/api/loose"] {
+                    let response = router
+                        .handle(Request::new("POST", path).with_body(Bytes::from_static(b"12345")));
+                    assert_eq!(
+                        response.status,
+                        if strict_first {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::PAYLOAD_TOO_LARGE
+                        },
+                    );
+                }
+                assert!(
+                    router
+                        .route_body_policies()
+                        .iter()
+                        .all(|entry| entry.effective_policy.is_none()),
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                assert_eq!(
+                    router
+                        .streaming_body_policy_limit(&Request::new("POST", "/api/strict"))
+                        .unwrap(),
+                    None,
+                );
+            }
+        }
+
+        #[test]
+        fn deeper_legacy_override_still_precedes_the_first_explicit_boundary() {
+            let child = Router::new()
+                .with_state(BodyLimits::new().max_raw_body_size(32))
+                .route(
+                    "/upload",
+                    post(FnHandler1::<_, RawBody>::new(raw_handler))
+                        .with_body_policy(RequestBodyPolicy::new().max_total_body_size(128)),
+                );
+            let router = merge(
+                Router::new()
+                    .with_state(BodyLimits::new().max_raw_body_size(4))
+                    .nest("/child", child),
+                Router::new().with_state(BodyLimits::new().max_raw_body_size(64)),
+                true,
+            );
+            for (length, expected) in [(32, StatusCode::OK), (33, StatusCode::PAYLOAD_TOO_LARGE)] {
+                assert_eq!(
+                    router
+                        .handle(
+                            Request::new("POST", "/api/child/upload")
+                                .with_body(Bytes::from(vec![b'x'; length])),
+                        )
+                        .status,
+                    expected,
+                );
+            }
+            assert_eq!(
+                router.route_body_policies()[0]
+                    .effective_policy
+                    .unwrap()
+                    .body_limits
+                    .max_raw_body_size,
+                32,
+            );
+
+            // Moving the explicit boundary above the merged mounts makes the
+            // retained ceiling authoritative before the child's legacy override.
+            let router =
+                router.with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(128));
+            assert_eq!(
+                router
+                    .handle(
+                        Request::new("POST", "/api/child/upload")
+                            .with_body(Bytes::from_static(b"12345")),
+                    )
+                    .status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            );
+            assert_eq!(
+                router.route_body_policies()[0]
+                    .effective_policy
+                    .unwrap()
+                    .body_limits
+                    .max_raw_body_size,
+                4,
+            );
+        }
+
+        #[test]
+        fn policy_preservation_does_not_change_state_handler_or_fallback_precedence() {
+            fn state(Extension(value): Extension<String>) -> String {
+                value
+            }
+            let first = Router::new()
+                .with_state("first".to_owned())
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(4))
+                .route("/same", get(FnHandler::new(ok_handler)))
+                .route(
+                    "/state",
+                    get(FnHandler1::<_, Extension<String>>::new(state)),
+                )
+                .fallback(FnHandler::new(not_found_handler));
+            let second = Router::new()
+                .with_state("second".to_owned())
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64))
+                .route("/same", get(FnHandler::new(created_handler)))
+                .fallback(FnHandler::new(created_handler));
+            let router = merge(first, second, true);
+            assert_eq!(
+                router
+                    .handle(Request::new("GET", "/api/state"))
+                    .body
+                    .as_ref(),
+                b"second",
+            );
+            assert_eq!(
+                router
+                    .handle(Request::new("GET", "/api/same"))
+                    .body
+                    .as_ref(),
+                b"ok",
+            );
+            assert_eq!(
+                router.handle(Request::new("GET", "/api/missing")).status,
+                StatusCode::NOT_FOUND,
+            );
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn streaming_admission_keeps_the_same_duplicate_mount_ceiling() {
+            use crate::http::h1::types::{Method, Version};
+
+            for source in ["router", "server", "extension", "state"] {
+                for strict_first in [false, true] {
+                    let router = merge(
+                        explicit_router("/strict", 4, source),
+                        explicit_router("/loose", 64, source),
+                        strict_first,
+                    );
+                    for path in ["/api/strict", "/api/loose", "/api/missing"] {
+                        let head = RequestHead {
+                            method: Method::Post,
+                            uri: path.to_owned(),
+                            version: Version::Http11,
+                            headers: Vec::new(),
+                        };
+                        assert_eq!(router.http1_streaming_body_policy(&head).unwrap(), Some(4));
+                        #[cfg(feature = "http2-streaming")]
+                        assert_eq!(router.http2_streaming_body_policy(&head).unwrap(), Some(4));
+                        #[cfg(all(feature = "http3", feature = "tls"))]
+                        assert_eq!(
+                            router.h3_streaming_body_policy_limit(&Request::new("POST", path)),
+                            Ok(Some(4)),
+                        );
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn streaming_dispatch_tightens_live_writer_after_duplicate_mount_merge() {
+            use crate::http::h1::StreamingServerRequest;
+            use crate::http::h1::types::{Method, Version};
+
+            for strict_first in [false, true] {
+                let cx = crate::Cx::for_testing();
+                let head = RequestHead {
+                    method: Method::Post,
+                    uri: "/api/upload".to_owned(),
+                    version: Version::Http11,
+                    headers: vec![("transfer-encoding".to_owned(), "chunked".to_owned())],
+                };
+                let (writer, request) = StreamingServerRequest::channel(head, &cx, 8);
+                let strict = Router::new()
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(6))
+                    .route(
+                        "/upload",
+                        post(BodyPolicyWriterProbe {
+                            writer: parking_lot::Mutex::new(Some(writer)),
+                        }),
+                    );
+                let loose = Router::new()
+                    .with_body_policy(RequestBodyPolicy::new().max_total_body_size(64));
+                let router = merge(strict, loose, strict_first);
+                let response = futures_lite::future::block_on(
+                    router.handle_http1_streaming_request_with_cx(&cx, request),
+                );
+                assert_eq!(response.status, 413);
+            }
+        }
+    }
+
     #[test]
     fn body_policy_server_router_and_route_merge_monotonically() {
         let server = RequestBodyPolicy::new()

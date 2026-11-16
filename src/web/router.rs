@@ -726,6 +726,7 @@ pub struct Router {
     extensions: Extensions,
     server_body_policy: Option<RequestBodyPolicy>,
     body_policy: Option<RequestBodyPolicy>,
+    merged_body_policies: Option<Box<MergedRouterBodyPolicies>>,
     default_trace: Option<DefaultTrace>,
     /// Mounts compete with routes by specificity
     /// ([`Router::prefer_specific_mounts`]).
@@ -3139,6 +3140,7 @@ impl Default for Router {
             extensions: Extensions::new(),
             server_body_policy: None,
             body_policy: None,
+            merged_body_policies: None,
             default_trace: Some(DefaultTrace::default()),
             prefer_specific_mounts: false,
         }
@@ -3182,6 +3184,11 @@ impl Router {
     /// The prefix is normalized to always begin with `/` (br-asupersync-vftw38 item 9).
     /// If another router was already mounted at this exact prefix, their routes and
     /// mounts merge rather than the first shadowing the second (br-asupersync-vftw38 item 7).
+    /// Explicit body policies from both mounts are met, so a later registration
+    /// cannot loosen a ceiling. Both mounts' legacy extractor limits join that
+    /// meet once an explicit policy is active, including at an ancestor or route.
+    /// Without an explicit policy, legacy extensions retain their existing
+    /// last-write-wins behavior, as does unrelated application state.
     #[must_use]
     pub fn nest(mut self, prefix: &str, router: Self) -> Self {
         let prefix = normalize_nest_prefix(prefix);
@@ -3200,6 +3207,27 @@ impl Router {
     /// Merge another router's routes, nested mounts, and fallback into this router
     /// (br-asupersync-vftw38 item 7).
     fn merge_router(&mut self, other: Self) {
+        // br-asupersync-vftw38: extension replacement must not erase a body
+        // ceiling from either mount. Retain legacy limits separately: a policy
+        // may be introduced later by an ancestor or a selected route, while
+        // legacy-only dispatch must keep its established extension precedence.
+        let merged_body_policies = MergedRouterBodyPolicies {
+            explicit: meet_optional_policy_state(
+                self.explicit_body_policy_state(),
+                other.explicit_body_policy_state(),
+            ),
+            legacy: meet_optional_policy_state(
+                self.legacy_body_policy_state(),
+                other.legacy_body_policy_state(),
+            ),
+        };
+        self.merged_body_policies = if merged_body_policies.explicit.is_some()
+            || merged_body_policies.legacy.is_some()
+        {
+            Some(Box::new(merged_body_policies))
+        } else {
+            None
+        };
         for (pattern, mut method_router) in other.routes {
             if let Some((registered, existing)) = self
                 .routes
@@ -3232,12 +3260,53 @@ impl Router {
             self.implicit_not_found = other.implicit_not_found;
         }
         self.extensions.extend_from(&other.extensions);
-        if self.body_policy.is_none() {
-            self.body_policy = other.body_policy;
+        self.body_policy = meet_optional_with(
+            self.body_policy,
+            other.body_policy,
+            RequestBodyPolicy::tightened_with,
+        );
+        self.server_body_policy = meet_optional_with(
+            self.server_body_policy,
+            other.server_body_policy,
+            RequestBodyPolicy::tightened_with,
+        );
+    }
+
+    fn explicit_body_policy_state(&self) -> Option<RequestBodyPolicyState> {
+        meet_optional_policy_state(
+            self.merged_body_policies
+                .as_ref()
+                .and_then(|policies| policies.explicit),
+            explicit_policy_state_from_extensions(&self.extensions),
+        )
+    }
+
+    fn legacy_body_policy_state(&self) -> Option<RequestBodyPolicyState> {
+        meet_optional_policy_state(
+            self.merged_body_policies
+                .as_ref()
+                .and_then(|policies| policies.legacy),
+            legacy_policy_state_from_extensions(&self.extensions),
+        )
+    }
+
+    fn deferred_legacy_body_policy_state(
+        &self,
+        inherited: &Extensions,
+    ) -> Option<RequestBodyPolicyState> {
+        let inherited = inherited
+            .get_typed::<DeferredLegacyBodyPolicy>()
+            .map(|policy| policy.0);
+        let retained = self
+            .merged_body_policies
+            .as_ref()
+            .and_then(|policies| policies.legacy);
+        if inherited.is_none() && retained.is_none() {
+            return None;
         }
-        if self.server_body_policy.is_none() {
-            self.server_body_policy = other.server_body_policy;
-        }
+        // Until an explicit policy is reached, an ordinary deeper legacy
+        // extension still overrides its inherited plane, just as before.
+        override_legacy_policy_state(inherited, self.legacy_body_policy_state())
     }
 
     /// Let this router's mounts compete with its own routes by specificity.
@@ -4276,6 +4345,9 @@ impl Router {
             if let Some(value) = source.get_typed_cloned::<RequestBodyPolicyState>() {
                 target.insert_typed(value);
             }
+            if let Some(value) = source.get_typed_cloned::<DeferredLegacyBodyPolicy>() {
+                target.insert_typed(value);
+            }
         }
 
         fn apply_probe_policy(
@@ -4294,8 +4366,14 @@ impl Router {
         let mut router = self;
         loop {
             let inherited = explicit_policy_state_from_extensions(&probe.extensions);
-            let extension_policy = explicit_policy_state_from_extensions(&router.extensions);
+            let extension_policy = router.explicit_body_policy_state();
+            let deferred_legacy = router.deferred_legacy_body_policy_state(&probe.extensions);
             extend_policy_extensions(&mut probe.extensions, &router.extensions);
+            if let Some(policy) = deferred_legacy {
+                probe
+                    .extensions
+                    .insert_typed(DeferredLegacyBodyPolicy(policy));
+            }
             let local = meet_optional_policy_state(
                 extension_policy,
                 meet_optional_policy_state(
@@ -4337,8 +4415,13 @@ impl Router {
     /// Route-match and dispatch without trace instrumentation.
     async fn handle_inner(&self, cx: &Cx, mut req: Request) -> Response {
         let inherited_policy = explicit_policy_state_from_extensions(&req.extensions);
-        let local_extension_policy = explicit_policy_state_from_extensions(&self.extensions);
+        let local_extension_policy = self.explicit_body_policy_state();
+        let deferred_legacy = self.deferred_legacy_body_policy_state(&req.extensions);
         req.extensions.extend_from(&self.extensions);
+        if let Some(policy) = deferred_legacy {
+            req.extensions
+                .insert_typed(DeferredLegacyBodyPolicy(policy));
+        }
         let local_policy = meet_optional_policy_state(
             local_extension_policy,
             meet_optional_policy_state(
@@ -4559,14 +4642,12 @@ impl Router {
         inherited_legacy: Option<RequestBodyPolicyState>,
         entries: &mut Vec<RouteBodyPolicyInfo>,
     ) {
-        let legacy_policy = override_legacy_policy_state(
-            inherited_legacy,
-            legacy_policy_state_from_extensions(&self.extensions),
-        );
+        let legacy_policy =
+            override_legacy_policy_state(inherited_legacy, self.legacy_body_policy_state());
         let explicit_policy = meet_optional_policy_state(
             inherited_policy,
             meet_optional_policy_state(
-                explicit_policy_state_from_extensions(&self.extensions),
+                self.explicit_body_policy_state(),
                 meet_optional_policy_state(
                     self.server_body_policy
                         .map(RequestBodyPolicyState::from_policy),
@@ -4609,6 +4690,17 @@ impl Router {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+struct MergedRouterBodyPolicies {
+    explicit: Option<RequestBodyPolicyState>,
+    legacy: Option<RequestBodyPolicyState>,
+}
+
+// A duplicate mount's legacy limits are retained without activating a
+// first-class policy or changing the legacy projections seen by its handlers.
+#[derive(Debug, Clone, Copy)]
+struct DeferredLegacyBodyPolicy(RequestBodyPolicyState);
 
 #[derive(Debug, Clone, Copy, Default)]
 struct RequestBodyPolicyState {
@@ -4747,10 +4839,16 @@ fn apply_request_body_policy(
     ) else {
         return Ok(());
     };
-    let state = legacy_policy_state_from_extensions(&request.extensions)
-        .map_or(explicit_policy, |legacy| {
-            explicit_policy.tightened_with(legacy)
-        });
+    let legacy = meet_optional_policy_state(
+        legacy_policy_state_from_extensions(&request.extensions),
+        request
+            .extensions
+            .get_typed::<DeferredLegacyBodyPolicy>()
+            .map(|policy| policy.0),
+    );
+    let state = legacy.map_or(explicit_policy, |legacy| {
+        explicit_policy.tightened_with(legacy)
+    });
     let effective = state.resolved();
     if let Some(raw_content_length) = request.header("content-length") {
         let declared =
