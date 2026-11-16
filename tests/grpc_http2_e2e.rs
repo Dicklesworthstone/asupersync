@@ -3856,3 +3856,288 @@ mod legacy_streaming {
         );
     }
 }
+
+// Owned registered unary dispatch must retain its actual request subtree until
+// every descendant has retired, including when the result crosses TCP/H2.
+#[cfg(not(target_arch = "wasm32"))]
+mod scoped_unary_tcp {
+    use super::*;
+    use asupersync::channel::oneshot;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeHandle};
+    use asupersync::types::RegionId;
+    use std::pin::pin;
+
+    const UNARY: &str = "/test.ScopedTcp/Unary";
+    const FAIL: &str = "/test.ScopedTcp/Fail";
+
+    struct CleanupGate {
+        ready: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    }
+
+    struct ChildDropped(Arc<AtomicUsize>);
+
+    impl Drop for ChildDropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ScopedTcpService {
+        first_cleanup: Mutex<Option<CleanupGate>>,
+        cleanup_cx: Cx,
+        calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        regions: Arc<Mutex<Vec<RegionId>>>,
+    }
+
+    impl NamedService for ScopedTcpService {
+        const NAME: &'static str = "test.ScopedTcp";
+    }
+
+    impl ServiceHandler for ScopedTcpService {
+        fn descriptor(&self) -> &ServiceDescriptor {
+            static METHODS: &[MethodDescriptor] = &[
+                MethodDescriptor::unary("Unary", UNARY),
+                MethodDescriptor::unary("Fail", FAIL),
+            ];
+            static DESCRIPTOR: ServiceDescriptor =
+                ServiceDescriptor::new("ScopedTcp", "test", METHODS);
+            &DESCRIPTOR
+        }
+
+        fn method_names(&self) -> Vec<&str> {
+            vec!["Unary", "Fail"]
+        }
+
+        fn call_unary<'a>(
+            &'a self,
+            cx: &'a Cx,
+            path: &'a str,
+            request: Request<Bytes>,
+            trailers: Metadata,
+        ) -> ServiceHandlerFuture<'a> {
+            Box::pin(async move {
+                assert!(trailers.is_empty());
+                let ambient = Cx::current().expect("admitted request context");
+                assert_eq!(ambient.task_id(), cx.task_id());
+                assert_eq!(ambient.region_id(), cx.region_id());
+                assert_ne!(cx.region_id(), self.cleanup_cx.region_id());
+                assert!(matches!(
+                    request.metadata().get("x-asupersync-grpc-transport"),
+                    Some(MetadataValue::Ascii(value)) if value == "native-h2"
+                ));
+                self.regions.lock().unwrap().push(cx.region_id());
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let gate = self.first_cleanup.lock().unwrap().take();
+                let cleanup_cx = self.cleanup_cx.clone();
+                let drops = Arc::clone(&self.drops);
+                let (parked, mut started) = oneshot::channel();
+                let _child = cx
+                    .spawn(move |child_cx| async move {
+                        let _dropped = ChildDropped(drops);
+                        let mut parked = Some(parked);
+                        let mut cancelled = pin!(child_cx.cancelled());
+                        poll_fn(|task| match cancelled.as_mut().poll(task) {
+                            Poll::Ready(()) => Poll::Ready(()),
+                            Poll::Pending => {
+                                if let Some(parked) = parked.take() {
+                                    parked.send_blocking(()).unwrap();
+                                }
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        assert!(child_cx.checkpoint().is_err());
+
+                        if let Some(CleanupGate { ready, mut release }) = gate {
+                            let mut ready = Some(ready);
+                            let mut released = pin!(release.recv(&cleanup_cx));
+                            poll_fn(|task| match released.as_mut().poll(task) {
+                                Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                                Poll::Pending => {
+                                    if let Some(ready) = ready.take() {
+                                        ready.send_blocking(()).unwrap();
+                                    }
+                                    Poll::Pending
+                                }
+                            })
+                            .await;
+                        }
+                    })
+                    .expect("spawn request-owned descendant");
+                started.recv(cx).await.expect("descendant actually parked");
+                if path == FAIL {
+                    return Err(Status::with_details(
+                        Code::Cancelled,
+                        "application cancellation %\n café",
+                        Bytes::from_static(b"scoped-details"),
+                    ));
+                }
+                assert_eq!(path, UNARY);
+                let mut response = Response::new(request.into_inner());
+                assert!(response.metadata_mut().insert("x-scoped-reply", "complete"));
+                Ok(response)
+            })
+        }
+    }
+
+    async fn round_trip(cx: Cx, runtime: RuntimeHandle, workers: usize) {
+        let (ready, mut cleanup) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let regions = Arc::new(Mutex::new(Vec::new()));
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(1024)
+                .max_send_message_size(1024)
+                .stream_idle_timeout(Some(Duration::from_secs(30)))
+                .add_service(ScopedTcpService {
+                    first_cleanup: Mutex::new(Some(CleanupGate { ready, release: released })),
+                    cleanup_cx: cx.clone(),
+                    calls: Arc::clone(&calls),
+                    drops: Arc::clone(&drops),
+                    regions: Arc::clone(&regions),
+                })
+                .build(),
+        );
+        let listener = server
+            .bind_registered_http2_scoped(
+                "127.0.0.1:0",
+                HostPolicy::allow_list(vec!["127.0.0.1".to_owned()]),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("bind request-owned registered gRPC listener");
+        let address = listener.local_addr().unwrap();
+        let manager = listener.connection_manager().clone();
+        let stats = listener.stats_handle();
+        let listener_runtime = runtime.clone();
+        let serving = runtime
+            .try_spawn(async move { listener.run(&listener_runtime).await })
+            .expect("spawn request-owned gRPC listener");
+        let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
+            .max_send_message_size(1024)
+            .max_recv_message_size(1024)
+            .reuse_connections(1)
+            .connect()
+            .await
+            .unwrap();
+        let mut client = GrpcClient::new(channel);
+        let mut first = Box::pin(client.unary::<Bytes, Bytes>(
+            UNARY,
+            Request::new(Bytes::from_static(b"first response")),
+        ));
+        let mut cleanup_wait = pin!(cleanup.recv(&cx));
+        poll_fn(|task| {
+            assert!(
+                first.as_mut().poll(task).is_pending(),
+                "wire response must wait while request descendant cleanup is parked"
+            );
+            cleanup_wait.as_mut().poll(task)
+        })
+        .await
+        .expect("cleanup reached its actual Pending boundary");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        release.send_blocking(()).unwrap();
+
+        let response = first.await.expect("first scoped unary reply");
+        assert_eq!(response.get_ref().as_ref(), b"first response");
+        assert!(matches!(
+            response.metadata().get("x-scoped-reply"),
+            Some(MetadataValue::Ascii(value)) if value == "complete"
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let connections = manager.active_connections();
+        assert_eq!(connections.len(), 1);
+        let connection_id = connections[0].0;
+
+        let status = client
+            .unary::<Bytes, Bytes>(FAIL, Request::new(Bytes::new()))
+            .await
+            .expect_err("application status crosses the same scoped wire path");
+        assert_eq!(status.code(), Code::Cancelled);
+        assert_eq!(status.message(), "application cancellation %\n café");
+        assert_eq!(status.details().unwrap().as_ref(), b"scoped-details");
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        let after_error = manager.active_connections();
+        assert_eq!(after_error.len(), 1);
+        assert_eq!(after_error[0].0, connection_id);
+
+        let response = client
+            .unary::<Bytes, Bytes>(
+                UNARY,
+                Request::new(Bytes::from_static(b"after error")),
+            )
+            .await
+            .expect("connection remains reusable after a scoped application error");
+        assert_eq!(response.get_ref().as_ref(), b"after error");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        let after_reuse = manager.active_connections();
+        assert_eq!(after_reuse.len(), 1);
+        assert_eq!(after_reuse[0].0, connection_id);
+        assert_eq!(stats.snapshot().accepted_total, 1);
+        {
+            let regions = regions.lock().unwrap();
+            assert_eq!(regions.len(), 3);
+            assert_ne!(regions[0], regions[1]);
+            assert_ne!(regions[0], regions[2]);
+            assert_ne!(regions[1], regions[2]);
+        }
+        assert!(!cx.is_cancel_requested());
+
+        drop(client);
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let drained = serving.await.expect("scoped listener drains");
+        assert_eq!(drained.force_closed, 0);
+        assert_eq!(manager.active_count(), 0);
+        log_test_event(
+            "scoped_unary_tcp_cleanup_and_reuse",
+            json!({
+                "workers": workers,
+                "service_calls": 3,
+                "child_drops": 3,
+                "accepted_connections": stats.snapshot().accepted_total,
+                "application_status": "Cancelled",
+                "active_connections": manager.active_count(),
+            }),
+        );
+    }
+
+    fn native_round_trip(workers: usize) {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .expect("scoped unary TCP runtime");
+        let handle = runtime.handle();
+        runtime.block_on(async {
+            let root = Cx::current().unwrap();
+            let mut task = root
+                .spawn(move |cx| round_trip(cx, handle, workers))
+                .expect("spawn scoped unary TCP scenario");
+            task.join(&root).await.expect("scoped unary TCP scenario");
+        });
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    #[test]
+    fn public_grpc_client_scoped_unary_waits_for_cleanup_and_reuses_connection() {
+        init_test("public_grpc_client_scoped_unary_waits_for_cleanup_and_reuses_connection");
+        for workers in [1, 2] {
+            owned_stream_watchdog(move || native_round_trip(workers));
+        }
+        test_complete!("public_grpc_client_scoped_unary_waits_for_cleanup_and_reuses_connection");
+    }
+}

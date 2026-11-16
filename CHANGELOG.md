@@ -104,7 +104,9 @@ artifacts.
   Request children and finalizers retire before a response is returned; cleanup
   panics become `INTERNAL`. The original deadline includes admission and
   interceptor time, and nested cancellation causes retain deadline or budget
-  status without rewriting application errors. (`br-asupersync-m8xsjx`.)
+  status without rewriting application errors. Native serving is available via
+  `bind_registered_http2_scoped`, `bind_registered_http2_unix_scoped`, and
+  `serve_http2_scoped`. (`br-asupersync-m8xsjx`.)
 - **Callable gRPC reflection builder:** `enable_reflection_rpc` installs the
   native v1 and v1alpha protobuf services from an explicit descriptor catalog.
   Both built-in versions share bounded admission, use the final authorization

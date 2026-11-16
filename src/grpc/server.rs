@@ -1612,6 +1612,38 @@ impl Server {
             .map(|listener| self.with_http2_keepalive(listener))
     }
 
+    /// Bind native HTTP/2 unary RPCs with independently owned request regions.
+    ///
+    /// Uses [`Self::registered_unary_scoped_handler`], preserving the native
+    /// transport's flow control, keepalive, admission limits, and shutdown
+    /// management. A handler's children and finalizers retire before its gRPC
+    /// response is encoded. Drive the returned listener with
+    /// [`Http2Listener::run`], or use [`Self::serve_http2_scoped`].
+    ///
+    /// `drain_grace` bounds handler cancellation drain, not the time needed for
+    /// a non-cooperative descendant to reach quiescence.
+    ///
+    /// # Errors
+    ///
+    /// Refuses empty service registries, invalid transport limits, and bind
+    /// failures before serving requests.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn bind_registered_http2_scoped<A>(
+        self: &Arc<Self>,
+        addr: A,
+        host_policy: HostPolicy,
+        drain_grace: Duration,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
+    where
+        A: std::net::ToSocketAddrs + Send + 'static,
+    {
+        let transport_handler = self.registered_unary_scoped_handler(drain_grace)?;
+        let config = self.http2_listener_config(host_policy);
+        Http2Listener::bind_with_config(addr, transport_handler, config)
+            .await
+            .map(|listener| self.with_http2_keepalive(listener))
+    }
+
     /// [`Self::bind_registered_http2`] on a Unix-domain socket listener, the
     /// usual transport of node-local gRPC services (CSI and device plugins,
     /// container runtimes, sidecars). Clients dial `unix:` targets with
@@ -1630,6 +1662,34 @@ impl Server {
     ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
     {
         let transport_handler = self.registered_unary_handler()?;
+        let config = self.http2_listener_config(host_policy);
+        Ok(self.with_http2_keepalive(Http2Listener::from_unix_listener(
+            listener,
+            transport_handler,
+            config,
+        )))
+    }
+
+    /// Serve independently owned unary requests over a Unix-domain listener.
+    ///
+    /// This is [`Self::bind_registered_http2_scoped`] with a caller-owned Unix
+    /// listener. The same request cleanup, gRPC framing, flow control, and
+    /// keepalive policies apply. Drive the result with [`Http2Listener::run`].
+    /// The host policy must admit the client's HTTP/2 authority; requests have
+    /// no peer address, and this transport does not support TLS.
+    ///
+    /// # Errors
+    ///
+    /// Refuses empty service registries and invalid transport limits.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub fn bind_registered_http2_unix_scoped(
+        self: &Arc<Self>,
+        listener: crate::net::unix::UnixListener,
+        host_policy: HostPolicy,
+        drain_grace: Duration,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
+    {
+        let transport_handler = self.registered_unary_scoped_handler(drain_grace)?;
         let config = self.http2_listener_config(host_policy);
         Ok(self.with_http2_keepalive(Http2Listener::from_unix_listener(
             listener,
@@ -1765,6 +1825,34 @@ impl Server {
         A: std::net::ToSocketAddrs + Send + 'static,
     {
         self.bind_registered_http2(addr, host_policy)
+            .await?
+            .run(runtime)
+            .await
+    }
+
+    /// Bind and run registered unary RPCs with request-owned cleanup.
+    ///
+    /// This drives [`Self::bind_registered_http2_scoped`] through the native
+    /// listener's graceful shutdown path. Each call inherits its listener
+    /// context and completes its child-region cleanup before returning a gRPC
+    /// result. Use the bind method when the caller needs the listener's
+    /// shutdown signal, local address, or connection manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns registration, transport configuration, bind, or listener errors.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn serve_http2_scoped<A>(
+        self: &Arc<Self>,
+        runtime: &RuntimeHandle,
+        addr: A,
+        host_policy: HostPolicy,
+        drain_grace: Duration,
+    ) -> io::Result<ShutdownStats>
+    where
+        A: std::net::ToSocketAddrs + Send + 'static,
+    {
+        self.bind_registered_http2_scoped(addr, host_policy, drain_grace)
             .await?
             .run(runtime)
             .await
