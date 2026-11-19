@@ -312,6 +312,45 @@ fn an_ack_only_step_sends_no_probe_when_the_loss_timer_is_due() {
     });
 }
 
+/// An owner that was not scheduled past its probe deadline still reads the
+/// ACK that queued meanwhile. A due loss timer used to cut the ACK-only wait
+/// to zero, so the step returned without reading the socket.
+#[test]
+fn an_ack_only_step_reads_a_queued_ack_after_the_loss_timer_is_due() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let (mut client, mut server) = live_pair(&cx).await;
+        settle(&cx, &mut client, &mut server).await;
+
+        let sent = queue(&cx, &mut server, b"picture");
+        assert!(server.flush(&cx).await.expect("server flush") > 0);
+        // The client receives and acknowledges while the server is not driven.
+        let progress = client
+            .acknowledge_io_once(&cx, Duration::from_secs(2))
+            .await
+            .expect("client acknowledges");
+        assert!(progress.packets_sent > 0, "no ACK sent: {progress:?}");
+        assert_eq!(send_state(&server, sent), (7, Some(0), 0));
+        // On loopback the first probe is due about 1 s after the send.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let progress = server
+            .acknowledge_io_once(&cx, Duration::from_millis(30))
+            .await
+            .expect("server reads the queued ACK");
+        assert!(
+            progress.packets_received > 0,
+            "the socket was not read: {progress:?}"
+        );
+        assert_eq!(progress.packets_sent, 0, "ack-only step sent: {progress:?}");
+        assert_eq!(
+            send_state(&server, sent),
+            (7, Some(7), 0),
+            "the queued ACK did not release the sent bytes"
+        );
+    });
+}
+
 fn queued_datagrams(owner: &NativeQuicUdpConnection) -> usize {
     owner.connection().inner().pending_outbound_datagram_count()
 }

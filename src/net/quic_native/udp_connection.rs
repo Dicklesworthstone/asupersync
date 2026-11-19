@@ -1171,6 +1171,9 @@ impl NativeQuicUdpConnection {
     /// not sent. Nothing is sent outside the established state or while
     /// packets assembled earlier still wait for the socket.
     ///
+    /// A due loss timer neither sends a probe nor shortens the receive wait,
+    /// so ACKs that queued while the owner was not scheduled are still read.
+    ///
     /// For an owner that must learn which already-sent bytes the peer has
     /// acknowledged without sending application data, e.g. after an
     /// authority fence, while still acknowledging a peer that may be waiting
@@ -1217,7 +1220,7 @@ impl NativeQuicUdpConnection {
             return Ok(progress);
         }
         let received = if self.early_one_rtt_packets.is_empty() {
-            let bounded_wait = self.receive_wait_duration(cx, receive_timeout)?;
+            let bounded_wait = self.receive_wait_duration(cx, receive_timeout, transmit)?;
             if bounded_wait.is_zero() {
                 progress.receive_timed_out = true;
                 if transmit {
@@ -1566,10 +1569,19 @@ impl NativeQuicUdpConnection {
         Ok(true)
     }
 
+    /// The receive wait: `requested`, cut short by the idle deadline and, when
+    /// `loss_timer` is set, by the loss timer this drive services on wake.
+    ///
+    /// The ACK-only drive passes `loss_timer: false`. It never services the
+    /// loss timer, so an overdue probe must not cut its wait to zero: a zero
+    /// wait returns without reading the socket, and an owner that was not
+    /// scheduled past its PTO could then never learn the ACKs already queued
+    /// for it.
     fn receive_wait_duration(
         &mut self,
         cx: &Cx,
         requested: Duration,
+        loss_timer: bool,
     ) -> Result<Duration, NativeQuicUdpConnectionError> {
         let now = Instant::now();
         let now_micros = self.instant_micros(now);
@@ -1580,6 +1592,7 @@ impl NativeQuicUdpConnection {
             // Preserve caller-driven idle pacing after expiry. Returning zero
             // forever would turn an existing drive loop into a busy loop.
             QuicConnectionState::Closed => return Ok(requested),
+            _ if !loss_timer => None,
             _ => self
                 .connection
                 .inner_mut()

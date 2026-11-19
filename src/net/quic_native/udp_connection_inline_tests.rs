@@ -487,7 +487,7 @@
             assert_eq!(client.connection.inner().transport().close_code(), Some(0));
             assert_eq!(
                 client
-                    .receive_wait_duration(&cx, Duration::from_millis(25))
+                    .receive_wait_duration(&cx, Duration::from_millis(25), true)
                     .unwrap(),
                 Duration::from_millis(25),
                 "closed owners retain caller-driven pacing"
@@ -832,7 +832,7 @@
             assert!(client.local_close.is_none());
             assert_eq!(
                 client
-                    .receive_wait_duration(&cx, Duration::from_secs(1))
+                    .receive_wait_duration(&cx, Duration::from_secs(1), true)
                     .unwrap(),
                 Duration::from_secs(1)
             );
