@@ -417,6 +417,306 @@
         assert!(cx.timer_driver().is_none(), "no time capability is restored");
     }
 
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    mod remote_client_owner_clock_tests {
+        use super::*;
+        use crate::time::{TimerDriverHandle, VirtualClock, raw_wall_now};
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        #[derive(Default)]
+        struct Wakes(AtomicUsize);
+
+        impl Wake for Wakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn clock_context(
+            now: Time,
+            task_id: TaskId,
+        ) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+            let clock = Arc::new(VirtualClock::starting_at(now));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(30, 1),
+                task_id,
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            (cx, clock, timer)
+        }
+
+        #[test]
+        fn attempt_uses_owner_deadline_and_preserves_poller_context_and_boundary_order() {
+            let (owner, clock, timer) =
+                clock_context(Time::from_secs(5), TaskId::new_for_test(31, 1));
+            let (ambient, _, foreign_timer) =
+                clock_context(Time::from_secs(1000), TaskId::new_for_test(32, 1));
+            let ambient_task = ambient.task_id();
+            let _current = Cx::set_current(Some(ambient));
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            let ready = Cell::new(false);
+            let polls = Cell::new(0);
+            let inner = std::future::poll_fn(|_| {
+                assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+                polls.set(polls.get() + 1);
+                if ready.get() { Poll::Ready(7) } else { Poll::Pending }
+            });
+            let mut attempt = Box::pin(remote_client_attempt_timeout(
+                &owner, Duration::from_secs(5), inner,
+            ));
+            assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(polls.get(), 1, "a fast foreign clock cannot skip the attempt");
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+            clock.advance_to(Time::from_secs(10));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            ready.set(true);
+            assert_eq!(attempt.as_mut().poll(&mut task_cx), Poll::Ready(Ok(7)));
+            assert_eq!(timer.pending_count(), 0, "ready work retires its timer immediately");
+            assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+
+            let overdue_polls = Cell::new(0);
+            let inner = std::future::poll_fn(|_| {
+                overdue_polls.set(overdue_polls.get() + 1);
+                if overdue_polls.get() > 1 { Poll::Ready(7) } else { Poll::Pending }
+            });
+            let mut overdue = Box::pin(remote_client_attempt_timeout(
+                &owner, Duration::from_secs(5), inner,
+            ));
+            assert!(overdue.as_mut().poll(&mut task_cx).is_pending());
+            clock.advance_to(Time::from_secs(16));
+            assert_eq!(timer.process_timers(), 1);
+            assert_eq!(overdue.as_mut().poll(&mut task_cx), Poll::Ready(Err(())));
+            assert_eq!(overdue_polls.get(), 1, "overdue work must not start another exchange");
+            assert_eq!(timer.pending_count(), 0);
+
+            let mut dropped = Box::pin(remote_client_attempt_timeout(
+                &owner, Duration::from_secs(5), std::future::pending::<()>(),
+            ));
+            assert!(dropped.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            drop(dropped);
+            assert_eq!(timer.pending_count(), 0, "dropping an attempt retires its timer");
+            assert_eq!(foreign_timer.pending_count(), 0);
+        }
+
+        #[test]
+        fn attempt_keeps_internal_virtual_time_when_public_time_is_restricted() {
+            let (full_owner, clock, timer) =
+                clock_context(Time::from_secs(5), TaskId::new_for_test(31, 1));
+            let owner = {
+                let _current = Cx::set_current(Some(full_owner));
+                let _restricted = Cx::push_restriction(crate::cx::cap::CapMask::none());
+                Cx::current().unwrap()
+            };
+            let (ambient, _, foreign_timer) =
+                clock_context(Time::from_secs(1000), TaskId::new_for_test(32, 1));
+            let ambient_task = ambient.task_id();
+            let _current = Cx::set_current(Some(ambient));
+            assert!(owner.timer_driver().is_none());
+            let mut attempt = Box::pin(remote_client_attempt_timeout(
+                &owner, Duration::from_secs(5), std::future::pending::<()>(),
+            ));
+            let mut task_cx = Context::from_waker(Waker::noop());
+            assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+            clock.advance_to(Time::from_secs(10));
+            assert_eq!(timer.process_timers(), 1);
+            assert_eq!(attempt.as_mut().poll(&mut task_cx), Poll::Ready(Err(())));
+            assert_eq!(timer.pending_count(), 0);
+            assert!(owner.timer_driver().is_none(), "internal accounting cannot restore TIME");
+            assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+        }
+
+        #[test]
+        fn backoff_ignores_foreign_cancel_and_retires_on_expiry_drop_or_owner_cancel() {
+            let (owner, clock, timer) =
+                clock_context(Time::from_secs(5), TaskId::new_for_test(31, 1));
+            let (ambient, _, foreign_timer) =
+                clock_context(Time::from_secs(1000), TaskId::new_for_test(32, 1));
+            ambient.cancel_with(CancelKind::User, Some("unrelated poller cancelled"));
+            let _current = Cx::set_current(Some(ambient));
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            let mut backoff = Box::pin(remote_client_race_cancellation(
+                &owner, remote_client_sleep_on_owner_clock(&owner, Duration::from_secs(5)),
+            ));
+            // Sleep's ambient cancellation path becomes ready on its second
+            // poll; neither poll may bypass this caller's backoff.
+            assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+            assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+            clock.advance_to(Time::from_secs(10));
+            assert_eq!(timer.process_timers(), 1);
+            assert!(matches!(backoff.as_mut().poll(&mut task_cx),
+                Poll::Ready(RemoteClientCancelRace::Completed(()))));
+            assert_eq!(timer.pending_count(), 0);
+
+            let mut dropped = Box::pin(remote_client_sleep_on_owner_clock(
+                &owner, Duration::from_secs(5),
+            ));
+            assert!(dropped.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            drop(dropped);
+            assert_eq!(timer.pending_count(), 0);
+
+            let mut cancelled = Box::pin(remote_client_race_cancellation(
+                &owner, remote_client_sleep_on_owner_clock(&owner, Duration::from_secs(5)),
+            ));
+            assert!(cancelled.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            let before_cancel = wakes.0.load(Ordering::SeqCst);
+            owner.cancel_with(CancelKind::User, Some("cancel the caller"));
+            assert!(wakes.0.load(Ordering::SeqCst) > before_cancel);
+            assert!(matches!(cancelled.as_mut().poll(&mut task_cx),
+                Poll::Ready(RemoteClientCancelRace::Cancelled)));
+            assert_eq!(timer.pending_count(), 0, "owner cancellation drops the losing timer");
+            assert_eq!(foreign_timer.pending_count(), 0);
+        }
+
+        #[test]
+        fn driverless_attempt_and_cancel_wait_keep_wall_time_under_foreign_clock() {
+            let deadline = raw_wall_now() + Duration::from_secs(3600);
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(30, 1),
+                TaskId::new_for_test(31, 1),
+                Budget::INFINITE.with_deadline(deadline),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let (ambient, _, foreign_timer) = clock_context(
+                deadline + Duration::from_secs(3600), TaskId::new_for_test(32, 1),
+            );
+            let ambient_task = ambient.task_id();
+            let _current = Cx::set_current(Some(ambient));
+            let before = raw_wall_now();
+            let now = remote_client_owner_now(&owner);
+            let after = raw_wall_now();
+            assert!(now >= before && now <= after);
+            assert!(!remote_client_is_cancelled(&owner));
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task_cx = Context::from_waker(&waker);
+            let polls = Cell::new(0);
+            let inner = std::future::poll_fn(|_| {
+                assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+                polls.set(polls.get() + 1);
+                Poll::<()>::Pending
+            });
+            let mut attempt = Box::pin(remote_client_race_cancellation(
+                &owner, remote_client_attempt_timeout(&owner, Duration::from_secs(3600), inner),
+            ));
+            assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+            assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+            assert!(polls.get() > 0);
+            assert!(!owner.is_cancel_requested(), "the cancellation wait keeps the owner clock");
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            let mut backoff = Box::pin(remote_client_sleep_on_owner_clock(
+                &owner, Duration::from_secs(3600),
+            ));
+            assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+            drop(backoff);
+            let before_cancel = wakes.0.load(Ordering::SeqCst);
+            owner.cancel_with(CancelKind::User, Some("cancel driverless caller"));
+            assert!(wakes.0.load(Ordering::SeqCst) > before_cancel);
+            assert!(matches!(attempt.as_mut().poll(&mut task_cx),
+                Poll::Ready(RemoteClientCancelRace::Cancelled)));
+            assert_eq!(owner.cancel_reason().unwrap().kind(), CancelKind::User);
+            assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+            assert_eq!(foreign_timer.pending_count(), 0);
+
+            let mut expired = Box::pin(remote_client_attempt_timeout(
+                &owner, Duration::ZERO, std::future::pending::<()>(),
+            ));
+            assert_eq!(expired.as_mut().poll(&mut task_cx), Poll::Ready(Err(())));
+            assert_eq!(foreign_timer.pending_count(), 0);
+        }
+
+        #[test]
+        fn earlier_caller_budget_wakes_attempt_and_masked_expiry_is_not_rearmed() {
+            for masked in [false, true] {
+                let (full_owner, clock, timer) =
+                    clock_context(Time::from_secs(5), TaskId::new_for_test(31, 1));
+                full_owner.inner.write().budget.deadline = Some(Time::from_secs(6));
+                let owner = {
+                    let _current = Cx::set_current(Some(full_owner));
+                    let _restricted = Cx::push_restriction(crate::cx::cap::CapMask::none());
+                    Cx::current().unwrap()
+                };
+                let (ambient, _, foreign_timer) =
+                    clock_context(Time::from_secs(1000), TaskId::new_for_test(32, 1));
+                let _current = Cx::set_current(Some(ambient));
+                let wakes = Arc::new(Wakes::default());
+                let waker = Waker::from(Arc::clone(&wakes));
+                let mut task_cx = Context::from_waker(&waker);
+                let mut attempt = Box::pin(remote_client_race_cancellation(
+                    &owner,
+                    remote_client_attempt_timeout(
+                        &owner, Duration::from_secs(60), std::future::pending::<()>(),
+                    ),
+                ));
+                let mut reach_deadline = || {
+                    assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+                    assert_eq!(timer.pending_count(), 2);
+                    assert_eq!(timer.next_deadline(), Some(Time::from_secs(6)));
+                    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+                    clock.advance_to(Time::from_secs(6));
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+                    if masked {
+                        assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+                        assert_eq!(timer.pending_count(), 1, "only the longer attempt timer remains");
+                        let after_deadline = wakes.0.load(Ordering::SeqCst);
+                        for _ in 0..3 {
+                            assert!(attempt.as_mut().poll(&mut task_cx).is_pending());
+                            assert_eq!(timer.pending_count(), 1);
+                        }
+                        assert_eq!(wakes.0.load(Ordering::SeqCst), after_deadline);
+                        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+                    }
+                    wakes.0.load(Ordering::SeqCst)
+                };
+                let before_unmask = if masked {
+                    owner.masked(reach_deadline)
+                } else {
+                    reach_deadline()
+                };
+                if masked {
+                    assert!(wakes.0.load(Ordering::SeqCst) > before_unmask);
+                }
+                assert!(matches!(attempt.as_mut().poll(&mut task_cx),
+                    Poll::Ready(RemoteClientCancelRace::Cancelled)));
+                assert_eq!(owner.cancel_reason().unwrap().kind(), CancelKind::Deadline);
+                assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                assert_eq!(timer.pending_count(), 0);
+                assert_eq!(foreign_timer.pending_count(), 0);
+                assert!(owner.timer_driver().is_none());
+            }
+        }
+    }
+
     #[cfg(feature = "tls")]
     #[test]
     fn peer_exchange_credits_bound_each_configured_identity_and_release_once() {

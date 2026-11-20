@@ -6899,13 +6899,90 @@ enum RemoteClientCancelRace<T> {
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_client_owner_now(cx: &Cx) -> Time {
+    let _owner = cx.clone().set_current_restricted();
+    cx.now()
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_client_is_cancelled(cx: &Cx) -> bool {
+    let _owner = cx.clone().set_current_restricted();
+    cx.checkpoint().is_err()
+}
+
+/// Keep deadline arithmetic and wake registration on the explicit caller's
+/// clock while leaving TCP/TLS polling on the polling runtime's I/O driver.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_client_attempt_timeout<F: Future>(
+    cx: &Cx,
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, ()> {
+    use std::task::Poll;
+
+    let deadline = remote_client_owner_now(cx) + duration;
+    let mut timer = std::pin::pin!(cx.sleep_until_on_clock(deadline));
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        // Match TimeoutFuture: ready work wins exactly at the boundary, but
+        // an overdue attempt cannot start another exchange before timing out.
+        if remote_client_owner_now(cx) > deadline
+            && timer.as_mut().poll_deadline(task_cx).is_ready()
+        {
+            return Poll::Ready(Err(()));
+        }
+        if let Poll::Ready(output) = future.as_mut().poll(task_cx) {
+            return Poll::Ready(Ok(output));
+        }
+        timer.as_mut().poll_deadline(task_cx).map(|()| Err(()))
+    })
+    .await
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_client_sleep_on_owner_clock(cx: &Cx, duration: Duration) {
+    let deadline = remote_client_owner_now(cx) + duration;
+    let mut timer = std::pin::pin!(cx.sleep_until_on_clock(deadline));
+    // Caller cancellation is raced separately. The poller's cancellation
+    // must neither complete a backoff early nor substitute its clock.
+    std::future::poll_fn(|task_cx| timer.as_mut().poll_deadline(task_cx)).await;
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 async fn remote_client_wait_for_cancellation(cx: &Cx) {
-    if cx.checkpoint().is_err() {
-        return;
-    }
-    let (sender, mut receiver) = oneshot::channel::<()>();
-    let _ = receiver.recv(cx).await;
-    drop(sender);
+    use std::task::Poll;
+
+    let mut cancellation = std::pin::pin!(async {
+        if cx.checkpoint().is_err() {
+            return;
+        }
+        let (sender, mut receiver) = oneshot::channel::<()>();
+        let _ = receiver.recv(cx).await;
+        drop(sender);
+    });
+    let mut budget_timer = None;
+    let mut observed_deadline = None;
+    std::future::poll_fn(|task_cx| {
+        let _owner = cx.clone().set_current_restricted();
+        if cancellation.as_mut().poll(task_cx).is_ready() {
+            return Poll::Ready(());
+        }
+        if cx.budget().deadline != observed_deadline {
+            budget_timer = cx.budget_deadline_sleep();
+            observed_deadline = budget_timer.as_ref().map(crate::time::Sleep::deadline);
+        }
+        if let Some(timer) = &mut budget_timer
+            && Pin::new(timer).poll_deadline(task_cx).is_ready()
+        {
+            // A parked caller's earlier budget must wake this wait itself.
+            // Keep the observed deadline after a masked expiry so it is not
+            // rearmed; the oneshot keeps its cancellation wake for unmasking.
+            budget_timer = None;
+            return cancellation.as_mut().poll(task_cx);
+        }
+        Poll::Pending
+    })
+    .await;
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7226,11 +7303,15 @@ impl RemoteComputationClient {
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientError,
     > {
-        let wire = RemoteServiceWireRequest::from_spawn_request_at(hello, request, cx.now())
-            .map_err(|source| RemoteComputationClientError::Session {
-                attempts: 0,
-                source: RemoteServiceSessionError::Service(source),
-            })?;
+        let wire = RemoteServiceWireRequest::from_spawn_request_at(
+            hello,
+            request,
+            remote_client_owner_now(cx),
+        )
+        .map_err(|source| RemoteComputationClientError::Session {
+            attempts: 0,
+            source: RemoteServiceSessionError::Service(source),
+        })?;
         let origin = RemoteRequestOrigin::new(cx, request);
         let mut started = self
             .start_session_before_dispatch(cx, &wire, Some(&origin), None)
@@ -7251,7 +7332,7 @@ impl RemoteComputationClient {
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientError,
     > {
-        if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
+        if remote_client_is_cancelled(cx) || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
             return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
         }
         let presented = request.hello().protocol_version();
@@ -7280,7 +7361,9 @@ impl RemoteComputationClient {
 
         let mut attempts = 0_usize;
         loop {
-            if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
+            if remote_client_is_cancelled(cx)
+                || origin.is_some_and(RemoteRequestOrigin::is_cancelled)
+            {
                 return Err(RemoteComputationClientError::Cancelled { attempts });
             }
             attempts = attempts.saturating_add(1);
@@ -7289,8 +7372,8 @@ impl RemoteComputationClient {
                 origin,
                 remote_client_race_cancellation(
                     cx,
-                    crate::time::timeout(
-                        cx.now(),
+                    remote_client_attempt_timeout(
+                        cx,
                         self.config.attempt_timeout,
                         self.start_session_once(endpoint, cx, request, origin, before_dispatch),
                     ),
@@ -7310,7 +7393,9 @@ impl RemoteComputationClient {
                     return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
                 }
             };
-            if cx.checkpoint().is_err() || origin.is_some_and(RemoteRequestOrigin::is_cancelled) {
+            if remote_client_is_cancelled(cx)
+                || origin.is_some_and(RemoteRequestOrigin::is_cancelled)
+            {
                 return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
             }
             match attempt {
@@ -7336,7 +7421,7 @@ impl RemoteComputationClient {
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientError> {
-        if cx.checkpoint().is_err() {
+        if remote_client_is_cancelled(cx) {
             return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
         }
         if request.has_relative_deadline() {
@@ -7355,15 +7440,15 @@ impl RemoteComputationClient {
         }
         let mut attempts = 0_usize;
         loop {
-            if cx.checkpoint().is_err() {
+            if remote_client_is_cancelled(cx) {
                 return Err(RemoteComputationClientError::Cancelled { attempts });
             }
             attempts = attempts.saturating_add(1);
             let endpoint = self.endpoint_for_attempt(attempts);
             let attempt = match remote_client_race_cancellation(
                 cx,
-                crate::time::timeout(
-                    cx.now(),
+                remote_client_attempt_timeout(
+                    cx,
                     self.config.attempt_timeout,
                     self.call_once(endpoint, cx, request),
                 ),
@@ -7379,7 +7464,7 @@ impl RemoteComputationClient {
                     return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
                 }
             };
-            if cx.checkpoint().is_err() {
+            if remote_client_is_cancelled(cx) {
                 return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
             }
             match attempt {
@@ -7487,7 +7572,7 @@ impl RemoteComputationClient {
         cx: &Cx,
         completed_attempts: usize,
     ) -> Result<(), RemoteComputationClientError> {
-        if cx.checkpoint().is_err() {
+        if remote_client_is_cancelled(cx) {
             return Err(RemoteComputationClientError::Cancelled {
                 attempts: completed_attempts,
             });
@@ -7495,7 +7580,8 @@ impl RemoteComputationClient {
         let delay = self.config.retry_delay(cx, completed_attempts);
         if !delay.is_zero() {
             if matches!(
-                remote_client_race_cancellation(cx, crate::time::sleep(cx.now(), delay)).await,
+                remote_client_race_cancellation(cx, remote_client_sleep_on_owner_clock(cx, delay))
+                    .await,
                 RemoteClientCancelRace::Cancelled
             ) {
                 return Err(RemoteComputationClientError::Cancelled {
@@ -7503,7 +7589,7 @@ impl RemoteComputationClient {
                 });
             }
         }
-        if cx.checkpoint().is_err() {
+        if remote_client_is_cancelled(cx) {
             return Err(RemoteComputationClientError::Cancelled {
                 attempts: completed_attempts,
             });

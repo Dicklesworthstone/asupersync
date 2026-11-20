@@ -1566,9 +1566,9 @@
         assert!(attempts_before_cancel > 0, "the live owner must reach the queue attempt");
         assert!(!owner.is_cancel_requested());
         assert_eq!(foreign_timer.pending_count(), 0);
-        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        let wakes_before_cancel = wakes.0.load(Ordering::SeqCst);
         owner.cancel_with(crate::types::CancelKind::User, Some("driverless producer owner"));
-        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(wakes.0.load(Ordering::SeqCst) > wakes_before_cancel);
         assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
         assert_eq!(attempts.load(Ordering::SeqCst), attempts_before_cancel);
         assert!(owner.inner.read().cancel_waker_registrations.is_empty());
