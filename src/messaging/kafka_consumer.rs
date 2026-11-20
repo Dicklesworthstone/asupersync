@@ -1369,27 +1369,103 @@ fn consumer_retry_backoff(config: &ConsumerConfig, attempt: u32) -> Duration {
     Duration::from_millis(base_ms.saturating_mul(exp).min(5000))
 }
 
-#[cfg(feature = "kafka")]
-async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
-    if delay.is_zero() {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        crate::runtime::yield_now().await;
-        return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
+fn consumer_checkpoint(cx: &Cx) -> Result<(), KafkaError> {
+    // A driverless context's budget uses wall time. Do not let a foreign
+    // polling task's virtual clock turn that budget into a cancellation.
+    let _ambient = cx.clone().set_current_restricted();
+    cx.checkpoint().map_err(|_| KafkaError::Cancelled)
+}
+
+#[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+fn consumer_now(cx: &Cx) -> crate::types::Time {
+    cx.timer_driver()
+        .map_or_else(crate::time::raw_wall_now, |driver| driver.now())
+}
+
+/// A parked consumer operation owns both its timer and cancellation wake.
+/// Neither may be borrowed from the task that happens to poll the operation.
+#[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+struct ConsumerWait<'a> {
+    cx: &'a Cx,
+    deadline: crate::types::Time,
+    sleep: Option<Sleep>,
+    budget_deadline: Option<crate::types::Time>,
+    budget_sleep: Option<Sleep>,
+    cancel_token: Option<crate::cx::CancelWakerToken>,
+}
+
+#[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+impl<'a> ConsumerWait<'a> {
+    fn new(cx: &'a Cx, deadline: crate::types::Time) -> Self {
+        Self {
+            cx,
+            deadline,
+            sleep: None,
+            budget_deadline: None,
+            budget_sleep: None,
+            cancel_token: None,
+        }
     }
 
-    let now = cx
-        .timer_driver()
-        .map_or_else(crate::time::wall_now, |driver| driver.now());
-    let mut sleeper = crate::time::sleep(now, delay);
-    std::future::poll_fn(|task_cx| {
-        if cx.checkpoint().is_err() {
-            return std::task::Poll::Ready(Err(KafkaError::Cancelled));
+    fn poll(&mut self, task: &mut std::task::Context<'_>) -> Poll<Result<(), KafkaError>> {
+        let _ambient = self.cx.clone().set_current_restricted();
+        // Register before checking, closing the cancel/check/park race. Keep
+        // the token while cancellation is masked so unmasking also wakes us.
+        self.cancel_token = Some(self.cx.refresh_cancel_waker(self.cancel_token, task.waker()));
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(KafkaError::Cancelled));
         }
-        std::pin::Pin::new(&mut sleeper)
-            .poll(task_cx)
-            .map(|()| Ok(()))
-    })
-    .await
+        if self.cx.budget().deadline != self.budget_deadline {
+            self.budget_sleep = self.cx.budget_deadline_sleep();
+            self.budget_deadline = self.budget_sleep.as_ref().map(Sleep::deadline);
+        }
+        if let Some(timer) = &mut self.budget_sleep {
+            if Pin::new(timer).poll_deadline(task).is_ready() {
+                // A masked deadline wakes once. Keep the observed deadline so
+                // repolls cannot rearm an expired timer, but keep cancellation
+                // registered so leaving the mask wakes this wait again.
+                self.budget_sleep = None;
+            }
+            if self.cx.checkpoint().is_err() {
+                return Poll::Ready(Err(KafkaError::Cancelled));
+            }
+        }
+        let sleep = self.sleep.get_or_insert_with(|| {
+            self.cx.timer_driver().map_or_else(
+                || Sleep::with_wall_clock(self.deadline),
+                |driver| Sleep::with_timer_driver(self.deadline, driver),
+            )
+        });
+        // Cancellation has its own error above. Sleep's ambient cancellation
+        // shortcut must never report a successful backoff or elapsed timeout.
+        Pin::new(sleep).poll_deadline(task).map(|()| Ok(()))
+    }
+}
+
+#[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+impl Drop for ConsumerWait<'_> {
+    fn drop(&mut self) {
+        let _ambient = self.cx.clone().set_current_restricted();
+        if let Some(token) = self.cancel_token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+        // Retire a timer under its owner too, including an abandoned wait.
+        drop(self.sleep.take());
+        drop(self.budget_sleep.take());
+    }
+}
+
+#[cfg(any(feature = "kafka", test))]
+async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
+    if delay.is_zero() {
+        consumer_checkpoint(cx)?;
+        crate::runtime::yield_now().await;
+        return consumer_checkpoint(cx);
+    }
+
+    let deadline = consumer_now(cx).saturating_add_nanos(duration_to_nanos(delay));
+    let mut wait = ConsumerWait::new(cx, deadline);
+    std::future::poll_fn(|task| wait.poll(task)).await
 }
 
 #[cfg(feature = "kafka")]
@@ -1404,7 +1480,7 @@ where
 {
     let mut attempt = 0;
     loop {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        consumer_checkpoint(cx)?;
 
         match attempt_operation().await {
             Ok(value) => return Ok(value),
@@ -1978,7 +2054,7 @@ impl KafkaConsumer {
         cx: &Cx,
         timeout: Duration,
     ) -> Result<Option<NullableConsumerRecord>, KafkaError> {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        consumer_checkpoint(cx)?;
         self.ensure_open()?;
 
         if self.broker_operations_feature_disabled() {
@@ -1991,22 +2067,12 @@ impl KafkaConsumer {
         {
             if let Some((consumer, broker_ops)) = self.broker_backend() {
                 let auto_commit = self.config.enable_auto_commit;
-                // br-asupersync-mskwk7: route deadline computation
-                // through `cx.timer_driver()` so a VirtualClock-backed
-                // lab harness can drive deterministic poll timeouts on
-                // the kafka-feature broker-backend path. Pre-fix this
-                // path read `wall_now()` directly, defeating
-                // `LabRuntime::advance` (mirroring the same defect that
-                // br-asupersync-my0rls fixed for the no-kafka fallback path).
-                let now_fn = || {
-                    cx.timer_driver()
-                        .map_or_else(crate::time::wall_now, |d| d.now())
-                };
+                let now_fn = || consumer_now(cx);
                 let deadline = now_fn().saturating_add_nanos(duration_to_nanos(timeout));
                 let mut first_iteration = true;
 
                 loop {
-                    cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+                    consumer_checkpoint(cx)?;
                     let now = now_fn();
 
                     // The result of the broker poll that just finished is
@@ -2189,23 +2255,14 @@ impl KafkaConsumer {
                 return Ok(None);
             }
 
-            // br-asupersync-6mlvbi: route deadline through
-            // `cx.timer_driver()` on the kafka-feature fallback path
-            // (this branch fires when broker_backend() returns None
-            // even though the kafka feature is enabled — typically a
-            // test harness with force_real_kafka=false). Same defect
-            // shape as br-asupersync-mskwk7 (kafka broker backend
-            // path) and br-asupersync-my0rls (no-kafka fallback path).
-            let now_fn = || {
-                cx.timer_driver()
-                    .map_or_else(crate::time::wall_now, |d| d.now())
-            };
+            let now_fn = || consumer_now(cx);
             let deadline = now_fn().saturating_add_nanos(duration_to_nanos(timeout));
             loop {
-                cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+                consumer_checkpoint(cx)?;
 
                 let mut state_wait = self.state_notify.notified();
-                let mut sleep = Sleep::new(deadline);
+                Pin::new(&mut state_wait).enable();
+                let mut wait = ConsumerWait::new(cx, deadline);
 
                 self.ensure_open()?;
                 self.ensure_has_subscription()?;
@@ -2213,19 +2270,16 @@ impl KafkaConsumer {
                     return Ok(None);
                 }
 
-                () = std::future::poll_fn(|task_cx| {
-                    if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                        return Poll::Ready(());
-                    }
-                    if Pin::new(&mut sleep).poll(task_cx).is_ready() {
-                        return Poll::Ready(());
+                std::future::poll_fn(|task_cx| {
+                    if let Poll::Ready(result) = wait.poll(task_cx) {
+                        return Poll::Ready(result);
                     }
                     if Pin::new(&mut state_wait).poll(task_cx).is_ready() {
-                        return Poll::Ready(());
+                        return Poll::Ready(Ok(()));
                     }
                     Poll::Pending
                 })
-                .await;
+                .await?;
             }
         }
 
@@ -2239,22 +2293,10 @@ impl KafkaConsumer {
                 return Ok(None);
             }
 
-            // br-asupersync-my0rls: route the deadline computation
-            // through `cx.timer_driver()` when one is attached so a
-            // VirtualClock-backed lab harness can advance time and
-            // unblock the poll deterministically. The previous shape
-            // pinned the deadline to wall-clock via `wall_now()` even
-            // in the no-kafka fallback path, defeating
-            // `LabRuntime::advance` for any test that relied on
-            // exercising poll-timeout flow without the kafka feature.
-            // Mirrors the pattern at messaging/kafka.rs line 522-524.
-            let now_fn = || {
-                cx.timer_driver()
-                    .map_or_else(crate::time::wall_now, |d| d.now())
-            };
+            let now_fn = || consumer_now(cx);
             let deadline = now_fn().saturating_add_nanos(duration_to_nanos(timeout));
             loop {
-                cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+                consumer_checkpoint(cx)?;
 
                 #[cfg(all(test, not(feature = "kafka")))]
                 let poll_before_wait_hook = self.poll_before_wait_hook.lock().clone();
@@ -2266,7 +2308,9 @@ impl KafkaConsumer {
 
                 let mut state_wait = self.state_notify.notified();
                 let mut broker_wait = deterministic_broker_notify().notified();
-                let mut sleep = Sleep::new(deadline);
+                Pin::new(&mut state_wait).enable();
+                Pin::new(&mut broker_wait).enable();
+                let mut wait = ConsumerWait::new(cx, deadline);
 
                 self.ensure_open()?;
                 self.ensure_has_subscription()?;
@@ -2277,22 +2321,19 @@ impl KafkaConsumer {
                     return Ok(None);
                 }
 
-                () = std::future::poll_fn(|task_cx| {
-                    if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                        return Poll::Ready(());
-                    }
-                    if Pin::new(&mut sleep).poll(task_cx).is_ready() {
-                        return Poll::Ready(());
+                std::future::poll_fn(|task_cx| {
+                    if let Poll::Ready(result) = wait.poll(task_cx) {
+                        return Poll::Ready(result);
                     }
                     if Pin::new(&mut state_wait).poll(task_cx).is_ready() {
-                        return Poll::Ready(());
+                        return Poll::Ready(Ok(()));
                     }
                     if Pin::new(&mut broker_wait).poll(task_cx).is_ready() {
-                        return Poll::Ready(());
+                        return Poll::Ready(Ok(()));
                     }
                     Poll::Pending
                 })
-                .await;
+                .await?;
             }
         }
 

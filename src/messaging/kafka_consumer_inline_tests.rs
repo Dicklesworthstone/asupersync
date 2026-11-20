@@ -14,6 +14,338 @@
     };
     use crate::test_utils::run_test_with_cx;
 
+    #[derive(Default)]
+    struct ConsumerWaitWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for ConsumerWaitWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn consumer_wait_context(
+        timer: Option<crate::time::TimerDriverHandle>,
+        budget: crate::types::Budget,
+    ) -> Cx {
+        Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 1),
+            crate::types::TaskId::new_for_test(1, 0),
+            budget,
+            None,
+            None,
+            None,
+            timer,
+            None,
+        )
+    }
+
+    #[test]
+    fn consumer_backoff_uses_owner_timer_across_foreign_pollers() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+
+        for foreign_origin in [0, 10_000] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = consumer_wait_context(Some(timer.clone()), Budget::INFINITE);
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(Time::from_nanos(foreign_origin)),
+            ));
+            let foreign = consumer_wait_context(Some(foreign_timer.clone()), Budget::INFINITE);
+            let _ambient = Cx::set_current(Some(foreign.clone()));
+            let wakes = Arc::new(ConsumerWaitWake::default());
+            let waker = std::task::Waker::from(Arc::clone(&wakes));
+            let mut task = std::task::Context::from_waker(&waker);
+            let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_nanos(10)));
+
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1, "the explicit owner must own the wake");
+            assert_eq!(foreign_timer.pending_count(), 0);
+            assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+            assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "the wait must stay parked");
+
+            // A cancelled polling task cannot make an owner's backoff report
+            // elapsed time; the owner alone supplies cancellation here.
+            foreign.cancel_with(crate::types::CancelKind::User, Some("foreign caller"));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            clock.advance(9);
+            assert_eq!(timer.process_timers(), 0);
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+            clock.advance(1);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+            assert_eq!(timer.pending_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(Cx::current().unwrap().cancel_reason(), foreign.cancel_reason());
+        }
+    }
+
+    #[test]
+    fn consumer_backoff_cancellation_wakes_the_replacement_waker_and_retires_wait() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+        let owner = consumer_wait_context(Some(timer.clone()), crate::types::Budget::INFINITE);
+        let first = Arc::new(ConsumerWaitWake::default());
+        let first_waker = std::task::Waker::from(Arc::clone(&first));
+        let replacement = Arc::new(ConsumerWaitWake::default());
+        let replacement_waker = std::task::Waker::from(Arc::clone(&replacement));
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+
+        assert!(wait.as_mut().poll(&mut std::task::Context::from_waker(&first_waker)).is_pending());
+        assert!(wait.as_mut().poll(&mut std::task::Context::from_waker(&replacement_waker)).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(first.0.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement.0.load(Ordering::SeqCst), 0);
+        owner.cancel_with(crate::types::CancelKind::User, Some("cancel parked consumer"));
+        assert_eq!(first.0.load(Ordering::SeqCst), 0, "the obsolete task waker must be retired");
+        assert!(replacement.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(
+            wait.as_mut().poll(&mut std::task::Context::from_waker(&replacement_waker)),
+            Poll::Ready(Err(KafkaError::Cancelled))
+        ));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_backoff_drop_removes_only_its_own_cancellation_registration() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+        let owner = consumer_wait_context(Some(timer.clone()), crate::types::Budget::INFINITE);
+        let wakes = Arc::new(ConsumerWaitWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut observer = std::pin::pin!(owner.cancelled());
+        assert!(observer.as_mut().poll(&mut task).is_pending());
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 2);
+        drop(wait);
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        owner.cancel_with(crate::types::CancelKind::User, Some("remaining observer"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(observer.as_mut().poll(&mut task).is_ready());
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_backoff_masked_cancellation_stays_parked_until_unmasked() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+        let owner = consumer_wait_context(Some(timer.clone()), crate::types::Budget::INFINITE);
+        let wakes = Arc::new(ConsumerWaitWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+        let before_unmask = owner.masked(|| {
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            owner.cancel_with(crate::types::CancelKind::User, Some("masked consumer wait"));
+            let after_request = wakes.0.load(Ordering::SeqCst);
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), after_request, "no cancellation spin");
+            assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+            after_request
+        });
+        assert!(wakes.0.load(Ordering::SeqCst) > before_unmask);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_backoff_driverless_budget_ignores_foreign_virtual_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+        let budget = Budget::INFINITE.with_deadline(crate::time::raw_wall_now() + Duration::from_secs(3600));
+        let owner = consumer_wait_context(None, budget);
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_nanos(u64::MAX - 1)),
+        ));
+        let foreign = consumer_wait_context(Some(foreign_timer.clone()), Budget::INFINITE);
+        let _ambient = Cx::set_current(Some(foreign));
+        let wakes = Arc::new(ConsumerWaitWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert!(!owner.is_cancel_requested(), "the wall-clock budget is still live");
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        owner.cancel_with(crate::types::CancelKind::User, Some("driverless consumer wait"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_backoff_budget_deadline_wakes_before_delay_without_time_authority() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+
+        for restrict_time in [false, true] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = consumer_wait_context(
+                Some(timer.clone()), Budget::INFINITE.with_deadline(Time::from_nanos(110)),
+            );
+            let owner = if restrict_time {
+                let _restricted = owner.restrict::<crate::cx::cap::None>().set_current_restricted();
+                Cx::current().unwrap()
+            } else {
+                owner
+            };
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(Time::from_nanos(10_000)),
+            ));
+            let foreign = consumer_wait_context(Some(foreign_timer.clone()), Budget::INFINITE);
+            let _ambient = Cx::set_current(Some(foreign));
+            let wakes = Arc::new(ConsumerWaitWake::default());
+            let waker = std::task::Waker::from(Arc::clone(&wakes));
+            let mut task = std::task::Context::from_waker(&waker);
+            let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.next_deadline(), Some(Time::from_nanos(110)));
+            assert_eq!(foreign_timer.pending_count(), 0);
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+            clock.advance(10);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+            assert_eq!(owner.cancel_reason().unwrap().kind, crate::types::CancelKind::Deadline);
+            assert_eq!(timer.pending_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn consumer_backoff_masked_deadline_is_not_rearmed_or_self_waking() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = consumer_wait_context(
+            Some(timer.clone()), Budget::INFINITE.with_deadline(Time::from_nanos(110)),
+        );
+        let wakes = Arc::new(ConsumerWaitWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+        let before_unmask = owner.masked(|| {
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 2);
+            clock.advance(10);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1, "only the original backoff remains");
+            let after_deadline = wakes.0.load(Ordering::SeqCst);
+            for _ in 0..3 {
+                assert!(wait.as_mut().poll(&mut task).is_pending());
+                assert_eq!(timer.process_timers(), 0);
+            }
+            assert_eq!(wakes.0.load(Ordering::SeqCst), after_deadline);
+            assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+            after_deadline
+        });
+        assert!(wakes.0.load(Ordering::SeqCst) > before_unmask);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_backoff_refreshes_a_changed_budget_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = consumer_wait_context(
+            Some(timer.clone()), Budget::INFINITE.with_deadline(Time::from_nanos(1000)),
+        );
+        let wakes = Arc::new(ConsumerWaitWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(wait_consumer_retry_backoff(&owner, Duration::from_secs(60)));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_nanos(1000)));
+        owner.inner.write().budget.deadline = Some(Time::from_nanos(110));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_nanos(110)));
+        assert_eq!(timer.pending_count(), 2, "the superseded deadline must be retired");
+        clock.advance(10);
+        assert_eq!(timer.process_timers(), 1);
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn consumer_poll_fallback_waits_on_owner_and_releases_waiters() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, Time};
+        #[cfg(not(feature = "kafka"))]
+        let _broker = deterministic_broker_guard();
+
+        for finish in ["timeout", "cancel", "close", "drop"] {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = consumer_wait_context(Some(timer.clone()), Budget::INFINITE);
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+            let foreign = consumer_wait_context(Some(foreign_timer.clone()), Budget::INFINITE);
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            futures_lite::future::block_on(consumer.subscribe(&owner, &["consumer-owner-wait"])).unwrap();
+            let _ambient = Cx::set_current(Some(foreign.clone()));
+            let wakes = Arc::new(ConsumerWaitWake::default());
+            let waker = std::task::Waker::from(Arc::clone(&wakes));
+            let mut task = std::task::Context::from_waker(&waker);
+            let mut wait = Box::pin(consumer.poll_nullable(&owner, Duration::from_nanos(10)));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(foreign_timer.pending_count(), 0);
+            assert_eq!(consumer.state_notify.waiter_count(), 1);
+            assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+            assert!(foreign.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+            match finish {
+                "timeout" => {
+                    clock.advance(10);
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+                    assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Ok(None))));
+                }
+                "cancel" => {
+                    owner.cancel_with(crate::types::CancelKind::User, Some("cancel consumer poll"));
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+                    assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+                }
+                "close" => {
+                    futures_lite::future::block_on(consumer.close(&owner)).unwrap();
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+                    assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Config(message))) if message.contains("closed")));
+                }
+                "drop" => {}
+                _ => unreachable!(),
+            }
+            drop(wait);
+            assert_eq!(timer.pending_count(), 0);
+            assert_eq!(consumer.state_notify.waiter_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
     #[test]
     fn nullable_record_compatibility_conversion_never_invents_nulls() {
         let legacy = ConsumerRecord {
