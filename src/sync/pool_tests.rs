@@ -1495,6 +1495,444 @@ mod tests {
     }
 
     #[test]
+    fn pool_close_during_idle_handoff_rejects_checkout_after_callbacks() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Stage {
+            Health,
+            Clock,
+            Cleanup,
+        }
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Path {
+            Acquire,
+            AcquireChecked,
+            TryAcquire,
+            TryAcquireChecked,
+        }
+        std::thread_local! {
+            static DURING_HEALTH_CHECK: RefCell<Option<Box<dyn FnOnce()>>> =
+                const { RefCell::new(None) };
+        }
+
+        for stage in [Stage::Health, Stage::Clock, Stage::Cleanup] {
+            for path in [
+                Path::Acquire,
+                Path::AcquireChecked,
+                Path::TryAcquire,
+                Path::TryAcquireChecked,
+            ] {
+                if stage == Stage::Cleanup
+                    && matches!(path, Path::TryAcquire | Path::TryAcquireChecked)
+                {
+                    continue;
+                }
+                for cancel in [false, true] {
+                    if cancel && path == Path::TryAcquire {
+                        continue; // The unchecked synchronous API has no Cx.
+                    }
+                    reset_test_pool_time();
+                    let capacity = if stage == Stage::Cleanup { 2 } else { 1 };
+                    let resources =
+                        Arc::new(PoolMutex::new(Vec::<PoolResourceDropProbe>::new()));
+                    let factory_resources = Arc::clone(&resources);
+                    let pool = Arc::new(
+                        GenericPool::with_time_getter(
+                            move || {
+                                std::future::ready(Ok::<_, std::io::Error>(
+                                    factory_resources.lock().pop().expect("seeded resource"),
+                                ))
+                            },
+                            PoolConfig::with_max_size(capacity)
+                                .warmup_connections(capacity)
+                                .health_check_on_acquire(true),
+                            checked_pool_close_race_now,
+                        )
+                        .with_health_check(|_| {
+                            let hook = DURING_HEALTH_CHECK.with(|hook| hook.borrow_mut().take());
+                            if let Some(hook) = hook {
+                                hook();
+                            }
+                            true
+                        }),
+                    );
+                    let mut drop_receivers = Vec::new();
+                    for _ in 0..capacity {
+                        let (resource, dropped) = pool_resource_lock_probe(&pool);
+                        resources.lock().push(resource);
+                        drop_receivers.push(dropped);
+                    }
+                    assert_eq!(
+                        futures_lite::future::block_on(pool.warmup()).unwrap(),
+                        capacity
+                    );
+                    let cx = Cx::for_testing();
+                    let held = (stage == Stage::Cleanup).then(|| {
+                        futures_lite::future::block_on(pool.acquire(&cx)).unwrap()
+                    });
+                    let callback_pool = Arc::clone(&pool);
+                    let callback_cx = cx.clone();
+                    let close: Box<dyn FnOnce()> = Box::new(move || {
+                        assert!(callback_pool.state.try_lock().is_some());
+                        assert!(callback_pool.return_rx.try_lock().is_some());
+                        assert_eq!(callback_pool.state.lock().active, capacity);
+                        futures_lite::future::block_on(callback_pool.close());
+                        if cancel {
+                            callback_cx.cancel_fast(crate::types::CancelKind::User);
+                        }
+                    });
+                    DURING_HEALTH_CHECK.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || match stage {
+                            Stage::Health => close(),
+                            Stage::Clock => TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+                                *callback.borrow_mut() = Some(close);
+                            }),
+                            Stage::Cleanup => TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+                                *callback.borrow_mut() = Some(Box::new(move || {
+                                    // Queue a real return from the checkout's final
+                                    // timestamp. Cleanup processes it and invokes
+                                    // the close/cancel clock after that timestamp.
+                                    held.expect("cleanup has another holder")
+                                        .return_to_pool();
+                                    TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+                                        *callback.borrow_mut() = Some(close);
+                                    });
+                                }));
+                            }),
+                        }));
+                    });
+                    let assert_error = |error| {
+                        assert!(
+                            if cancel {
+                                matches!(error, PoolError::Cancelled)
+                            } else {
+                                matches!(error, PoolError::Closed)
+                            },
+                            "{stage:?} {path:?} cancel={cancel}: wrong refusal"
+                        );
+                    };
+                    match path {
+                        Path::Acquire => match futures_lite::future::block_on(pool.acquire(&cx)) {
+                            Err(error) => assert_error(error),
+                            Ok(_) => panic!("{stage:?}: acquire exposed a closed-pool resource"),
+                        },
+                        Path::AcquireChecked => {
+                            match futures_lite::future::block_on(pool.acquire_checked(&cx)) {
+                                Err(CheckedPoolError::Pool(error)) => assert_error(error),
+                                _ => panic!("{stage:?}: checked acquire missed pre-handoff close"),
+                            }
+                        }
+                        Path::TryAcquire => assert!(pool.try_acquire().is_none()),
+                        Path::TryAcquireChecked => match pool.try_acquire_checked(&cx) {
+                            Err(CheckedPoolError::Pool(error)) => assert_error(error),
+                            _ => panic!("{stage:?}: checked try-acquire missed pre-handoff close"),
+                        },
+                    }
+                    DURING_HEALTH_CHECK.with(|hook| assert!(hook.borrow().is_none()));
+                    TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|hook| assert!(hook.borrow().is_none()));
+                    for dropped in &drop_receivers {
+                        assert_pool_resource_dropped_outside_locks(
+                            dropped,
+                            "refused pool handoff",
+                        );
+                        assert!(
+                            dropped.try_recv().is_err(),
+                            "resource was destroyed exactly once"
+                        );
+                    }
+                    let stats = pool.stats();
+                    assert_eq!(
+                        (stats.active, stats.idle, stats.total, stats.waiters),
+                        (0, 0, 0, 0)
+                    );
+                    assert_eq!(stats.total_acquisitions, u64::from(stage == Stage::Cleanup));
+                    assert_eq!(pool.state.lock().creating, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pool_close_during_created_resource_handoff_rolls_back_checkout() {
+        std::thread_local! {
+            static AFTER_CREATE: RefCell<Option<Box<dyn FnOnce()>>> =
+                const { RefCell::new(None) };
+        }
+        for checked in [false, true] {
+            for cancel in [false, true] {
+                reset_test_pool_time();
+                let resource = Arc::new(PoolMutex::new(None::<PoolResourceDropProbe>));
+                let factory_resource = Arc::clone(&resource);
+                let pool = Arc::new(GenericPool::with_time_getter(
+                    move || {
+                        let resource = factory_resource.lock().take().expect("seeded resource");
+                        // The next injected clock read is the final handoff
+                        // timestamp, after the creation reservation commits.
+                        let callback = AFTER_CREATE.with(|hook| hook.borrow_mut().take());
+                        TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|hook| {
+                            *hook.borrow_mut() = callback;
+                        });
+                        std::future::ready(Ok::<_, std::io::Error>(resource))
+                    },
+                    PoolConfig::with_max_size(1),
+                    checked_pool_close_race_now,
+                ));
+                let (probe, dropped) = pool_resource_lock_probe(&pool);
+                *resource.lock() = Some(probe);
+                let cx = Cx::for_testing();
+                let callback_cx = cx.clone();
+                let callback_pool = Arc::clone(&pool);
+                AFTER_CREATE.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        assert!(callback_pool.state.try_lock().is_some());
+                        assert!(callback_pool.return_rx.try_lock().is_some());
+                        assert_eq!(callback_pool.state.lock().creating, 0);
+                        assert_eq!(callback_pool.state.lock().active, 1);
+                        futures_lite::future::block_on(callback_pool.close());
+                        if cancel {
+                            callback_cx.cancel_fast(crate::types::CancelKind::User);
+                        }
+                    }));
+                });
+                let error = if checked {
+                    match futures_lite::future::block_on(pool.acquire_checked(&cx)) {
+                        Err(CheckedPoolError::Pool(error)) => error,
+                        _ => panic!("checked creation missed pre-handoff close"),
+                    }
+                } else {
+                    match futures_lite::future::block_on(pool.acquire(&cx)) {
+                        Err(error) => error,
+                        Ok(_) => panic!("creation exposed a closed-pool resource"),
+                    }
+                };
+                assert!(if cancel {
+                    matches!(error, PoolError::Cancelled)
+                } else {
+                    matches!(error, PoolError::Closed)
+                });
+                AFTER_CREATE.with(|hook| assert!(hook.borrow().is_none()));
+                TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|hook| assert!(hook.borrow().is_none()));
+                assert_pool_resource_dropped_outside_locks(&dropped, "refused created resource");
+                assert!(dropped.try_recv().is_err(), "resource was destroyed exactly once");
+                let stats = pool.stats();
+                assert_eq!((stats.active, stats.idle, stats.total, stats.waiters), (0, 0, 0, 0));
+                assert_eq!(stats.total_acquisitions, 0);
+                assert_eq!(pool.state.lock().creating, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pool_return_and_warmup_clocks_may_reenter_stats_or_close() {
+        for warmup in [false, true] {
+            for close in [false, true] {
+                reset_test_pool_time();
+                let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let factory_drops = Arc::clone(&drops);
+                let pool = Arc::new(GenericPool::with_time_getter(
+                    move || {
+                        let drops = Arc::clone(&factory_drops);
+                        async move {
+                            Ok::<_, std::io::Error>(PoolResourceDropProbe {
+                                on_drop: Box::new(move || {
+                                    drops.fetch_add(1, Ordering::AcqRel);
+                                }),
+                            })
+                        }
+                    },
+                    PoolConfig::with_max_size(1).warmup_connections(1),
+                    checked_pool_close_race_now,
+                ));
+                let cx = Cx::for_testing();
+                if !warmup {
+                    futures_lite::future::block_on(pool.acquire(&cx))
+                        .unwrap()
+                        .return_to_pool();
+                }
+
+                let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let callback_calls = Arc::clone(&calls);
+                let callback_pool = Arc::clone(&pool);
+                TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+                    *callback.borrow_mut() = Some(Box::new(move || {
+                        // Fail the old locked-clock path without hanging the
+                        // test, then exercise the actual reentrant public API.
+                        assert!(callback_pool.state.try_lock().is_some());
+                        assert!(callback_pool.return_rx.try_lock().is_some());
+                        let stats = callback_pool.stats();
+                        assert_eq!(stats.total, 1, "the in-flight slot stays owned");
+                        assert_eq!(stats.active, usize::from(!warmup));
+                        assert_eq!(stats.idle, 0);
+                        assert_eq!(callback_pool.state.lock().creating, usize::from(warmup));
+                        if close {
+                            futures_lite::future::block_on(callback_pool.close());
+                        }
+                        callback_calls.fetch_add(1, Ordering::AcqRel);
+                    }));
+                });
+
+                if warmup {
+                    assert_eq!(futures_lite::future::block_on(pool.warmup()).unwrap(), 1);
+                }
+                let stats = pool.stats();
+                assert_eq!(calls.load(Ordering::Acquire), 1);
+                assert_eq!(stats.active, 0);
+                assert_eq!(stats.idle, usize::from(!close));
+                assert_eq!(stats.total, usize::from(!close));
+                assert_eq!(pool.state.lock().creating, 0);
+                assert_eq!(drops.load(Ordering::Acquire), usize::from(close));
+                if close {
+                    assert!(pool.try_acquire().is_none());
+                } else {
+                    pool.try_acquire().expect("returned resource stays reusable").return_to_pool();
+                    futures_lite::future::block_on(pool.close());
+                }
+                assert_eq!(drops.load(Ordering::Acquire), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn pool_return_clock_panic_frees_capacity_and_wakes_parked_successor() {
+        reset_test_pool_time();
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = GenericPool::with_time_getter(
+            counting_factory(Arc::clone(&created)),
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
+        assert_eq!(*held, 0);
+        let wake = Arc::new(PoolAcquireWake::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut successor = pool.acquire(&cx);
+        assert!(successor.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(pool.stats().waiters, 1);
+
+        held.return_to_pool();
+        wake.0.store(0, Ordering::Release);
+        panic_test_pool_time_on_call(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.stats()));
+        assert!(result.is_err(), "the original clock panic must propagate");
+        assert_eq!(test_pool_time_probe_state(), (1, None));
+        assert!(wake.0.load(Ordering::Acquire) > 0, "discarded return frees a FIFO slot");
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.total, stats.waiters), (0, 0, 0, 1));
+
+        let Poll::Ready(Ok(replacement)) = successor.as_mut().poll(&mut task_cx) else {
+            panic!("successor must acquire the slot freed by the failed return");
+        };
+        assert_eq!(*replacement, 1, "an invalid timestamp is not reused as an idle entry");
+        assert_eq!(created.load(Ordering::Acquire), 2);
+        replacement.return_to_pool();
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+    }
+
+    #[test]
+    fn pool_warmup_clock_panic_frees_capacity_and_wakes_parked_successor() {
+        reset_test_pool_time();
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = test_cx_with_timer(timer);
+        let _current = Cx::set_current(Some(cx.clone()));
+        let gate = Arc::new(PoolCreationGate::default());
+        let pool = GenericPool::with_time_getter(
+            ParkedFirstPoolFactory::new(Arc::clone(&gate)),
+            PoolConfig::with_max_size(1).warmup_connections(1),
+            panic_once_test_pool_time_now,
+        );
+        let mut warmup = Box::pin(pool.warmup());
+        let mut warmup_cx = Context::from_waker(Waker::noop());
+        assert!(warmup.as_mut().poll(&mut warmup_cx).is_pending());
+        assert!(gate.entered.load(Ordering::Acquire));
+        assert_eq!(pool.state.lock().creating, 1);
+
+        let wake = Arc::new(PoolAcquireWake::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut successor = pool.acquire(&cx);
+        assert!(successor.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(pool.stats().waiters, 1);
+        wake.0.store(0, Ordering::Release);
+        gate.released.store(true, Ordering::Release);
+        panic_test_pool_time_on_call(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            warmup.as_mut().poll(&mut warmup_cx)
+        }));
+        assert!(result.is_err(), "the original clock panic must propagate");
+        drop(warmup);
+        assert_eq!(test_pool_time_probe_state(), (1, None));
+        assert_eq!(pool.state.lock().creating, 0);
+        assert!(wake.0.load(Ordering::Acquire) > 0, "failed warmup wakes its FIFO successor");
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.total, stats.waiters), (0, 0, 0, 1));
+
+        let Poll::Ready(Ok(resource)) = successor.as_mut().poll(&mut task_cx) else {
+            panic!("successor must acquire the slot freed by failed warmup");
+        };
+        assert_eq!(*resource, 73);
+        assert_eq!(pool.factory.attempts.load(Ordering::Acquire), 2);
+        resource.return_to_pool();
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+        assert_eq!(cx.now(), Time::ZERO, "no timeout supplied progress");
+    }
+
+    #[test]
+    fn pool_return_wake_panic_does_not_strand_other_ready_waiters() {
+        struct PanicOnceWake {
+            armed: AtomicBool,
+        }
+        impl Wake for PanicOnceWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                assert!(!self.armed.swap(false, Ordering::AcqRel), "pool wake panic");
+            }
+        }
+        reset_test_pool_time();
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(2),
+            test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        let first = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
+        let second = futures_lite::future::block_on(pool.acquire(&cx)).unwrap();
+        let panic_wake = Arc::new(PanicOnceWake { armed: AtomicBool::new(false) });
+        let first_waker = Waker::from(Arc::clone(&panic_wake));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut first_waiter = pool.acquire(&cx);
+        assert!(first_waiter.as_mut().poll(&mut first_cx).is_pending());
+        let wake = Arc::new(PoolAcquireWake::default());
+        let second_waker = Waker::from(Arc::clone(&wake));
+        let mut second_cx = Context::from_waker(&second_waker);
+        let mut second_waiter = pool.acquire(&cx);
+        assert!(second_waiter.as_mut().poll(&mut second_cx).is_pending());
+        assert_eq!(pool.stats().waiters, 2);
+
+        first.return_to_pool();
+        second.return_to_pool();
+        panic_wake.armed.store(true, Ordering::Release);
+        wake.0.store(0, Ordering::Release);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.stats()));
+        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"pool wake panic"));
+        assert!(wake.0.load(Ordering::Acquire) > 0, "the second ready waiter is still notified");
+        let Poll::Ready(Ok(first)) = first_waiter.as_mut().poll(&mut first_cx) else {
+            panic!("first waiter remains collectable after its wake panicked");
+        };
+        let Poll::Ready(Ok(second)) = second_waiter.as_mut().poll(&mut second_cx) else {
+            panic!("second waiter must consume the other returned resource");
+        };
+        drop((first, second));
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle, stats.waiters), (0, 2, 0));
+    }
+
+    #[test]
     fn pool_creation_cancel_wakes_and_releases_capacity_without_time_advance() {
         init_test("pool_creation_cancel_wakes_and_releases_capacity_without_time_advance");
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));

@@ -508,7 +508,12 @@ pub struct PooledResource<R> {
     /// implementations that use only the public `new()` constructor get
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
-    return_wakers: Option<ReturnWakers>,
+    // Only the private notification registry is asserted unwind-safe. Its
+    // critical sections move entries or clone known Arc relays; user Waker
+    // callbacks run after unlock. A callback panic cannot leave this registry
+    // half-mutated, and neither a guard nor a mutable entry escapes the pool.
+    // Keep R's own unwind-safety requirements intact.
+    return_wakers: Option<std::panic::AssertUnwindSafe<ReturnWakers>>,
     /// Closed flag of the owning pool: when the pool is closed while this
     /// resource is checked out, returns discard immediately rather than
     /// lingering in the channel (br-asupersync-myvrjv L1).
@@ -582,7 +587,7 @@ impl<R> PooledResource<R> {
     /// returning/discarding the resource immediately wakes waiting
     /// acquirers.
     fn with_return_notify(mut self, wakers: ReturnWakers) -> Self {
-        self.return_wakers = Some(wakers);
+        self.return_wakers = Some(std::panic::AssertUnwindSafe(wakers));
         self
     }
 
@@ -1876,7 +1881,10 @@ where
         if self.closed.load(Ordering::Acquire) {
             return Err(PoolError::Closed.into());
         }
-        match self.try_acquire_inner(false) {
+        let pooled = self.try_acquire_inner(false);
+        // Health and clock callbacks may cancel after the initial checkpoint.
+        cx.checkpoint().map_err(|_| PoolError::Cancelled)?;
+        match pooled {
             Some(pooled) => CheckedPooledResource::admit(pooled, cx).map(Some),
             None if self.closed.load(Ordering::Acquire) => Err(PoolError::Closed.into()),
             None => Ok(None),
@@ -2064,6 +2072,7 @@ where
     /// Process returned resources from the return channel.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
+        let mut panics = CheckedPoolCleanupPanics::new();
         let mut waiters_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         // Detach exactly one message from the receiver before inspecting its
         // payload. A closed-pool Return may destroy arbitrary R state, and that
@@ -2075,39 +2084,34 @@ where
                     hold_duration,
                     created_at,
                 } => {
-                    // Record metrics for the release
-                    #[cfg(feature = "metrics")]
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_released(hold_duration);
+                    // An injected clock may reenter stats/close or panic. Read
+                    // it with neither receiver nor state locked, while this
+                    // return still owns its active slot. If it fails, discard
+                    // the resource and free that slot before resuming unwind.
+                    let mut idle_since = None;
+                    if !self.closed.load(Ordering::Acquire) {
+                        panics.run(|| idle_since = Some((self.time_getter)()));
                     }
-
-                    // Declare the pending owner before the state guard. If the
-                    // injected clock or capacity reservation unwinds, the guard
-                    // unlocks before either this owner or `resource` is dropped.
-                    #[allow(clippy::needless_late_init)]
-                    let mut pending_idle: Option<IdleResource<R>>;
-                    let mut state = self.state.lock();
-                    state.active = state.active.saturating_sub(1);
-
-                    if state.closed {
-                        drop(state);
-                        drop(resource);
-                        continue;
-                    }
-
-                    let idle_since = (self.time_getter)();
-                    pending_idle = Some(IdleResource {
+                    let mut pending_idle = Some(IdleResource {
                         resource,
                         publication: ret.publication,
-                        idle_since,
+                        // A failed clock sample is never published as idle.
+                        idle_since: idle_since.unwrap_or(created_at),
                         created_at,
                     });
-                    state.idle.reserve(1);
-                    state.idle.push_back(
-                        pending_idle
-                            .take()
-                            .expect("return payload prepared before idle insertion"),
-                    );
+                    let mut state = self.state.lock();
+                    state.active = state.active.saturating_sub(1);
+
+                    // Revalidate after the callback: it may have closed the
+                    // pool, even if the pre-sample flag said it was open.
+                    if !state.closed && idle_since.is_some() {
+                        state.idle.reserve(1);
+                        state.idle.push_back(
+                            pending_idle
+                                .take()
+                                .expect("return payload prepared before idle insertion"),
+                        );
+                    }
 
                     let total = state.active + state.idle.len() + state.creating;
                     let available = state.idle.len() + self.config.max_size.saturating_sub(total);
@@ -2115,15 +2119,17 @@ where
                         waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
                     }
                     drop(state);
-                }
-                PoolReturn::Discard { hold_duration } => {
-                    // Record metrics for the discard (destroyed as unhealthy)
+
+                    // Resource destruction and instrumentation are independent
+                    // of capacity publication. A failure in either must not
+                    // strand later returns or the waiters already selected.
+                    panics.run(|| drop(pending_idle));
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
-                        metrics.record_released(hold_duration);
-                        metrics.record_destroyed(DestroyReason::Unhealthy);
+                        panics.run(|| metrics.record_released(hold_duration));
                     }
-
+                }
+                PoolReturn::Discard { hold_duration } => {
                     let mut state = self.state.lock();
                     state.active = state.active.saturating_sub(1);
 
@@ -2133,12 +2139,19 @@ where
                         waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
                     }
                     drop(state);
+
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        panics.run(|| metrics.record_released(hold_duration));
+                        panics.run(|| metrics.record_destroyed(DestroyReason::Unhealthy));
+                    }
                 }
             }
         }
 
         for waker in waiters_to_wake {
-            waker.wake();
+            panics.run(|| waker.wake_by_ref());
+            panics.run(|| drop(waker));
         }
     }
 
@@ -2341,33 +2354,36 @@ where
     /// Unlike `commit_create_slot`, this does NOT increment `active` or
     /// `total_acquisitions` — the resource goes straight to the idle queue.
     fn commit_create_slot_as_idle(&self, resource: R) {
-        // Keep the pending owner outside the state guard's drop scope.
-        #[allow(clippy::needless_late_init)]
-        let mut pending_idle: Option<IdleResource<R>>;
+        let mut panics = CheckedPoolCleanupPanics::new();
+        let mut now = None;
+        if !self.closed.load(Ordering::Acquire) {
+            panics.run(|| now = Some((self.time_getter)()));
+        }
+        // Keep the resource owned outside the lock even when the clock failed
+        // or reentrantly closed the pool. Neither case may retain its reserved
+        // creation slot, or let R::drop run under state.
+        let mut pending_resource = Some(resource);
+        let mut pending_idle = now.map(|now| IdleResource {
+            resource: pending_resource
+                .take()
+                .expect("warmup resource has one owner"),
+            publication: None,
+            idle_since: now,
+            created_at: now,
+        });
         let waker = {
             let mut state = self.state.lock();
             state.creating = state.creating.saturating_sub(1);
             state.total_created += 1;
 
-            if state.closed {
-                // Drop the resource instead of leaking it in the idle queue of a closed pool
-                drop(state);
-                return;
+            if !state.closed && pending_idle.is_some() {
+                state.idle.reserve(1);
+                state.idle.push_back(
+                    pending_idle
+                        .take()
+                        .expect("warmup payload prepared before idle insertion"),
+                );
             }
-
-            let now = (self.time_getter)();
-            pending_idle = Some(IdleResource {
-                resource,
-                publication: None,
-                idle_since: now,
-                created_at: now,
-            });
-            state.idle.reserve(1);
-            state.idle.push_back(
-                pending_idle
-                    .take()
-                    .expect("warmup payload prepared before idle insertion"),
-            );
 
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
@@ -2378,8 +2394,11 @@ where
             }
         };
 
+        panics.run(|| drop(pending_idle));
+        panics.run(|| drop(pending_resource));
         if let Some(waker) = waker {
-            waker.wake();
+            panics.run(|| waker.wake_by_ref());
+            panics.run(|| drop(waker));
         }
     }
 
@@ -2670,6 +2689,12 @@ where
                     if cx.checkpoint().is_err() {
                         return Err(PoolError::Cancelled);
                     }
+                    // Health checks run outside state and may close the pool.
+                    // Keep cancellation precedence and roll back the detached
+                    // checkout before exposing it to the caller.
+                    if self.closed.load(Ordering::Acquire) {
+                        return Err(PoolError::Closed);
+                    }
 
                     if !is_healthy {
                         checkout.reject_unhealthy();
@@ -2686,8 +2711,15 @@ where
                         Duration::from_nanos(get_now().duration_since(acquire_start));
 
                     let acquired_at = (self.time_getter)();
+                    // Cleanup can dispatch returns and run user callbacks.
+                    // Keep checkout rollback armed until those callbacks and
+                    // the final cancellation/close checks have completed.
+                    drop(cleanup);
                     if cx.checkpoint().is_err() {
                         return Err(PoolError::Cancelled);
+                    }
+                    if self.closed.load(Ordering::Acquire) {
+                        return Err(PoolError::Closed);
                     }
                     let mut pooled = PooledResource::new_with_timestamps(
                         resource,
@@ -2709,9 +2741,6 @@ where
                         self.update_metrics_gauges();
                     }
 
-                    // Cleanup can dispatch other returns and run user callbacks.
-                    // Finish it before importing evidence for a successful result.
-                    drop(cleanup);
                     if complete_handoff {
                         pooled.complete_handoff(Some(cx));
                     }
@@ -2805,8 +2834,12 @@ where
                     }
 
                     let acquired_at = (self.time_getter)();
+                    drop(cleanup);
                     if cx.checkpoint().is_err() {
                         return Err(PoolError::Cancelled);
+                    }
+                    if self.closed.load(Ordering::Acquire) {
+                        return Err(PoolError::Closed);
                     }
                     let mut pooled = PooledResource::new_with_timestamps(
                         resource,
@@ -2829,7 +2862,6 @@ where
                         self.update_metrics_gauges();
                     }
 
-                    drop(cleanup);
                     if complete_handoff {
                         pooled.complete_handoff(Some(cx));
                     }
@@ -2926,6 +2958,9 @@ where
                 true
             };
 
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
             if !is_healthy {
                 checkout.reject_unhealthy();
                 continue;
@@ -2938,6 +2973,9 @@ where
                 .map(|_| (self.time_getter)().saturating_duration_since(acquire_start));
 
             let acquired_at = (self.time_getter)();
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
             let mut pooled = PooledResource::new_with_timestamps(
                 resource,
                 PoolReturnRoute::Generic(self.return_tx.clone()),
