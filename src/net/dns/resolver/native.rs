@@ -321,7 +321,10 @@ struct NativeDeadline {
 
 impl NativeDeadline {
     fn now(&self) -> Time {
-        self.clock.as_ref().map_or_else(crate::time::wall_now, |clock| clock.now())
+        // A missing owner driver means process time, not the polling task's
+        // ambient clock. This also applies before the owned future is entered
+        // (query-budget construction and the outer cancellation/deadline gate).
+        self.clock.as_ref().map_or_else(crate::time::raw_wall_now, |clock| clock.now())
     }
 
     fn remaining(&self) -> Duration {
@@ -383,7 +386,7 @@ struct NativeOwner {
 impl NativeOwner {
     fn new(cx: &Cx, timeout: Duration) -> Self {
         let clock = cx.timer_driver();
-        let now = clock.as_ref().map_or_else(crate::time::wall_now, |clock| clock.now());
+        let now = clock.as_ref().map_or_else(crate::time::raw_wall_now, |clock| clock.now());
         let ambient = Cx::current().map(Cancellation::new);
         let mut deadline = NativeDeadline { clock, at: now + timeout };
         for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
@@ -430,6 +433,9 @@ impl NativeOwner {
             return Err(DnsError::Timeout);
         }
         for guard in std::iter::once(&self.owner).chain(self.ambient.iter()).chain(self.poller.iter()) {
+            // Checkpoints also enforce budgets. A driverless context must
+            // observe its own process clock, not another task's virtual time.
+            let _current = guard.cx.clone().set_current_restricted();
             guard.cx.checkpoint().map_err(|_| DnsError::Cancelled)?;
         }
         // A driverless owner's clock must never adopt a later poller's driver.
@@ -458,7 +464,13 @@ fn require_native_io(cx: &Cx, require_driver: bool) -> Result<(), DnsError> {
 
 fn meet_budget(deadline: &mut NativeDeadline, cx: &Cx) {
     if let Some(budget) = cx.budget().deadline {
-        let now = cx.timer_driver().as_ref().map_or_else(crate::time::wall_now, |clock| clock.now());
+        // Budget accounting uses the context's retained clock even when its
+        // TIME capability is attenuated. Scope the driverless fallback too:
+        // the original caller can differ from both owner and later poller.
+        let now = {
+            let _current = cx.clone().set_current_restricted();
+            cx.now()
+        };
         let remaining = budget.as_nanos().saturating_sub(now.as_nanos());
         deadline.at = deadline.at.min(deadline.now().saturating_add_nanos(remaining));
     }

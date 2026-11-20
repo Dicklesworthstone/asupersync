@@ -454,6 +454,213 @@ fn native_dns_budget_meet_keeps_its_owner_clock_across_foreign_pollers() {
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
+#[test]
+fn native_dns_driverless_timeout_keeps_process_time_under_a_foreign_poller() {
+    let runtime = runtime(1);
+    let native = runtime.request_cx_with_budget(Budget::INFINITE);
+    let owner = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(74, 0),
+        Budget::INFINITE,
+        None,
+        native.io_driver_handle(),
+        None,
+        None,
+        None,
+    );
+    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(Time::from_secs(1_000_000_000)),
+    ));
+    let foreign = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(75, 0),
+        Budget::INFINITE,
+        None,
+        native.io_driver_handle(),
+        None,
+        Some(foreign_timer.clone()),
+        None,
+    );
+    {
+        let _current = Cx::set_current(Some(foreign.clone()));
+        let allowance = Duration::from_secs(60);
+        let before = crate::time::raw_wall_now();
+        let mut operation = NativeOwner::new(&owner, allowance);
+        let after = crate::time::raw_wall_now();
+        assert!(operation.deadline.at >= before + allowance);
+        assert!(operation.deadline.at <= after + allowance);
+
+        // This is computed before entering the owned transport future too.
+        let query = operation.query_deadline();
+        assert!(query.at <= operation.deadline.at);
+        assert!(query.remaining() > Duration::from_secs(30));
+        let mut task = Context::from_waker(Waker::noop());
+        operation.check(&mut task).unwrap();
+        assert_eq!(foreign_timer.pending_count(), 0);
+        owner.cancel_with(crate::types::CancelKind::User, Some("DNS owner stopped"));
+        assert!(matches!(operation.check(&mut task), Err(DnsError::Cancelled)));
+        drop(operation);
+        assert!(cancel_waker_tokens(&owner).is_empty());
+        assert!(cancel_waker_tokens(&foreign).is_empty());
+    }
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
+#[test]
+fn native_dns_driverless_budget_survives_foreign_polling_through_the_public_api() {
+    let runtime = runtime(1);
+    let native = runtime.request_cx_with_budget(Budget::INFINITE);
+    let owner = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(76, 0),
+        Budget::INFINITE
+            .with_deadline(crate::time::raw_wall_now() + Duration::from_secs(60)),
+        None,
+        native.io_driver_handle(),
+        None,
+        None,
+        None,
+    );
+    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(Time::from_secs(1_000_000_000)),
+    ));
+    let foreign = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(77, 0),
+        Budget::INFINITE,
+        None,
+        native.io_driver_handle(),
+        None,
+        Some(foreign_timer.clone()),
+        None,
+    );
+    {
+        // Isolate the checkpoint from construction: the operation starts on
+        // its owner's clock and is only then polled by another task.
+        let mut operation = {
+            let _current = Cx::set_current(Some(owner.clone()));
+            NativeOwner::new(&owner, Duration::from_secs(60))
+        };
+        let _current = Cx::set_current(Some(foreign.clone()));
+        let mut task = Context::from_waker(Waker::noop());
+        operation.check(&mut task).unwrap();
+        drop(operation);
+
+        // Literal lookup still traverses the public API's owner gate. It
+        // needs no nameserver or external timing to expose a false expiry.
+        let resolver = Resolver::new();
+        let mut lookup = Box::pin(resolver.lookup_ip_native(&owner, "192.0.2.42"));
+        let Poll::Ready(Ok(found)) = lookup.as_mut().poll(&mut task) else {
+            panic!("a foreign clock expired a live native DNS owner");
+        };
+        assert_eq!(found.addresses(), &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42))]);
+        drop(lookup);
+        assert!(!owner.is_cancel_requested());
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(cancel_waker_tokens(&owner).is_empty());
+        assert!(cancel_waker_tokens(&foreign).is_empty());
+        assert!(Arc::ptr_eq(&Cx::current().unwrap().inner, &foreign.inner));
+    }
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
+#[test]
+fn native_dns_original_driverless_caller_keeps_its_budget_after_poller_migration() {
+    let runtime = runtime(1);
+    let native = runtime.request_cx_with_budget(Budget::INFINITE);
+    let owner_origin = Time::from_secs(10);
+    let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(owner_origin),
+    ));
+    let owner = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(78, 0),
+        Budget::INFINITE,
+        None,
+        native.io_driver_handle(),
+        None,
+        Some(owner_timer.clone()),
+        None,
+    );
+    let original = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(79, 0),
+        Budget::INFINITE
+            .with_deadline(crate::time::raw_wall_now() + Duration::from_secs(60)),
+        None,
+        native.io_driver_handle(),
+        None,
+        None,
+        None,
+    );
+    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(Time::from_secs(1_000_000_000)),
+    ));
+    let foreign = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(80, 0),
+        Budget::INFINITE,
+        None,
+        native.io_driver_handle(),
+        None,
+        Some(foreign_timer.clone()),
+        None,
+    );
+    {
+        let mut operation = {
+            let _current = Cx::set_current(Some(original.clone()));
+            NativeOwner::new(&owner, Duration::from_secs(120))
+        };
+        let _current = Cx::set_current(Some(foreign.clone()));
+        let mut task = Context::from_waker(Waker::noop());
+        operation.check(&mut task).unwrap();
+        assert!(operation.deadline.at > owner_origin + Duration::from_secs(30));
+        assert!(operation.deadline.at <= owner_origin + Duration::from_secs(60));
+        assert_eq!(owner_timer.pending_count(), 1);
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert!(!original.is_cancel_requested());
+        drop(operation);
+        assert_eq!(owner_timer.pending_count(), 0);
+        for cx in [&owner, &original, &foreign] {
+            assert!(cancel_waker_tokens(cx).is_empty());
+        }
+    }
+    assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
+#[test]
+fn native_dns_budget_translation_retains_a_time_restricted_contexts_clock() {
+    let owner_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(Time::from_nanos(100)),
+    ));
+    let budget_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        crate::time::VirtualClock::starting_at(Time::from_nanos(500)),
+    ));
+    let budgeted = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(81, 0),
+        Budget::INFINITE.with_deadline(Time::from_nanos(507)),
+        None,
+        None,
+        None,
+        Some(budget_timer),
+        None,
+    );
+    let restricted = {
+        let _current = Cx::set_current(Some(budgeted));
+        let _restriction = Cx::push_restriction(CapMask::none());
+        Cx::current().unwrap()
+    };
+    assert!(restricted.timer_driver().is_none());
+    let mut deadline = NativeDeadline {
+        clock: Some(owner_timer),
+        at: Time::from_nanos(1_000),
+    };
+    meet_budget(&mut deadline, &restricted);
+    assert_eq!(deadline.at, Time::from_nanos(107));
+    assert!(restricted.checkpoint().is_ok());
+}
+
 /// A current-thread runtime whose blocking pool forbids blocking work, with a native reactor.
 fn forbidding_runtime() -> Runtime {
     RuntimeBuilder::current_thread()
