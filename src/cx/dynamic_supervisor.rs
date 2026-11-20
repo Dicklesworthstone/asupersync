@@ -88,6 +88,7 @@ struct SharedRestartState {
     tracker: RestartTracker,
     pending: usize,
     admitted: u64,
+    revision: u64,
     refusal: Option<BudgetRefusal>,
     waiter: Option<Waker>,
 }
@@ -97,6 +98,7 @@ struct SharedRestartState {
 pub(crate) struct SharedRestartDomain {
     state: Mutex<SharedRestartState>,
     root: OnceLock<Cx>,
+    refused: AtomicBool,
     cancellation_sent: AtomicBool,
 }
 
@@ -109,10 +111,12 @@ impl SharedRestartDomain {
                 ),
                 pending: 0,
                 admitted: 0,
+                revision: 0,
                 refusal: None,
                 waiter: None,
             }),
             root: OnceLock::new(),
+            refused: AtomicBool::new(false),
             cancellation_sent: AtomicBool::new(false),
         }
     }
@@ -125,6 +129,20 @@ impl SharedRestartDomain {
             recent: state.tracker.recent_count(now).saturating_add(state.pending),
             refusal: state.refusal.clone(),
         }
+    }
+
+    /// The permanent stop latch is also the admission fence for controllers
+    /// that reserved a restart before another tree exhausted the shared window.
+    /// Reading it needs neither a host clock callback nor a scan of history.
+    pub(crate) fn is_refused(&self) -> bool {
+        self.refused.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn refusal(&self) -> Option<BudgetRefusal> {
+        if !self.is_refused() {
+            return None;
+        }
+        self.state.lock().refusal.clone()
     }
 
     fn register(&self, waker: &Waker) {
@@ -149,19 +167,40 @@ impl SharedRestartDomain {
     }
 
     fn admit_with_clock(&self, now: impl Fn() -> u64) -> RestartVerdict {
-        let evaluated_at = now();
-        let (verdict, wake) = {
+        if let Some(refusal) = self.refusal() {
+            return RestartVerdict::Denied { refusal };
+        }
+        let mut evaluated_at = now();
+        let mut sampled_revision = None;
+        let (verdict, wake) = loop {
             let mut state = self.state.lock();
             if let Some(refusal) = &state.refusal {
                 return RestartVerdict::Denied { refusal: refusal.clone() };
             }
-            // A delayed clock sample can only retain too much OLD history.
+            // A delayed clock sample can retain too much history.
             // Newly accepted slots stay pending until stamped AFTER admission,
             // so a preempted caller cannot backdate its reservation and cause
             // another controller to prune it immediately. Clock callbacks run
             // outside the lock; pending slots cannot expire in that interval.
             let recent = state.tracker.recent_count(evaluated_at).saturating_add(state.pending);
             let policy = state.tracker.history().config();
+            if sampled_revision.is_some_and(|revision| revision != state.revision)
+                || (recent >= policy.max_restarts as usize && sampled_revision.is_none())
+            {
+                // A sample taken before a contended lock can retain expired
+                // history. A transient over-count must not permanently stop
+                // the whole dynamic root. Refresh outside the lock and then
+                // recheck both history and non-expiring pending reservations.
+                // A peer may reserve or stamp a slot while the clock runs or
+                // this caller reacquires the mutex. Only an unchanged revision
+                // lets a refusal linearize at the sampled time.
+                // In particular, never call a user-provided clock while this
+                // mutex is held: clocks may inspect this same domain.
+                sampled_revision = Some(state.revision);
+                drop(state);
+                evaluated_at = now();
+                continue;
+            }
             let verdict = if recent >= policy.max_restarts as usize {
                 RestartVerdict::Denied {
                     refusal: BudgetRefusal::WindowExhausted {
@@ -180,14 +219,16 @@ impl SharedRestartDomain {
                 RestartVerdict::Allowed { .. } => {
                     state.pending += 1;
                     state.admitted = state.admitted.saturating_add(1);
+                    state.revision = state.revision.wrapping_add(1);
                     None
                 }
                 RestartVerdict::Denied { refusal } => {
                     state.refusal = Some(refusal.clone());
+                    self.refused.store(true, Ordering::Release);
                     state.waiter.take()
                 }
             };
-            (verdict, wake)
+            break (verdict, wake);
         };
         if verdict.is_allowed() {
             // A clock panic leaves this counted slot pending until owner drop.
@@ -196,6 +237,7 @@ impl SharedRestartDomain {
             let mut state = self.state.lock();
             state.tracker.record(admitted_at);
             state.pending -= 1;
+            state.revision = state.revision.wrapping_add(1);
         }
         if let Some(waker) = wake {
             if let Err(payload) = catch_unwind(AssertUnwindSafe(|| waker.wake())) {
@@ -587,6 +629,10 @@ impl<E> DynamicSupervisor<E> {
     pub fn shared_restart_status(&self) -> Option<SharedRestartStatus> {
         self.shared_restarts.as_ref().map(|domain| domain.status())
     }
+
+    pub(super) fn shared_restart_refused(&self) -> bool {
+        self.shared_restarts.as_ref().is_some_and(|domain| domain.is_refused())
+    }
     /// Snapshot of reserved names in stable lexical order; never consumes results.
     #[must_use]
     pub fn children(&self) -> Vec<DynamicChildInfo> {
@@ -612,7 +658,7 @@ impl<E> DynamicSupervisor<E> {
         if !self.sealed {
             if let Some(domain) = &self.shared_restarts {
                 domain.register(cx.waker());
-                if domain.status().refusal.is_some() {
+                if domain.is_refused() {
                     self.begin_shutdown();
                     return;
                 }
@@ -623,7 +669,7 @@ impl<E> DynamicSupervisor<E> {
     }
 
     fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
-        if let Some(refusal) = self.shared_restart_status().and_then(|status| status.refusal) {
+        if let Some(refusal) = self.shared_restarts.as_ref().and_then(|domain| domain.refusal()) {
             self.begin_shutdown();
             return Err(DynamicSupervisorError::SharedRestartLimit(refusal));
         }
@@ -691,7 +737,7 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             ));
         }
         if let Some(domain) = &self.shared_restarts {
-            if let Some(refusal) = domain.status().refusal {
+            if let Some(refusal) = domain.refusal() {
                 self.begin_shutdown();
                 region.close_with_outcome().await?;
                 return Err(DynamicSupervisorError::SharedRestartLimit(refusal));

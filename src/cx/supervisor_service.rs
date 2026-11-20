@@ -190,7 +190,7 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
         -> Result<DynamicAdmission<E>, DynamicServiceError>
     {
         if cx.checkpoint().is_err() { return Err(cancellation(cx)); }
-        if let Some(refusal) = self.shared_restart_status().and_then(|status| status.refusal) {
+        if let Some(refusal) = self.shared_restarts.as_ref().and_then(|domain| domain.refusal()) {
             return Err(DynamicSupervisorError::SharedRestartLimit(refusal).into());
         }
         if self.control.mode.load(Ordering::Acquire) != RUNNING {
@@ -445,7 +445,7 @@ async fn drive<E: Send + 'static>(
     loop {
         let command = poll_fn(|task_cx| {
             if cancellation.requested(task_cx) || owner.is_closing()
-                || owner.shared_restart_status().is_some_and(|status| status.refusal.is_some()) {
+                || owner.shared_restart_refused() {
                 control.mode.fetch_max(STOPPING, Ordering::AcqRel);
             }
             // Drain one coalesced notification, then register for the next.
@@ -474,8 +474,7 @@ async fn drive<E: Send + 'static>(
             poll_children(&mut owner, &mut tickets, task_cx);
             // A child's completion can seal the shared owner during this sweep.
             // Recheck before parking on an otherwise idle admission mailbox.
-            if owner.is_closing()
-                || owner.shared_restart_status().is_some_and(|status| status.refusal.is_some()) {
+            if owner.is_closing() || owner.shared_restart_refused() {
                 control.mode.fetch_max(STOPPING, Ordering::AcqRel);
                 owner.begin_shutdown();
                 drop(receiver.take());

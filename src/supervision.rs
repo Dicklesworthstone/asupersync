@@ -2368,6 +2368,41 @@ mod managed {
         registration_error: Option<RegistrationFailure>,
     }
 
+    /// The shared stop can arrive after a controller submitted this generation
+    /// but before its task is polled, or while name registration was pending.
+    /// Fence factory entry itself; asynchronous root cancellation is not an
+    /// admission barrier for those already submitted tasks.
+    fn refuse_shared_start<E>(
+        domain: Option<&crate::cx::dynamic_supervisor::SharedRestartDomain>,
+        publication: &Mutex<ChildPublication<E>>,
+        cx: &Cx,
+    ) -> bool {
+        if domain.is_none_or(|domain| !domain.is_refused()) {
+            return false;
+        }
+        let now = cx.now();
+        let reason = CancelReason::with_origin(
+            crate::types::CancelKind::FailFast,
+            cx.region_id(),
+            now,
+        )
+        .with_task(cx.task_id())
+        .with_message("dynamic supervisor shared restart allowance exhausted");
+        let waiter = {
+            let mut publication = publication.lock();
+            publication.terminal = Some((
+                now,
+                Outcome::Cancelled(reason),
+                publication.shutdown_requested,
+            ));
+            publication.waiter.take()
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+        true
+    }
+
     struct RunningChild<E> {
         number: u64,
         region: Option<ChildRegion>,
@@ -2568,6 +2603,24 @@ mod managed {
 
         fn cancelled(&self) -> bool {
             self.cx.checkpoint().is_err()
+        }
+
+        fn observe_shared_refusal(&mut self, index: usize) -> bool {
+            let Some(refusal) = self
+                .supervisor
+                .shared_restarts
+                .as_ref()
+                .and_then(|domain| domain.refusal())
+            else {
+                return false;
+            };
+            if matches!(self.report.outcome, Outcome::Ok(())) {
+                self.report.outcome = Outcome::Err(ManagedSupervisorError::SharedRestartLimit {
+                    child: self.supervisor.children[index].name.clone(),
+                    refusal,
+                });
+            }
+            true
         }
 
         /// Whether the supervisor's own budget deadline (`with_budget`) has
@@ -2784,6 +2837,9 @@ mod managed {
         }
 
         async fn start(&mut self, index: usize) -> Result<(), ManagedSupervisorError> {
+            if self.observe_shared_refusal(index) {
+                return Ok(());
+            }
             if self.cancelled() {
                 self.record_cancel();
                 return Ok(());
@@ -2801,6 +2857,13 @@ mod managed {
                 .open_child_region(ChildRegionSpec::inherit())
                 .await
                 .map_err(ManagedSupervisorError::Region)?;
+            if self.observe_shared_refusal(index) {
+                region
+                    .close()
+                    .await
+                    .map_err(ManagedSupervisorError::Region)?;
+                return Ok(());
+            }
             if self.cancelled() {
                 self.record_cancel();
                 region
@@ -2819,6 +2882,7 @@ mod managed {
             }));
             let child_publication = Arc::clone(&publication);
             let factory = Arc::clone(&self.supervisor.bindings[index].factory);
+            let shared_restarts = self.supervisor.shared_restarts.clone();
             #[cfg(test)]
             let terminal_publication_hook = self.supervisor.terminal_publication_hook.clone();
             let region_id = region.region_id();
@@ -2832,6 +2896,13 @@ mod managed {
                     .retain_until_finalized(Arc::clone(registration))
                     .await
                     .map_err(ManagedSupervisorError::Region)?;
+                if self.observe_shared_refusal(index) {
+                    region
+                        .close()
+                        .await
+                        .map_err(ManagedSupervisorError::Region)?;
+                    return Ok(());
+                }
                 if self.cancelled() {
                     self.record_cancel();
                     region
@@ -2858,6 +2929,9 @@ mod managed {
                         task: cx.task_id(),
                     };
                     child_publication.lock().identity = Some(identity);
+                    if refuse_shared_start(shared_restarts.as_deref(), &child_publication, &cx) {
+                        return;
+                    }
                     if let Some(registration) = &child_registration {
                         if let Err(error) = registration.acquire(&cx, identity).await {
                             let (reason, error) = match error {
@@ -2880,6 +2954,9 @@ mod managed {
                             if let Some(waiter) = waiter {
                                 waiter.wake();
                             }
+                            return;
+                        }
+                        if refuse_shared_start(shared_restarts.as_deref(), &child_publication, &cx) {
                             return;
                         }
                     }
@@ -2982,6 +3059,9 @@ mod managed {
                 }
             })
             .await;
+            if self.observe_shared_refusal(index) {
+                return Ok(());
+            }
             let registration_error = self.running[index]
                 .as_ref()
                 .expect("owned child")
@@ -3320,7 +3400,10 @@ mod managed {
             }
         }
 
-        async fn backoff(&mut self, delay: Option<Duration>) -> bool {
+        async fn backoff(&mut self, delay: Option<Duration>, failed: usize) -> bool {
+            if self.observe_shared_refusal(failed) {
+                return false;
+            }
             if self.cancelled() {
                 self.record_cancel();
                 return false;
@@ -3332,6 +3415,9 @@ mod managed {
                         self.cx
                             .refresh_cancel_waker(self.cancel_waker, poll_cx.waker()),
                     );
+                    if self.observe_shared_refusal(failed) {
+                        return Poll::Ready(false);
+                    }
                     if self.cancelled() {
                         self.record_cancel();
                         return Poll::Ready(false);
@@ -3342,6 +3428,9 @@ mod managed {
                 if !completed {
                     return false;
                 }
+            }
+            if self.observe_shared_refusal(failed) {
+                return false;
             }
             if self.cancelled() {
                 self.record_cancel();
@@ -3640,12 +3729,15 @@ mod managed {
                         tap.retire();
                     }
                 }
-                if !self.backoff(delay).await {
+                if !self.backoff(delay, failed).await {
                     return;
                 }
                 let mut counted = false;
                 let mut attempt = 0;
                 for index in restart {
+                    if self.observe_shared_refusal(index) {
+                        return;
+                    }
                     if self.cancelled() {
                         self.record_cancel();
                         return;
@@ -5423,6 +5515,172 @@ mod managed {
             Success,
             Cancelled,
             IndependentlyCancelledFailure,
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn managed_shared_refusal_during_native_finalizer_forbids_reserved_restart() {
+            use crate::cx::dynamic_supervisor::{SharedRestartConfig, SharedRestartDomain};
+
+            for sharded in [false, true] {
+                let runtime = crate::runtime::RuntimeBuilder::new()
+                    .worker_threads(2)
+                    .with_sharded_state(sharded)
+                    .build()
+                    .unwrap();
+                let domain = Arc::new(SharedRestartDomain::new(
+                    SharedRestartConfig::new(1, Duration::from_secs(60))
+                        .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(60))),
+                ));
+                let starts = Arc::new(AtomicUsize::new(0));
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let factory_starts = Arc::clone(&starts);
+                let finalizer_count = Arc::clone(&finalized);
+                let peer = Arc::clone(&domain);
+                let handle = runtime.handle();
+                let binding = ManagedChildBinding::new(
+                    "child",
+                    ManagedRestartMode::Transient,
+                    move |_: Cx, generation: ManagedGeneration| {
+                        factory_starts.fetch_add(1, Ordering::SeqCst);
+                        let peer = Arc::clone(&peer);
+                        let finalizer_count = Arc::clone(&finalizer_count);
+                        assert!(handle.register_sync_finalizer_for_testing(
+                            generation.region,
+                            move || {
+                                // The controller reserves its shared slot
+                                // before draining this actual generation. A
+                                // peer exhausts the domain during that drain.
+                                assert!(matches!(peer.admit(), RestartVerdict::Denied { .. }));
+                                finalizer_count.fetch_add(1, Ordering::SeqCst);
+                            },
+                        ));
+                        async { Outcome::Err(()) }
+                    },
+                );
+                let mut managed = topology(&["child"], RestartPolicy::OneForOne)
+                    .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 4))
+                    .unwrap();
+                managed.set_shared_restarts(Arc::clone(&domain));
+                let report = runtime.block_on(async move {
+                    let cx = Cx::current().expect("native shared-restart owner");
+                    crate::time::timeout(cx.now(), Duration::from_secs(10), managed.run(&cx))
+                        .await
+                        .expect("shared refusal must bypass the reserved 60-second backoff")
+                });
+                assert!(
+                    matches!(
+                        report.outcome,
+                        Outcome::Err(ManagedSupervisorError::SharedRestartLimit { .. })
+                    ),
+                    "{report:?}"
+                );
+                assert!(domain.is_refused());
+                assert_eq!(starts.load(Ordering::SeqCst), 1);
+                assert_eq!(finalized.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    (report.started, report.joined, report.restart_batches),
+                    (1, 1, 0)
+                );
+                assert_eq!(report.escalations, 0);
+                assert!(report.region_outcome.is_some());
+                assert_eq!(report.children.len(), 1);
+                assert!(report.children[0].region_outcome.is_some());
+                assert!(runtime.is_quiescent());
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn managed_shared_refusal_after_native_name_wait_prevents_factory_entry() {
+            use crate::cx::dynamic_supervisor::{SharedRestartConfig, SharedRestartDomain};
+
+            for sharded in [false, true] {
+                let runtime = crate::runtime::RuntimeBuilder::new()
+                    .worker_threads(2)
+                    .with_sharded_state(sharded)
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("native named shared-restart owner");
+                    let boundary = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    let mut task = boundary.cx().spawn(|cx| async move {
+                        let registry = Arc::new(Mutex::new(NameRegistry::new()));
+                        let mut held = registry
+                            .lock()
+                            .register("shared-service", cx.task_id(), cx.region_id(), cx.now())
+                            .unwrap();
+                        let domain = Arc::new(SharedRestartDomain::new(
+                            SharedRestartConfig::new(0, Duration::from_secs(60)),
+                        ));
+                        let starts = Arc::new(AtomicUsize::new(0));
+                        let factory_starts = Arc::clone(&starts);
+                        let binding = ManagedChildBinding::new(
+                            "child",
+                            ManagedRestartMode::Temporary,
+                            move |_: Cx, _: ManagedGeneration| {
+                                factory_starts.fetch_add(1, Ordering::SeqCst);
+                                async { Outcome::<(), ()>::Ok(()) }
+                            },
+                        );
+                        let mut compiled = topology(&["child"], RestartPolicy::OneForOne);
+                        compiled.children[0].registration = NameRegistrationPolicy::Register {
+                            name: "shared-service".into(),
+                            collision: NameCollisionPolicy::Wait,
+                        };
+                        let mut managed = compiled
+                            .bind_managed_with_registry(
+                                vec![binding],
+                                config(RestartPolicy::OneForOne, 1),
+                                Arc::clone(&registry),
+                            )
+                            .unwrap();
+                        managed.set_shared_restarts(Arc::clone(&domain));
+                        let mut supervisor = managed.spawn(&cx).unwrap();
+                        let deadline = cx.now().as_nanos().saturating_add(2_000_000_000);
+                        while registry.lock().waiter_count() != 1 {
+                            assert!(
+                                cx.now().as_nanos() < deadline,
+                                "generation reaches the real name wait"
+                            );
+                            crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                        }
+                        assert_eq!(starts.load(Ordering::SeqCst), 0);
+                        assert!(matches!(domain.admit(), RestartVerdict::Denied { .. }));
+                        registry
+                            .lock()
+                            .unregister_owned_and_grant(&held, cx.now())
+                            .unwrap();
+                        held.release().unwrap();
+                        let report = supervisor.join().await.unwrap();
+                        assert!(
+                            matches!(
+                                report.outcome,
+                                Outcome::Err(ManagedSupervisorError::SharedRestartLimit { .. })
+                            ),
+                            "{report:?}"
+                        );
+                        assert_eq!(starts.load(Ordering::SeqCst), 0);
+                        assert_eq!((report.started, report.joined), (0, 1));
+                        assert!(report.region_outcome.is_some());
+                        assert_eq!(report.children.len(), 1);
+                        assert!(report.children[0].outcome.is_cancelled());
+                        assert!(report.children[0].region_outcome.is_some());
+                        assert!(registry.lock().is_empty());
+                        assert_eq!(registry.lock().waiter_count(), 0);
+                        assert!(registry.lock().take_granted().is_empty());
+                    }).unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(10), task.join(&cx))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    boundary.close().await.unwrap();
+                });
+                assert!(runtime.is_quiescent());
+            }
         }
 
         #[cfg(not(target_arch = "wasm32"))]

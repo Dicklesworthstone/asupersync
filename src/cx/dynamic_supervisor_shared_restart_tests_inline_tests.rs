@@ -45,6 +45,104 @@
     }
 
     #[test]
+    fn shared_stale_exhaustion_sample_is_refreshed_before_permanent_refusal() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(1, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 0).is_allowed());
+        let calls = AtomicUsize::new(0);
+        let verdict = domain.admit_with_clock(|| {
+            assert!(domain.state.try_lock().is_some(), "clock runs outside the accounting lock");
+            if calls.fetch_add(1, Ordering::Relaxed) == 0 { 5 } else { 20 }
+        });
+        assert!(verdict.is_allowed(), "the old reservation expired before refusal");
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert!(!domain.is_refused());
+        let state = domain.state.lock();
+        assert_eq!((state.admitted, state.pending), (2, 0));
+        assert_eq!(state.tracker.recent_count(20), 1);
+    }
+
+    #[test]
+    fn shared_refreshed_sample_rechecks_a_competing_reservation() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(1, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 0).is_allowed());
+        let calls = AtomicUsize::new(0);
+        let verdict = domain.admit_with_clock(|| match calls.fetch_add(1, Ordering::Relaxed) {
+            0 => 5,
+            1 => {
+                // A peer consumes the newly available slot while this caller
+                // refreshes its clock outside the lock. It must be counted.
+                assert!(domain.admit_with_clock(|| 20).is_allowed());
+                20
+            }
+            _ => 20,
+        });
+        assert!(matches!(verdict, RestartVerdict::Denied { .. }));
+        assert!(domain.is_refused());
+        let state = domain.state.lock();
+        assert_eq!((state.admitted, state.pending), (2, 0));
+        assert_eq!(state.tracker.recent_count(20), 1);
+    }
+
+    #[test]
+    fn shared_accounting_changes_require_another_fresh_exhaustion_sample() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(1, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 0).is_allowed());
+        let calls = AtomicUsize::new(0);
+        let verdict = domain.admit_with_clock(|| match calls.fetch_add(1, Ordering::Relaxed) {
+            0 => 5,
+            1 => {
+                assert!(domain.admit_with_clock(|| 20).is_allowed());
+                20
+            }
+            // Reacquiring the accounting lock took long enough for the
+            // peer's reservation to expire too. Its revision invalidates
+            // the preceding sample, so it cannot latch a false refusal.
+            _ => 40,
+        });
+        assert!(verdict.is_allowed());
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        assert!(!domain.is_refused());
+        let state = domain.state.lock();
+        assert_eq!((state.admitted, state.pending), (3, 0));
+        assert_eq!(state.tracker.recent_count(40), 1);
+    }
+
+    #[test]
+    fn shared_refresh_clock_panic_does_not_latch_a_speculative_refusal() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(1, Duration::from_nanos(10)),
+        );
+        assert!(domain.admit_with_clock(|| 0).is_allowed());
+        let calls = AtomicUsize::new(0);
+        assert!(catch_unwind(AssertUnwindSafe(|| domain.admit_with_clock(|| {
+            assert_eq!(calls.fetch_add(1, Ordering::Relaxed), 0, "refresh clock panic");
+            5
+        }))).is_err());
+        assert!(!domain.is_refused());
+        assert_eq!(domain.state.lock().pending, 0);
+        assert!(domain.admit_with_clock(|| 20).is_allowed());
+    }
+
+    #[test]
+    fn shared_latched_refusal_does_not_call_the_clock_again() {
+        let domain = SharedRestartDomain::new(
+            SharedRestartConfig::new(0, Duration::from_secs(1)),
+        );
+        assert!(matches!(domain.admit_with_clock(|| 0), RestartVerdict::Denied { .. }));
+        assert!(domain.is_refused());
+        assert!(matches!(
+            domain.admit_with_clock(|| panic!("a latched domain needs no clock")),
+            RestartVerdict::Denied { .. }
+        ));
+    }
+
+    #[test]
     fn shared_pending_slots_are_counted_and_clock_panic_does_not_refund() {
         let domain = SharedRestartDomain::new(
             SharedRestartConfig::new(2, Duration::from_nanos(10))
