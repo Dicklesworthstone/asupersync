@@ -1349,6 +1349,231 @@
         );
     }
 
+    fn producer_retry_owner(budget: Budget) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1), TaskId::new_for_test(1, 0), budget,
+            None, None, None, Some(timer.clone()), None,
+        );
+        (owner, clock, timer)
+    }
+
+    /// The native task is parked inside the production queue-retry path. The
+    /// watchdog polls its join handle, not the retry, so it cannot supply a
+    /// missing wake. Its virtual backoff clock stays frozen until cleanup.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn producer_retry_native_owner_cancellation_wakes_parked_backoff() {
+        for multithread in [false, true] {
+            for cross_thread in [false, true] {
+                let builder = if multithread {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                };
+                let runtime = builder.build().unwrap();
+                runtime.block_on(async {
+                    let root = Cx::current().unwrap();
+                    let (owner, clock, timer) = producer_retry_owner(Budget::INFINITE);
+                    let operation_owner = owner.clone();
+                    let attempts = Arc::new(AtomicUsize::new(0));
+                    let task_attempts = Arc::clone(&attempts);
+                    let (parked_tx, mut parked_rx) = crate::channel::oneshot::channel();
+                    let mut waiting = root.spawn(move |task_cx| async move {
+                        let config = ProducerConfig::default().retries(3).linger_ms(250);
+                        let mut retry = std::pin::pin!(retry_immediate_send(&operation_owner, &config, || {
+                            task_attempts.fetch_add(1, Ordering::SeqCst);
+                            Err::<(), _>(KafkaError::QueueFull)
+                        }));
+                        let mut witness = Some(parked_tx);
+                        let result = std::future::poll_fn(|task| {
+                            let result = retry.as_mut().poll(task);
+                            if result.is_pending() && let Some(witness) = witness.take() {
+                                witness.send_blocking(()).unwrap();
+                            }
+                            result
+                        }).await;
+                        (result, task_cx.is_cancel_requested())
+                    }).unwrap();
+                    crate::time::timeout(root.now(), Duration::from_secs(5), parked_rx.recv(&root))
+                        .await.expect("retry reached a real Pending backoff").unwrap();
+                    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                    assert_eq!(timer.pending_count(), 1);
+                    assert!(!waiting.is_finished());
+                    let cancel = || owner.cancel_with(
+                        crate::types::CancelKind::User, Some("cancel explicit retry owner"),
+                    );
+                    if cross_thread {
+                        std::thread::scope(|scope| scope.spawn(cancel).join().unwrap());
+                    } else {
+                        cancel();
+                    }
+                    let result = crate::time::timeout(
+                        root.now(), Duration::from_secs(2), waiting.join(&root),
+                    ).await;
+                    if result.is_err() {
+                        // The old implementation has no cancellation wake;
+                        // release its frozen timer so even failure drains.
+                        clock.advance(1_000_000_000);
+                        let _ = timer.process_timers();
+                        let _ = crate::time::timeout(
+                            root.now(), Duration::from_secs(5), waiting.join(&root),
+                        ).await.expect("release the old-code backoff for cleanup");
+                    }
+                    let (result, task_cancelled) = result
+                        .expect("owner cancellation must wake backoff without timer progress")
+                        .expect("owner cancellation must remain a typed Kafka result");
+                    assert!(matches!(result, Err(KafkaError::Cancelled)));
+                    assert!(!task_cancelled);
+                    assert_eq!(attempts.load(Ordering::SeqCst), 1, "no retry after cancellation");
+                    assert_eq!(timer.pending_count(), 0);
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                });
+                let report = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(report.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+                assert_eq!(report.live_tasks, 0);
+                assert_eq!(report.pending_obligations, 0);
+                assert!(runtime.is_quiescent());
+            }
+        }
+    }
+
+    #[test]
+    fn producer_backoff_drop_preserves_another_cancellation_observer() {
+        let (owner, _, timer) = producer_retry_owner(Budget::INFINITE);
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut observer = std::pin::pin!(owner.cancelled());
+        assert!(observer.as_mut().poll(&mut task).is_pending());
+        let mut wait = Box::pin(wait_retry_backoff(&owner, Duration::from_secs(60)));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 2);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        drop(wait);
+        assert_eq!(timer.pending_count(), 0);
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        owner.cancel_with(crate::types::CancelKind::User, Some("remaining producer observer"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(observer.as_mut().poll(&mut task).is_ready());
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn producer_backoff_owner_deadline_wakes_with_time_restricted() {
+        use crate::types::Time;
+        for restrict_time in [false, true] {
+            let (owner, clock, timer) = producer_retry_owner(
+                Budget::INFINITE.with_deadline(Time::from_nanos(10)),
+            );
+            let owner = if restrict_time {
+                let _restricted = owner.restrict::<crate::cx::cap::None>().set_current_restricted();
+                Cx::current().unwrap()
+            } else {
+                owner
+            };
+            let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::starting_at(Time::from_nanos(10_000)),
+            ));
+            let foreign = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1), TaskId::new_for_test(2, 0), Budget::INFINITE,
+                None, None, None, Some(foreign_timer.clone()), None,
+            );
+            let _ambient = Cx::set_current(Some(foreign));
+            let wakes = Arc::new(ReceiptWake::default());
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut task = std::task::Context::from_waker(&waker);
+            let mut wait = Box::pin(wait_retry_backoff(&owner, Duration::from_secs(60)));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.next_deadline(), Some(Time::from_nanos(10)));
+            assert_eq!(foreign_timer.pending_count(), 0);
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+            clock.advance(10);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+            assert_eq!(owner.cancel_reason().unwrap().kind, crate::types::CancelKind::Deadline);
+            assert_eq!(timer.pending_count(), 0);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    #[test]
+    fn producer_backoff_masked_deadline_stays_parked_and_refreshes_changed_budget() {
+        use crate::types::Time;
+        let (owner, clock, timer) = producer_retry_owner(
+            Budget::INFINITE.with_deadline(Time::from_nanos(10)),
+        );
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(wait_retry_backoff(&owner, Duration::from_secs(60)));
+        let before_unmask = owner.masked(|| {
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 2);
+            clock.advance(10);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            let after_deadline = wakes.0.load(Ordering::SeqCst);
+            for _ in 0..3 {
+                assert!(wait.as_mut().poll(&mut task).is_pending());
+                assert_eq!(timer.process_timers(), 0);
+            }
+            assert_eq!(wakes.0.load(Ordering::SeqCst), after_deadline);
+            owner.inner.write().budget.deadline = Some(Time::from_nanos(20));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 2);
+            assert_eq!(timer.next_deadline(), Some(Time::from_nanos(20)));
+            clock.advance(10);
+            assert_eq!(timer.process_timers(), 1);
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            wakes.0.load(Ordering::SeqCst)
+        });
+        assert!(wakes.0.load(Ordering::SeqCst) > before_unmask);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn producer_retry_driverless_owner_does_not_adopt_foreign_clock() {
+        use crate::types::Time;
+        let owner = Cx::for_testing_with_budget(Budget::INFINITE.with_deadline(
+            crate::time::raw_wall_now() + Duration::from_secs(3600),
+        ));
+        let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_nanos(u64::MAX - 1)),
+        ));
+        let foreign = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1), TaskId::new_for_test(2, 0), Budget::INFINITE,
+            None, None, None, Some(foreign_timer.clone()), None,
+        );
+        let _ambient = Cx::set_current(Some(foreign));
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = std::task::Context::from_waker(&waker);
+        let config = ProducerConfig::default().retries(3).linger_ms(250);
+        let attempts = AtomicUsize::new(0);
+        let mut wait = Box::pin(retry_immediate_send(&owner, &config, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(KafkaError::QueueFull)
+        }));
+        assert!(wait.as_mut().poll(&mut task).is_pending());
+        let attempts_before_cancel = attempts.load(Ordering::SeqCst);
+        assert!(attempts_before_cancel > 0, "the live owner must reach the queue attempt");
+        assert!(!owner.is_cancel_requested());
+        assert_eq!(foreign_timer.pending_count(), 0);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        owner.cancel_with(crate::types::CancelKind::User, Some("driverless producer owner"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(KafkaError::Cancelled))));
+        assert_eq!(attempts.load(Ordering::SeqCst), attempts_before_cancel);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
     #[test]
     fn producer_config_validate_zero_batch_size() {
         let cfg = ProducerConfig {

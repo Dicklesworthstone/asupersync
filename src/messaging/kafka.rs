@@ -856,28 +856,53 @@ fn producer_retry_backoff(config: &ProducerConfig, attempt: u32) -> Duration {
 }
 
 async fn wait_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
-    if delay.is_zero() {
+    cx.with_ambient(async {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        crate::runtime::yield_now().await;
-        return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
-    }
-
-    let mut sleeper = cx.timer_driver().map_or_else(
-        || crate::time::sleep(crate::time::wall_now(), delay),
-        |driver| {
-            let deadline = driver
-                .now()
-                .saturating_add_nanos(delay.as_nanos().min(u128::from(u64::MAX)) as u64);
-            crate::time::Sleep::with_timer_driver(deadline, driver)
-        },
-    );
-    std::future::poll_fn(|task_cx| {
-        if cx.checkpoint().is_err() {
-            return std::task::Poll::Ready(Err(KafkaError::Cancelled));
+        if delay.is_zero() {
+            crate::runtime::yield_now().await;
+            return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
         }
-        std::pin::Pin::new(&mut sleeper)
-            .poll(task_cx)
-            .map(|()| Ok(()))
+
+        let mut cancel = KafkaDeliveryCancelGuard { cx, token: None };
+        let clock = cx.timer_driver();
+        let deadline = clock
+            .as_ref()
+            .map_or_else(crate::time::raw_wall_now, crate::time::TimerDriverHandle::now)
+            .saturating_add_nanos(delay.as_nanos().min(u128::from(u64::MAX)) as u64);
+        let mut sleeper = clock.map_or_else(
+            || crate::time::Sleep::with_wall_clock(deadline),
+            |driver| crate::time::Sleep::with_timer_driver(deadline, driver),
+        );
+        let mut budget_deadline = None;
+        let mut budget_sleep = None;
+        std::future::poll_fn(|task| {
+            // Queue retries and flush/close waits can be polled by a different
+            // task. Cancellation of their explicit owner must wake that task
+            // even when the broker and the backoff clock make no progress.
+            cancel.refresh(task.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(KafkaError::Cancelled));
+            }
+            if cx.budget().deadline != budget_deadline {
+                budget_sleep = cx.budget_deadline_sleep();
+                budget_deadline = budget_sleep.as_ref().map(crate::time::Sleep::deadline);
+            }
+            if let Some(timer) = &mut budget_sleep {
+                if Pin::new(timer).poll_deadline(task).is_ready() {
+                    // A masked deadline may wake once without ending the wait.
+                    // Retain its identity so it is not rearmed on each poll;
+                    // the cancellation registration wakes us when unmasked.
+                    budget_sleep = None;
+                }
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(KafkaError::Cancelled));
+                }
+            }
+            // Only elapsed time completes backoff successfully. Cancellation
+            // is reported as KafkaError::Cancelled by the owner checkpoint.
+            Pin::new(&mut sleeper).poll_deadline(task).map(|()| Ok(()))
+        })
+        .await
     })
     .await
 }
@@ -893,7 +918,12 @@ where
 {
     let mut attempt = 0;
     loop {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        {
+            // Only the explicit owner's checkpoint uses its clock. Preserve
+            // the caller's ambient context while running the send operation.
+            let _ambient = cx.clone().set_current_restricted();
+            cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        }
 
         match attempt_send() {
             Ok(value) => return Ok(value),
