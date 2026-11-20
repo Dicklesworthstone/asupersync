@@ -4893,6 +4893,248 @@ computations = ["proof.configured-write-budget"]
         assert!(dbg.contains("NoCapability"));
     }
 
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[derive(Debug, PartialEq, Eq)]
+    struct NativeRemoteCallbackSnapshot {
+        active: bool,
+        task_state: Option<RemoteTaskState>,
+        cancel_reason: Option<CancelReason>,
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[derive(Debug)]
+    struct NativeRemoteCallbackProbe {
+        shared: std::sync::Weak<NativeRemoteShared>,
+        task_id: RemoteTaskId,
+        observations: Mutex<Vec<Option<NativeRemoteCallbackSnapshot>>>,
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    impl NativeRemoteCallbackProbe {
+        fn new(shared: &Arc<NativeRemoteShared>, task_id: RemoteTaskId) -> Arc<Self> {
+            Arc::new(Self {
+                shared: Arc::downgrade(shared),
+                task_id,
+                observations: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn observe(&self) {
+            let shared = self.shared.upgrade().expect("runtime survives its callback");
+            // A regressed callback-under-lock must fail an assertion rather
+            // than hang the test inside a reentrant lock acquisition.
+            let snapshot = shared.state.try_lock().map(|state| {
+                let entry = state.tasks.get(&self.task_id);
+                NativeRemoteCallbackSnapshot {
+                    active: state.active.contains(&self.task_id),
+                    task_state: entry.map(|entry| entry.state),
+                    cancel_reason: entry.and_then(|entry| entry.control.cancel_reason()),
+                }
+            });
+            self.observations.lock().push(snapshot);
+        }
+
+        fn take_observations(&self) -> Vec<Option<NativeRemoteCallbackSnapshot>> {
+            std::mem::take(&mut *self.observations.lock())
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    impl std::task::Wake for NativeRemoteCallbackProbe {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[derive(Debug)]
+    struct NativeRemoteContextDropProbe(Arc<NativeRemoteCallbackProbe>);
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    impl crate::evidence_sink::EvidenceSink for NativeRemoteContextDropProbe {
+        fn emit(&self, _entry: &franken_evidence::EvidenceLedger) {}
+
+        fn next_evidence_ts(&self) -> u64 {
+            0
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    impl Drop for NativeRemoteContextDropProbe {
+        fn drop(&mut self) {
+            self.0.observe();
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    fn native_shared_for_callback_test() -> Arc<NativeRemoteShared> {
+        Arc::new(NativeRemoteShared {
+            max_in_flight: 4,
+            drain_timeout: Duration::from_secs(1),
+            automatic_lease_renewal: false,
+            state: Mutex::new(NativeRemoteState::new()),
+            retirement_notify: None,
+        })
+    }
+
+    /// asupersync-bi2462.77: publishing a control signal can synchronously
+    /// reenter the runtime through an executor waker.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_cancel_wakes_after_unlock_and_preserves_dispatch_fence() {
+        let shared = native_shared_for_callback_test();
+        let task_id = RemoteTaskId::from_raw(1);
+        let (result, _result_rx) = oneshot::channel();
+        shared.register(task_id, result);
+        let mut receiver = shared.admit(task_id).unwrap();
+        let probe = NativeRemoteCallbackProbe::new(&shared, task_id);
+        let waker = Waker::from(Arc::clone(&probe));
+        let mut context = Context::from_waker(&waker);
+        let cx = Cx::for_testing();
+        let mut receive = std::pin::pin!(receiver.recv(&cx));
+        assert!(receive.as_mut().poll(&mut context).is_pending());
+
+        let reason = CancelReason::user("cancel before dispatch");
+        shared.request_cancel(task_id, reason.clone()).unwrap();
+        assert_eq!(
+            probe.take_observations(),
+            vec![Some(NativeRemoteCallbackSnapshot {
+                active: true,
+                task_state: Some(RemoteTaskState::Pending),
+                cancel_reason: Some(reason.clone()),
+            })]
+        );
+        assert!(!shared.begin_request_dispatch(task_id));
+
+        // The one-slot wake channel is already full. A second cancellation
+        // must still strengthen its reason without reopening dispatch.
+        let stronger = CancelReason::shutdown();
+        let mut expected = reason;
+        expected.strengthen(&stronger);
+        shared.request_cancel(task_id, stronger).unwrap();
+        assert_eq!(shared.control(task_id).unwrap().cancel_reason(), Some(expected));
+        assert!(!shared.begin_request_dispatch(task_id));
+        assert_eq!(receive.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_rollback_retires_resources_before_notifying_drain() {
+        let shared = native_shared_for_callback_test();
+        let task_id = RemoteTaskId::from_raw(1);
+        let (result, mut result_rx) = oneshot::channel();
+        shared.register(task_id, result);
+        let _receiver = shared.admit(task_id).unwrap();
+        let probe = NativeRemoteCallbackProbe::new(&shared, task_id);
+        let waker = Waker::from(Arc::clone(&probe));
+        let mut context = Context::from_waker(&waker);
+        assert!(result_rx.poll_recv_uninterruptible(&mut context).is_pending());
+        let (_, tasks, drain) = shared.begin_drain(true);
+        assert_eq!(tasks, vec![task_id]);
+        let mut drain = drain.expect("active driver requires a drain waiter");
+        assert_eq!(drain.try_recv(), Err(oneshot::TryRecvError::Empty));
+
+        shared.roll_back_admission(task_id);
+
+        assert_eq!(
+            probe.take_observations(),
+            vec![Some(NativeRemoteCallbackSnapshot {
+                active: true,
+                task_state: None,
+                cancel_reason: None,
+            })]
+        );
+        assert_eq!(
+            result_rx.poll_recv_uninterruptible(&mut context),
+            Poll::Ready(Err(oneshot::RecvError::Closed))
+        );
+        assert_eq!(drain.try_recv(), Ok(()));
+        let state = shared.state.lock();
+        assert!(state.active.is_empty());
+        assert!(state.tasks.is_empty());
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_driver_contexts_retire_outside_state_lock() {
+        let shared = native_shared_for_callback_test();
+        let task_id = RemoteTaskId::from_raw(1);
+        let (result, mut result_rx) = oneshot::channel();
+        shared.register(task_id, result);
+        let _receiver = shared.admit(task_id).unwrap();
+        let probe = NativeRemoteCallbackProbe::new(&shared, task_id);
+
+        for completing in [false, true] {
+            let sink = Arc::new(NativeRemoteContextDropProbe(Arc::clone(&probe)));
+            shared.attach_driver_cx(task_id, Cx::for_testing().with_evidence_sink(Some(sink)));
+            assert!(probe.take_observations().is_empty());
+            if completing {
+                shared.complete(task_id, Ok(RemoteOutcome::Success(vec![7])), None);
+            } else {
+                shared.attach_driver_cx(task_id, Cx::for_testing());
+            }
+            assert_eq!(
+                probe.take_observations(),
+                vec![Some(NativeRemoteCallbackSnapshot {
+                    active: true,
+                    task_state: Some(if completing {
+                        RemoteTaskState::Completed
+                    } else {
+                        RemoteTaskState::Pending
+                    }),
+                    cancel_reason: None,
+                })]
+            );
+        }
+        assert_eq!(result_rx.try_recv(), Ok(Ok(RemoteOutcome::Success(vec![7]))));
+        assert!(shared.state.lock().active.is_empty());
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_result_cleanup_wakes_control_receiver_outside_state_lock() {
+        for delivered in [false, true] {
+            let shared = native_shared_for_callback_test();
+            let task_id = RemoteTaskId::from_raw(1);
+            let (result, result_rx) = oneshot::channel();
+            let mut result_rx = Some(result_rx);
+            shared.register(task_id, result);
+            let mut receiver = shared.admit(task_id).unwrap();
+            let probe = NativeRemoteCallbackProbe::new(&shared, task_id);
+            let waker = Waker::from(Arc::clone(&probe));
+            let mut context = Context::from_waker(&waker);
+            let cx = Cx::for_testing();
+            let mut receive = std::pin::pin!(receiver.recv(&cx));
+            assert!(receive.as_mut().poll(&mut context).is_pending());
+            if !delivered {
+                drop(result_rx.take());
+            }
+
+            shared.complete(task_id, Ok(RemoteOutcome::Success(vec![7])), None);
+            if delivered {
+                assert!(probe.take_observations().is_empty());
+                drop(result_rx.take());
+                shared.release_dropped_handle(task_id);
+            }
+
+            assert_eq!(
+                probe.take_observations(),
+                vec![Some(NativeRemoteCallbackSnapshot {
+                    active: !delivered,
+                    task_state: None,
+                    cancel_reason: None,
+                })]
+            );
+            assert_eq!(
+                receive.as_mut().poll(&mut context),
+                Poll::Ready(Err(mpsc::RecvError::Disconnected))
+            );
+            let state = shared.state.lock();
+            assert!(state.active.is_empty());
+            assert!(state.tasks.is_empty());
+        }
+    }
+
     /// asupersync-bi2462.77: a second drain request reached a driver whose
     /// graceful Cancel exchange was in flight and cancelled its Cx. The
     /// server's Cancelled outcome was then lost to a local `Err(Cancelled)`.

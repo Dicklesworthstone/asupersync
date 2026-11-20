@@ -8332,15 +8332,17 @@ impl NativeRemoteControl {
         }
     }
 
-    fn request_cancel(&self, reason: CancelReason) -> bool {
-        {
-            let mut pending = self.pending_cancel.lock();
-            if let Some(existing) = pending.as_mut() {
-                existing.strengthen(&reason);
-            } else {
-                *pending = Some(reason);
-            }
+    fn queue_cancel(&self, reason: CancelReason) {
+        let mut pending = self.pending_cancel.lock();
+        if let Some(existing) = pending.as_mut() {
+            existing.strengthen(&reason);
+        } else {
+            *pending = Some(reason);
         }
+    }
+
+    fn request_cancel(&self, reason: CancelReason) -> bool {
+        self.queue_cancel(reason);
         self.signal()
     }
 
@@ -8463,18 +8465,21 @@ impl NativeRemoteShared {
     }
 
     fn attach_driver_cx(&self, task_id: RemoteTaskId, cx: Cx) {
-        let pending_cancel = {
+        let (pending_cancel, retired_cx) = {
             let mut state = self.state.lock();
-            state.tasks.get_mut(&task_id).and_then(|entry| {
-                entry.driver_cx = Some(cx.clone());
-                (entry.state == RemoteTaskState::Pending)
+            state.tasks.get_mut(&task_id).map_or((None, None), |entry| {
+                let retired_cx = entry.driver_cx.replace(cx.clone());
+                let pending_cancel = (entry.state == RemoteTaskState::Pending)
                     .then(|| entry.control.cancel_reason())
-                    .flatten()
+                    .flatten();
+                (pending_cancel, retired_cx)
             })
         };
         if let Some(reason) = pending_cancel {
             cx.set_cancel_reason(reason);
         }
+        // Context capabilities may own user-defined destructors.
+        drop(retired_cx);
     }
 
     // A handle was dropped without consuming its result and has released its
@@ -8484,17 +8489,22 @@ impl NativeRemoteShared {
     // tracked; if its sender is still here, complete() cannot deliver into
     // the released receiver and removes the entry itself.
     fn release_dropped_handle(&self, task_id: RemoteTaskId) {
-        let mut state = self.state.lock();
-        let settled = state.tasks.get(&task_id).is_some_and(|entry| {
-            entry.result.is_none()
-                && !matches!(
-                    entry.state,
-                    RemoteTaskState::Pending | RemoteTaskState::Running
-                )
-        });
-        if settled {
-            state.tasks.remove(&task_id);
-        }
+        let retired = {
+            let mut state = self.state.lock();
+            let settled = state.tasks.get(&task_id).is_some_and(|entry| {
+                entry.result.is_none()
+                    && !matches!(
+                        entry.state,
+                        RemoteTaskState::Pending | RemoteTaskState::Running
+                    )
+            });
+            if settled {
+                state.tasks.remove(&task_id)
+            } else {
+                None
+            }
+        };
+        drop(retired);
     }
 
     fn set_running(&self, task_id: RemoteTaskId) {
@@ -8546,22 +8556,16 @@ impl NativeRemoteShared {
     }
 
     fn roll_back_admission(&self, task_id: RemoteTaskId) {
-        let waiters = {
-            let mut state = self.state.lock();
-            state.active.remove(&task_id);
-            state.tasks.remove(&task_id);
-            if state.active.is_empty() {
-                std::mem::take(&mut state.drain_waiters)
-            } else {
-                Vec::new()
-            }
+        // Removing a result sender or control receiver can invoke an executor
+        // waker. Retire them outside the state lock, and keep the operation
+        // active until that retirement finishes, including during unwinding.
+        let retirement = NativeRemoteDriverRetirement {
+            shared: self,
+            task_id,
         };
-        for waiter in waiters {
-            let _ = waiter.send_blocking(());
-        }
-        if let Some(notify) = &self.retirement_notify {
-            notify.notify_waiters();
-        }
+        let retired = self.state.lock().tasks.remove(&task_id);
+        drop(retired);
+        drop(retirement);
     }
 
     fn complete(
@@ -8579,19 +8583,21 @@ impl NativeRemoteShared {
         let driver_admission = admission;
         let terminal_result = result;
         let terminal_state = RemoteHandle::terminal_state_for_result(&terminal_result);
-        let sender = {
+        let (sender, retired_cx) = {
             let mut state = self.state.lock();
-            state.tasks.get_mut(&task_id).and_then(|entry| {
+            state.tasks.get_mut(&task_id).map_or((None, None), |entry| {
                 entry.state = terminal_state;
-                entry.driver_cx = None;
+                let retired_cx = entry.driver_cx.take();
                 entry.control_in_flight = false;
                 entry.cancel_exchange_in_flight = false;
-                entry.result.take()
+                (entry.result.take(), retired_cx)
             })
         };
+        drop(retired_cx);
         let delivered = sender.is_some_and(|sender| sender.send_blocking(terminal_result).is_ok());
         if !delivered {
-            self.state.lock().tasks.remove(&task_id);
+            let retired = self.state.lock().tasks.remove(&task_id);
+            drop(retired);
         }
         drop(driver_admission);
         drop(retirement);
@@ -8635,14 +8641,17 @@ impl NativeRemoteShared {
         task_id: RemoteTaskId,
         reason: CancelReason,
     ) -> Result<(), RemoteError> {
-        let (signaled, pending_driver) = {
+        let (control, pending_driver) = {
             let state = self.state.lock();
             let entry = state.tasks.get(&task_id).ok_or_else(|| {
                 RemoteError::TransportError(format!(
                     "native remote task {task_id} is not active or registered"
                 ))
             })?;
-            let signaled = entry.control.request_cancel(reason.clone());
+            // Keep publication of the reason serialized with dispatch and
+            // control-exchange admission. The channel signal runs only after
+            // releasing state: it can invoke a reentrant executor waker.
+            entry.control.queue_cancel(reason.clone());
             // A graceful Cancel exchange already carries this request to the
             // server; interrupting its driver would abandon the drain.
             let pending_driver = ((entry.state == RemoteTaskState::Pending
@@ -8650,8 +8659,9 @@ impl NativeRemoteShared {
                 || (entry.control_in_flight && !entry.cancel_exchange_in_flight))
                 .then(|| entry.driver_cx.clone())
                 .flatten();
-            (signaled, pending_driver)
+            (Arc::clone(&entry.control), pending_driver)
         };
+        let signaled = control.signal();
         if let Some(cx) = pending_driver {
             cx.set_cancel_reason(reason);
         }
@@ -9605,7 +9615,8 @@ impl RemoteRuntime for NativeRemoteRuntime {
     }
 
     fn clear_task_state(&self, task_id: RemoteTaskId) {
-        self.shared.state.lock().tasks.remove(&task_id);
+        let retired = self.shared.state.lock().tasks.remove(&task_id);
+        drop(retired);
     }
 
     fn unregister_task(&self, task_id: RemoteTaskId) {
