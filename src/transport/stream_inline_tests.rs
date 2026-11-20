@@ -576,6 +576,213 @@
     }
 
     #[test]
+    fn test_next_with_cancel_idle_owner_wakes_latest_task() {
+        init_test("test_next_with_cancel_idle_owner_wakes_latest_task");
+        let cx = Cx::for_testing();
+        let mut stream = PendingStream;
+        let old_woke = Arc::new(AtomicBool::new(false));
+        let new_woke = Arc::new(AtomicBool::new(false));
+        let old_waker = flagged_waker(Arc::clone(&old_woke));
+        let new_waker = flagged_waker(Arc::clone(&new_woke));
+        let mut wait = Box::pin(stream.next_with_cancel(&cx));
+        assert!(wait.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
+        assert!(wait.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(!old_woke.load(Ordering::SeqCst));
+        assert!(new_woke.load(Ordering::SeqCst), "an idle source must need no data wake");
+        assert!(matches!(
+            wait.as_mut().poll(&mut Context::from_waker(&new_waker)),
+            Poll::Ready(Err(StreamError::Cancelled))
+        ));
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        crate::test_complete!("test_next_with_cancel_idle_owner_wakes_latest_task");
+    }
+
+    #[test]
+    fn test_next_with_cancel_drop_removes_only_its_own_registration() {
+        init_test("test_next_with_cancel_drop_removes_only_its_own_registration");
+        let cx = Cx::for_testing();
+        let mut first_stream = PendingStream;
+        let mut second_stream = PendingStream;
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut task = Context::from_waker(&waker);
+        let mut first = Box::pin(first_stream.next_with_cancel(&cx));
+        let mut second = Box::pin(second_stream.next_with_cancel(&cx));
+        assert!(first.as_mut().poll(&mut task).is_pending());
+        assert!(second.as_mut().poll(&mut task).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+        drop(first);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(woke.load(Ordering::SeqCst));
+        assert!(matches!(second.as_mut().poll(&mut task), Poll::Ready(Err(StreamError::Cancelled))));
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        drop(second);
+
+        let fresh = Cx::for_testing();
+        let mut abandoned = Box::pin(first_stream.next_with_cancel(&fresh));
+        assert!(abandoned.as_mut().poll(&mut task).is_pending());
+        drop(abandoned);
+        woke.store(false, Ordering::SeqCst);
+        fresh.cancel_fast(crate::types::CancelKind::User);
+        assert!(!woke.load(Ordering::SeqCst), "dropped wait must not be woken");
+        assert!(fresh.inner.read().cancel_waker_registrations.is_empty());
+        crate::test_complete!("test_next_with_cancel_drop_removes_only_its_own_registration");
+    }
+
+    #[test]
+    fn test_next_with_cancel_terminal_results_retire_registration_before_drop() {
+        struct ControlledStream(Arc<AtomicUsize>);
+        impl SymbolStream for ControlledStream {
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+            ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+                match self.0.load(Ordering::SeqCst) {
+                    0 => Poll::Pending,
+                    1 => Poll::Ready(Some(Ok(create_symbol(91)))),
+                    2 => Poll::Ready(None),
+                    _ => Poll::Ready(Some(Err(StreamError::Reset))),
+                }
+            }
+        }
+        init_test("test_next_with_cancel_terminal_results_retire_registration_before_drop");
+        for terminal in 1..=3 {
+            let cx = Cx::for_testing();
+            let state = Arc::new(AtomicUsize::new(0));
+            let mut stream = ControlledStream(Arc::clone(&state));
+            let woke = Arc::new(AtomicBool::new(false));
+            let waker = flagged_waker(Arc::clone(&woke));
+            let mut task = Context::from_waker(&waker);
+            let mut wait = Box::pin(stream.next_with_cancel(&cx));
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+            state.store(terminal, Ordering::SeqCst);
+            let result = wait.as_mut().poll(&mut task);
+            match terminal {
+                1 => assert!(matches!(result, Poll::Ready(Ok(Some(symbol))) if symbol.symbol().id().esi() == 91)),
+                2 => assert!(matches!(result, Poll::Ready(Ok(None)))),
+                _ => assert!(matches!(result, Poll::Ready(Err(StreamError::Reset)))),
+            }
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+            cx.cancel_fast(crate::types::CancelKind::User);
+            assert!(!woke.load(Ordering::SeqCst));
+            assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Err(StreamError::PolledAfterCompletion))));
+        }
+        crate::test_complete!("test_next_with_cancel_terminal_results_retire_registration_before_drop");
+    }
+
+    #[test]
+    fn test_next_with_cancel_handles_cancellation_during_source_poll() {
+        struct CancellingStream {
+            cx: Cx,
+            ready: bool,
+        }
+        impl SymbolStream for CancellingStream {
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _task: &mut Context<'_>,
+            ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+                self.cx.cancel_fast(crate::types::CancelKind::User);
+                if self.ready {
+                    Poll::Ready(Some(Ok(create_symbol(37))))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+        init_test("test_next_with_cancel_handles_cancellation_during_source_poll");
+        for ready in [false, true] {
+            let cx = Cx::for_testing();
+            let mut stream = CancellingStream { cx: cx.clone(), ready };
+            let mut wait = Box::pin(stream.next_with_cancel(&cx));
+            let result = wait.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            if ready {
+                assert!(matches!(result, Poll::Ready(Ok(Some(symbol))) if symbol.symbol().id().esi() == 37));
+            } else {
+                assert!(matches!(result, Poll::Ready(Err(StreamError::Cancelled))));
+            }
+            assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        }
+        crate::test_complete!("test_next_with_cancel_handles_cancellation_during_source_poll");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_next_with_cancel_native_explicit_owner_wakes_parked_receive() {
+        init_test("test_next_with_cancel_native_explicit_owner_wakes_parked_receive");
+        for multithread in [false, true] {
+            for cross_thread in [false, true] {
+                let builder = if multithread {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                };
+                let runtime = builder.build().unwrap();
+                runtime.block_on(async {
+                    let root = Cx::current().expect("native root context");
+                    let owner = Cx::for_testing();
+                    let wait_owner = owner.clone();
+                    // Keep the empty channel open: neither data nor EOF can
+                    // wake the child until the cancellation assertion finishes.
+                    let (mut sink, mut stream) = channel(1);
+                    let (parked_tx, mut parked_rx) = crate::channel::oneshot::channel();
+                    let mut waiting = root.spawn(move |task_cx| async move {
+                        let mut wait = std::pin::pin!(stream.next_with_cancel(&wait_owner));
+                        let mut witness = Some(parked_tx);
+                        let result = std::future::poll_fn(|task| {
+                            let poll = wait.as_mut().poll(task);
+                            if poll.is_pending()
+                                && let Some(witness) = witness.take()
+                            {
+                                witness.send_blocking(()).unwrap();
+                            }
+                            poll
+                        }).await;
+                        (result, task_cx.is_cancel_requested())
+                    }).unwrap();
+                    crate::time::timeout(root.now(), Duration::from_secs(5), parked_rx.recv(&root))
+                        .await.expect("native symbol receive reached Pending").unwrap();
+                    assert!(!waiting.is_finished());
+                    let cancel = || owner.cancel_fast(crate::types::CancelKind::User);
+                    if cross_thread {
+                        std::thread::scope(|scope| scope.spawn(cancel).join().unwrap());
+                    } else {
+                        cancel();
+                    }
+                    // Await the task handle, never the receive future: a
+                    // watchdog repoll must not hide a lost cancellation wake.
+                    let result = crate::time::timeout(
+                        root.now(), Duration::from_secs(2), waiting.join(&root),
+                    ).await;
+                    if result.is_err() {
+                        // Bound old-code failure cleanup without contributing
+                        // a source wake to the successful cancellation path.
+                        SymbolSinkExt::send(&mut sink, create_symbol(91)).await.unwrap();
+                        let _ = crate::time::timeout(
+                            root.now(), Duration::from_secs(5), waiting.join(&root),
+                        ).await.expect("data wake retires the old-code task");
+                    }
+                    let (result, task_cancelled) = result
+                        .expect("owner cancellation alone must wake the parked receive")
+                        .expect("the polling task belongs to a different owner");
+                    assert!(matches!(result, Err(StreamError::Cancelled)));
+                    assert!(!task_cancelled);
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                });
+                let report = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(report.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+                assert_eq!(report.live_tasks, 0);
+                assert_eq!(report.pending_obligations, 0);
+                assert!(runtime.is_quiescent());
+            }
+        }
+        crate::test_complete!("test_next_with_cancel_native_explicit_owner_wakes_parked_receive");
+    }
+
+    #[test]
     fn test_next_with_cancel_repoll_after_success_fails_closed_without_consuming_next_item() {
         init_test(
             "test_next_with_cancel_repoll_after_success_fails_closed_without_consuming_next_item",

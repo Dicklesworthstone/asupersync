@@ -18,6 +18,7 @@
 //! - **Authentication**: All symbols are authenticated before transmission
 //! - **Efficiency**: Zero-copy transmission where possible, minimal allocations
 
+use crate::channel::OwnedCancelRegistration;
 use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::time::Sleep;
@@ -183,6 +184,12 @@ pub trait SymbolStreamExt: SymbolStream {
     }
 
     /// Receive the next symbol with cancellation support.
+    ///
+    /// Cancelling `cx` wakes a pending receive even if the stream is idle or
+    /// this future is polled by a task with a different context. Completion
+    /// and dropping the future remove its cancellation registration. A symbol
+    /// returned by the stream is preserved if cancellation arrives during that
+    /// ready poll; cancellation observed before polling consumes no symbol.
     fn next_with_cancel<'a>(&'a mut self, cx: &'a Cx) -> NextWithCancelFuture<'a, Self>
     where
         Self: Unpin,
@@ -190,6 +197,7 @@ pub trait SymbolStreamExt: SymbolStream {
         NextWithCancelFuture {
             stream: self,
             cx,
+            cancellation: None,
             completed: false,
         }
     }
@@ -279,6 +287,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
 pub struct NextWithCancelFuture<'a, S: ?Sized> {
     stream: &'a mut S,
     cx: &'a Cx,
+    cancellation: Option<OwnedCancelRegistration>,
     completed: bool,
 }
 
@@ -294,31 +303,35 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
 
         if this.cx.checkpoint().is_err() {
             this.completed = true;
+            if let Some(cancellation) = &mut this.cancellation {
+                cancellation.clear();
+            }
             return Poll::Ready(Err(StreamError::Cancelled));
         }
 
-        match Pin::new(&mut *this.stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(symbol))) => {
-                this.completed = true;
-                Poll::Ready(Ok(Some(symbol)))
-            }
-            Poll::Ready(Some(Err(err))) => {
-                this.completed = true;
-                Poll::Ready(Err(err))
-            }
-            Poll::Ready(None) => {
-                this.completed = true;
-                Poll::Ready(Ok(None))
-            }
+        let result = match Pin::new(&mut *this.stream).poll_next(cx) {
+            Poll::Ready(result) => Poll::Ready(result.transpose()),
             Poll::Pending => {
+                // The explicit owner need not be the task polling this wait.
+                // Register only on the slow path and recheck after registration
+                // so cancellation racing the Pending poll cannot lose its wake.
+                this.cancellation
+                    .get_or_insert_with(|| OwnedCancelRegistration::new(this.cx.clone()))
+                    .refresh(cx.waker());
                 if this.cx.checkpoint().is_err() {
-                    this.completed = true;
                     Poll::Ready(Err(StreamError::Cancelled))
                 } else {
                     Poll::Pending
                 }
             }
+        };
+        if result.is_ready() {
+            this.completed = true;
+            if let Some(cancellation) = &mut this.cancellation {
+                cancellation.clear();
+            }
         }
+        result
     }
 }
 
