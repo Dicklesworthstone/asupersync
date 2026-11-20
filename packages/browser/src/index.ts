@@ -3058,27 +3058,6 @@ function normalizeBrowserNativeStreamByteLimit(
   return value;
 }
 
-function normalizeBrowserNativeStreamChunk(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-  if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value);
-  }
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  if (Array.isArray(value)) {
-    return Uint8Array.from(value);
-  }
-  if (typeof value === "string") {
-    return new TextEncoder().encode(value);
-  }
-  throw new TypeError(
-    "Browser-native stream chunks must be Uint8Array, ArrayBuffer, ArrayBufferView, byte[], or string.",
-  );
-}
-
 // Unlike Promise.race with a shared terminal promise, settled operations leave
 // no permanent reaction behind. A host promise may never settle after abort;
 // clear its callbacks so it does not retain the stream helper or its payload.
@@ -3153,9 +3132,10 @@ function beginBrowserNativeStreamCleanup(
   return promise;
 }
 
-function prepareBrowserNativeStreamWrite(value: BrowserNativeStreamChunk): {
+function prepareBrowserNativeStreamChunk(value: unknown): {
   byteLength: number;
   copy: () => Uint8Array;
+  view: () => Uint8Array;
 } {
   if (typeof value === "string") {
     let byteLength = 0;
@@ -3169,23 +3149,40 @@ function prepareBrowserNativeStreamWrite(value: BrowserNativeStreamChunk): {
         index += 1;
       } else byteLength += 3;
     }
-    return { byteLength, copy: () => new TextEncoder().encode(value) };
+    const encode = () => new TextEncoder().encode(value);
+    return { byteLength, copy: encode, view: encode };
   }
   if (ARRAY_BUFFER_IS_VIEW(value)) {
+    // A detached or out-of-bounds TypedArray reports length zero. Validate its
+    // internal slots before treating that as an empty chunk. DataView getters
+    // perform their own equivalent validation in browserStorageViewParts.
+    if (Reflect.apply(TYPED_ARRAY_TAG_GETTER!, value, []) !== undefined) {
+      Reflect.apply(TYPED_ARRAY_VALUES, value, []);
+    }
     const { buffer, byteLength, byteOffset } = browserStorageViewParts(value);
-    return { byteLength, copy: () => new Uint8Array(new Uint8Array(buffer, byteOffset, byteLength)) };
-  }
-  if (value instanceof ArrayBuffer) {
-    const byteLength = Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER!, value, []) as number;
-    return { byteLength, copy: () => new Uint8Array(new Uint8Array(value, 0, byteLength)) };
+    const view = () => new Uint8Array(buffer, byteOffset, byteLength);
+    return { byteLength, view, copy: () => new Uint8Array(view()) };
   }
   if (Array.isArray(value)) {
     const byteLength = value.length;
-    return { byteLength, copy: () => {
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new TypeError("Browser-native stream byte arrays must have a non-negative safe length.");
+    }
+    const copy = () => {
       const bytes = new Uint8Array(byteLength);
       for (let index = 0; index < byteLength; index += 1) bytes[index] = value[index];
       return bytes;
-    } };
+    };
+    return { byteLength, copy, view: copy };
+  }
+  // The intrinsic brand check accepts cross-realm buffers without evaluating
+  // user-supplied constructors, iterators or shadowed storage properties.
+  try {
+    const byteLength = Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER!, value, []) as number;
+    const view = () => new Uint8Array(value as ArrayBuffer, 0, byteLength);
+    return { byteLength, view, copy: () => new Uint8Array(view()) };
+  } catch {
+    // Fall through to the explicit supported-chunk diagnostic.
   }
   throw new TypeError("Browser-native stream chunks must be Uint8Array, ArrayBuffer, ArrayBufferView, byte[], or string.");
 }
@@ -3253,16 +3250,28 @@ export class BrowserReadableStream {
       return null;
     }
     if (this.stateValue !== "released") this.ensureOpen("read");
-    let chunk: Uint8Array;
+    let prepared: ReturnType<typeof prepareBrowserNativeStreamChunk>;
     try {
-      chunk = normalizeBrowserNativeStreamChunk(result.value);
+      prepared = prepareBrowserNativeStreamChunk(result.value);
     } catch (error) {
       if (this.stateValue !== "open") throw this.operationError("read", this.stateReason());
       this.markErrored("unsupported_chunk");
       throw this.operationError("read", "unsupported_chunk", errorMessage(error));
     }
     if (this.stateValue !== "released") this.ensureOpen("read");
-    this.recordRead(chunk.byteLength);
+    // Refuse before copying array elements or encoding strings. Canonical
+    // views retain zero-copy reads without trusting instance byteLength.
+    this.ensureReadBudget(prepared.byteLength);
+    let chunk: Uint8Array;
+    try {
+      chunk = prepared.view();
+    } catch (error) {
+      if (this.stateValue !== "open") throw this.operationError("read", this.stateReason());
+      this.markErrored("unsupported_chunk");
+      throw this.operationError("read", "unsupported_chunk", errorMessage(error));
+    }
+    if (this.stateValue !== "released") this.ensureOpen("read");
+    this.recordRead(prepared.byteLength);
     return chunk;
   }
 
@@ -3313,9 +3322,9 @@ export class BrowserReadableStream {
     this.releaseReaderLock(true);
   }
 
-  private recordRead(bytes: number): void {
+  private ensureReadBudget(bytes: number): void {
     const next = this.bytesReadValue + bytes;
-    if (this.maxBytes !== null && next > this.maxBytes) {
+    if (!Number.isSafeInteger(next) || (this.maxBytes !== null && next > this.maxBytes)) {
       this.markErrored("read_limit_exceeded");
       throw createBrowserNativeStreamOperationError(
         nativeStreamOperationDiagnostics(
@@ -3329,7 +3338,11 @@ export class BrowserReadableStream {
         ),
       );
     }
-    this.bytesReadValue = next;
+  }
+
+  private recordRead(bytes: number): void {
+    this.ensureReadBudget(bytes);
+    this.bytesReadValue += bytes;
   }
 
   private ensureOpen(operation: string): void {
@@ -3447,9 +3460,9 @@ export class BrowserWritableStream {
   async write(chunk: BrowserNativeStreamChunk): Promise<number> {
     this.ensureOpen("write");
     if (this.closing) throw this.operationError("write", "closed");
-    let prepared: ReturnType<typeof prepareBrowserNativeStreamWrite> | null;
+    let prepared: ReturnType<typeof prepareBrowserNativeStreamChunk> | null;
     try {
-      prepared = prepareBrowserNativeStreamWrite(chunk);
+      prepared = prepareBrowserNativeStreamChunk(chunk);
     } catch (error) {
       if (this.stateValue !== "open") throw this.operationError("write", this.stateReason());
       this.markErrored("unsupported_chunk");
@@ -4600,6 +4613,11 @@ function normalizeBrowserStorageValue(value: BrowserStorageValue): Uint8Array {
 }
 
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  Symbol.toStringTag,
+)?.get;
+const TYPED_ARRAY_VALUES = Uint8Array.prototype.values;
 const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
   "buffer",

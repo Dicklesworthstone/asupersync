@@ -383,6 +383,89 @@ test("NATIVE-STREAM: readAll snapshots a host's reused byte buffer", async () =>
   assert.equal(reader.bytesRead, 2);
 });
 
+test("NATIVE-STREAM: read quota uses intrinsic byte length instead of a shadowed property", async () => {
+  const api = await sdk();
+  const chunk = Uint8Array.of(1, 2, 3);
+  Object.defineProperty(chunk, "byteLength", { value: 0 });
+  const cancelled = [];
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(chunk); },
+    cancel(reason) { cancelled.push(reason); },
+  });
+  const reader = api.createBrowserReadableStream(stream, { ...authority, maxBytes: 2 });
+  rejected(await observe(reader.read()), "read_limit_exceeded");
+  await turn();
+  assert.equal(reader.bytesRead, 0);
+  assert.deepEqual(cancelled, ["read_limit_exceeded"]);
+  assert.equal(stream.locked, false);
+});
+
+test("NATIVE-STREAM: oversized read arrays are refused before evaluating elements or iterators", async () => {
+  const api = await sdk();
+  let accessed = false;
+  const chunk = [1, 2];
+  Object.defineProperty(chunk, 0, { get() { accessed = true; return 1; } });
+  Object.defineProperty(chunk, Symbol.iterator, {
+    get() { accessed = true; return Array.prototype[Symbol.iterator]; },
+  });
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(chunk); } });
+  const reader = api.createBrowserReadableStream(stream, { ...authority, maxBytes: 1 });
+  rejected(await observe(reader.read()), "read_limit_exceeded");
+  await turn();
+  assert.equal(accessed, false, "quota refusal must precede conversion or allocation");
+  assert.equal(reader.bytesRead, 0);
+  assert.equal(stream.locked, false);
+});
+
+test("NATIVE-STREAM: read views retain exact bytes without evaluating shadowed storage getters", async () => {
+  const api = await sdk();
+  for (const makeView of [
+    (buffer) => new Uint8Array(buffer, 1, 2),
+    (buffer) => new DataView(buffer, 1, 2),
+  ]) {
+    const backing = Uint8Array.of(9, 1, 2, 9);
+    const chunk = makeView(backing.buffer);
+    for (const name of ["buffer", "byteOffset", "byteLength"]) {
+      Object.defineProperty(chunk, name, { get() { throw new Error(`shadowed ${name}`); } });
+    }
+    const stream = new ReadableStream({
+      start(controller) { controller.enqueue(chunk); controller.close(); },
+    });
+    const reader = api.createBrowserReadableStream(stream, { ...authority, maxBytes: 2 });
+    assert.deepEqual(Array.from(await reader.readAll()), [1, 2]);
+    assert.equal(reader.bytesRead, 2);
+    assert.equal(stream.locked, false);
+  }
+});
+
+test("NATIVE-STREAM: detached read views are errors rather than successful empty chunks", async () => {
+  const api = await sdk();
+  const chunk = Uint8Array.of(1);
+  structuredClone(chunk.buffer, { transfer: [chunk.buffer] });
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(chunk); } });
+  const reader = api.createBrowserReadableStream(stream, { ...authority, maxBytes: 0 });
+  rejected(await observe(reader.read()), "unsupported_chunk");
+  await turn();
+  assert.equal(reader.bytesRead, 0);
+  assert.equal(stream.locked, false);
+});
+
+test("NATIVE-STREAM: UTF-8 and empty read chunks respect the exact cumulative byte limit", async () => {
+  const api = await sdk();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array());
+      controller.enqueue("A\ud83d\ude00\ud800");
+      controller.enqueue([1, 2]);
+      controller.close();
+    },
+  });
+  const reader = api.createBrowserReadableStream(stream, { ...authority, maxBytes: 10 });
+  assert.deepEqual(Array.from(await reader.readAll()), [65, 240, 159, 152, 128, 239, 191, 189, 1, 2]);
+  assert.equal(reader.bytesRead, 10);
+  assert.equal(stream.locked, false);
+});
+
 test("NATIVE-STREAM: UTF-8 and typed subview writes count exactly the accepted bytes", async () => {
   const api = await sdk();
   const chunks = [];
