@@ -186,7 +186,8 @@ pub use map_reduce::{
     MapReduce, MapReduceError, MapReduceExecution, MapReduceExecutionError, MapReduceLimits,
     MapReduceResult, MapReduceStopCause, ScopedMapReduceClose, ScopedMapReduceError,
     ScopedMapReduceExecution, execute_map_reduce, execute_map_reduce_scoped,
-    make_map_reduce_result, map_reduce_outcomes, map_reduce_to_result, reduce_successes,
+    execute_map_reduce_stream, execute_map_reduce_stream_scoped, make_map_reduce_result,
+    map_reduce_outcomes, map_reduce_to_result, reduce_successes,
 };
 pub use pipeline::{
     FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineExecution,

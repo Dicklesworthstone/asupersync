@@ -145,6 +145,354 @@
     }
 
     #[test]
+    fn executing_stream_map_real_channel_bounds_read_ahead_and_preserves_order() {
+        use crate::channel::mpsc;
+        use crate::stream::{ReceiverStream, StreamExt};
+
+        let mut lab = LabRuntime::new(LabConfig::new(0x32_0200).max_steps(8192));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (sender, receiver) = mpsc::channel(1);
+        let gate = Arc::new(crate::sync::Mutex::new(()));
+        let held = gate.try_lock_owned().unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicUsize::new(0));
+        let source_pulled = Arc::clone(&pulled);
+        let mapped_finished = Arc::clone(&finished);
+        let child_gate = Arc::clone(&gate);
+        let (parent, mut joined) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let source = ReceiverStream::new(cx.clone(), receiver).inspect(move |_| {
+                    source_pulled.fetch_add(1, Ordering::SeqCst);
+                });
+                cx.scope()
+                    .map_reduce_stream(
+                        &cx,
+                        executing_limits(2, 3),
+                        source,
+                        move |child, index: usize| {
+                            let gate = Arc::clone(&child_gate);
+                            let finished = Arc::clone(&mapped_finished);
+                            async move {
+                                if index == 0 {
+                                    drop(
+                                        crate::sync::OwnedMutexGuard::lock(gate, &child)
+                                            .await
+                                            .unwrap(),
+                                    );
+                                }
+                                finished.fetch_add(1, Ordering::SeqCst);
+                                Outcome::<_, ()>::Ok(index.to_string())
+                            }
+                        },
+                        |left, right| format!("{left}>{right}"),
+                    )
+                    .await
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(parent, 0);
+        lab.run_until_idle();
+        assert!(joined.try_join().unwrap().is_none());
+        assert_eq!(pulled.load(Ordering::SeqCst), 0);
+        assert_eq!(lab.run_until_idle(), 0, "an empty open channel parks the engine");
+
+        let sent = Arc::clone(&published);
+        let (producer, mut produced) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                for index in 0..12 {
+                    sender.send(&cx, index).await.unwrap();
+                    sent.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(producer, 0);
+        lab.run_until_idle();
+        assert_eq!(gate.waiters(), 1);
+        assert_eq!(pulled.load(Ordering::SeqCst), 3);
+        assert_eq!(finished.load(Ordering::SeqCst), 2);
+        assert_eq!(published.load(Ordering::SeqCst), 4, "only one extra item fits in the channel");
+        assert!(joined.try_join().unwrap().is_none());
+        assert!(produced.try_join().unwrap().is_none());
+        assert_eq!(lab.run_until_idle(), 0, "full retained credit stops source polling");
+
+        drop(held);
+        lab.run_until_idle();
+        assert_eq!(produced.try_join().unwrap(), Some(()));
+        let report = joined.try_join().unwrap().unwrap();
+        assert_eq!((report.admitted, report.completed, report.reduced), (12, 12, 12));
+        assert_eq!((report.max_in_flight, report.max_retained), (2, 3));
+        assert_eq!(
+            report.outcome.unwrap(),
+            Some((0..12).map(|index| index.to_string()).collect::<Vec<_>>().join(">"))
+        );
+        assert_eq!(published.load(Ordering::SeqCst), 12);
+        assert_eq!(gate.waiters(), 0);
+        assert_executing_lab_clean(&mut lab, root);
+        eprintln!(
+            "stream map channel: inputs=12 joined=12 reduced=12 max_active=2 max_retained=3 queued=1 ordered=true"
+        );
+    }
+
+    #[test]
+    fn executing_stream_map_quiet_cancel_and_source_panic_drain_real_children() {
+        struct ParkedSource {
+            first: Option<usize>,
+            panic: Arc<std::sync::atomic::AtomicBool>,
+            wake: Arc<parking_lot::Mutex<Option<std::task::Waker>>>,
+            polls: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Stream for ParkedSource {
+            type Item = usize;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                task: &mut std::task::Context<'_>,
+            ) -> Poll<Option<usize>> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.panic.load(Ordering::SeqCst), "stream source poll panic");
+                if let Some(item) = self.first.take() {
+                    Poll::Ready(Some(item))
+                } else {
+                    *self.wake.lock() = Some(task.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }
+        impl Drop for ParkedSource {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                self.wake.lock().take();
+            }
+        }
+
+        for source_panics in [false, true] {
+            let mut lab = LabRuntime::new(LabConfig::new(0x32_0201).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let panic = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let wake = Arc::new(parking_lot::Mutex::new(None));
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let source = ParkedSource {
+                first: Some(7),
+                panic: Arc::clone(&panic),
+                wake: Arc::clone(&wake),
+                polls: Arc::clone(&polls),
+                drops: Arc::clone(&drops),
+            };
+            let (release, gate) = crate::channel::oneshot::channel::<()>();
+            let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
+            let started = Arc::new(AtomicUsize::new(0));
+            let child_started = Arc::clone(&started);
+            let returned = Arc::new(parking_lot::Mutex::new(None));
+            let publication = Arc::clone(&returned);
+            let (parent, mut joined) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    let report = execute_map_reduce_stream(
+                        &cx,
+                        &cx.scope(),
+                        executing_limits(2, 2),
+                        source,
+                        move |_child, value| {
+                            let gate = Arc::clone(&gate);
+                            let started = Arc::clone(&child_started);
+                            async move {
+                                started.fetch_add(1, Ordering::SeqCst);
+                                let mut gate = gate.lock().take().unwrap();
+                                gate.recv_uninterruptible().await.unwrap();
+                                Outcome::<_, ()>::Ok(value)
+                            }
+                        },
+                        |left, right| left + right,
+                    )
+                    .await;
+                    *publication.lock() = Some(report);
+                })
+                .unwrap();
+            let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(wake.lock().is_some(), "the quiet source was really polled Pending");
+            assert_eq!(lab.run_until_idle(), 0, "a quiet source does not self-wake");
+            let before_stop = polls.load(Ordering::SeqCst);
+            if source_panics {
+                panic.store(true, Ordering::SeqCst);
+                let waker = wake.lock().take().unwrap();
+                waker.wake();
+            } else {
+                parent_cx.cancel_with(
+                    crate::types::CancelKind::Shutdown,
+                    Some("quiet stream stop"),
+                );
+            }
+            lab.run_until_idle();
+            assert_eq!(polls.load(Ordering::SeqCst), before_stop + usize::from(source_panics));
+            assert!(joined.try_join().unwrap().is_none());
+            assert!(returned.lock().is_none(), "no report before actual child retirement");
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            let child = lab
+                .state
+                .region(root)
+                .unwrap()
+                .task_ids()
+                .into_iter()
+                .find(|task| *task != parent)
+                .unwrap();
+            assert!(lab.state.task(child).unwrap().cx.as_ref().unwrap().is_cancel_requested());
+            assert_eq!(lab.run_until_idle(), 0, "cleanup waits for an actual wake");
+
+            release.send_blocking(()).unwrap();
+            lab.run_until_idle();
+            if source_panics {
+                assert_eq!(joined.try_join().unwrap(), Some(()));
+            } else {
+                assert_eq!(
+                    joined.try_join(),
+                    Err(JoinError::Cancelled(parent_cx.cancel_reason().unwrap()))
+                );
+            }
+            let report = returned.lock().take().expect("drained map report");
+            assert_eq!((report.admitted, report.completed, report.reduced), (1, 1, 0));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(wake.lock().is_none());
+            if source_panics {
+                assert!(report.outcome.is_panicked());
+                assert_eq!(report.stopped_by, Some((1, MapReduceStopCause::InputPanicked)));
+            } else {
+                assert!(matches!(
+                    report.outcome,
+                    Outcome::Cancelled(reason) if reason == parent_cx.cancel_reason().unwrap()
+                ));
+            }
+            assert_executing_lab_clean(&mut lab, root);
+            eprintln!(
+                "stream map stop: source_panics={source_panics} admitted=1 joined=1 source_drops=1 quiet_and_cleanup_parked=true"
+            );
+        }
+    }
+
+    #[test]
+    fn executing_stream_map_accepts_stack_pinned_sources_and_non_unpin_iterators() {
+        struct PinnedNumbers {
+            next: std::cell::Cell<usize>,
+            _pin: std::marker::PhantomPinned,
+        }
+        impl PinnedNumbers {
+            fn new() -> Self {
+                Self {
+                    next: std::cell::Cell::new(1),
+                    _pin: std::marker::PhantomPinned,
+                }
+            }
+
+            fn next_value(&self) -> Option<usize> {
+                let next = self.next.get();
+                self.next.set(next + 1);
+                (next <= 3).then_some(next)
+            }
+        }
+        impl Stream for PinnedNumbers {
+            type Item = usize;
+
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> Poll<Option<usize>> {
+                Poll::Ready(self.as_ref().get_ref().next_value())
+            }
+        }
+        impl Iterator for PinnedNumbers {
+            type Item = usize;
+
+            fn next(&mut self) -> Option<usize> {
+                self.next_value()
+            }
+        }
+        for stream in [false, true] {
+            let report = run_executing_case(move |cx| async move {
+                let scope = cx.scope();
+                let map = |_child, n| async move { Outcome::<_, ()>::Ok(n) };
+                let reduce = |left, right| left * 10 + right;
+                if stream {
+                    let mut source = std::pin::pin!(PinnedNumbers::new());
+                    execute_map_reduce_stream(
+                        &cx, &scope, executing_limits(2, 3), source.as_mut(), map, reduce,
+                    )
+                    .await
+                } else {
+                    execute_map_reduce(
+                        &cx, &scope, executing_limits(2, 3), PinnedNumbers::new(), map, reduce,
+                    )
+                    .await
+                }
+            });
+            assert_eq!(report.outcome.unwrap(), Some(123));
+            assert_eq!((report.admitted, report.completed, report.reduced), (3, 3, 3));
+        }
+    }
+
+    #[test]
+    fn executing_stream_map_source_drop_panic_precedes_success_publication() {
+        struct Source {
+            next: usize,
+            count: usize,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Stream for Source {
+            type Item = usize;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> Poll<Option<usize>> {
+                if self.next == self.count {
+                    Poll::Ready(None)
+                } else {
+                    let next = self.next;
+                    self.next += 1;
+                    Poll::Ready(Some(next))
+                }
+            }
+        }
+        impl Drop for Source {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                panic!("stream source retirement panic");
+            }
+        }
+        for count in [0, 3] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let source_drops = Arc::clone(&drops);
+            let report = run_executing_case(move |cx| async move {
+                execute_map_reduce_stream(
+                    &cx,
+                    &cx.scope(),
+                    executing_limits(2, 3),
+                    Source {
+                        next: 0,
+                        count,
+                        drops: source_drops,
+                    },
+                    |_child, n| async move { Outcome::<_, ()>::Ok(n) },
+                    |left, right| left + right,
+                )
+                .await
+            });
+            assert!(report.outcome.is_panicked());
+            assert_eq!(report.stopped_by, Some((count, MapReduceStopCause::InputPanicked)));
+            assert_eq!((report.admitted, report.completed, report.reduced), (count, count, count));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn executing_map_zero_one_many_move_only_values_and_independent_limits() {
         struct MoveOnly(String);
         assert!(NonZeroUsize::new(0).is_none());

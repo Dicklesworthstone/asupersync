@@ -836,6 +836,13 @@ fn scoped_map_unpolled_drop_supports_borrowed_non_send_state_and_owner_authority
             panic!("an unpolled operation must not enter its source");
         }
     }
+    impl Stream for BorrowedDrop<'_> {
+        type Item = usize;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<Option<usize>> {
+            panic!("an unpolled operation must not poll its source");
+        }
+    }
     impl BorrowedDrop<'_> {
         fn touch(&self) {
             assert_eq!(self.0.get(), 0);
@@ -863,4 +870,95 @@ fn scoped_map_unpolled_drop_supports_borrowed_non_send_state_and_owner_authority
     assert_eq!(source_drops.get(), 1);
     assert_eq!(reducer_drops.get(), 1);
     assert!(require_ambient_io("foreign after unpolled drop").is_ok());
+
+    let stream_drops = Cell::new(0);
+    let stream_reducer_drops = Cell::new(0);
+    let reducer = BorrowedDrop(&stream_reducer_drops);
+    let work = execute_map_reduce_stream_scoped(
+        &owner,
+        limits(1, 1),
+        BorrowedDrop(&stream_drops),
+        |_mapper, value| async move { Outcome::<_, ()>::Ok(value) },
+        move |left, right| {
+            reducer.touch();
+            left + right
+        },
+    );
+    drop(work);
+    assert_eq!(stream_drops.get(), 1);
+    assert_eq!(stream_reducer_drops.get(), 1);
+    assert!(require_ambient_io("foreign after unpolled stream drop").is_ok());
+}
+
+async fn stream_subtree_journey(cx: Cx) {
+    let seen = Arc::new(Progress::default());
+    let observe = Arc::clone(&seen);
+    let (sender, _receiver) = mpsc::channel(1);
+    let send = sender.clone();
+    let (release, cleanup) = oneshot::channel();
+    let (inputs, source) = mpsc::channel(1);
+    inputs.try_send((7_usize, cleanup)).unwrap();
+    drop(inputs);
+    let handles = Arc::new(parking_lot::Mutex::new(Vec::<TaskHandle<CancelReason>>::new()));
+    let retain = Arc::clone(&handles);
+    let mut operation = cx
+        .spawn(move |owner| async move {
+            let source = crate::stream::ReceiverStream::new(owner.clone(), source);
+            execute_map_reduce_stream_scoped(
+                &owner,
+                limits(1, 1),
+                source,
+                move |mapper, (value, cleanup)| {
+                    let seen = Arc::clone(&observe);
+                    let sender = send.clone();
+                    let handles = Arc::clone(&retain);
+                    async move {
+                        let progress = Arc::clone(&seen);
+                        let descendant = mapper
+                            .spawn(move |child| {
+                                held_descendant(child, sender, progress, cleanup, false)
+                            })
+                            .unwrap();
+                        handles.lock().push(descendant);
+                        seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+                        Outcome::<_, ()>::Ok(value)
+                    }
+                },
+                |left, right| left + right,
+            )
+            .await
+            .unwrap()
+        })
+        .unwrap();
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
+    assert!(!operation.is_finished(), "a successful fold still waits for subtree cleanup");
+    assert!(!seen.retired.load(Ordering::Acquire));
+    assert!(sender.try_reserve().is_err(), "descendant still holds its checked credit");
+    release.send(&cx, ()).unwrap();
+    let report = operation.join(&cx).await.unwrap();
+    assert!(matches!(report.execution.outcome, Outcome::Ok(Some(7))));
+    assert_eq!((report.execution.admitted, report.execution.completed), (1, 1));
+    let close = report.close.expect("actual operation close receipt");
+    assert!(close.cleanup_outcome.is_none());
+    assert!(close.descendant_panic.is_none());
+    assert!(seen.finished.load(Ordering::Acquire));
+    assert!(seen.retired.load(Ordering::Acquire));
+    drop(sender.try_reserve().expect("subtree close returns the checked credit"));
+    assert!(handles.lock().iter().all(TaskHandle::is_finished));
+    eprintln!(
+        "scoped stream map: channel_inputs=1 joined_maps=1 folded=7 descendant_cleanup_pending=true retired=true credit_returned=true region={:?}",
+        report.region_id
+    );
+}
+
+#[test]
+fn scoped_stream_map_real_channel_waits_for_descendant_cleanup() {
+    let ((), report) = run_async_under_lab(0x32_3100, stream_subtree_journey);
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn scoped_stream_map_native_channel_waits_for_descendant_cleanup() {
+    native(stream_subtree_journey);
 }

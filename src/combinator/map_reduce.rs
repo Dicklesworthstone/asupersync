@@ -14,6 +14,9 @@
 //! [`execute_map_reduce_scoped`] additionally owns a private operation region.
 //! It cancels that whole subtree before draining failed work, and returns its
 //! actual close receipt separately from the ordered map-reduce result.
+//! [`execute_map_reduce_stream`] and [`execute_map_reduce_stream_scoped`] accept
+//! asynchronous sources with the same admission bounds and drain semantics,
+//! without collecting the source or its mapped results into an unbounded list.
 //!
 //! The unchanged [`MapReduce`] marker and helpers such as
 //! [`map_reduce_outcomes`] and [`make_map_reduce_result`] operate on outcomes
@@ -26,11 +29,13 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
 use crate::cx::{CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx, Scope};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
+use crate::stream::Stream;
 use crate::types::Policy;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
@@ -549,7 +554,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for MapReduceExecutionError
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MapReduceStopCause {
-    /// The input iterator panicked.
+    /// The input source panicked during construction, polling, or destruction.
     InputPanicked,
     /// A map or admission returned an error.
     Error,
@@ -1009,7 +1014,63 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    execute_map_reduce_inner(cx, cx, scope, None, limits, inputs, map, reduce).await
+    execute_map_reduce_inner(
+        cx,
+        cx,
+        scope,
+        None,
+        limits,
+        move || crate::stream::iter(inputs),
+        map,
+        reduce,
+    )
+    .await
+}
+
+/// Maps an asynchronous source as scoped children and folds in input order.
+///
+/// This is [`execute_map_reduce`] for a [`Stream`], including channel and
+/// network sources that can remain pending between items. The source is polled
+/// only when BOTH concurrency and retained-work credit are available. Completed
+/// results waiting for an earlier item continue to hold retained credit, so a
+/// slow first map cannot cause unbounded read-ahead. Source and reducer state
+/// may borrow and need not be `Send`; admitted items and mapper futures are
+/// `Send + 'static`.
+///
+/// A pending source parks until a source, child, or cancellation wake; it does
+/// not cause a self-waking polling loop. Caller cancellation wakes even a quiet
+/// source that never wakes itself. Cancellation, source panics and child failures
+/// stop admission and join every admitted mapper before returning. Source
+/// destruction is also observed before the result is selected. The limits
+/// bound items, not source-internal buffering, payload bytes or the accumulator.
+///
+/// As with the iterator API, reduction is a left fold, empty input returns
+/// `Ok(None)`, and a noncooperative mapper can keep drainage pending. Dropping
+/// this future requests child cancellation while region ownership remains the
+/// cleanup backstop. Use [`execute_map_reduce_stream_scoped`] to own and drain
+/// the entire operation subtree, including mapper descendants.
+///
+/// A `!Unpin` source can be passed as `std::pin::pin!(source).as_mut()` or
+/// `Box::pin(source)`: the stream's pinned target does not need to be `Unpin`.
+pub async fn execute_map_reduce_stream<S, M, F, R, T, E, P>(
+    cx: &Cx,
+    scope: &Scope<'_, P>,
+    limits: MapReduceLimits,
+    inputs: S,
+    map: M,
+    reduce: R,
+) -> MapReduceExecution<T, E>
+where
+    P: Policy,
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    M: Fn(Cx, S::Item) -> F + Send + Sync + 'static,
+    F: Future<Output = Outcome<T, E>> + Send + 'static,
+    R: FnMut(T, T) -> T,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    execute_map_reduce_inner(cx, cx, scope, None, limits, move || inputs, map, reduce).await
 }
 
 /// Maps and reduces inside one independently owned operation subtree.
@@ -1083,6 +1144,93 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
+    execute_map_reduce_source_scoped(
+        cx,
+        limits,
+        move || crate::stream::iter(inputs),
+        map,
+        reduce,
+    )
+}
+
+/// Maps an asynchronous source inside an independently owned operation region.
+///
+/// Combines [`execute_map_reduce_stream`]'s bounded, demand-driven source polling
+/// with [`execute_map_reduce_scoped`]'s whole-subtree ownership and close receipt.
+/// The source is never polled before region admission, or after cancellation or
+/// failure stops admission. Its polling and destruction use the explicit
+/// owner's ambient context, including abandonment before the first poll.
+///
+/// The report separates the direct map/reduce result from descendant and
+/// finalizer cleanup outcomes. On failure or owner cancellation, the operation
+/// subtree is cancelled before direct mapper joins. A successful return waits
+/// for actual subtree close; unrelated owner-region tasks remain independent.
+/// Retained values must not hold obligations needed to close this subtree.
+///
+/// # Errors
+///
+/// A pre-cancelled owner or refused child region returns [`ScopedMapReduceError`]
+/// without polling the source or invoking a mapper. Later failures remain in
+/// the execution and close reports, as with [`execute_map_reduce_scoped`].
+/// Pin a `!Unpin` source with `std::pin::pin!` or `Box::pin` before passing it.
+///
+/// ```no_run
+/// # async fn example(cx: &asupersync::Cx, receiver: asupersync::channel::mpsc::Receiver<u32>) {
+/// use asupersync::{Outcome, combinator::{MapReduceLimits, execute_map_reduce_stream_scoped}};
+/// use asupersync::stream::ReceiverStream;
+/// use std::num::NonZeroUsize;
+/// let limits = MapReduceLimits::new(
+///     NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(4).unwrap(),
+/// );
+/// let report = execute_map_reduce_stream_scoped(
+///     cx, limits, ReceiverStream::new(cx.clone(), receiver),
+///     |_child, n| async move { Outcome::<_, ()>::Ok(u64::from(n)) },
+///     |left, right| left + right,
+/// ).await.expect("operation region admitted");
+/// let close = report.close.expect("operation subtree quiesced");
+/// assert!(close.cleanup_outcome.is_none());
+/// assert!(close.descendant_panic.is_none());
+/// # }
+/// ```
+pub fn execute_map_reduce_stream_scoped<S, M, F, R, T, E>(
+    cx: &Cx,
+    limits: MapReduceLimits,
+    inputs: S,
+    map: M,
+    reduce: R,
+) -> impl Future<Output = Result<ScopedMapReduceExecution<T, E>, ScopedMapReduceError>>
+where
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    M: Fn(Cx, S::Item) -> F + Send + Sync + 'static,
+    F: Future<Output = Outcome<T, E>> + Send + 'static,
+    R: FnMut(T, T) -> T,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    execute_map_reduce_source_scoped(cx, limits, move || inputs, map, reduce)
+}
+
+// Defer iterator conversion until admission and contain its panic in the same
+// engine as source polling. Iter<I> is Unpin even for a non-Unpin iterator, so
+// adapting the legacy API does not impose any new bounds on its callers.
+fn execute_map_reduce_source_scoped<I, S, M, F, R, T, E>(
+    cx: &Cx,
+    limits: MapReduceLimits,
+    make_inputs: I,
+    map: M,
+    reduce: R,
+) -> impl Future<Output = Result<ScopedMapReduceExecution<T, E>, ScopedMapReduceError>>
+where
+    I: FnOnce() -> S,
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    M: Fn(Cx, S::Item) -> F + Send + Sync + 'static,
+    F: Future<Output = Outcome<T, E>> + Send + 'static,
+    R: FnMut(T, T) -> T,
+    T: Send + 'static,
+    E: Send + 'static,
+{
     cx.with_ambient(async move {
         if cx.is_cancel_requested() {
             return Err(ScopedMapReduceError::Cancelled(
@@ -1103,7 +1251,7 @@ where
                 &scope,
                 Some(&region),
                 limits,
-                inputs,
+                make_inputs,
                 map,
                 reduce,
             ));
@@ -1138,21 +1286,22 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_map_reduce_inner<I, M, F, R, T, E, P>(
+async fn execute_map_reduce_inner<I, S, M, F, R, T, E, P>(
     cx: &Cx,
     spawn_cx: &Cx,
     scope: &Scope<'_, P>,
     boundary: Option<&ChildRegion>,
     limits: MapReduceLimits,
-    inputs: I,
+    make_inputs: I,
     map: M,
     mut reduce: R,
 ) -> MapReduceExecution<T, E>
 where
     P: Policy,
-    I: IntoIterator,
-    I::Item: Send + 'static,
-    M: Fn(Cx, I::Item) -> F + Send + Sync + 'static,
+    I: FnOnce() -> S,
+    S: Stream + Unpin,
+    S::Item: Send + 'static,
+    M: Fn(Cx, S::Item) -> F + Send + Sync + 'static,
     F: Future<Output = Outcome<T, E>> + Send + 'static,
     R: FnMut(T, T) -> T,
     T: Send + 'static,
@@ -1180,12 +1329,12 @@ where
     {
         // Cancellation can arrive while the mint acknowledgement is pending.
         // The admitted region still closes, but the source is never entered.
-        if let Some(payload) = executing_map_discard(inputs) {
+        if let Some(payload) = executing_map_discard(make_inputs) {
             failures.panic(0, MapReduceStopCause::InputPanicked, payload);
         }
         None
     } else {
-        match catch_unwind(AssertUnwindSafe(|| inputs.into_iter())) {
+        match catch_unwind(AssertUnwindSafe(make_inputs)) {
             Ok(inputs) => Some(inputs),
             Err(payload) => {
                 failures.panic(
@@ -1366,13 +1515,15 @@ where
                 break;
             }
             let item = match catch_unwind(AssertUnwindSafe(|| {
-                inputs.as_mut().expect("iterator exists before stop").next()
+                Pin::new(inputs.as_mut().expect("input source exists before stop"))
+                    .poll_next(poll_cx)
             })) {
-                Ok(Some(item)) => item,
-                Ok(None) => {
+                Ok(Poll::Ready(Some(item))) => item,
+                Ok(Poll::Ready(None)) => {
                     exhausted = true;
                     break;
                 }
+                Ok(Poll::Pending) => break,
                 Err(payload) => {
                     failures.panic(
                         admitted,
@@ -1422,8 +1573,9 @@ where
                 }
             }
         }
-        // next() can request cancellation and return None. This checkpoint is
-        // also the success-publication boundary when no admission was needed.
+        // Source polling can request cancellation and return None or Pending.
+        // This is also the success-publication checkpoint when no admission
+        // was needed.
         executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
         if failures.stopped_by.is_some() {
             owner.abort();
@@ -1455,7 +1607,7 @@ where
 
     // These captures may run arbitrary destructors, including a new caller
     // cancellation request. Retire them before choosing the report, even when
-    // iterator construction failed. Admitted children have all joined, so the
+    // source construction failed. Admitted children have all joined, so the
     // mapper Arc is no longer shared with any child execution.
     for (cause, panic) in [
         (

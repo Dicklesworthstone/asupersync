@@ -350,6 +350,40 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             .await
     }
 
+    /// Maps an asynchronous source with bounded concurrency and ordered reduction.
+    ///
+    /// This is [`Self::map_reduce`] for a [`crate::stream::Stream`]. Both work
+    /// limits apply before polling the source; a pending source parks until a
+    /// source, mapper, or cancellation wake. Every admitted mapper is joined
+    /// before return, including asynchronous cancellation cleanup. Source and
+    /// reducer state may borrow and need not be `Send`.
+    ///
+    /// Pass a `!Unpin` source through `std::pin::pin!` or `Box::pin`. For whole
+    /// operation-subtree drainage, including mapper descendants, use
+    /// [`crate::combinator::execute_map_reduce_stream_scoped`].
+    pub async fn map_reduce_stream<S, M, F, T, E, R>(
+        &self,
+        cx: &Cx,
+        limits: crate::combinator::map_reduce::MapReduceLimits,
+        inputs: S,
+        map: M,
+        reduce: R,
+    ) -> crate::combinator::map_reduce::MapReduceExecution<T, E>
+    where
+        S: crate::stream::Stream + Unpin,
+        S::Item: Send + 'static,
+        M: Fn(Cx, S::Item) -> F + Send + Sync + 'static,
+        F: Future<Output = Outcome<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+        R: FnMut(T, T) -> T,
+    {
+        crate::combinator::map_reduce::execute_map_reduce_stream(
+            cx, self, limits, inputs, map, reduce,
+        )
+        .await
+    }
+
     // =========================================================================
     // Task Spawning
     // =========================================================================
