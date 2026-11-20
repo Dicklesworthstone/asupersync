@@ -197,6 +197,84 @@ fn ambient_cancellation_is_not_misreported_as_write_timeout() {
     timed_out(Pin::new(&mut io).poll_write(&mut task, b"x"));
 }
 
+#[test]
+fn driverless_write_budget_stays_on_wall_time_across_foreign_pollers() {
+    use crate::types::{Budget, RegionId, TaskId};
+
+    let timeout = Duration::from_secs(3600);
+    let mut io = RemoteWriteProgress::new(ControlledIo::default(), Some(timeout), None);
+    let fast_clock = Arc::new(VirtualClock::starting_at(raw_wall_now() + timeout + timeout));
+    let fast_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&fast_clock));
+    let slow_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+    let mut task = Context::from_waker(Waker::noop());
+    let mut registered_deadline = None;
+    for timer in [&fast_timer, &slow_timer] {
+        let ambient = Cx::new_with_drivers(
+            RegionId::new_for_test(30, 1),
+            TaskId::new_for_test(31, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(ambient));
+        let before = raw_wall_now();
+        assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+        let after = raw_wall_now();
+        let deadline = io.timer.as_ref().unwrap().deadline();
+        if let Some(expected) = registered_deadline {
+            assert_eq!(deadline, expected, "changing pollers cannot renew a stalled write");
+        } else {
+            assert!(deadline >= before + timeout);
+            assert!(deadline <= after + timeout);
+            registered_deadline = Some(deadline);
+        }
+        assert_eq!(timer.pending_count(), 0, "the poller's clock owns no write timer");
+        fast_clock.advance_to(fast_timer.now() + Duration::from_secs(1));
+        assert_eq!(fast_timer.process_timers(), 0);
+        assert!(Pin::new(&mut io).poll_flush(&mut task).is_pending());
+    }
+    drop(io);
+    assert_eq!(fast_timer.pending_count(), 0);
+    assert_eq!(slow_timer.pending_count(), 0);
+
+    let mut zero = RemoteWriteProgress::new(ControlledIo::default(), Some(Duration::ZERO), None);
+    timed_out(Pin::new(&mut zero).poll_write(&mut task, b"reply"));
+    assert!(zero.timer.is_none(), "expiry retires the wall-clock timer");
+}
+
+#[test]
+fn explicit_write_clock_ignores_a_foreign_driver_and_retires_on_drop() {
+    use crate::types::{Budget, RegionId, TaskId};
+
+    let (mut io, clock, driver) = fixture(Some(Duration::from_secs(1)));
+    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+        VirtualClock::starting_at(Time::from_secs(3600)),
+    ));
+    let ambient = Cx::new_with_drivers(
+        RegionId::new_for_test(30, 1),
+        TaskId::new_for_test(31, 1),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(foreign_timer.clone()),
+        None,
+    );
+    let _current = Cx::set_current(Some(ambient));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+    assert_eq!(driver.pending_count(), 1);
+    assert_eq!(foreign_timer.pending_count(), 0);
+    clock.advance_to(Time::from_millis(999));
+    assert!(Pin::new(&mut io).poll_shutdown(&mut task).is_pending());
+    drop(io);
+    assert_eq!(driver.pending_count(), 0, "dropping the transport retires its own timer");
+    assert_eq!(foreign_timer.pending_count(), 0);
+}
+
 #[cfg(unix)]
 mod native {
     use super::*;

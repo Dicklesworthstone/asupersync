@@ -4,7 +4,7 @@
 //! plaintext into TLS buffers does not count as network progress.
 
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use crate::time::{Sleep, TimerDriverHandle, wall_now};
+use crate::time::{Sleep, TimerDriverHandle, raw_wall_now};
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -61,7 +61,9 @@ impl<IO> RemoteWriteProgress<IO> {
         if self.timer.is_none() {
             self.timer = Some(match self.clock.as_ref() {
                 Some(clock) => Sleep::with_timer_driver(clock.now() + timeout, clock.clone()),
-                None => Sleep::new(wall_now() + timeout),
+                // None is the transport owner's wall clock, not a request to
+                // adopt whichever timer driver happens to poll this socket.
+                None => Sleep::with_wall_clock(raw_wall_now() + timeout),
             });
         }
         match self.check_timeout(cx) {

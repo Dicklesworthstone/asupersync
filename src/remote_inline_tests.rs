@@ -280,6 +280,143 @@
         assert!(!cx.is_cancel_requested(), "the remote budget is independent");
     }
 
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn driverless_origin_keeps_wall_deadline_under_a_foreign_virtual_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock, raw_wall_now};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        #[derive(Default)]
+        struct Wakes(AtomicUsize);
+
+        impl Wake for Wakes {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let deadline = raw_wall_now() + Duration::from_secs(3600);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(13, 14),
+            TaskId::new_for_test(15, 16),
+            Budget::INFINITE.with_deadline(deadline),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (hello, request) = deadline_wire_fixture(
+            RemoteProtocolVersion::V4,
+            Some(Budget::INFINITE.with_deadline(deadline)),
+        );
+        let wire =
+            RemoteServiceWireRequest::from_spawn_request_at(hello, &request, raw_wall_now()).unwrap();
+        let origin = RemoteRequestOrigin::new(&cx, &request);
+        let clock = Arc::new(VirtualClock::starting_at(deadline + Duration::from_secs(3600)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let ambient = Cx::new_with_drivers(
+            RegionId::new_for_test(30, 1),
+            TaskId::new_for_test(31, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let ambient_task = ambient.task_id();
+        let _current = Cx::set_current(Some(ambient));
+
+        let before_dispatch = raw_wall_now();
+        let remaining = origin.request_at_dispatch(&wire).budget.unwrap().deadline_nanos.unwrap();
+        let after_dispatch = raw_wall_now();
+        assert!(remaining <= deadline.duration_since(before_dispatch));
+        assert!(remaining >= deadline.duration_since(after_dispatch));
+        assert!(remaining > 0, "the foreign clock cannot expire the request");
+        assert!(!origin.is_cancelled());
+        assert!(!cx.is_cancel_requested(), "checkpoint must use the origin clock too");
+
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut cancellation = Box::pin(origin.cancellation());
+        assert!(cancellation.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+        assert_eq!(timer.pending_count(), 0, "the poller's timer is not borrowed");
+        clock.advance_to(timer.now() + Duration::from_secs(1));
+        assert_eq!(timer.process_timers(), 0);
+        assert!(cancellation.as_mut().poll(&mut task_cx).is_pending());
+
+        cx.cancel_with(CancelKind::User, Some("cancel the actual origin"));
+        assert!(wakes.0.load(Ordering::SeqCst) > 0);
+        let Poll::Ready(reason) = cancellation.as_mut().poll(&mut task_cx) else {
+            panic!("origin cancellation must wake the retained wait");
+        };
+        assert_eq!(reason.kind(), CancelKind::User);
+        assert_eq!(origin.cancellation_reason().unwrap().kind(), CancelKind::User);
+        assert_eq!(Cx::current().unwrap().task_id(), ambient_task);
+        assert_eq!(timer.pending_count(), 0);
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn restricted_origin_keeps_its_internal_virtual_deadline_clock() {
+        use crate::cx::cap::CapMask;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(13, 14),
+            TaskId::new_for_test(15, 16),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let cx = {
+            let _current = Cx::set_current(Some(owner));
+            let _restricted = Cx::push_restriction(CapMask::none());
+            Cx::current().unwrap()
+        };
+        assert!(cx.timer_driver().is_none(), "the public time capability is absent");
+        let (hello, request) = deadline_wire_fixture(
+            RemoteProtocolVersion::V4,
+            Some(Budget::INFINITE.with_deadline(Time::from_secs(10))),
+        );
+        let wire =
+            RemoteServiceWireRequest::from_spawn_request_at(hello, &request, cx.now()).unwrap();
+        let origin = RemoteRequestOrigin::new(&cx, &request);
+        let _current = Cx::set_current(Some(Cx::for_testing()));
+        assert_eq!(
+            origin.request_at_dispatch(&wire).budget.unwrap().deadline_nanos,
+            Some(5_000_000_000),
+            "internal deadline accounting retains the attenuated owner's clock"
+        );
+        assert!(!origin.is_cancelled());
+        let mut cancellation = Box::pin(origin.cancellation());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(cancellation.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance_to(Time::from_secs(10));
+        assert_eq!(timer.process_timers(), 1);
+        let Poll::Ready(reason) = cancellation.as_mut().poll(&mut task_cx) else {
+            panic!("the retained internal clock must expire the remote deadline");
+        };
+        assert_eq!(reason.kind(), CancelKind::Deadline);
+        assert_eq!(reason.timestamp(), Time::from_secs(10));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(cx.timer_driver().is_none(), "no time capability is restored");
+    }
+
     #[cfg(feature = "tls")]
     #[test]
     fn peer_exchange_credits_bound_each_configured_identity_and_release_once() {

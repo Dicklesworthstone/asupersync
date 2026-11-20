@@ -6944,6 +6944,9 @@ impl RemoteRequestOrigin {
     }
 
     fn request_at_dispatch(&self, request: &RemoteServiceWireRequest) -> RemoteServiceWireRequest {
+        // A driverless origin owns the wall clock, even when a native driver
+        // dispatches its request from a different virtual-clock context.
+        let _current = self.cx.clone().set_current_restricted();
         let mut request = request.clone();
         if request.hello.protocol_version().uses_relative_deadline() {
             if let Some(budget) = request.budget.as_mut() {
@@ -6963,6 +6966,7 @@ impl RemoteRequestOrigin {
     }
 
     fn deadline_reason(&self) -> CancelReason {
+        let _current = self.cx.clone().set_current_restricted();
         CancelReason::with_origin(CancelKind::Deadline, self.cx.region_id(), self.cx.now())
             .with_message("remote origin deadline expired")
     }
@@ -6972,6 +6976,7 @@ impl RemoteRequestOrigin {
     }
 
     fn cancellation_reason(&self) -> Option<CancelReason> {
+        let _current = self.cx.clone().set_current_restricted();
         if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
             return Some(self.deadline_reason());
         }
@@ -6981,29 +6986,39 @@ impl RemoteRequestOrigin {
     }
 
     async fn cancellation(&self) -> CancelReason {
-        if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
-            return self.deadline_reason();
-        }
-        let cancelled = async {
-            remote_client_wait_for_cancellation(&self.cx).await;
-            self.cx
-                .cancel_reason()
-                .unwrap_or_else(CancelReason::parent_cancelled)
-        };
-        match self.deadline() {
-            Some(deadline) => {
-                let mut sleep = std::pin::pin!(self.cx.sleep_until_on_clock(deadline));
-                futures_lite::future::race(cancelled, async {
-                    // Only the origin clock may classify this as Deadline.
-                    // A cancelled ambient driver must not complete the timer
-                    // early and replace its User/Shutdown cancellation cause.
-                    std::future::poll_fn(|task_cx| sleep.as_mut().poll_deadline(task_cx)).await;
-                    self.deadline_reason()
-                })
-                .await
+        let mut cancellation = std::pin::pin!(async {
+            if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
+                return self.deadline_reason();
             }
-            None => cancelled.await,
-        }
+            let cancelled = async {
+                remote_client_wait_for_cancellation(&self.cx).await;
+                self.cx
+                    .cancel_reason()
+                    .unwrap_or_else(CancelReason::parent_cancelled)
+            };
+            match self.deadline() {
+                Some(deadline) => {
+                    let mut sleep = std::pin::pin!(self.cx.sleep_until_on_clock(deadline));
+                    futures_lite::future::race(cancelled, async {
+                        // Only the origin clock may classify this as Deadline.
+                        // A cancelled ambient driver must not complete the timer
+                        // early and replace its User/Shutdown cancellation cause.
+                        std::future::poll_fn(|task_cx| sleep.as_mut().poll_deadline(task_cx)).await;
+                        self.deadline_reason()
+                    })
+                    .await
+                }
+                None => cancelled.await,
+            }
+        });
+        std::future::poll_fn(|task_cx| {
+            // Scope each poll, never an await: checkpoint and oneshot polling
+            // must keep the origin's driverless fallback without changing the
+            // surrounding driver's context while this future is suspended.
+            let _current = self.cx.clone().set_current_restricted();
+            cancellation.as_mut().poll(task_cx)
+        })
+        .await
     }
 }
 
