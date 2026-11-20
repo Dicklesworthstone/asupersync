@@ -80,8 +80,14 @@ import {
   type BrowserFetchOptions,
   type FetchStreamHandle,
 } from "./fetch.js";
+import { createBrowserWebSocketManager, type BrowserWebSocketHandle, type BrowserWebSocketOptions } from "./websocket.js";
 export { BROWSER_FETCH_LIMITS } from "./fetch.js";
 export type { BrowserFetchOptions, BrowserFetchResponse, BrowserFetchRead, FetchStreamHandle } from "./fetch.js";
+export { BROWSER_WEBSOCKET_LIMITS } from "./websocket.js";
+export type {
+  BrowserWebSocketHandle, BrowserWebSocketOptions, BrowserWebSocketMessage,
+  BrowserWebSocketRead, BrowserWebSocketReady, BrowserWebSocketCloseOptions,
+} from "./websocket.js";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
@@ -6185,6 +6191,12 @@ const SDK_FETCHES = createBrowserFetchManager({
   },
 });
 
+const SDK_WEBSOCKETS = createBrowserWebSocketManager({
+  globalObject: defaultGlobalObject,
+  isClosing: browserOwnerIsClosing,
+  isTracked: browserMessageScopeIsTracked,
+});
+
 // Reliable streams share the existing SDK session and its task/region owner.
 // This stable adapter is the shared manager's identity; it creates no transport
 // or additional runtime task and never exposes the handle's authority token.
@@ -6578,6 +6590,7 @@ function cancelBrowserTask(
     return requested;
   }
   SDK_FETCHES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
+  SDK_WEBSOCKETS.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
     const receipt = settleWebTransportTask(ownedTask, terminal, version,
@@ -6605,6 +6618,7 @@ function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void 
 function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   const ownerKeys = deleteOwnedRegionKeys(browserWebTransportStateKey(handle));
   SDK_FETCHES.closeScopes(ownerKeys, "scope_close");
+  SDK_WEBSOCKETS.closeScopes(ownerKeys, "scope_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
 }
@@ -6614,15 +6628,17 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   const ownerKeys = deleteOwnedRegionKeys(rootKey);
   RUNTIME_FETCH_GRANTS.delete(rootKey);
   SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
+  SDK_WEBSOCKETS.closeScopes(ownerKeys, "runtime_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
 }
 
 async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
-  // Start both cancellations before waiting on either host. Fetch cleanup may
+  // Start all cancellations before waiting on a host. Fetch cleanup may
   // itself depend on a message endpoint reaching its terminal state.
   const receipts = await Promise.all([
     SDK_FETCHES.drainScopes(ownerKeys, kind),
+    SDK_WEBSOCKETS.drainScopes(ownerKeys, kind),
     drainOwnedBrowserMessageStreams(ownerKeys, kind),
   ]);
   return receipts.find((receipt) => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
@@ -6898,7 +6914,7 @@ export class BrowserRuntime {
   }
 
   /**
-   * Cancel and await owned streamed fetches and message receivers, then close the runtime through
+   * Cancel and await owned fetches, WebSockets and message receivers, then close the runtime through
    * the ABI. Other ABI close restrictions still apply. Failed attempts
    * restore fetch admission; a host that never settles keeps cleanup pending.
    */
@@ -6970,7 +6986,7 @@ export class RegionHandle {
   }
 
   /**
-   * Drain streamed fetches and message receivers in this scope and its descendants before the ABI
+   * Drain fetches, WebSockets and message receivers in this scope and its descendants before the ABI
    * close. Admission is fenced while draining. ABI close errors propagate
    * unchanged; synchronous close and withScope keep their existing behavior.
    */
@@ -7063,6 +7079,36 @@ export class RegionHandle {
     const laneOutcome = this.runtime?.laneAvailabilityOutcome("receive browser-native messages");
     if (laneOutcome) return laneOutcome;
     return startOwnedBrowserMessageStream(this.core, source, options, consumerVersion);
+  }
+
+  /**
+   * Transfer a connecting/open native socket into this region. The caller must
+   * stop using the native socket after success. No connection or network grant
+   * is created. closeAsync waits for native close and task retirement; a host
+   * that never closes remains owned rather than producing false quiescence.
+   */
+  adoptWebSocket(
+    socket: WebSocket,
+    options: BrowserWebSocketOptions = {},
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): BrowserOutcome<BrowserWebSocketHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome("adopt a browser-native WebSocket");
+    if (laneOutcome) return laneOutcome;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      return SDK_WEBSOCKETS.adopt(browserWebTransportStateKey(scope), () => {
+        const spawned = taskSpawn({ scope, label: "browser-websocket", cancel_kind: "websocket_cancel" }, version);
+        if (spawned.outcome !== "ok") return spawned;
+        const task = snapshotTaskHandle(spawned.value);
+        return OutcomeFactory.ok({
+          key: browserWebTransportStateKey(task),
+          cancel: (kind: string, message: string) => taskCancel({ task, kind, message }, version),
+          join: (outcome: BrowserOutcome<void>) => taskJoin(task,
+            outcome.outcome === "ok" ? OutcomeFactory.ok(undefined) : outcome, version) as BrowserOutcome<void>,
+        });
+      }, socket, options);
+    } catch { return OutcomeFactory.err("compatibility_rejected", "permanent", "WebSocket adoption requires a valid SDK region."); }
   }
 
   openWebSocket(

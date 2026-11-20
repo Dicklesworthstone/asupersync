@@ -70,6 +70,7 @@ async function sdk(host) {
   for (const [name, path, typescript] of [
     ["@asupersync/browser-core", "../packages/browser-core/index.js", false],
     ["./fetch.js", "../packages/browser/src/fetch.ts", true],
+    ["./websocket.js", "../packages/browser/src/websocket.ts", true],
     ["@asupersync/browser-core/webtransport-streams", "../packages/browser-core/webtransport-streams.js", false],
   ]) {
     const raw = readFileSync(new URL(path, import.meta.url), "utf8");

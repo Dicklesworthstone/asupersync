@@ -26,17 +26,21 @@ const managerPath = process.env.ASUPERSYNC_WEBTRANSPORT_STREAM_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
 const fetchPath = process.env.ASUPERSYNC_BROWSER_FETCH_SOURCE
   ?? fileURLToPath(new URL("../packages/browser/src/fetch.ts", import.meta.url));
+const websocketPath = fileURLToPath(new URL("../packages/browser/src/websocket.ts", import.meta.url));
 const sdkSource = readFileSync(sdkPath, "utf8");
 const coreSource = readFileSync(corePath, "utf8");
 const managerSource = readFileSync(managerPath, "utf8");
 const fetchSource = readFileSync(fetchPath, "utf8");
+const websocketSource = readFileSync(websocketPath, "utf8");
 const sdkJavaScript = stripTypeScriptTypes(sdkSource, { mode: "transform" });
 const fetchJavaScript = stripTypeScriptTypes(fetchSource, { mode: "transform" });
+const websocketJavaScript = stripTypeScriptTypes(websocketSource, { mode: "transform" });
 
 console.log(JSON.stringify({
   scenario_id: "browser-sdk-webtransport-reliable-streams",
   sources: Object.fromEntries([
     ["sdk", sdkSource], ["core", coreSource], ["streams", managerSource], ["fetch", fetchSource],
+    ["websocket", websocketSource],
   ].map(([name, source]) => [name, createHash("sha256").update(source).digest("hex")])),
   evidence_scope: "actual SDK/core/shared manager, native WHATWG streams, intentional WASM ABI recorder",
   no_claim: ["Rust dispatcher execution", "packaged WASM", "browser conformance", "live HTTP/3"],
@@ -218,6 +222,7 @@ async function fixture(t, options = {}) {
   const coreModule = new SourceTextModule(coreSource, { context, identifier: corePath });
   const managerModule = new SourceTextModule(managerSource, { context, identifier: managerPath });
   const fetchModule = new SourceTextModule(fetchJavaScript, { context, identifier: fetchPath });
+  const websocketModule = new SourceTextModule(websocketJavaScript, { context, identifier: websocketPath });
   const sdkModule = new SourceTextModule(
     `${sdkJavaScript}\nexport { INFLIGHT_WEBTRANSPORTS as sdkHostSessions };`,
     { context, identifier: sdkPath },
@@ -225,6 +230,7 @@ async function fixture(t, options = {}) {
   await sdkModule.link((specifier) => {
     if (specifier === "@asupersync/browser-core") return coreModule;
     if (specifier === "./fetch.js") return fetchModule;
+    if (specifier === "./websocket.js") return websocketModule;
     if (specifier === "@asupersync/browser-core/webtransport-streams"
       || specifier === "@asupersync/browser-core/webtransport-streams.js"
       || specifier === "./webtransport-streams.js") return managerModule;

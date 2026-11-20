@@ -27,16 +27,19 @@ const sdkPath = process.env.ASUPERSYNC_BROWSER_SDK_SOURCE
   ?? fileURLToPath(new URL("../packages/browser/src/index.ts", import.meta.url));
 const fetchPath = process.env.ASUPERSYNC_BROWSER_FETCH_SOURCE
   ?? fileURLToPath(new URL("../packages/browser/src/fetch.ts", import.meta.url));
+const websocketPath = fileURLToPath(new URL("../packages/browser/src/websocket.ts", import.meta.url));
 const corePath = process.env.ASUPERSYNC_BROWSER_CORE_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/index.js", import.meta.url));
 const managerPath = fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
 const sources = {
   sdk: readFileSync(sdkPath, "utf8"), fetch: readFileSync(fetchPath, "utf8"),
+  websocket: readFileSync(websocketPath, "utf8"),
   core: readFileSync(corePath, "utf8"), streams: readFileSync(managerPath, "utf8"),
 };
 const javaScript = {
   sdk: stripTypeScriptTypes(sources.sdk, { mode: "transform" }),
   fetch: stripTypeScriptTypes(sources.fetch, { mode: "transform" }),
+  websocket: stripTypeScriptTypes(sources.websocket, { mode: "transform" }),
 };
 console.log(JSON.stringify({
   scenario_id: "browser-sdk-owned-fetch-streams",
@@ -251,12 +254,14 @@ async function fixture(t, options = {}) {
   const modules = {
     sdk: new SourceTextModule(javaScript.sdk, { context, identifier: sdkPath }),
     fetch: new SourceTextModule(javaScript.fetch, { context, identifier: fetchPath }),
+    websocket: new SourceTextModule(javaScript.websocket, { context, identifier: websocketPath }),
     core: new SourceTextModule(sources.core, { context, identifier: corePath }),
     streams: new SourceTextModule(sources.streams, { context, identifier: managerPath }),
   };
   await modules.sdk.link((specifier) => {
     if (specifier === "@asupersync/browser-core") return modules.core;
     if (specifier === "./fetch.js") return modules.fetch;
+    if (specifier === "./websocket.js") return modules.websocket;
     if (specifier === "@asupersync/browser-core/webtransport-streams"
       || specifier === "./webtransport-streams.js") return modules.streams;
     assert.equal(specifier, "./asupersync.js", "only the generated WASM ABI is replaced");

@@ -1,13 +1,15 @@
 /**
  * Region-owned reception over actual SDK source, the checked-in WASM ABI,
- * and Node's native MessageChannel/BroadcastChannel implementations.
+ * and Node's native MessageChannel/BroadcastChannel/WebSocket implementations.
  * This harness supplies browser-like globals for SDK admission; it is not a
  * browser-engine run, a Rust rebuild, or proof of Rust executor dispatch.
  * node --unhandled-rejections=strict --experimental-vm-modules --test scripts/test_browser_message_regions_wasm.mjs
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -18,6 +20,7 @@ const files = [
   ["sdk", "packages/browser/src/index.ts", true],
   ["@asupersync/browser-core", "packages/browser-core/index.js", false],
   ["./fetch.js", "packages/browser/src/fetch.ts", true],
+  ["./websocket.js", "packages/browser/src/websocket.ts", true],
   ["./asupersync.js", "packages/browser-core/asupersync.js", false],
   ["./webtransport-streams.js", "packages/browser-core/webtransport-streams.js", false],
 ];
@@ -33,14 +36,15 @@ const wasmBytes = readFileSync(new URL(`../${wasmPath}`, import.meta.url));
 hashes[wasmPath] = createHash("sha256").update(wasmBytes).digest("hex");
 console.log(JSON.stringify({
   scenario_id: "browser-message-regions-packaged-wasm",
-  evidence_scope: "actual SDK, checked-in generated JS/WASM ABI, native Node message hosts",
+  evidence_scope: "actual SDK, checked-in generated JS/WASM ABI, native Node message and WebSocket hosts",
   no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch"],
   source_sha256: hashes,
 }));
 
 async function loadSdk(globals = {}) {
   const context = createContext({
-    console, AbortController, ArrayBuffer, DataView, Uint8Array, URL,
+    console, AbortController, AbortSignal, ArrayBuffer, DataView, Uint8Array, URL,
+    EventTarget, MessageEvent, WebSocket,
     TextEncoder, TextDecoder, ReadableStream, WritableStream, WebAssembly,
     MessageChannel, BroadcastChannel, Response, Request, structuredClone,
     queueMicrotask, setTimeout, clearTimeout, window: {}, document: {},
@@ -66,7 +70,12 @@ async function loadSdk(globals = {}) {
   context.wasmBytes = wasmBytes;
   // Build the initializer object in the module's own realm, as a browser would.
   await runInContext("sdk.init({ module_or_path: wasmBytes })", context);
-  return entry.namespace;
+  const raw = modules.get("./asupersync.js").namespace;
+  return {
+    sdk: entry.namespace,
+    // Counts from the checked-in WASM handle ledger, not Rust task dispatch.
+    snapshot: () => JSON.parse(raw.browser_operator_snapshot()),
+  };
 }
 
 function ok(outcome) {
@@ -92,7 +101,7 @@ async function bounded(promise) {
   } finally { clearTimeout(timer); }
 }
 async function fixture(t, options = {}) {
-  const sdk = await loadSdk(options.globals);
+  const { sdk, snapshot } = await loadSdk(options.globals);
   const runtime = ok(await sdk.createBrowserRuntime({ ...options.runtimeOptions, eagerInit: false }));
   const scope = ok(runtime.enterScope("message-receive-integration"));
   let runtimeClosed = false;
@@ -102,13 +111,112 @@ async function fixture(t, options = {}) {
     runtimeClosed = true;
   };
   t.after(closeRuntime);
-  return { sdk, runtime, scope, closeRuntime };
+  return { sdk, runtime, scope, closeRuntime, snapshot };
 }
 function channel(t, sdk) {
   const pair = sdk.createBrowserMessageChannel(authority);
   t.after(() => pair.close());
   return pair;
 }
+
+test("WASM WebSocket ownership waits for native peer close and retires its real ABI task", { timeout: 5000 }, async (t) => {
+  let resolveConnected, resolveClosing, resolveDisconnected;
+  const connected = new Promise(resolve => { resolveConnected = resolve; });
+  const peerClosing = new Promise(resolve => { resolveClosing = resolve; });
+  const disconnected = new Promise(resolve => { resolveDisconnected = resolve; });
+  const server = createServer();
+  let peerSocket;
+  let input = Buffer.alloc(0);
+  const received = [];
+  const frame = (opcode, payload = Buffer.alloc(0)) => {
+    assert.ok(payload.length < 126, "this independent peer only needs small frames");
+    return Buffer.concat([Buffer.from([0x80 | opcode, payload.length]), payload]);
+  };
+  server.on("upgrade", (request, socket, head) => {
+    peerSocket = socket;
+    const accept = createHash("sha1")
+      .update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on("close", resolveDisconnected);
+    socket.on("error", () => {});
+    const consume = chunk => {
+      input = Buffer.concat([input, chunk]);
+      while (input.length >= 2) {
+        const length = input[1] & 127;
+        assert.ok(length < 126, "client messages fit the independent small-frame parser");
+        assert.ok(input[1] & 128, "native client frames are masked");
+        if (input.length < 6 + length) return;
+        const opcode = input[0] & 15;
+        const payload = Buffer.from(input.subarray(6, 6 + length));
+        for (let i = 0; i < payload.length; i += 1) payload[i] ^= input[2 + i % 4];
+        input = input.subarray(6 + length);
+        received.push({ opcode, payload });
+        if (opcode === 8) resolveClosing(payload);
+      }
+    };
+    socket.on("data", consume);
+    if (head.length) consume(head);
+    resolveConnected();
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  // Registered before the fixture's runtime cleanup so failure also releases
+  // the real socket that an owned task could still be waiting to close.
+  t.after(async () => {
+    peerSocket?.destroy();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const { scope, closeRuntime, snapshot } = await fixture(t);
+  assert.equal(snapshot().tasks.total, 0);
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  const events = ["open", "message", "error", "close"];
+  const listenerCounts = () => Object.fromEntries(events.map(type => [type, getEventListeners(socket, type).length]));
+  const beforeListeners = listenerCounts();
+  assert.deepEqual(beforeListeners, { open: 0, message: 0, error: 0, close: 0 });
+  const handle = ok(scope.adoptWebSocket(socket, { maxQueuedMessages: 2, maxQueuedBytes: 64 }));
+  assert.equal(snapshot().tasks.total, 1, "adoption admitted a real checked-in ABI task");
+  ok(await bounded(handle.opened));
+  await bounded(connected);
+  ok(handle.send("owned-ledger-send"));
+  const text = handle.receive();
+  peerSocket.write(frame(1, Buffer.from("héllo through WASM ownership")));
+  peerSocket.write(frame(2, Buffer.from([0, 255, 7])));
+  assert.equal(ok(await bounded(text)).value, "héllo through WASM ownership");
+  assert.deepEqual([...ok(await bounded(handle.receive())).value], [0, 255, 7]);
+
+  const pendingRead = handle.receive();
+  let ownerSettled = false;
+  let terminalSettled = false;
+  const closing = scope.closeAsync();
+  void closing.then(() => { ownerSettled = true; });
+  void handle.closed.then(() => { terminalSettled = true; });
+  const closePayload = await bounded(peerClosing);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(socket.readyState, WebSocket.CLOSING);
+  assert.equal(ownerSettled, false, "scope close cannot outrun the peer's close acknowledgement");
+  assert.equal(terminalSettled, false, "task terminal is withheld until native close");
+  assert.equal(snapshot().tasks.total, 1, "the live native close remains owned in the ABI ledger");
+  assert.equal(received.find(message => message.opcode === 1).payload.toString(), "owned-ledger-send");
+
+  peerSocket.end(frame(8, closePayload));
+  ok(await bounded(closing));
+  assert.equal((await bounded(pendingRead)).outcome, "cancelled");
+  assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+  await bounded(disconnected);
+  assert.equal(socket.readyState, WebSocket.CLOSED);
+  assert.deepEqual(listenerCounts(), beforeListeners, "all owned native socket listeners retired");
+  assert.equal(snapshot().tasks.total, 0, "successful owner close retains no ABI task");
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+  await closeRuntime();
+  console.log(JSON.stringify({
+    scenario_id: "browser-websocket-owned-packaged-wasm",
+    received_messages: 2, sent_messages: 1,
+    pending_owner_close_before_peer_ack: true,
+    wasm_task_counts: [0, 1, 1, 0], native_listeners_after_close: listenerCounts(),
+    evidence_scope: "actual SDK, checked-in JS/WASM handle ledger, native Node WebSocket and HTTP-upgrade peer",
+    no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch"],
+  }));
+});
 
 test("WASM message ownership delivers native FIFO/transfer and retires on return", async (t) => {
   const { sdk, scope } = await fixture(t);
