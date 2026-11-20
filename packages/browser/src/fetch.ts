@@ -91,10 +91,11 @@ export interface FetchStreamHandle {
    * remain available. Native stream support is required only for this method.
    *
    * pipeTo, async-iteration exit, and reader.cancel() drive owned cancellation.
-   * Await the initiating cancellation/pipe/iterator promise or closed for
-   * cleanup. Native EOF and repeated cancel() on an already closed stream do
-   * not rejoin pending cleanup. Errors have
-   * the terminal Outcome in error.cause. ABI refusal rejects cancellation;
+   * The initiating cancellation/pipe/iterator promise joins independent
+   * retirement and rejects failed host cleanup; closed retains the operation's
+   * separate terminal Outcome. Native EOF and repeated cancel() on an already
+   * closed stream do not rejoin pending cleanup. Errors have the operation or
+   * cleanup Outcome in error.cause. ABI refusal rejects cancellation;
    * terminal-publication refusal still retains the owned task and its credit.
    *
    * This is a default stream of Uint8Array chunks, not a BYOB byte stream.
@@ -721,15 +722,16 @@ export function createBrowserFetchManager(dependencies: {
             // Mark that before callbacks, and stop host I/O on ABI refusal:
             // this consumer can never resume to take responsibility for it.
             ended = true;
-            await this.requestCancel("fetch_cancel",
-              reason === undefined ? "fetch stream cancelled by consumer" : message(reason), true);
+            // The operation may publish Cancelled even when a host cleanup
+            // callback failed. Join the independent retirement receipt so
+            // native cancel/iteration/pipe settlement cannot hide that failure.
+            const retired = await this.retireAndJoin(
+              reason === undefined ? "fetch stream cancelled by consumer" : message(reason));
             const terminal = await this.closed.promise;
             if (terminal.outcome !== "ok" && terminal.outcome !== "cancelled") {
               throw bodyStreamError(terminal);
             }
-            if (this.creditHeld) {
-              throw bodyStreamError(failure("fetch stream cleanup retained its owned task", "internal_failure"));
-            }
+            if (retired.outcome !== "ok") throw bodyStreamError(retired);
           },
         }, { highWaterMark: 0 });
         this.bodyStream = stream;

@@ -219,6 +219,90 @@ test("native reader cancellation awaits pending read and delayed source cleanup"
   reader.releaseLock();
 });
 
+// br-asupersync-bi2462.147.211: native consumers must join the same independent
+// cleanup receipt as the higher-level fetch adapters, not just operation closed.
+for (const mode of ["stream", "reader", "iterator", "pipe"]) {
+  test(`${mode} cancellation exposes host cleanup refusal after draining`, { timeout: 3000 }, async (t) => {
+    const release = deferred();
+    const entered = deferred();
+    let cancels = 0;
+    const body = new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array([9])); },
+      cancel() {
+        cancels += 1;
+        entered.resolve();
+        return release.promise.then(() => { throw new Error("private host cleanup detail"); });
+      },
+    }, { highWaterMark: 0 });
+    const f = await fixture(t, { body });
+    f.cleanup.push(release.resolve);
+    const handle = f.start().value;
+    const stream = f.stream(handle);
+    await handle.response();
+    let operation;
+    if (mode === "stream") operation = stream.cancel("consumer stopped");
+    if (mode === "reader") {
+      const reader = stream.getReader();
+      t.after(() => reader.releaseLock());
+      operation = reader.cancel("consumer stopped");
+    }
+    if (mode === "iterator") operation = (async () => {
+      for await (const value of stream) {
+        assert.deepEqual(Array.from(value), [9]);
+        break;
+      }
+    })();
+    if (mode === "pipe") operation = stream.pipeTo(new WritableStream({
+      write() { throw new Error("destination failed"); },
+    }));
+    let rejected = false;
+    const rejection = expectFailure(operation, "err", /response cancellation failed/)
+      .then(() => { rejected = true; });
+    await entered.promise;
+    await turn();
+    assert.equal(rejected, false, "consumer settlement must wait for host cleanup");
+    assert.equal(cancels, 1);
+    assert.equal(f.calls.join.length, 0);
+    release.resolve();
+    await rejection;
+    assert.equal((await handle.closed).outcome, "cancelled", "operation outcome remains independent");
+    const retirement = await handle.retire();
+    assert.equal(retirement.outcome, "err");
+    assert.match(retirement.failure.message, /response cancellation failed/);
+    assert.equal(body.locked, false);
+    assert.equal(f.calls.cancel.length, 1);
+    assert.equal(f.calls.join.length, 1);
+    assert.equal(cancels, 1, "joining retirement must not repeat source cancellation");
+  });
+}
+
+test("cancellation before headers exposes late response cleanup refusal", { timeout: 3000 }, async (t) => {
+  const response = deferred();
+  const release = deferred();
+  const entered = deferred();
+  const body = new ReadableStream({ cancel() {
+    entered.resolve();
+    return release.promise.then(() => { throw new Error("private late response cleanup detail"); });
+  } }, { highWaterMark: 0 });
+  const late = new Response(body);
+  const f = await fixture(t, { fetch: () => response.promise });
+  f.cleanup.push(() => response.resolve(late), release.resolve);
+  const handle = f.start().value;
+  let rejected = false;
+  const cancellation = expectFailure(f.stream(handle).cancel("stop before headers"), "err", /late response disposal failed/)
+    .then(() => { rejected = true; });
+  response.resolve(late);
+  await entered.promise;
+  await turn();
+  assert.equal(rejected, false);
+  assert.equal(f.calls.join.length, 0);
+  release.resolve();
+  await cancellation;
+  assert.equal((await handle.closed).outcome, "cancelled");
+  assert.equal((await handle.retire()).outcome, "err");
+  assert.equal(f.calls.join.length, 1);
+});
+
 test("breaking async iteration waits for owned fetch cleanup", { timeout: 3000 }, async (t) => {
   const release = deferred();
   const entered = deferred();

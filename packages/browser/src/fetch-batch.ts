@@ -570,13 +570,17 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
         return receipt;
       }) : Promise.resolve(ok(undefined));
       let refusal: Failure | undefined;
+      let cancellationRejected = false;
       try {
         if (member.reader) await Reflect.apply(CANCEL!, member.reader, ["fetch batch member retired"]);
         else if (member.fetch) {
           const receipt = checked<void>(await member.fetch.cancel("fetch batch member retired"));
           if (receipt.outcome === "err" || receipt.outcome === "panicked") refusal = receipt;
         }
-      } catch { refusal = failure("fetch batch cancellation or terminal publication refused", "internal_failure"); }
+      } catch {
+        cancellationRejected = true;
+        refusal = failure("fetch batch cancellation or terminal publication refused", "internal_failure");
+      }
       let terminal: Outcome<void>;
       try { terminal = member.closed ? await member.closed : ok(undefined); }
       catch { terminal = failure("fetch batch terminal publication rejected", "internal_failure"); }
@@ -591,7 +595,11 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       // not evidence of failed cleanup. Genuine owner cancellation was already
       // observed by stop; do not manufacture a stronger cause during retirement.
       // An equally severe operation failure keeps its own, more specific cause.
-      if (retired.outcome !== "ok" && (outcome.outcome === "ok" || severity(retired) > severity(outcome))) outcome = retired;
+      // Native cancellation can now reject with this same retirement failure.
+      // Prefer the checked receipt to our generic rejection diagnostic without
+      // replacing an equally severe, independently observed operation failure.
+      if (retired.outcome !== "ok" && (outcome.outcome === "ok" || severity(retired) > severity(outcome)
+          || cancellationRejected && !terminalFailure && severity(retired) === severity(outcome))) outcome = retired;
       if (outcome.outcome !== "ok") noteCleanup(member.index, outcome);
       member.ended = true;
       if (member.bodyController) {

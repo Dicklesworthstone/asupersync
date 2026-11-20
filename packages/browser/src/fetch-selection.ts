@@ -342,13 +342,20 @@ function selectFetchResponses(
         : tolerateFailedAttempts && member.responseOutcome?.outcome === "err"
           && !INVALID_OUTCOMES.has(member.responseOutcome)
           ? terminal.outcome === "cancelled" ? terminal : internal("failed fetch attempt completed without its operation error")
-        : refused ? terminal.outcome === "cancelled" ? terminal
-          : internal("fetch cancellation or terminal publication refused") : undefined;
+        : refused && terminal.outcome === "cancelled" && !member.retire ? terminal : undefined;
+      // A native cancellation can reject because independent retirement failed.
+      // Its expected operation Cancelled is not a new owner cancellation, and
+      // must not hide the retirement error or replace a caller's cancel reason.
+      const refusal = refused && !tolerated
+        ? internal("fetch cancellation or terminal publication refused") : undefined;
       if (failure) noteCleanup(index, failure);
+      else if (refusal) stop(refusal);
       // Recorded after the terminal: an equally severe operation failure keeps
-      // its own, more specific cause.
+      // its own, more specific cause. The independent retirement receipt is more
+      // specific than the generic native-rejection diagnostic recorded last.
       retired ??= await joinedRetirement;
       if (retired.outcome !== "ok") noteCleanup(index, retired);
+      if (refusal) noteCleanup(index, refusal);
       resolve();
     })();
     return member.draining;
