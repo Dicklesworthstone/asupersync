@@ -381,14 +381,28 @@ impl DeliverySender {
 struct DeliveryReceiver {
     inner: Arc<Mutex<DeliveryState>>,
     cx: Cx,
+    cancel_waker: Option<CancelWakerToken>,
+}
+
+#[cfg(feature = "kafka")]
+impl DeliveryReceiver {
+    fn clear_cancel_waker(&mut self) {
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
 }
 
 #[cfg(feature = "kafka")]
 impl Drop for DeliveryReceiver {
     fn drop(&mut self) {
-        let mut state = self.inner.lock();
-        state.closed = true;
-        state.waker = None;
+        let retired_waker = {
+            let mut state = self.inner.lock();
+            state.closed = true;
+            state.waker.take()
+        };
+        self.clear_cancel_waker();
+        drop(retired_waker);
     }
 }
 
@@ -397,37 +411,53 @@ impl Future for DeliveryReceiver {
     type Output = Result<RecordMetadata, KafkaError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.inner.lock();
-
-        if state.completed {
+        let this = self.get_mut();
+        if this.inner.lock().completed {
             return Poll::Ready(Err(KafkaError::PolledAfterCompletion));
         }
 
-        // A delivery report that has already arrived wins over cancellation.
-        // librdkafka delivers an enqueued record regardless; reporting
-        // Cancelled for a delivered record made the caller send it again.
-        if let Some(value) = state.value.take() {
-            state.closed = true;
-            state.completed = true;
-            state.waker = None;
-            return Poll::Ready(value);
-        }
+        // The explicit owner may differ from the polling task's context. Its
+        // cancellation must wake a parked send even if no broker report arrives
+        // (br-asupersync-messaging-client-audit-k6pxks). Register before the
+        // checkpoint, and retire the registration on completion as well as drop.
+        this.cancel_waker = Some(this.cx.refresh_cancel_waker(this.cancel_waker, cx.waker()));
 
-        if self.cx.checkpoint().is_err() {
-            state.closed = true;
-            state.completed = true;
-            state.waker = None;
-            Poll::Ready(Err(KafkaError::Cancelled))
-        } else {
-            if !state
-                .waker
-                .as_ref()
-                .is_some_and(|w| w.will_wake(cx.waker()))
-            {
-                state.waker = Some(cx.waker().clone());
+        // Cx checkpoints and Waker callbacks may re-enter this delivery state.
+        // Keep both outside its lock. A report observed before the checkpoint
+        // still wins without acknowledging cancellation; re-check under the
+        // lock so a report published during the checkpoint also wins.
+        let has_report = this.inner.lock().value.is_some();
+        let cancelled = !has_report && this.cx.checkpoint().is_err();
+        let mut pending_waker = (!has_report && !cancelled).then(|| cx.waker().clone());
+        let (poll, retired_waker) = {
+            let mut state = this.inner.lock();
+            if let Some(value) = state.value.take() {
+                state.closed = true;
+                state.completed = true;
+                (Poll::Ready(value), state.waker.take())
+            } else if cancelled {
+                state.closed = true;
+                state.completed = true;
+                (Poll::Ready(Err(KafkaError::Cancelled)), state.waker.take())
+            } else {
+                let retired_waker = if state
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    None
+                } else {
+                    std::mem::replace(&mut state.waker, pending_waker.take())
+                };
+                (Poll::Pending, retired_waker)
             }
-            Poll::Pending
+        };
+
+        drop(retired_waker);
+        if poll.is_ready() {
+            this.clear_cancel_waker();
         }
+        poll
     }
 }
 
@@ -439,6 +469,7 @@ fn delivery_channel(cx: &Cx) -> (DeliverySender, DeliveryReceiver) {
         DeliveryReceiver {
             inner,
             cx: cx.clone(),
+            cancel_waker: None,
         },
     )
 }

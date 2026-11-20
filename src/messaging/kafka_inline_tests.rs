@@ -3377,6 +3377,216 @@
 
     #[cfg(feature = "kafka")]
     #[test]
+    fn delivery_receiver_cancel_wakes_the_latest_waiter_and_retires_registration() {
+        let owner = Cx::for_testing();
+        let (sender, receiver) = delivery_channel(&owner);
+        let state = Arc::clone(&receiver.inner);
+        let mut receiver = Box::pin(receiver);
+        let old_wakes = Arc::new(ReceiptWake::default());
+        let new_wakes = Arc::new(ReceiptWake::default());
+        let old_waker = Waker::from(Arc::clone(&old_wakes));
+        let new_waker = Waker::from(Arc::clone(&new_wakes));
+
+        assert!(receiver.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        assert!(receiver.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        assert!(state.lock().value.is_none(), "the broker has not reported delivery");
+
+        owner.cancel_with(crate::types::CancelKind::User, Some("cancel legacy send"));
+        assert_eq!(old_wakes.0.load(Ordering::SeqCst), 0);
+        assert!(new_wakes.0.load(Ordering::SeqCst) > 0);
+        assert!(matches!(
+            receiver.as_mut().poll(&mut Context::from_waker(&new_waker)),
+            Poll::Ready(Err(KafkaError::Cancelled))
+        ));
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        {
+            let state = state.lock();
+            assert!(state.closed && state.completed);
+            assert!(state.waker.is_none());
+        }
+        // A cancelled legacy wait cannot retract delivery, but a late native
+        // callback must not retain or wake its retired waiter.
+        let wakes_before_report = new_wakes.0.load(Ordering::SeqCst);
+        sender.complete(Ok(receipt_metadata()));
+        assert_eq!(new_wakes.0.load(Ordering::SeqCst), wakes_before_report);
+        assert!(state.lock().value.is_none());
+        assert!(matches!(
+            receiver.as_mut().poll(&mut Context::from_waker(&new_waker)),
+            Poll::Ready(Err(KafkaError::PolledAfterCompletion))
+        ));
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivery_receiver_drop_retires_only_its_own_pending_registration() {
+        let owner = Cx::for_testing();
+        let (abandoned_sender, abandoned) = delivery_channel(&owner);
+        let abandoned_state = Arc::downgrade(&abandoned.inner);
+        let (sender, surviving) = delivery_channel(&owner);
+        let wakes = Arc::new(ReceiptWake::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task = Context::from_waker(&waker);
+        let mut abandoned = Box::pin(abandoned);
+        let mut surviving = Box::pin(surviving);
+        assert!(abandoned.as_mut().poll(&mut task).is_pending());
+        assert!(surviving.as_mut().poll(&mut task).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 2);
+        drop(abandoned);
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        {
+            let state = abandoned_state.upgrade().unwrap();
+            let state = state.lock();
+            assert!(state.closed);
+            assert!(state.waker.is_none());
+        }
+        drop(abandoned_sender);
+        assert!(abandoned_state.upgrade().is_none());
+
+        sender.complete(Ok(receipt_metadata()));
+        owner.cancel_with(crate::types::CancelKind::User, Some("after delivery"));
+        let Poll::Ready(Ok(metadata)) = surviving.as_mut().poll(&mut task) else {
+            panic!("a published delivery must still win over owner cancellation");
+        };
+        assert_eq!((metadata.partition, metadata.offset), (2, 41));
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(surviving.inner.lock().waker.is_none());
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivery_receiver_retires_wakers_outside_delivery_lock() {
+        struct ReentrantDropWake {
+            state: Arc<Mutex<DeliveryState>>,
+            retired: Arc<AtomicBool>,
+        }
+        impl std::task::Wake for ReentrantDropWake {
+            fn wake(self: Arc<Self>) {}
+        }
+        impl Drop for ReentrantDropWake {
+            fn drop(&mut self) {
+                assert!(self.state.try_lock().is_some(), "Waker drop must not hold DeliveryState");
+                self.retired.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for finish in ["replace", "complete", "drop"] {
+            let owner = Cx::for_testing();
+            let (sender, receiver) = delivery_channel(&owner);
+            let mut receiver = Box::pin(receiver);
+            let retired = Arc::new(AtomicBool::new(false));
+            {
+                let waker = Waker::from(Arc::new(ReentrantDropWake {
+                    state: Arc::clone(&receiver.inner),
+                    retired: Arc::clone(&retired),
+                }));
+                assert!(receiver.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+            }
+            assert!(!retired.load(Ordering::SeqCst));
+            match finish {
+                "replace" => {
+                    assert!(receiver.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                    assert!(retired.load(Ordering::SeqCst));
+                    drop(receiver);
+                }
+                "complete" => {
+                    sender.complete(Ok(receipt_metadata()));
+                    assert!(receiver.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_ready());
+                    assert!(retired.load(Ordering::SeqCst));
+                }
+                _ => {
+                    drop(receiver);
+                    assert!(retired.load(Ordering::SeqCst));
+                }
+            }
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+
+    /// The receiver is parked as a real native task before a different Cx is
+    /// cancelled. The watchdog waits on its TaskHandle, never on the receiver,
+    /// so watchdog polling cannot conceal a missing cancellation wakeup.
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn delivery_receiver_native_explicit_owner_cancel_wakes_parked_send() {
+        for multithread in [false, true] {
+            for cross_thread in [false, true] {
+                let builder = if multithread {
+                    crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                } else {
+                    crate::runtime::RuntimeBuilder::current_thread()
+                };
+                let runtime = builder.build().unwrap();
+                runtime.block_on(async {
+                    let root = Cx::current().expect("native root context");
+                    let owner = Cx::for_testing();
+                    let (sender, receiver) = delivery_channel(&owner);
+                    let state = Arc::clone(&receiver.inner);
+                    let (parked_tx, mut parked_rx) = crate::channel::oneshot::channel();
+                    let mut waiting = root.spawn(move |task_cx| async move {
+                        let mut receiver = std::pin::pin!(receiver);
+                        let mut witness = Some(parked_tx);
+                        let result = std::future::poll_fn(|task| {
+                            let poll = receiver.as_mut().poll(task);
+                            if poll.is_pending()
+                                && let Some(witness) = witness.take()
+                            {
+                                witness.send_blocking(()).unwrap();
+                            }
+                            poll
+                        }).await;
+                        (result, task_cx.is_cancel_requested())
+                    }).unwrap();
+                    crate::time::timeout(root.now(), Duration::from_secs(5), parked_rx.recv(&root))
+                        .await.expect("native delivery wait reached Pending").unwrap();
+                    {
+                        let state = state.lock();
+                        assert!(state.waker.is_some());
+                        assert!(state.value.is_none() && !state.closed && !state.completed);
+                    }
+                    assert!(!waiting.is_finished());
+                    let cancel = || {
+                        owner.cancel_with(crate::types::CancelKind::User, Some("explicit delivery owner"));
+                    };
+                    if cross_thread {
+                        std::thread::scope(|scope| scope.spawn(cancel).join().unwrap());
+                    } else {
+                        cancel();
+                    }
+                    let result = crate::time::timeout(
+                        root.now(), Duration::from_secs(2), waiting.join(&root),
+                    ).await;
+                    // A broken implementation still gets a bounded cleanup:
+                    // the withheld callback can now release the parked task.
+                    sender.complete(Ok(receipt_metadata()));
+                    if result.is_err() {
+                        let _ = crate::time::timeout(
+                            root.now(), Duration::from_secs(5), waiting.join(&root),
+                        ).await.expect("late callback retires the old-code task");
+                    }
+                    let (result, task_cancelled) = result
+                        .expect("owner cancellation alone must wake the parked receiver")
+                        .expect("the foreign owner's cancellation is a typed send result");
+                    assert!(matches!(result, Err(KafkaError::Cancelled)));
+                    assert!(!task_cancelled, "only the explicit delivery owner was cancelled");
+                    assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+                    let state = state.lock();
+                    assert!(state.closed && state.completed);
+                    assert!(state.waker.is_none() && state.value.is_none());
+                });
+                let report = runtime.shutdown_drained(Duration::from_secs(5));
+                assert_eq!(report.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+                assert_eq!(report.live_tasks, 0);
+                assert_eq!(report.pending_obligations, 0);
+                assert!(runtime.is_quiescent());
+            }
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
     fn run_kafka_blocking_uses_pool_when_available() {
         let pool = crate::runtime::BlockingPool::new(1, 1);
         let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
