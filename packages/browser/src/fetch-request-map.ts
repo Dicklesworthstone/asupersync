@@ -530,7 +530,11 @@ export interface FetchRequestMergeOptions {
  * drain remain visible. Same-severity cleanup failures use source input order.
  *
  * Pass the result directly to streamMapFetches/tryStreamMapFetches. No request is
- * admitted, body acquired, task spawned, timer installed or retry performed here.
+ * admitted, body acquired, task spawned or retry performed here. Eager ready-input
+ * consumption periodically yields through one owned host timer when a timer pair
+ * is available, so host cancellation and other event-loop work can run. Stopping
+ * retires that timer before joining producers; timer-free embedders retain their
+ * existing scheduling behavior.
  * Descriptors keep their identity. Unadmitted upload bodies, source queues, hidden
  * raw-stream producer work and downstream buffering remain caller responsibilities.
  * Read or cancel the output; waiting only for closed can intentionally stall.
@@ -581,6 +585,8 @@ export function mergeFetchRequestSources(
   let stopped: Failure | undefined;
   let cleanup: { index: number; outcome: Failure } | undefined;
   let retirement: Promise<void> | undefined;
+  let workSteps = 0;
+  let hostTurn: { timer: ReturnType<typeof setTimeout> | undefined } | undefined;
   const onAbort = () => { void stop(cancelled("request merge cancelled by signal")); };
 
   function detachParent(): void {
@@ -596,6 +602,32 @@ export function mergeFetchRequestSources(
   }
   function note(outcome: Failure): void {
     if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
+  }
+  function clearHostTurn(): void {
+    const wait = hostTurn;
+    hostTurn = undefined;
+    if (!wait) return;
+    try {
+      if (wait.timer !== undefined) Reflect.apply(UNSCHEDULE!, globalThis, [wait.timer]);
+    } catch { note(fail("request merge host scheduling cleanup failed", "compatibility_rejected")); }
+  }
+  function yieldToHost(): void {
+    workSteps = 0;
+    if (!SCHEDULE || !UNSCHEDULE) { pump(); return; }
+    const wait: { timer: ReturnType<typeof setTimeout> | undefined } = { timer: undefined };
+    hostTurn = wait;
+    try {
+      const timer = Reflect.apply(SCHEDULE, globalThis, [() => {
+        if (hostTurn !== wait) return;
+        hostTurn = undefined;
+        pump();
+      }, 0]) as ReturnType<typeof setTimeout>;
+      if (hostTurn === wait) wait.timer = timer;
+      else Reflect.apply(UNSCHEDULE, globalThis, [timer]);
+    } catch {
+      if (hostTurn === wait) hostTurn = undefined;
+      void stop(fail("request merge host scheduling failed", "compatibility_rejected"));
+    }
   }
   function noteCleanup(index: number, outcome: Failure): void {
     if (!cleanup || severity(outcome) > severity(cleanup.outcome)
@@ -627,6 +659,7 @@ export function mergeFetchRequestSources(
       }));
       if (retirement) await retirement;
       ended = true;
+      clearHostTurn();
       detachParent();
       release();
       const outcome = cleanup && (!stopped || severity(cleanup.outcome) >= severity(stopped))
@@ -650,6 +683,7 @@ export function mergeFetchRequestSources(
     if (!retirement) {
       const joined = deferred<void>();
       retirement = joined.promise; // Fence before every producer callback.
+      clearHostTurn();
       ready.length = 0;
       for (const member of members) member.queued = false;
       void Promise.all(members.map(async (member, index) => {
@@ -685,7 +719,7 @@ export function mergeFetchRequestSources(
     void stop(cause);
   }
   function deliver(): void {
-    if (ended || retirement) return;
+    if (ended || retirement || hostTurn) return;
     if (demand && ready.length) {
       const item = ready.shift()!;
       members[item.index].queued = false;
@@ -709,6 +743,16 @@ export function mergeFetchRequestSources(
       } catch { fault(index); }
       finally { member.reading = undefined; done.resolve(); }
     })();
+  }
+  function pump(): void {
+    if (ended || retirement || hostTurn) return;
+    // Snapshot eligibility before starting reads. Resolution uses microtasks,
+    // so every source in this demand wave gets exactly one chance to read.
+    for (let index = 0; index < members.length; index++) {
+      const member = members[index];
+      if (!member.eof && !member.queued && !member.reading) read(index);
+    }
+    deliver();
   }
   try {
     const count = Array.isArray(sources) ? sources.length : -1;
@@ -741,13 +785,10 @@ export function mergeFetchRequestSources(
       pull() {
         if (ended || retirement) return completion.promise.then(() => undefined);
         const pending = deferred<void>(); demand = pending;
-        // Snapshot eligibility before starting reads. Resolution uses microtasks,
-        // so every source in this demand wave gets exactly one chance to read.
-        for (let index = 0; index < members.length; index++) {
-          const member = members[index];
-          if (!member.eof && !member.queued && !member.reading) read(index);
-        }
-        deliver();
+        // Keep this budget across pulls. Eager consumers otherwise form an
+        // unbounded microtask chain even though each source has just one credit.
+        if (++workSteps >= HOST_TURN_STEPS) yieldToHost();
+        else pump();
         return pending.promise;
       },
       async cancel() {

@@ -52,7 +52,7 @@ function fixture(t) {
     }};
     return { readable,owner,terminal,count,controller,input:options.owned?owner:readable };
   }
-  const merge = (inputs, options) => { const admitted=api.mergeFetchRequestSources(inputs.map(x=>x.input??x), options); assert.equal(admitted.outcome,"ok"); handles.push(admitted.value); return admitted.value; };
+  const merge = (inputs, options, library = api) => { const admitted=library.mergeFetchRequestSources(inputs.map(x=>x.input??x), options); assert.equal(admitted.outcome,"ok"); handles.push(admitted.value); return admitted.value; };
   const reader = h => { const r=h.readable.getReader(); readers.push(r); return r; };
   t.after(async()=>{ for(const g of gates)g.resolve(); for(const r of receipts)r.resolve(ok(undefined));
     await Promise.all(handles.map(h=>h.cancel("test cleanup"))); for(const r of readers){try{r.releaseLock();}catch{}} });
@@ -211,4 +211,106 @@ test("customized parent signal is refused before source ownership",async t=>{
 test("empty merge stays a successful identity even with a pre-aborted parent",async t=>{
   const f=fixture(t),controller=new AbortController();controller.abort();const h=f.merge([],{signal:controller.signal});
   assert.deepEqual(await collect(h),[]);assert.equal((await h.closed).outcome,"ok");
+});
+
+test("eager merged sources yield to host cancellation before exhausting ready input", { timeout: 5000 }, async t => {
+  const yielding = await load({ setTimeout, clearTimeout }), f = fixture(t), parent = new AbortController();
+  const sources = [f.source("a", { owned: true, count: 1024 }), f.source("b", { owned: true, count: 1024 })];
+  const h = f.merge(sources, { signal: parent.signal }, yielding);
+  const abort = setTimeout(() => parent.abort(), 0); t.after(() => clearTimeout(abort));
+  let delivered = 0;
+  const consuming = (async () => { for await (const _ of h.readable) delivered++; })();
+  void consuming.catch(() => {});
+  assert.equal((await h.closed).outcome, "cancelled");
+  await assert.rejects(consuming);
+  assert.ok(delivered > 0 && delivered < 2048);
+  assert.deepEqual(sources.map(s => [s.count.native, s.count.owner]), [[1, 1], [1, 1]]);
+  assert.equal(sources.every(s => !s.readable.locked), true);
+});
+
+test("host yields preserve merge order and keep only one timer until clean EOF", { timeout: 5000 }, async t => {
+  const live = new Set(); let scheduled = 0, peak = 0;
+  const yielding = await load({
+    setTimeout(callback, delay) {
+      const token = setTimeout(() => { live.delete(token); callback(); }, delay);
+      live.add(token); scheduled++; peak = Math.max(peak, live.size); return token;
+    },
+    clearTimeout(token) { live.delete(token); clearTimeout(token); },
+  });
+  const f = fixture(t), sources = [f.source("a", { owned: true, count: 512 }), f.source("b", { owned: true, count: 512 })];
+  const h = f.merge(sources, undefined, yielding);
+  assert.deepEqual(await collect(h), Array.from({ length: 512 }, (_, i) => [`a/${i}`, `b/${i}`]).flat());
+  assert.equal((await h.closed).outcome, "ok");
+  assert.ok(scheduled > 1); assert.equal(peak, 1); assert.equal(live.size, 0);
+  assert.deepEqual(sources.map(s => [s.count.native, s.count.owner]), [[0, 0], [0, 0]]);
+  assert.equal(sources.every(s => !s.readable.locked), true);
+});
+
+for (const mode of ["parent", "caller"]) test(`${mode} cancellation retires a parked merge timer and still joins every producer barrier`, { timeout: 5000 }, async t => {
+  const scheduled = deferred(), live = new Set(); let cleared = 0;
+  const paused = await load({
+    setTimeout(callback) { const token = { callback }; live.add(token); scheduled.resolve(token); return token; },
+    clearTimeout(token) { assert.equal(live.delete(token), true); cleared++; },
+  });
+  const f = fixture(t), nativeGate = f.gate(), ownerGate = f.gate(), parent = new AbortController();
+  const sources = [f.source("a", { owned: true, count: 1024, nativeGate, holdTerminal: true }),
+    f.source("b", { owned: true, count: 1024, ownerGate, holdTerminal: true })];
+  const h = f.merge(sources, { signal: parent.signal }, paused), reader = f.reader(h);
+  let delivered = 0;
+  const consuming = (async () => { while (!(await reader.read()).done) delivered++; })();
+  void consuming.catch(() => {});
+  const token = await scheduled.promise;
+  assert.ok(delivered > 0 && delivered < 2048); assert.equal(live.size, 1);
+  const pulls = sources.map(s => s.count.pulls);
+  const stopping = mode === "caller" ? h.cancel("cancel parked merge") : (parent.abort(), h.closed);
+  assert.equal(cleared, 1); assert.equal(live.size, 0);
+  token.callback(); await pending(h.closed);
+  assert.deepEqual(sources.map(s => s.count.pulls), pulls);
+  assert.deepEqual(sources.map(s => [s.count.native, s.count.owner]), [[1, 1], [1, 1]]);
+  sources.forEach(s => s.terminal.resolve(cancelled())); await pending(h.closed);
+  nativeGate.resolve(); await pending(h.closed);
+  ownerGate.resolve(); assert.equal((await stopping).outcome, "cancelled");
+  await assert.rejects(consuming);
+  assert.equal(sources.every(s => !s.readable.locked), true);
+});
+
+test("producer failure while yielding retires the merge timer and preserves its diagnosis", { timeout: 5000 }, async t => {
+  const scheduled = deferred(); let cleared = 0;
+  const paused = await load({
+    setTimeout(callback) { const token = { callback }; scheduled.resolve(token); return token; },
+    clearTimeout() { cleared++; },
+  });
+  const f = fixture(t), a = f.source("a", { owned: true, count: 1024, holdTerminal: true }), b = f.source("b", { owned: true, count: 1024 });
+  const h = f.merge([a, b], undefined, paused), consuming = collect(h); void consuming.catch(() => {});
+  const token = await scheduled.promise; a.terminal.resolve(err("producer failed while merge yielded"));
+  const result = await h.closed;
+  assert.equal(result.outcome, "err"); assert.equal(result.failure.message, "producer failed while merge yielded");
+  await assert.rejects(consuming); assert.equal(cleared, 1); assert.equal(b.count.owner, 1);
+  const pulls = a.count.pulls + b.count.pulls; token.callback(); await turn(); assert.equal(a.count.pulls + b.count.pulls, pulls);
+});
+
+test("a throwing merge scheduler fails closed and joins sources without presenting its exception", { timeout: 5000 }, async t => {
+  const unavailable = await load({
+    setTimeout() { throw { get message() { assert.fail("exception message inspected"); }, toString() { assert.fail("exception presented"); } }; },
+    clearTimeout() { assert.fail("no timer was acquired"); },
+  });
+  const f = fixture(t), a = f.source("a", { owned: true, count: 1024 }), h = f.merge([a], undefined, unavailable);
+  const consuming = collect(h); void consuming.catch(() => {});
+  const result = await h.closed;
+  assert.equal(result.outcome, "err"); assert.equal(result.failure.code, "compatibility_rejected");
+  assert.equal(result.failure.message, "request merge host scheduling failed"); await assert.rejects(consuming);
+  assert.equal(a.count.native, 1); assert.equal(a.count.owner, 1); assert.equal(a.readable.locked, false);
+});
+
+test("cancellation reentered during merge timer registration clears the returned timer", { timeout: 5000 }, async t => {
+  let h, scheduled = 0, cleared = 0;
+  const reentrant = await load({
+    setTimeout(callback) { scheduled++; void h.cancel("cancel during scheduling"); return { callback }; },
+    clearTimeout(token) { cleared++; token.callback(); },
+  });
+  const f = fixture(t), a = f.source("a", { owned: true, count: 1024 });
+  h = f.merge([a], undefined, reentrant);
+  const consuming = collect(h); void consuming.catch(() => {});
+  assert.equal((await h.closed).outcome, "cancelled"); await assert.rejects(consuming);
+  assert.equal(scheduled, 1); assert.equal(cleared, 1); assert.equal(a.count.owner, 1); assert.equal(a.readable.locked, false);
 });
