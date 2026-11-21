@@ -97,6 +97,8 @@ export interface ReliableStreamManager<
    * release succeeded. A throwing acquisition leaves cleanup unconfirmed.
    * Failures from previously completed children, incoming readers and late
    * admissions remain sticky; this bounded immutable receipt never retries cleanup.
+   * A native reader's stored source error is an operation failure, not failed
+   * cancellation, when its intrinsic terminal promise witnesses the same error.
    * Datagrams and the native transport connection are still excluded.
    */
   whenRetired(state: State): Promise<Outcome<void>>;

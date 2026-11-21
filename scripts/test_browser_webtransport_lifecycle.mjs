@@ -113,6 +113,7 @@ async function fixture(options = {}) {
 
   const context = createContext({
     ArrayBuffer, Uint8Array, URL, TextEncoder, Error, TypeError,
+    ReadableStream, ReadableStreamDefaultReader,
     WebTransport: ControlledTransport,
   });
   const names = [
@@ -1849,4 +1850,82 @@ test("WTS-RETIRE-ACQUISITION: an acquired but unreturned collection lock cannot 
   core.scope_close(scope);
   assert.equal((await retired).outcome, "err");
   assert.equal(collection.locked, false);
+});
+
+test("WTS-RETIRE-PEER-RESET: an errored native reader retires without a failed cleanup hook", async () => {
+  const wire = duplex();
+  const { core, session, scope } = await fixture({ createStream: () => wire });
+  const state = [...core.hostSessions.values()][0];
+  const child = await openedStream(core, session);
+  const reading = child.read();
+  wire.input.error(new Error("peer reset the reliable read side"));
+  assert.equal((await reading).outcome, "err");
+  assert.equal((await child.closed).outcome, "err", "the operation still reports the peer failure");
+  assert.equal(wire.events.filter(([kind]) => kind === "cancel").length, 0,
+    "native cancellation of an already errored reader never invokes the source hook");
+  assert.equal(wire.events.filter(([kind]) => kind === "abort").length, 1);
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.writable.locked, false);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  assert.deepEqual(normalize(await retired), { outcome: "ok", value: undefined });
+});
+
+test("WTS-RETIRE-PEER-COLLECTION: an errored native incoming collection retires after its pending accept", async () => {
+  const { core, session, scope, host } = await fixture();
+  const state = [...core.hostSessions.values()][0];
+  const accepting = core.webtransport_accept_unidirectional_stream({ session });
+  await turn();
+  assert.equal(host.incomingUnidirectionalStreams.locked, true);
+  host.incomingUni.error(new Error("peer reset the incoming collection"));
+  assert.equal((await accepting).outcome, "err");
+  assert.equal(host.events.filter(([kind]) => kind === "incoming-unidirectional-cancel").length, 0);
+  assert.equal(host.incomingUnidirectionalStreams.locked, false);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  assert.deepEqual(normalize(await retired), { outcome: "ok", value: undefined });
+});
+
+test("WTS-RETIRE-PEER-LATE: an already errored native source returned after owner closure can retire", async () => {
+  const creation = deferred();
+  const wire = duplex();
+  const { core, session, scope, host } = await fixture({ createStream: () => creation.promise });
+  const state = [...core.hostSessions.values()][0];
+  const opening = core.webtransport_open_stream({ session });
+  await turn();
+  assert.equal(host.events.filter(([kind]) => kind === "create-bidirectional").length, 1);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  wire.input.error(new Error("late stream already reset by peer"));
+  creation.resolve(wire);
+  assert.equal((await opening).outcome, "cancelled");
+  assert.equal(wire.events.filter(([kind]) => kind === "cancel").length, 0);
+  assert.equal(wire.events.filter(([kind]) => kind === "abort").length, 1);
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.writable.locked, false);
+  assert.deepEqual(normalize(await retired), { outcome: "ok", value: undefined });
+});
+
+test("WTS-RETIRE-CUSTOM-ERROR: matching custom closed and cancellation errors are not native terminal proof", async () => {
+  const peerError = new Error("custom reader error");
+  const wire = duplex();
+  let cancellations = 0;
+  let releases = 0;
+  wire.readable = { getReader() { return {
+    closed: Promise.reject(peerError),
+    read: () => Promise.reject(peerError),
+    cancel: () => { cancellations += 1; return Promise.reject(peerError); },
+    releaseLock: () => { releases += 1; },
+  }; } };
+  const { core, session, scope } = await fixture({ createStream: () => wire });
+  const state = [...core.hostSessions.values()][0];
+  const child = await openedStream(core, session);
+  assert.equal((await child.closed).outcome, "err");
+  assert.equal(cancellations, 1);
+  assert.ok(releases > 0);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  assert.equal((await retired).outcome, "err");
+  assert.equal(await core.streamManager.whenRetired(state), await retired);
+  assert.equal(cancellations, 1, "a rejected custom cleanup is not replayed into false success");
 });

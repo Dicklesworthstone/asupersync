@@ -37,6 +37,59 @@ function release(lock, failed) {
   try { lock?.releaseLock(); } catch { failed?.(); }
 }
 
+const READER_CLASS = typeof ReadableStreamDefaultReader === "undefined" ? undefined : ReadableStreamDefaultReader;
+const READER_CANCEL = READER_CLASS?.prototype.cancel;
+const READER_CLOSED = READER_CLASS && Object.getOwnPropertyDescriptor(READER_CLASS.prototype, "closed")?.get;
+const READABLE_CLASS = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
+const READABLE_CANCEL = READABLE_CLASS?.prototype.cancel;
+const READABLE_LOCKED = READABLE_CLASS && Object.getOwnPropertyDescriptor(READABLE_CLASS.prototype, "locked")?.get;
+const READABLE_READER = READABLE_CLASS?.prototype.getReader;
+
+async function cancelReader(reader, reason, failed) {
+  try {
+    const cancel = reader.cancel;
+    let terminal = null;
+    if (cancel === READER_CANCEL && READER_CLOSED) {
+      // Native cancel rejects an already errored reader with its stored source
+      // error, without invoking cleanup. Its original closed promise witnesses
+      // that distinction: a failing cancellation hook instead leaves it fulfilled.
+      // Intrinsic getters reject (rather than throw) for some invalid receivers;
+      // neither a custom closed promise nor its rejection alone is native proof.
+      try {
+        terminal = Promise.resolve(Reflect.apply(READER_CLOSED, reader, []))
+          .then(() => null, cause => ({ cause }));
+      } catch { /* Without intrinsic evidence, every cancellation failure sticks. */ }
+    }
+    try { await Reflect.apply(cancel, reader, [reason]); }
+    catch (cause) {
+      const ended = terminal && await terminal;
+      if (!ended || !Object.is(ended.cause, cause)) failed?.();
+    }
+  } catch { failed?.(); }
+}
+
+function cancelReadable(readable, reason, failed) {
+  if (readable == null) return Promise.resolve();
+  try {
+    const cancel = readable.cancel;
+    if (cancel === READABLE_CANCEL && READABLE_LOCKED && READABLE_READER) {
+      // Late admissions may arrive already errored, before attach acquired a
+      // reader. A temporary native lock lets their cleanup use the same terminal
+      // witness. The synchronous locked getter brands the stream before access.
+      let unlocked = false;
+      try { unlocked = Reflect.apply(READABLE_LOCKED, readable, []) === false; } catch {}
+      if (unlocked) {
+        const reader = Reflect.apply(READABLE_READER, readable, []);
+        return cancelReader(reader, reason, failed).then(() => release(reader, failed));
+      }
+    }
+    return attempt(() => Reflect.apply(cancel, readable, [reason]), failed);
+  } catch {
+    failed?.();
+    return Promise.resolve();
+  }
+}
+
 // Read internal slots, not shadowable instance properties. A forged `buffer`
 // can otherwise invoke an iterator or allocate an arbitrary-sized typed array
 // before the byte limit is checked. Intrinsics also accept same-origin iframe
@@ -163,7 +216,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     // Publish before invoking cancel: host hooks may synchronously reenter.
     const completion = deferred();
     source.cleanup = completion.promise;
-    void attempt(() => reader.cancel(outcome), () => cleanupFailed(ctx)).then(() => {
+    void cancelReader(reader, outcome, () => cleanupFailed(ctx)).then(() => {
       release(reader, () => cleanupFailed(ctx));
       if (source.reader === reader) source.reader = null;
       completion.resolve();
@@ -193,8 +246,9 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     const receives = direction === "bidirectional" || incoming;
     const sends = direction === "bidirectional" || !incoming;
     await Promise.all([
-      receives ? attempt(() => reader ? reader.cancel(reason)
-        : (direction === "bidirectional" ? host?.readable : host)?.cancel(reason), () => cleanupFailed(ctx)) : undefined,
+      receives ? attempt(() => reader ? cancelReader(reader, reason, () => cleanupFailed(ctx))
+        : cancelReadable(direction === "bidirectional" ? host?.readable : host, reason, () => cleanupFailed(ctx)),
+      () => cleanupFailed(ctx)) : undefined,
       sends ? attempt(() => writer ? writer.abort(reason)
         : (direction === "bidirectional" ? host?.writable : host)?.abort(reason), () => cleanupFailed(ctx)) : undefined,
     ]);
