@@ -195,8 +195,12 @@ const fn cleanup_released_fetches() {}
 fn cleanup_released_websockets() {
     let retired = INFLIGHT_WEBSOCKETS.with(|sockets| {
         let mut sockets = sockets.borrow_mut();
-        let handles: Vec<_> = sockets.keys().copied()
-            .filter(|handle| !dispatcher_handle_is_live(handle)).collect();
+        #[allow(clippy::needless_collect)]
+        let handles: Vec<_> = sockets
+            .keys()
+            .copied()
+            .filter(|handle| !dispatcher_handle_is_live(handle))
+            .collect();
         handles.into_iter().filter_map(|handle| sockets.remove(&handle))
             .collect::<Vec<_>>()
     });

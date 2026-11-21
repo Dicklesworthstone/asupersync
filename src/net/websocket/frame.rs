@@ -578,7 +578,7 @@ impl Decoder for FrameCodec {
         // possible length field and the incoming role's masking key.
         let extended_len = if self.max_payload_size <= CONTROL_FRAME_MAX_PAYLOAD_LEN {
             0
-        } else if self.max_payload_size <= usize::from(u16::MAX) {
+        } else if u16::try_from(self.max_payload_size).is_ok() {
             2
         } else {
             8

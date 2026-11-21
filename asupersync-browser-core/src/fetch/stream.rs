@@ -67,6 +67,7 @@ impl FetchStream {
 
     /// Bytes successfully handed to the caller, excluding a refused chunk.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn received_bytes(&self) -> usize {
         #[cfg(target_arch = "wasm32")]
         { self.body.received_bytes() }
@@ -76,6 +77,7 @@ impl FetchStream {
 
     /// Poll one chunk. Empty chunks are `Some(Vec::new())`, never invented EOF.
     /// No new host read is started while the previous read is pending.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn poll_chunk(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -91,6 +93,7 @@ impl FetchStream {
 
     /// Wait for one chunk without losing an in-flight read when this wait is
     /// dropped. To cancel the transfer itself, drop the body or close its owner.
+    #[allow(clippy::future_not_send)]
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, FetchBytesError> {
         poll_fn(|cx| Pin::new(&mut *self).poll_chunk(cx)).await
     }
@@ -100,7 +103,7 @@ impl FetchStream {
 ///
 /// Scope, ABI, URL, method, credential and request-byte checks are the same as
 /// [`super::fetch_bytes`]. Redirects are refused before following them. The
-/// returned body keeps the canonical handle and AbortController alive until
+/// returned body keeps the canonical handle and `AbortController` alive until
 /// EOF, error or drop. No body read is issued merely to return the headers.
 ///
 /// On native targets no handle or network work is admitted; the result is

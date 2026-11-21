@@ -759,15 +759,15 @@ fn schedule_command_result(report: &ScenarioScheduleReport) -> Result<(), String
 
 fn cmd_explore_exact(scenario: &Scenario, args: &ExactExploreArgs, json: bool) -> Result<(), String> {
     let checkpoint_limits = args.checkpoint_limits()?;
-    if let Some(path) = &args.checkpoint_out {
-        if path.try_exists().map_err(|error| {
+    if let Some(path) = &args.checkpoint_out
+        && path.try_exists().map_err(|error| {
             format!("Cannot inspect checkpoint output {}: {error}", path.display())
-        })? {
-            return Err(format!(
-                "Checkpoint output {} already exists; choose a new output path",
-                path.display()
-            ));
-        }
+        })?
+    {
+        return Err(format!(
+            "Checkpoint output {} already exists; choose a new output path",
+            path.display()
+        ));
     }
     let mut checkpoint = if let Some(path) = &args.resume_checkpoint {
         read_schedule_checkpoint(path, checkpoint_limits)?

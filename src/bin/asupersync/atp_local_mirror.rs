@@ -21,7 +21,7 @@ use std::path::PathBuf;
         unsupported input is refused. New files use 0600 and new directories 0700. \
         Retain the JSON application receipt for recovery. There is no whole-tree rollback."
 )]
-pub(super) struct MirrorArgs {
+pub struct MirrorArgs {
     /// Authoritative source directory
     #[arg(value_name = "SOURCE")]
     source: PathBuf,
@@ -48,7 +48,7 @@ pub(super) struct MirrorArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct DirectoryLimitsArgs {
+pub struct DirectoryLimitsArgs {
     /// Maximum entries in each tree, including directories (1..=1000000)
     #[arg(long, default_value_t = 100_000)]
     max_entries: usize,
@@ -63,7 +63,7 @@ pub(crate) struct DirectoryLimitsArgs {
     max_total_bytes: u64,
 }
 
-pub(crate) fn parse_review_id(value: &str) -> Result<String, String> {
+pub fn parse_review_id(value: &str) -> Result<String, String> {
     if value.len() == 64
         && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
@@ -73,7 +73,7 @@ pub(crate) fn parse_review_id(value: &str) -> Result<String, String> {
     }
 }
 
-pub(super) fn run_mirror(args: &MirrorArgs, output: &mut Output) -> Result<(), CliError> {
+pub fn run_mirror(args: &MirrorArgs, output: &mut Output) -> Result<(), CliError> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         native::run_mirror(args, output)
@@ -90,7 +90,7 @@ pub(super) fn run_mirror(args: &MirrorArgs, output: &mut Output) -> Result<(), C
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) mod native {
+pub mod native {
     use super::{CliError, DirectoryLimitsArgs, ExitCode, MirrorArgs, Output};
     use asupersync::atp::sync::native::{
         NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectoryError,
@@ -108,7 +108,7 @@ pub(crate) mod native {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    pub(crate) const CONTENT_PROFILE: &str = "linux-gnu-content-only-v1";
+    pub const CONTENT_PROFILE: &str = "linux-gnu-content-only-v1";
 
     impl DirectoryLimitsArgs {
         pub(crate) fn native(&self) -> NativeDirectoryLimits {
@@ -249,7 +249,7 @@ pub(crate) mod native {
         }
     }
 
-    pub(super) fn run_mirror(args: &MirrorArgs, output: &mut Output) -> Result<(), CliError> {
+    pub fn run_mirror(args: &MirrorArgs, output: &mut Output) -> Result<(), CliError> {
         validate_path("source", &args.source)?;
         validate_path("destination", &args.destination)?;
         if let Some(staging) = &args.staging_dir {
@@ -332,13 +332,13 @@ pub(crate) mod native {
         Ok(report)
     }
 
-    pub(crate) fn current_cx() -> Result<Cx, CliError> {
+    pub fn current_cx() -> Result<Cx, CliError> {
         Cx::current().ok_or_else(|| CliError::new(
             "atp_local_operation_context", "Local directory operation has no runtime context",
         ).exit_code(ExitCode::RUNTIME_ERROR))
     }
 
-    pub(crate) fn run_owned<T, F>(operation: F) -> Result<(T, bool, bool), CliError>
+    pub fn run_owned<T, F>(operation: F) -> Result<(T, bool, bool), CliError>
     where
         F: Future<Output = Result<T, CliError>>,
     {
@@ -354,7 +354,7 @@ pub(crate) mod native {
             .context("runtime_quiescent", quiescent).context("runtime_stopped", stopped))
     }
 
-    pub(crate) fn require_shutdown(quiescent: bool, stopped: bool) -> Result<(), CliError> {
+    pub fn require_shutdown(quiescent: bool, stopped: bool) -> Result<(), CliError> {
         if quiescent && stopped {
             Ok(())
         } else {
@@ -364,7 +364,7 @@ pub(crate) mod native {
         }
     }
 
-    pub(crate) fn write_receipt<T: Outputtable>(output: &mut Output, report: &T) -> Result<(), CliError> {
+    pub fn write_receipt<T: Outputtable>(output: &mut Output, report: &T) -> Result<(), CliError> {
         let failed = |error| super::super::output_write_error("local directory receipt")(error)
             .context("receipt", report)
             .suggestion("Inspect the observed receipt and retained recovery paths before retrying; output failure does not roll back filesystem effects");
@@ -372,12 +372,12 @@ pub(crate) mod native {
         output.flush().map_err(failed)
     }
 
-    pub(crate) fn native_error(stage: &str, error: NativeDirectoryError) -> CliError {
+    pub fn native_error(stage: &str, error: NativeDirectoryError) -> CliError {
         CliError::new("atp_local_operation_refused", "Local directory operation was refused")
             .detail(error.to_string()).context("stage", stage).exit_code(ExitCode::USER_ERROR)
     }
 
-    pub(crate) fn validate_path(label: &str, path: &Path) -> Result<(), CliError> {
+    pub fn validate_path(label: &str, path: &Path) -> Result<(), CliError> {
         if path.is_absolute() && path.to_str().is_some() {
             return Ok(());
         }

@@ -1,6 +1,13 @@
 //! Caller-driven CONNECT ownership over the native HTTP/3 session.
 
-use super::*;
+use super::{
+    Bytes, Context, Cx, Future, H3RequestHead, H3ResponseHead, H3Settings, IO_CHUNK_BYTES,
+    ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint, NativeH3Client,
+    NativeH3ClientConfig, NativeH3ClientError, NativeH3Event, NativeH3RequestWriter,
+    NativeH3Session, NativeH3SessionError, NativeQuicConnectionError, NativeQuicUdpConnection,
+    NonZeroUsize, POLL_STEPS, Pin, Poll, QuicConnection, StreamId, add_field_size, check_limit,
+    content_length, fields_size, fmt, validate_request_head_with_settings, validate_response_head,
+};
 use crate::cx::CancelWakerToken;
 use crate::http::h3_native::H3Frame;
 use crate::net::quic_core::ConnectionId;

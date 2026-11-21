@@ -215,10 +215,8 @@ fn validate_quorum(required: usize, total: usize) -> Result<(), ScopedQuorumErro
     }
 }
 
-fn deadline_expired(schedule: &Option<(Time, TimerDriverHandle)>) -> bool {
-    schedule
-        .as_ref()
-        .is_some_and(|(deadline, driver)| driver.now() >= *deadline)
+fn deadline_expired(schedule: Option<&(Time, TimerDriverHandle)>) -> bool {
+    schedule.is_some_and(|(deadline, driver)| driver.now() >= *deadline)
 }
 
 impl<Caps> Cx<Caps>
@@ -385,7 +383,7 @@ where
                 admission_stop = Some(ScopedQuorumStop::Cancelled(owner_reason(self)));
                 break;
             }
-            if deadline_expired(&schedule) {
+            if deadline_expired(schedule.as_ref()) {
                 admission_stop = Some(ScopedQuorumStop::TimedOut);
                 break;
             }
@@ -401,7 +399,7 @@ where
                 if factory_owner.is_cancel_requested() {
                     return BodyResult::NotStarted(Some(owner_reason(&factory_owner)));
                 }
-                if deadline_expired(&factory_schedule) {
+                if deadline_expired(factory_schedule.as_ref()) {
                     return BodyResult::DeadlineReached;
                 }
                 if factory_region.close_requested() || body.is_cancel_requested() {
@@ -431,7 +429,7 @@ where
                 if cancelled.as_mut().poll(task).is_ready() {
                     return Poll::Ready(ScopedQuorumStop::Cancelled(owner_reason(self)));
                 }
-                if deadline_expired(&schedule) {
+                if deadline_expired(schedule.as_ref()) {
                     return Poll::Ready(ScopedQuorumStop::TimedOut);
                 }
                 for (index, branch) in owned.branches.iter_mut().enumerate() {
@@ -458,7 +456,7 @@ where
                     }
                     // Joining/retiring a value can cross the deadline inside
                     // this poll. Keep the receipt, but do not count a late vote.
-                    if deadline_expired(&schedule) {
+                    if deadline_expired(schedule.as_ref()) {
                         return Poll::Ready(ScopedQuorumStop::TimedOut);
                     }
                     remaining -= 1;

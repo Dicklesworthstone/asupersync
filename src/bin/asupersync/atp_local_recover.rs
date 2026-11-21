@@ -23,7 +23,7 @@ use std::path::PathBuf;
         persistent local-sync history is not rewound. This is not whole-tree rollback or \
         unattended crash replay. Retain both the original receipt and the recovery receipt."
 )]
-pub(super) struct RecoverArgs {
+pub struct RecoverArgs {
     /// Saved JSON application receipt, recovery source, or output_error with context.receipt
     #[arg(value_name = "RECEIPT")]
     receipt: PathBuf,
@@ -56,7 +56,7 @@ fn parse_receipt_bound(value: &str) -> Result<usize, String> {
         .ok_or_else(|| "receipt byte bound must be in 1..=67108864".to_owned())
 }
 
-pub(super) fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
+pub fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         native::run(args, output)
@@ -214,7 +214,7 @@ mod native {
         }
     }
 
-    pub(super) fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
+    pub fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
         validate_path("receipt", &args.receipt)?;
         validate_path("local", &args.local)?;
         validate_path("remote", &args.remote)?;

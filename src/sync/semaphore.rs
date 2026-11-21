@@ -168,6 +168,7 @@ struct SemaphoreState {
     /// FIFO capacity provenance, allocated only after a tracked release.
     /// Each batch describes physical available units, never a global clock
     /// that could order two acquisitions of unrelated permits.
+    #[allow(clippy::box_collection)]
     causality: Option<Box<VecDeque<PermitPublicationBatch>>>,
 }
 

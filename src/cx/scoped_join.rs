@@ -823,7 +823,7 @@ where
                         break;
                     };
                     remaining -= 1;
-                    scan_from = index.checked_add(1).unwrap_or(usize::MAX);
+                    scan_from = index.saturating_add(1);
                     let (not_started, unavailable) = owned.poll_slot(index, &gateway);
                     observe_bounded_owner(&owner, &mut owner_cancellation, &mut stop, &mut cancel);
                     if stop.is_none() && (not_started || unavailable) {

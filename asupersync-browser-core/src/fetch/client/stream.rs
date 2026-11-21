@@ -161,6 +161,7 @@ impl ClientBody {
 
     /// Await one chunk. Abandoning this wait retains both the pending host read
     /// and client credit in the body; dropping the body cancels the operation.
+    #[allow(clippy::future_not_send)]
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, FetchBytesError> {
         poll_fn(|cx| Pin::new(&mut *self).poll_chunk(cx)).await
     }

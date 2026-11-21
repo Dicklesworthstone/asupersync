@@ -23,7 +23,7 @@ use std::path::PathBuf;
     job; it is not an approval token for a later invocation. Each --apply prepares and \
     revalidates the current changes against saved history before applying the selected grants."
 )]
-pub(super) struct LocalSyncArgs {
+pub struct LocalSyncArgs {
     /// First directory to reconcile
     #[arg(value_name = "LOCAL")]
     local: PathBuf,
@@ -68,7 +68,7 @@ pub(super) struct LocalSyncArgs {
     max_state_bytes: usize,
 }
 
-pub(super) fn run(args: &LocalSyncArgs, output: &mut Output) -> Result<(), CliError> {
+pub fn run(args: &LocalSyncArgs, output: &mut Output) -> Result<(), CliError> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         native::run(args, output)
@@ -295,7 +295,7 @@ mod native {
         }
     }
 
-    pub(super) fn run(args: &LocalSyncArgs, output: &mut Output) -> Result<(), CliError> {
+    pub fn run(args: &LocalSyncArgs, output: &mut Output) -> Result<(), CliError> {
         // Do not canonicalize away symlinks before the native engine can refuse
         // them. UTF-8 also makes every emitted recovery path exactly serializable.
         for (label, path) in [

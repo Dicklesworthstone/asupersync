@@ -136,11 +136,7 @@ impl Future for LocalTask {
         if completion.is_some() { self.completed = true; }
         drop(retired);
         drop(incoming);
-        if let Some(completion) = completion {
-            Poll::Ready(completion)
-        } else {
-            Poll::Pending
-        }
+        completion.map_or(Poll::Pending, Poll::Ready)
     }
 }
 
@@ -440,8 +436,13 @@ pub(crate) fn cancel_registered(request: &WasmTaskCancelRequest) {
 /// Retire actual Rust work whose canonical owner has been closed.
 pub(crate) fn cleanup_released() {
     let executor = executor();
-    let candidates: Vec<_> = executor.borrow().tasks.iter()
-        .map(|(id, task)| (*id, task.handle)).collect();
+    #[allow(clippy::needless_collect)]
+    let candidates: Vec<_> = executor
+        .borrow()
+        .tasks
+        .iter()
+        .map(|(id, task)| (*id, task.handle))
+        .collect();
     let retired: Vec<_> = candidates.into_iter()
         .filter(|(_, handle)| !dispatcher_handle_is_live(handle)).collect();
     let mut tasks = Vec::new();
@@ -476,7 +477,7 @@ impl Drop for PollGuard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DriveState { Empty, Parked, Runnable }
 
-fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> DriveState {
+fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &Context<'_>) -> DriveState {
     let (signal, budget) = {
         let mut state = executor.borrow_mut();
         assert!(!state.polling, "local executor cannot be polled recursively");
@@ -486,7 +487,7 @@ fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Driv
     let guard = PollGuard(Rc::clone(executor));
     signal.register(cx.waker());
     let mut payloads = Vec::new();
-    let mut wakes = Vec::new();
+    let mut join_wakes = Vec::new();
     for _ in 0..budget {
         let selected = {
             let mut state = executor.borrow_mut();
@@ -526,17 +527,17 @@ fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Driv
                 } else { task.cancellation.take().unwrap_or(outcome) }),
                 Ok(Poll::Pending) => task.cancellation.take(),
             };
-            if let Some(outcome) = outcome {
+            outcome.map_or((None, None), |outcome| {
                 (Some(extract_task(&mut state, id)), Some(outcome))
-            } else { (None, None) }
+            })
         };
         if let (Some(task), Some(outcome)) = (task, outcome) {
-            finish_task(executor, task, outcome, &mut payloads, &mut wakes);
+            finish_task(executor, task, outcome, &mut payloads, &mut join_wakes);
         }
     }
     // Keep the driver-turn guard through callbacks: a custom join waker may
     // admit work, but cannot recursively poll an unbounded number of quanta.
-    dispatch_join_wakes(wakes, None);
+    dispatch_join_wakes(join_wakes, None);
     drop(payloads);
     drop(guard);
     // Join wakes and panic-payload destructors may have spawned more work.
@@ -549,8 +550,10 @@ fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Driv
 }
 
 /// Drive at most one configured quantum on a native host, parking when no task
-/// is ready. `Ready(())` means no retained Rust futures, not that every task
-/// succeeded. Inspect the individual [`LocalTaskCompletion`] values.
+/// is ready.
+///
+/// `Ready(())` means no retained Rust futures, not that every task succeeded.
+/// Inspect the individual [`LocalTaskCompletion`] values.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn poll_local_tasks(cx: &mut Context<'_>) -> Poll<()> {
     let executor = executor();

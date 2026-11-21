@@ -34,9 +34,11 @@ mod state;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
-/// Explicit per-operation limits. Zero is valid and refuses the corresponding
-/// work; a null response body needs no reader calls, while a stream needs a read
-/// call even to observe EOF. There is deliberately no implicit unlimited mode.
+/// Explicit per-operation limits.
+///
+/// Zero is valid and refuses the corresponding work; a null response body needs
+/// no reader calls, while a stream needs a read call even to observe EOF. There
+/// is deliberately no implicit unlimited mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FetchBytesLimits {
     /// Maximum offered request-body length, checked before a JS copy or dispatch.
@@ -60,6 +62,7 @@ impl FetchBytesLimits {
 }
 
 /// A complete response body, not just a successful response-header arrival.
+///
 /// HTTP error status codes remain ordinary responses for the caller to handle.
 /// Debug output excludes body contents; explicit access can contain secrets.
 #[derive(PartialEq, Eq)]
@@ -148,7 +151,7 @@ pub enum FetchBytesError {
     /// The host returned a non-Response, opaque/error response, malformed chunk
     /// or non-boolean stream completion flag.
     InvalidResponse,
-    /// Owner closure or the operation's AbortSignal invalidated this result.
+    /// Owner closure or the operation's `AbortSignal` invalidated this result.
     Cancelled,
     /// A real result could not be published to its canonical live handle.
     Publication,

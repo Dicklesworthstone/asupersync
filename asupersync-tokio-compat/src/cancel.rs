@@ -74,10 +74,10 @@ impl CancelSignal {
                 .take();
             if let Some(waker) = waker {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
-                if let Err(payload) = result {
-                    if first_panic.is_none() {
-                        first_panic = Some(payload);
-                    }
+                if let Err(payload) = result
+                    && first_panic.is_none()
+                {
+                    first_panic = Some(payload);
                 }
             }
         }
