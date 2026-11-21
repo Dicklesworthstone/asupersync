@@ -31,8 +31,9 @@ console.log(JSON.stringify({
 
 const Outcome = {
   ok: (value) => ({ outcome: "ok", value }),
-  err: (message) => ({ outcome: "err", failure: {
-    code: "internal_failure", recoverability: "unknown", message,
+  err: (codeOrMessage, recoverability, message) => ({ outcome: "err", failure: {
+    code: message === undefined ? "internal_failure" : codeOrMessage,
+    recoverability: recoverability ?? "unknown", message: message ?? codeOrMessage,
   } }),
   cancelled: (cancellation) => ({ outcome: "cancelled", cancellation }),
 };
@@ -44,6 +45,14 @@ function deferred() {
   let reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+
+const turn = () => new Promise(resolve => setImmediate(resolve));
+async function pending(promise) {
+  let settled = false;
+  void promise.then(() => { settled = true; }, () => { settled = true; });
+  await turn();
+  assert.equal(settled, false, "replacement must wait for the previous generation's retirement");
 }
 
 function ok(outcome) {
@@ -235,6 +244,8 @@ test("old completion cannot clear a replacement's pending single flight", async 
   const old = f.adapter.initializeRuntime();
   f.adapter.close();
   const current = f.adapter.initializeRuntime();
+  assert.equal(f.requests.length, 1, "a replacement cannot overtake the still-pending old factory");
+  await pending(current);
   const stale = f.finish(0);
   cancelled(await old);
   const joined = f.adapter.initializeRuntime();
@@ -248,21 +259,31 @@ test("old completion cannot clear a replacement's pending single flight", async 
 });
 
 for (const completion of ["success", "failure", "rejection"]) {
-  test(`old ${completion} cannot change or close a ready replacement`, async () => {
+  test(`replacement waits for old ${completion} without losing its single flight or owner`, async () => {
     const f = await fixture();
     f.hydrate();
     const old = f.adapter.initializeRuntime();
     f.adapter.cancelBootstrap("retry in another generation");
     f.adapter.recover("retry_runtime_init");
     const current = f.adapter.initializeRuntime();
-    const owner = f.finish(1);
-    assert.equal(ok(await current), owner.scope);
-    const expected = f.adapter.snapshot();
+    const joined = f.adapter.initializeRuntime();
+    assert.equal(f.requests.length, 1, "the old factory still owns its generation");
+    await pending(current);
+    await pending(joined);
     let stale;
-    if (completion === "success") stale = f.finish(0);
+    if (completion === "success") stale = f.finish(0, {
+      runtimeClose() { assert.equal(f.requests.length, 1, "late native cleanup precedes replacement allocation"); },
+    });
     else if (completion === "failure") f.requests[0].resolve(Outcome.err("old refusal"));
     else f.requests[0].reject(new Error("old factory rejection"));
     cancelled(await old);
+    await turn();
+    assert.equal(f.requests.length, 2, "waiting callers share one replacement allocation");
+    const owner = f.finish(1);
+    assert.equal(ok(await current), owner.scope);
+    assert.equal(ok(await joined), owner.scope);
+    const expected = f.adapter.snapshot();
+    await turn();
     assert.deepEqual(f.adapter.snapshot(), expected);
     assert.equal(f.adapter.currentRuntime(), owner.runtime);
     assert.equal(f.adapter.currentScope(), owner.scope);
@@ -367,9 +388,14 @@ test("factory reentry can retire its attempt and start a replacement", async () 
   });
   f.hydrate();
   const first = f.adapter.initializeRuntime();
-  assert.equal(f.requests.length, 2);
-  const stale = f.finish(0);
+  assert.equal(f.requests.length, 1, "reentrant initialization waits for the superseded factory");
+  await pending(replacement);
+  const stale = f.finish(0, {
+    runtimeClose() { assert.equal(f.requests.length, 1); },
+  });
   cancelled(await first);
+  await turn();
+  assert.equal(f.requests.length, 2);
   const owner = f.finish(1);
   assert.equal(ok(await replacement), owner.scope);
   assert.equal(stale.runtimeCloses, 1);
@@ -459,26 +485,41 @@ test("a throwing live log hook leaves its published owner reachable for cleanup"
   assert.deepEqual(owner.closeOrder, ["scope", "runtime"]);
 });
 
-test("cleanup detaches both old handles before callbacks and still closes the runtime on throw", async () => {
+test("cleanup detaches both handles and retains a thrown refusal until explicit retry", async () => {
   const f = await fixture();
   f.hydrate();
   const first = f.adapter.initializeRuntime();
   let replacement;
+  let refuse = true, reentered = false;
   const old = f.finish(0, {
     scopeClose() {
       assert.equal(f.adapter.currentScope(), null);
       assert.equal(f.adapter.currentRuntime(), null);
-      replacement = f.adapter.initializeRuntime();
-      throw new Error("scope close callback failed");
+      if (!reentered) {
+        reentered = true;
+        replacement = f.adapter.initializeRuntime();
+      }
+      if (refuse) throw new Error("scope close callback failed");
     },
   });
   ok(await first);
   const event = f.adapter.close();
   assert.match(event.detail, /scope close callback failed/);
   assert.equal(old.runtimeCloses, 1);
+  assert.equal(f.requests.length, 1, "failed cleanup cannot allocate an overlapping replacement");
+  assert.equal((await replacement).outcome, "err");
+  assert.equal((await f.adapter.initializeRuntime()).outcome, "err");
+  assert.equal(old.scopeCloses, 1, "initialization observes the original refusal without retrying cleanup");
+  assert.equal(old.runtimeCloses, 1);
+  assert.equal(f.requests.length, 1);
+  refuse = false;
+  ok(await f.adapter.closeAsync("retry retained cleanup"));
+  assert.equal(old.scopeCloses, 2);
+  assert.equal(old.runtimeCloses, 1, "the successfully closed runtime is not closed again");
+  const retry = f.adapter.initializeRuntime();
   assert.equal(f.requests.length, 2);
   const owner = f.finish(1);
-  assert.equal(ok(await replacement), owner.scope);
+  assert.equal(ok(await retry), owner.scope);
   assert.equal(f.adapter.currentRuntime(), owner.runtime);
   f.adapter.close();
   assert.deepEqual(owner.closeOrder, ["scope", "runtime"]);
@@ -519,9 +560,13 @@ for (const stale of [false, true]) {
       ok(await pending);
       assert.equal(owner.consumerVersion, version);
       f.adapter.close();
-      assert.deepEqual(owner.scopeCloseVersions, [version]);
+      assert.deepEqual(owner.scopeCloseVersions.map(value => ({ ...value })), [version]);
+      assert.equal(Object.isFrozen(owner.scopeCloseVersions[0]), true);
+      assert.notStrictEqual(owner.scopeCloseVersions[0], version);
     }
-    assert.deepEqual(owner.runtimeCloseVersions, [version]);
+    assert.deepEqual(owner.runtimeCloseVersions.map(value => ({ ...value })), [version]);
+    assert.equal(Object.isFrozen(owner.runtimeCloseVersions[0]), true);
+    assert.notStrictEqual(owner.runtimeCloseVersions[0], version);
   });
 }
 

@@ -19,6 +19,7 @@ import {
   Outcome as OutcomeFactory,
   type RegionHandle,
 } from "@asupersync/browser";
+import * as BrowserSdk from "@asupersync/browser";
 
 export * from "@asupersync/browser";
 
@@ -245,6 +246,92 @@ function nextBootstrapCleanupError(error: unknown): string {
 interface NextRuntimeInitializationAttempt {
   result: Promise<BrowserOutcome<RegionHandle>>;
   cancelled: BrowserOutcome<never> | null;
+  owner: NextBootstrapOwner;
+}
+
+interface NextBootstrapOwnedHandle {
+  readonly asynchronous: boolean;
+  readonly close: () => unknown;
+  closed: boolean;
+}
+
+interface NextBootstrapOwner {
+  runtime: NextBootstrapOwnedHandle | null;
+  scope: NextBootstrapOwnedHandle | null;
+  readonly initialized: Promise<void>;
+  readonly initialize: () => void;
+  initializedDone: boolean;
+  published: boolean;
+  closing: boolean;
+  closed: boolean;
+  attempt: Promise<BrowserOutcome<void>> | null;
+  receipt: BrowserOutcome<void> | null;
+  failures: string[];
+}
+
+function nextCleanupFailure(error: unknown): BrowserOutcome<void> {
+  return Object.freeze(OutcomeFactory.err("internal_failure", "transient",
+    `Next bootstrap cleanup failed: ${nextBootstrapCleanupError(error)}`));
+}
+
+function nextCleanupReceipt(value: unknown): BrowserOutcome<void> {
+  try {
+    if (!value || typeof value !== "object") throw new TypeError("Missing cleanup receipt");
+    const result = value as BrowserOutcome<void>;
+    if (result.outcome === "ok" && result.value === undefined) {
+      return Object.freeze(OutcomeFactory.ok(undefined));
+    }
+    if (result.outcome === "err") {
+      const { code, recoverability, message } = result.failure;
+      if (typeof code !== "string" || typeof recoverability !== "string" || typeof message !== "string") {
+        throw new TypeError("Invalid cleanup failure");
+      }
+      return Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability, message }) });
+    }
+    if (result.outcome === "cancelled") {
+      return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({ ...result.cancellation }) });
+    }
+    if (result.outcome === "panicked" && typeof result.message === "string") {
+      return Object.freeze({ outcome: "panicked", message: result.message });
+    }
+    throw new TypeError("Invalid cleanup receipt");
+  } catch (error) { return nextCleanupFailure(error); }
+}
+
+function captureNextBootstrapOwner(owner: BrowserRuntime | RegionHandle): NextBootstrapOwnedHandle {
+  try {
+    const rawVersion = owner.consumerVersion;
+    const version = rawVersion == null ? null
+      : Object.freeze({ major: rawVersion.major, minor: rawVersion.minor });
+    const nativeRuntime = typeof BrowserSdk.BrowserRuntime === "function"
+      && owner instanceof BrowserSdk.BrowserRuntime;
+    const nativeScope = typeof BrowserSdk.RegionHandle === "function"
+      && owner instanceof BrowserSdk.RegionHandle;
+    if (nativeRuntime || nativeScope) {
+      // Public SDK facades are mutable JavaScript objects. Retain an independent
+      // frozen core identity so replacing facade.core or its close methods can
+      // neither abandon this owner nor redirect cleanup to an unrelated owner.
+      const raw = owner.core.toJSON();
+      const kind = nativeRuntime ? "runtime" : "region";
+      if (raw.kind !== kind) throw new TypeError("Unexpected bootstrap owner kind");
+      const fields = { slot: raw.slot, generation: raw.generation, owner_token: raw.owner_token };
+      const core = nativeRuntime
+        ? new BrowserSdk.CoreRuntimeHandle({ ...fields, kind: "runtime" })
+        : new BrowserSdk.CoreRegionHandle({ ...fields, kind: "region" });
+      const receiver = Object.freeze({ core, consumerVersion: version });
+      const close = nativeRuntime
+        ? BrowserSdk.BrowserRuntime.prototype.closeAsync : BrowserSdk.RegionHandle.prototype.closeAsync;
+      return { asynchronous: true, closed: false, close: () => Reflect.apply(close, receiver, [version]) };
+    }
+    const asynchronous = owner.closeAsync;
+    const close = typeof asynchronous === "function" ? asynchronous : owner.close;
+    if (typeof close !== "function") throw new TypeError("Owner cannot be closed");
+    return { asynchronous: typeof asynchronous === "function", closed: false,
+      close: () => Reflect.apply(close, owner, [version]) };
+  } catch (error) {
+    const failure = nextCleanupFailure(error);
+    return { asynchronous: true, closed: false, close: () => failure };
+  }
 }
 
 function supportsWasmRuntime(environment: NextRenderEnvironment): boolean {
@@ -875,6 +962,8 @@ export class NextEdgeBridgeAdapter {
 export class NextClientBootstrapAdapter {
   private runtime: BrowserRuntime | null = null;
   private scope: RegionHandle | null = null;
+  private owner: NextBootstrapOwner | null = null;
+  private readonly owners = new Set<NextBootstrapOwner>();
   private initializationAttempt: NextRuntimeInitializationAttempt | null = null;
   private readonly logEvents: NextBootstrapLogEvent[] = [];
   private snapshotState: NextBootstrapSnapshot;
@@ -931,7 +1020,15 @@ export class NextClientBootstrapAdapter {
       resolve = onResolve;
       reject = onReject;
     });
-    const attempt: NextRuntimeInitializationAttempt = { result, cancelled: null };
+    let initialize!: () => void;
+    const owner: NextBootstrapOwner = {
+      runtime: null, scope: null,
+      initialized: new Promise<void>((done) => { initialize = done; }), initialize: () => initialize(),
+      initializedDone: false, published: false, closing: false, closed: false,
+      attempt: null, receipt: null, failures: [],
+    };
+    this.owners.add(owner);
+    const attempt: NextRuntimeInitializationAttempt = { result, cancelled: null, owner };
     // Publish before support detection, option getters, or the factory can reenter.
     this.initializationAttempt = attempt;
     void this.initializeRuntimeAttempt(attempt).then(
@@ -958,8 +1055,7 @@ export class NextClientBootstrapAdapter {
   private async initializeRuntimeAttempt(
     attempt: NextRuntimeInitializationAttempt,
   ): Promise<BrowserOutcome<RegionHandle>> {
-    let ownedRuntime: BrowserRuntime | null = null;
-    let ownedScope: RegionHandle | null = null;
+    const owner = attempt.owner;
     try {
       assertNextRuntimeSupport(
         "client",
@@ -994,6 +1090,15 @@ export class NextClientBootstrapAdapter {
         );
       }
 
+      // A superseded factory may still return a runtime. Its generation was
+      // retained before allocation, so replacement cannot overtake its drain.
+      const previous = [...this.owners].filter((entry) => entry !== owner && entry.closing);
+      if (previous.length > 0) {
+        const cleanup = await this.closeOwners(previous);
+        if (attempt.cancelled) return attempt.cancelled;
+        if (cleanup.outcome !== "ok") return cleanup;
+      }
+
       const from = this.captureTransitionPoint();
       const runtimeOptions = nextClientBrowserRuntimeOptions(this.options);
       if (attempt.cancelled) {
@@ -1002,7 +1107,7 @@ export class NextClientBootstrapAdapter {
       this.snapshotState.runtimeInitAttempts += 1;
       const runtime = await createBrowserRuntime(runtimeOptions);
       if (runtime.outcome === "ok") {
-        ownedRuntime = runtime.value;
+        owner.runtime = captureNextBootstrapOwner(runtime.value);
       }
       if (attempt.cancelled) {
         return attempt.cancelled;
@@ -1019,14 +1124,13 @@ export class NextClientBootstrapAdapter {
       }
       const entered = runtime.value.enterScope(label, consumerVersion);
       if (entered.outcome === "ok") {
-        ownedScope = entered.value;
+        owner.scope = captureNextBootstrapOwner(entered.value);
       }
       if (attempt.cancelled) {
         return attempt.cancelled;
       }
       if (entered.outcome !== "ok") {
-        ownedRuntime = null;
-        this.closeHandles(runtime.value, null);
+        owner.closing = true;
         if (attempt.cancelled) {
           return attempt.cancelled;
         }
@@ -1036,8 +1140,8 @@ export class NextClientBootstrapAdapter {
 
       this.runtime = runtime.value;
       this.scope = entered.value;
-      ownedRuntime = null;
-      ownedScope = null;
+      this.owner = owner;
+      owner.published = true;
       this.transitionTo("runtime_ready", "initializeRuntime");
       this.snapshotState.runtimeInitialized = true;
       this.snapshotState.runtimeInitSuccesses += 1;
@@ -1055,8 +1159,13 @@ export class NextClientBootstrapAdapter {
       }
       throw error;
     } finally {
-      // Stale completions only dispose handles they have not published.
-      this.closeHandles(ownedRuntime, ownedScope);
+      // Release the acquisition witness before joining cleanup: a close that
+      // arrived during the factory already waits on this exact generation.
+      owner.initializedDone = true;
+      owner.initialize();
+      if (!owner.published || owner.closing || attempt.cancelled) {
+        await this.closeOwner(owner);
+      }
     }
   }
 
@@ -1216,6 +1325,32 @@ export class NextClientBootstrapAdapter {
     return this.recordEvent("close_runtime", from, this.snapshotState.lastError ?? reason);
   }
 
+  /**
+   * Detach the current generation and join every owner captured by this call,
+   * including a bootstrap that has not returned its runtime yet. Failed owners
+   * remain private and retryable; replacement initialization cannot bypass them.
+   * Success describes cleanup, independently of the invalidated operation.
+   */
+  closeAsync(reason = "manual_close"): Promise<BrowserOutcome<void>> {
+    if (typeof reason !== "string") {
+      return Promise.resolve(nextCleanupFailure("close reason must be a string"));
+    }
+    const owners = [...this.owners];
+    // Only failures already observed before this explicit call may be retried.
+    // A new failure from its initial cleanup cannot be hidden by an immediate
+    // second native/ABI attempt in the same retirement operation.
+    const retries = new Set(owners.filter((entry) => entry.receipt !== null
+      && entry.receipt.outcome !== "ok" && entry.attempt === null));
+    try { this.close(reason); }
+    catch { /* A log observer cannot detach or erase retained cleanup ownership. */ }
+    return this.closeOwners(owners, retries);
+  }
+
+  /** Retry retained cleanup without admitting a replacement runtime. */
+  retire(reason = "manual_close"): Promise<BrowserOutcome<void>> {
+    return this.closeAsync(reason);
+  }
+
   private captureTransitionPoint(): {
     phase: NextBootstrapPhase;
     environment: NextRenderEnvironment;
@@ -1277,6 +1412,7 @@ export class NextClientBootstrapAdapter {
   private invalidateInitialization(reason: string): void {
     const attempt = this.initializationAttempt;
     if (attempt) {
+      attempt.owner.closing = true;
       attempt.cancelled = OutcomeFactory.cancelled({
         kind: "next_bootstrap_invalidated",
         phase: "completed",
@@ -1291,40 +1427,77 @@ export class NextClientBootstrapAdapter {
   }
 
   private cleanupHandles(): string[] {
-    const scope = this.scope;
-    const runtime = this.runtime;
+    const owner = this.owner;
     // Close callbacks must never observe or clear a newer owner's handles.
     this.scope = null;
     this.runtime = null;
-    return this.closeHandles(runtime, scope);
+    this.owner = null;
+    if (owner) owner.closing = true;
+    const closing = [...this.owners].filter((entry) => entry.closing);
+    for (const entry of closing) void this.closeOwner(entry);
+    return closing.flatMap((entry) => entry.failures);
   }
 
-  private closeHandles(runtime: BrowserRuntime | null, scope: RegionHandle | null): string[] {
-    const failures: string[] = [];
-
-    if (scope) {
+  private closeOwner(owner: NextBootstrapOwner, retry = false): Promise<BrowserOutcome<void>> {
+    owner.closing = true;
+    if (owner.closed) return Promise.resolve(OutcomeFactory.ok(undefined));
+    if (owner.attempt) return owner.attempt;
+    if (!retry && owner.receipt !== null) return Promise.resolve(owner.receipt);
+    let finish!: (receipt: BrowserOutcome<void>) => void;
+    const attempt = new Promise<BrowserOutcome<void>>((resolve) => { finish = resolve; });
+    owner.attempt = attempt;
+    owner.receipt = null;
+    owner.failures = [];
+    // This record is published before invoking either captured close callback.
+    // Legacy synchronous providers still run their callbacks synchronously.
+    void (async () => {
+      let receipt: BrowserOutcome<void> = OutcomeFactory.ok(undefined);
       try {
-        const closeScope = scope.close(scope.consumerVersion);
-        if (closeScope.outcome !== "ok") {
-          failures.push(`scope_close=${formatOutcomeFailure(closeScope)}`);
+        if (!owner.initializedDone) await owner.initialized;
+        const asynchronous = owner.scope?.asynchronous || owner.runtime?.asynchronous;
+        for (const [kind, handle] of [["scope", owner.scope], ["runtime", owner.runtime]] as const) {
+          if (!handle || handle.closed) continue;
+          // An async parent may only retire after its child positively drained.
+          // Legacy synchronous providers retain their independent best-effort
+          // callback order, but even their first refusal remains observable.
+          if (receipt.outcome !== "ok" && asynchronous) break;
+          let result: BrowserOutcome<void>;
+          try {
+            const raw = handle.close();
+            const awaited = raw !== null && (typeof raw === "object" || typeof raw === "function")
+              && typeof (raw as { then?: unknown }).then === "function" ? await raw : raw;
+            result = nextCleanupReceipt(awaited);
+            if (result.outcome !== "ok") owner.failures.push(`${kind}_close=${formatOutcomeFailure(result)}`);
+          } catch (error) {
+            result = nextCleanupFailure(error);
+            owner.failures.push(`${kind}_close=${nextBootstrapCleanupError(error)}`);
+          }
+          if (result.outcome === "ok") handle.closed = true;
+          else if (receipt.outcome === "ok") receipt = result;
         }
       } catch (error) {
-        failures.push(`scope_close=${nextBootstrapCleanupError(error)}`);
+        receipt = nextCleanupFailure(error);
+        owner.failures.push(`cleanup=${nextBootstrapCleanupError(error)}`);
       }
-    }
-
-    if (runtime) {
-      try {
-        const closeRuntime = runtime.close(runtime.consumerVersion);
-        if (closeRuntime.outcome !== "ok") {
-          failures.push(`runtime_close=${formatOutcomeFailure(closeRuntime)}`);
-        }
-      } catch (error) {
-        failures.push(`runtime_close=${nextBootstrapCleanupError(error)}`);
+      owner.receipt = receipt;
+      if (receipt.outcome === "ok") {
+        owner.closed = true;
+        this.owners.delete(owner);
       }
-    }
+      if (owner.attempt === attempt) owner.attempt = null;
+      finish(receipt);
+    })();
+    return attempt;
+  }
 
-    return failures;
+  private async closeOwners(
+    owners: readonly NextBootstrapOwner[],
+    retries: ReadonlySet<NextBootstrapOwner> = new Set(),
+  ): Promise<BrowserOutcome<void>> {
+    // Fence every captured generation before its first callback can reenter.
+    for (const owner of owners) owner.closing = true;
+    const receipts = await Promise.all(owners.map((owner) => this.closeOwner(owner, retries.has(owner))));
+    return receipts.find((receipt) => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
   }
 
   private recordEvent(
