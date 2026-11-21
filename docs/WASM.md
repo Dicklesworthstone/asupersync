@@ -28,7 +28,7 @@ From JavaScript, you get:
 - **Task lifecycle**: `taskSpawn()`, `taskJoin()`, `taskCancel()`
 - **Cancel-correct fetch**: `fetchRequest()` with automatic `AbortController` integration
 - **WebSocket management**: `websocketOpen()`, `websocketSend()`, `websocketRecv()`, `websocketClose()`
-- **Capability-gated WebTransport datagrams**: `openWebTransport()`, `sendDatagram()`, `recvDatagram()`, `close()`, `cancel()` in `@asupersync/browser`, plus raw `webtransportOpen()`/`webtransportSend()` helpers in `@asupersync/browser-core`
+- **Capability-gated WebTransport**: datagrams and reliable byte streams through `openWebTransport()`, with `closeAsync()` and `cancelAsync()` awaiting host cleanup and task retirement; existing synchronous APIs and raw `webtransportOpen()`/`webtransportSend()` helpers retain their contracts
 - **Four-valued outcomes**: every operation returns `ok | err | cancelled | panicked`
 - **ABI versioning**: `abiVersion()`, `abiFingerprint()` for compatibility checking
 
@@ -425,6 +425,19 @@ expose the Rust `AsyncRead`/`AsyncWrite` bridge.
 that awaited cleanup in a callback bracket. Cleanup refusal raises a
 `BrowserScopeCleanupError` retaining both the callback completion and a child
 handle for explicit retry; the existing synchronous APIs keep their contracts.
+
+For WebTransport sessions, [`WebTransportHandle.closeAsync()` and
+`cancelAsync()`](browser_webtransport_ownership.md) await connection closure,
+admitted datagram operations, reliable streams and pending admissions, native
+cancel/abort cleanup, lock release, and accepted task publication. SDK
+`scope.closeAsync()`, `runtime.closeAsync()`, and `withScopeAsync()` include that
+barrier. Pending cleanup after synchronous closure retains its captured owner
+ancestry for a later asynchronous drain. A first failure remains visible;
+explicit retries can release retained known locks or retry refused publication
+without replaying settled native cancel/abort operations. The shared core's
+`whenRetired()` historical receipt remains immutable and sticky, while its
+`drainCleanup()` receipt describes each explicit cleanup attempt. The guide
+details the bounds, permanent uncertainty cases, and Node/WASM evidence scope.
 
 ### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
 

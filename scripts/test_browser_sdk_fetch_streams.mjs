@@ -1096,34 +1096,47 @@ test("SDK-FETCH-CLOSE-ASYNC-ABI-DENIED: final owner refusal is returned after cl
   assert.equal(liveTasks.size, 0);
 });
 
-for (const kind of ["generic-task", "webtransport"]) {
-  test("SDK-FETCH-CLOSE-ASYNC-UNRELATED-" + kind + ": unrelated work preserves an injected ABI close refusal", { timeout: 5000 }, async (t) => {
-    const { sdk, scope, start, calls, liveTasks } = await fixture(t);
-    const fetch = start();
-    const other = kind === "generic-task"
-      ? unwrap(scope.spawnTask({ label: "unrelated-task" }))
-      : unwrap(scope.openWebTransport("https://transport.example.test/session"));
-    await turn();
-    assert.equal(liveTasks.size, 2);
-    failure(await scope.closeAsync(), "compatibility_rejected");
-    cancellation(await fetch.closed);
-    assert.equal(liveTasks.size, 1);
-    assert.equal(calls.cancel.length, 1);
-    assert.equal(calls.cancel[0].task.slot, calls.issuedTasks[0].slot);
-    if (kind === "webtransport") {
-      assert.equal(calls.transports[0].closes, 0);
-      assert.equal(calls.transports[0].datagrams.readable.locked, true);
-      unwrap(await other.ready());
-      cancellation(other.close());
-      await turn();
-    } else {
-      unwrap(other.join(sdk.Outcome.ok(undefined)));
-    }
-    assert.equal(liveTasks.size, 0);
-    unwrap(await scope.closeAsync());
-    assert.equal(calls.scopeClose.length, 2);
-  });
-}
+test("SDK-FETCH-CLOSE-ASYNC-UNRELATED: generic tasks preserve an injected ABI close refusal", { timeout: 5000 }, async (t) => {
+  const { sdk, scope, start, calls, liveTasks } = await fixture(t);
+  const fetch = start();
+  const other = unwrap(scope.spawnTask({ label: "unrelated-task" }));
+  await turn();
+  assert.equal(liveTasks.size, 2);
+  failure(await scope.closeAsync(), "compatibility_rejected");
+  cancellation(await fetch.closed);
+  assert.equal(liveTasks.size, 1);
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.cancel[0].task.slot, calls.issuedTasks[0].slot);
+  unwrap(other.join(sdk.Outcome.ok(undefined)));
+  assert.equal(liveTasks.size, 0);
+  unwrap(await scope.closeAsync());
+  assert.equal(calls.scopeClose.length, 2);
+});
+
+test("SDK-FETCH-CLOSE-ASYNC-WEBTRANSPORT: shared ownership drains both network resources before ABI close", { timeout: 5000 }, async (t) => {
+  const { scope, start, calls, liveTasks } = await fixture(t);
+  const fetch = start();
+  const transport = unwrap(scope.openWebTransport("https://transport.example.test/session"));
+  unwrap(await transport.ready());
+  await turn();
+  assert.equal(liveTasks.size, 2);
+  assert.equal(calls.transports[0].datagrams.readable.locked, true);
+  assert.equal(calls.transports[0].datagrams.writable.locked, true);
+  // WebTransport now participates in asynchronous owner cleanup. Generic
+  // tasks above still exercise the separate, unchanged ABI refusal barrier.
+  unwrap(await scope.closeAsync());
+  cancellation(await fetch.closed);
+  assert.equal(calls.network[0].init.signal.aborted, true);
+  assert.equal(calls.transports[0].closes, 1);
+  assert.equal(calls.transports[0].datagrams.readable.locked, false);
+  assert.equal(calls.transports[0].datagrams.writable.locked, false);
+  assert.deepEqual(new Set(calls.cancel.map(call => call.task.slot)),
+    new Set(calls.issuedTasks.map(task => task.slot)));
+  assert.equal(calls.cancel.length, 2);
+  assert.equal(calls.join.length, 2);
+  assert.equal(liveTasks.size, 0);
+  assert.equal(calls.scopeClose.length, 1);
+});
 
 test("SDK-FETCH-CLOSE-ASYNC-PUBLICATION: refused task publication blocks owner close after host cleanup", { timeout: 5000 }, async (t) => {
   const { scope, start, calls, controls, liveTasks } = await fixture(t);

@@ -40,7 +40,7 @@ unwrapOutcome(result);
 ```
 
 When the callback finishes early, its still-active fetches, message receivers,
-WebSockets, and stream pipes are cancelled and drained before the helper
+WebSockets, WebTransport sessions, and stream pipes are cancelled and drained before the helper
 settles. A pending native write or asynchronous abort keeps the helper pending.
 Use `scope.withScopeAsync()` for independently bracketed nested work. If the
 callback or an ancestor already completed SDK closure of the child, the helper

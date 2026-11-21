@@ -1414,12 +1414,31 @@ type BrowserWebTransportConstructorLike = new (
 ) => BrowserWebTransportSessionLike;
 
 interface BrowserWebTransportState {
+  task: CoreTaskHandle;
+  ownerKeys: Set<string>;
+  ownerReleased: boolean;
+  published: boolean;
+  cancelAccepted: boolean;
+  asyncClosing: boolean;
+  asyncAttempt: Promise<BrowserOutcome<void>> | null;
+  connectionClosed: Promise<void>;
+  stopHandshake: () => void;
+  readerLock: BrowserWebTransportReaderLike | null;
+  writerLock: BrowserWebTransportWriterLike | null;
+  datagramOperations: Set<Promise<void>>;
+  unconfirmedFailure: BrowserOutcome<never> | null;
+  cleanup: {
+    done: Promise<void>;
+    receipt: Promise<BrowserOutcome<void>>;
+    failure: BrowserOutcome<void> | null;
+    reported: boolean;
+  } | null;
   consumerVersion: AbiVersion | null;
   pendingDatagramCount: number;
   pendingDatagramBytes: number;
   datagramTerminal: BrowserOutcome<void> | null;
   datagramWaiters: Set<(outcome: BrowserOutcome<void>) => void>;
-  reader: Promise<BrowserWebTransportReaderLike>;
+  reader: Promise<BrowserWebTransportReaderLike | null>;
   ready: Promise<void>;
   session: BrowserWebTransportSessionLike;
   streamSession: {
@@ -1435,12 +1454,13 @@ interface BrowserWebTransportState {
     closeHost: (() => void) | null;
   } | null;
   scopeKey: string;
-  writer: Promise<BrowserWebTransportWriterLike>;
+  writer: Promise<BrowserWebTransportWriterLike | null>;
 }
 
 interface BrowserWebTransportTerminalState {
   outcome: BrowserOutcome<WasmValue>;
   scopeKey: string;
+  ownerKeys: Set<string>;
 }
 
 type BrowserHandleLike = {
@@ -1462,9 +1482,17 @@ const RUNTIME_FETCH_GRANTS = new Map<string, BrowserFetchGrant>();
 const FETCH_OWNER_CLOSES = new Map<string, Promise<BrowserOutcome<void>>>();
 // Only live callback brackets retain this evidence. A missing/stale handle is
 // not itself proof that an SDK owner successfully completed its cleanup.
-const ASYNC_SCOPE_BRACKETS = new Map<string, { closed: boolean }>();
+const ASYNC_SCOPE_BRACKETS = new Map<string, { closed: boolean; closedOwners: Set<string> | null }>();
+const RELEASED_SCOPE_CLEANUP_RETRIES = new WeakMap<RegionHandle, Set<string>>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
+// Native cleanup can outlive a legacy synchronous task publication or scope
+// close. Keep its captured ancestry until an asynchronous retirement accepts it.
+const OWNED_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
+const WEBTRANSPORT_READER_CANCEL = typeof ReadableStreamDefaultReader === "undefined"
+  ? undefined : ReadableStreamDefaultReader.prototype.cancel;
+const WEBTRANSPORT_READER_CLOSED = typeof ReadableStreamDefaultReader === "undefined"
+  ? undefined : Object.getOwnPropertyDescriptor(ReadableStreamDefaultReader.prototype, "closed")?.get;
 // Match browser-core's facade-owned send bounds, including readiness waiters
 // and writes queued in or currently held by the host writer.
 const WEBTRANSPORT_DATAGRAM_LIMITS = Object.freeze({
@@ -5993,6 +6021,16 @@ function browserOwnerIsClosing(scopeKey: string): boolean {
   return false;
 }
 
+function browserOwnerAncestry(scopeKey: string): Set<string> {
+  const owners = new Set<string>();
+  let current: string | undefined = scopeKey;
+  while (current !== undefined && !owners.has(current)) {
+    owners.add(current);
+    current = REGION_PARENTS.get(current);
+  }
+  return owners;
+}
+
 function browserMessageScopeIsTracked(scopeKey: string): boolean {
   const visited = new Set<string>();
   let current: string | undefined = scopeKey;
@@ -6471,6 +6509,14 @@ function waitForWebTransportDatagramHost<T>(
   });
 }
 
+function trackWebTransportDatagramOperation<T>(state: BrowserWebTransportState, operation: Promise<T>): Promise<T> {
+  const observed = Promise.resolve(operation);
+  const settled = observed.then(() => undefined, () => undefined);
+  state.datagramOperations.add(settled);
+  void settled.then(() => { state.datagramOperations.delete(settled); });
+  return observed;
+}
+
 async function sendAdmittedWebTransportDatagram(
   handle: CoreTaskHandle,
   state: BrowserWebTransportState,
@@ -6483,12 +6529,13 @@ async function sendAdmittedWebTransportDatagram(
     const ready = await waitForWebTransportDatagramHost(state, state.writer);
     if ("terminal" in ready) return currentWebTransportTerminal(state) ?? ready.terminal;
     const writer = ready.value;
+    if (!writer) return currentWebTransportTerminal(state) ?? webTransportFailureOutcome("WebTransport writer was not acquired");
     const write = writer.write;
     // Host method lookup can reenter owner close before invocation.
     if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     const writing = write.call(writer, payload!);
     payload = null;
-    const sent = await waitForWebTransportDatagramHost(state, writing);
+    const sent = await waitForWebTransportDatagramHost(state, trackWebTransportDatagramOperation(state, writing));
     if (state.datagramTerminal !== null) return currentWebTransportTerminal(state)!;
     return "terminal" in sent ? sent.terminal : OutcomeFactory.ok(undefined);
   } catch (error) {
@@ -6508,6 +6555,7 @@ function settleWebTransportTask(
   outcome: BrowserOutcome<WasmValue>,
   consumerVersion: AbiVersion | null,
   closeHost: (() => void) | null = null,
+  drained = false,
 ): BrowserOutcome<WasmValue> {
   const key = browserWebTransportStateKey(handle);
   const state = lookupWebTransportState(handle);
@@ -6517,6 +6565,9 @@ function settleWebTransportTask(
       return terminal.outcome;
     }
     return taskJoin(handle, outcome, consumerVersion);
+  }
+  if (state.asyncClosing && !drained) {
+    return OutcomeFactory.err("compatibility_rejected", "transient", "WebTransport asynchronous cleanup is still pending; await or retry closeAsync");
   }
   if (state.termination?.busy) {
     return OutcomeFactory.err("compatibility_rejected", "transient", "WebTransport terminal publication is already in progress");
@@ -6553,13 +6604,18 @@ function settleWebTransportTask(
     if (INFLIGHT_WEBTRANSPORTS.get(key) !== state) {
       return invalidHandleOutcome("WebTransport owner closed during terminal publication");
     }
+    if (state.unconfirmedFailure) {
+      termination.receipt = state.unconfirmedFailure;
+      return termination.receipt;
+    }
     const receipt = snapshotWebTransportTerminal(taskJoin(handle, termination.outcome, consumerVersion), true);
     const accepted = sameWebTransportTerminal(termination.outcome, receipt);
     termination.receipt = !accepted && receipt.outcome === "ok"
       ? webTransportFailureOutcome("WebTransport terminal publication returned an inconsistent success")
       : receipt;
     if (accepted && INFLIGHT_WEBTRANSPORTS.get(key) === state) {
-      TERMINAL_WEBTRANSPORTS.set(key, { outcome: receipt, scopeKey: state.scopeKey });
+      state.published = true;
+      TERMINAL_WEBTRANSPORTS.set(key, { outcome: receipt, scopeKey: state.scopeKey, ownerKeys: state.ownerKeys });
       INFLIGHT_WEBTRANSPORTS.delete(key);
     }
     return termination.receipt;
@@ -6579,49 +6635,171 @@ function cleanupWebTransportState(
     reason ?? "WebTransport session closed.",
   ),
 ): void {
+  if (state.cleanup) return;
+  let finish!: () => void;
+  let report!: (receipt: BrowserOutcome<void>) => void;
+  const cleanup = {
+    done: new Promise<void>(resolve => { finish = resolve; }),
+    receipt: new Promise<BrowserOutcome<void>>(resolve => { report = resolve; }),
+    failure: null as BrowserOutcome<void> | null,
+    reported: false,
+  };
+  // Publish the barrier before native cancellation can reenter a public close.
+  state.cleanup = cleanup;
   stopWebTransportStreams(state, outcome);
-  // Best-effort cleanup must close/abort before releasing the lock; otherwise
-  // Web Streams can reject with a released-reader/writer error on teardown.
-  void state.reader
-    .then((reader) =>
-      Promise.resolve()
-        .then(() => reader.cancel?.(reason))
-        .catch(() => undefined)
-        .finally(() => {
-          try {
-            reader.releaseLock?.();
-          } catch {
-            // Ignore cleanup races while the session is already tearing down.
-          }
-        }),
-    )
-    .catch(() => undefined);
-  void state.writer
-    .then((writer) =>
-      Promise.resolve()
-        // Owner termination cancels queued datagrams even without a message.
-        // A graceful writer.close() would send bytes already reported cancelled.
-        .then(() => writer.abort?.(reason ?? "WebTransport session closed."))
-        .catch(() => undefined)
-        .finally(() => {
-          try {
-            writer.releaseLock?.();
-          } catch {
-            // Ignore cleanup races while the session is already tearing down.
-          }
-        }),
-    )
-    .catch(() => undefined);
+  state.stopHandshake();
+  const failed = (operation: string, error: unknown): void => {
+    cleanup.failure ??= ownerCloseFailure(operation, error);
+  };
+  const cancelReader = async (): Promise<void> => {
+    await state.reader.catch(() => null);
+    const reader = state.readerLock;
+    if (!reader) return;
+    try {
+      const cancel = reader.cancel;
+      if (typeof cancel !== "function") throw new TypeError("datagram reader cannot be cancelled");
+      let terminal: Promise<{ cause: unknown } | null> | null = null;
+      if (cancel === WEBTRANSPORT_READER_CANCEL && WEBTRANSPORT_READER_CLOSED) {
+        try {
+          terminal = Promise.resolve(Reflect.apply(WEBTRANSPORT_READER_CLOSED, reader, []))
+            .then(() => null, cause => ({ cause }));
+        } catch { /* A custom reader supplies no native terminal evidence. */ }
+      }
+      try { await Reflect.apply(cancel, reader, [reason]); }
+      catch (error) {
+        // An already errored native reader rejects cancel with its stored
+        // source error without invoking a cleanup hook. A rejecting cancel
+        // hook instead leaves the intrinsic closed promise fulfilled.
+        const ended = terminal && await terminal;
+        if (!ended || !Object.is(ended.cause, error)) throw error;
+      }
+    } catch (error) { failed("webtransport_datagram_cancel", error); }
+  };
+  const abortWriter = async (): Promise<void> => {
+    await state.writer.catch(() => null);
+    const writer = state.writerLock;
+    if (!writer) return;
+    try {
+      if (typeof writer.abort !== "function") throw new TypeError("datagram writer cannot be aborted");
+      await writer.abort(reason ?? "WebTransport session closed.");
+    } catch (error) { failed("webtransport_datagram_abort", error); }
+  };
+  void Promise.all([cancelReader(), abortWriter()]).then(async () => {
+    // Caller-facing cancellation can settle before the actual read/write. The
+    // native operation remains owned until it finishes and its lock releases.
+    await Promise.all([...state.datagramOperations]);
+    releaseWebTransportDatagramLocks(state);
+    finish();
+  }).catch(error => { failed("webtransport_datagram_cleanup", error); finish(); });
+  void Promise.all([
+    cleanup.done,
+    SDK_WEBTRANSPORT_STREAMS.drainCleanup(state.streamSession),
+    state.connectionClosed,
+  ]).then(([, reliable]) => {
+    const receipt = state.unconfirmedFailure ?? cleanup.failure ?? reliable;
+    report(receipt);
+    // Completed legacy synchronous sessions need no permanent extra registry
+    // entry. A failed receipt stays available to an explicit owner retry.
+    if (receipt.outcome === "ok" && (state.published || state.ownerReleased) && !state.asyncClosing) {
+      const key = browserWebTransportStateKey(state.task);
+      if (OWNED_WEBTRANSPORTS.get(key) === state) OWNED_WEBTRANSPORTS.delete(key);
+    }
+  }, error => { failed("webtransport_cleanup", error); report(cleanup.failure!); });
+}
+
+function releaseWebTransportDatagramLocks(state: BrowserWebTransportState): void {
+  for (const side of ["readerLock", "writerLock"] as const) {
+    const lock = state[side];
+    if (!lock) continue;
+    try {
+      if (typeof lock.releaseLock !== "function") throw new TypeError("datagram lock cannot be released");
+      lock.releaseLock();
+      state[side] = null;
+    } catch (error) { state.cleanup!.failure ??= ownerCloseFailure("webtransport_datagram_release", error); }
+  }
 }
 
 function closeTrackedWebTransportState(state: BrowserWebTransportState, reason?: string): void {
+  state.ownerReleased = true;
   state.settled = true;
-  cleanupWebTransportState(state, reason);
+  state.termination ??= {
+    outcome: webTransportCancellationOutcome("webtransport_close", reason), receipt: null, busy: false,
+    closeHost: () => state.session.close(reason === undefined ? undefined : { reason }),
+  };
+  cleanupWebTransportState(state, reason, state.termination.outcome);
   try {
-    state.session.close(reason === undefined ? undefined : { reason });
+    state.termination.closeHost?.();
+    state.termination.closeHost = null;
   } catch {
-    // Ignore close races during scope/runtime teardown.
+    // Preserve the callable for an explicit asynchronous cleanup retry.
   }
+}
+
+function retireWebTransportAsync(
+  state: BrowserWebTransportState,
+  version: AbiVersion | null,
+  kind: string,
+  message: string | undefined,
+  options: BrowserWebTransportCloseOptions,
+): Promise<BrowserOutcome<void>> {
+  if (state.asyncAttempt) return state.asyncAttempt;
+  let resolve!: (receipt: BrowserOutcome<void>) => void;
+  const attempt = new Promise<BrowserOutcome<void>>(done => { resolve = done; });
+  state.asyncAttempt = attempt;
+  void (async () => {
+    try {
+      if (!state.ownerReleased && !state.published && !state.termination && !state.cancelAccepted) {
+        const cancelled = taskCancel({ task: state.task, kind, message }, version);
+        if (cancelled.outcome !== "ok") { resolve(cancelled); return; }
+        state.cancelAccepted = true;
+      }
+      state.asyncClosing = true;
+      state.settled = true;
+      state.termination ??= {
+        outcome: snapshotWebTransportTerminal(webTransportCancellationOutcome(kind, message)),
+        receipt: null, busy: false,
+        closeHost: () => state.session.close(options),
+      };
+      cleanupWebTransportState(state, message, state.termination.outcome);
+      if (state.termination.closeHost) {
+        state.termination.closeHost();
+        state.termination.closeHost = null;
+      }
+      const cleanup = state.cleanup!;
+      let receipt: BrowserOutcome<void>;
+      if (!cleanup.reported) {
+        receipt = await cleanup.receipt;
+        cleanup.reported = true;
+      } else {
+        // The first failed cleanup remains observable. An explicit retry can
+        // release retained locks without replaying settled cancel/abort calls.
+        cleanup.failure = null;
+        releaseWebTransportDatagramLocks(state);
+        const reliable = await SDK_WEBTRANSPORT_STREAMS.drainCleanup(state.streamSession);
+        receipt = state.unconfirmedFailure ?? cleanup.failure ?? reliable;
+      }
+      if (receipt.outcome !== "ok") { resolve(receipt); return; }
+      if (!state.ownerReleased && !state.published) {
+        const published = settleWebTransportTask(state.task, state.termination.outcome, version, null, true);
+        if (!sameWebTransportTerminal(state.termination.outcome, published)) {
+          resolve(collapseTaskOutcome(published)); return;
+        }
+      }
+      const key = browserWebTransportStateKey(state.task);
+      if (OWNED_WEBTRANSPORTS.get(key) === state) OWNED_WEBTRANSPORTS.delete(key);
+      resolve(OutcomeFactory.ok(undefined));
+    } catch (error) { resolve(ownerCloseFailure("webtransport_close_async", error)); }
+    finally { if (state.asyncAttempt === attempt) state.asyncAttempt = null; }
+  })();
+  return attempt;
+}
+
+async function drainOwnedWebTransports(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
+  const receipts = await Promise.all([...OWNED_WEBTRANSPORTS.values()]
+    .filter(state => [...ownerKeys].some(key => state.ownerKeys.has(key)))
+    .map(state => retireWebTransportAsync(state, state.consumerVersion, kind,
+      "WebTransport owner is closing.", Object.freeze({ reason: "WebTransport owner is closing." }))));
+  return receipts.find(receipt => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
 }
 
 function cancelBrowserTask(
@@ -6657,15 +6835,15 @@ function cancelBrowserTask(
 }
 
 function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void {
-  for (const [taskKey, state] of INFLIGHT_WEBTRANSPORTS) {
-    if (!ownerKeys.has(state.scopeKey)) {
+  for (const [taskKey, state] of OWNED_WEBTRANSPORTS) {
+    if (![...ownerKeys].some(key => state.ownerKeys.has(key))) {
       continue;
     }
     closeTrackedWebTransportState(state, reason);
-    INFLIGHT_WEBTRANSPORTS.delete(taskKey);
+    if (INFLIGHT_WEBTRANSPORTS.get(taskKey) === state) INFLIGHT_WEBTRANSPORTS.delete(taskKey);
   }
   for (const [taskKey, terminal] of TERMINAL_WEBTRANSPORTS) {
-    if (ownerKeys.has(terminal.scopeKey)) {
+    if ([...ownerKeys].some(key => terminal.ownerKeys.has(key))) {
       TERMINAL_WEBTRANSPORTS.delete(taskKey);
     }
   }
@@ -6698,7 +6876,10 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
 function recordClosedAsyncScopeBrackets(ownerKeys: Set<string>): void {
   for (const key of ownerKeys) {
     const bracket = ASYNC_SCOPE_BRACKETS.get(key);
-    if (bracket) bracket.closed = true;
+    if (bracket) {
+      bracket.closed = true;
+      bracket.closedOwners = new Set(ownerKeys);
+    }
   }
 }
 
@@ -6709,6 +6890,7 @@ async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string):
   const receipts = await Promise.all([
     SDK_STREAM_PIPES.drainScopes(ownerKeys, kind),
     SDK_BYTE_PIPES.drainScopes(ownerKeys, kind),
+    drainOwnedWebTransports(ownerKeys, kind),
     SDK_FETCHES.drainScopes(ownerKeys, kind),
     SDK_WEBSOCKETS.drainScopes(ownerKeys, kind),
     drainOwnedBrowserMessageStreams(ownerKeys, kind),
@@ -6762,46 +6944,93 @@ function createBrowserWebTransportState(
   consumerVersion: AbiVersion | null,
   session: BrowserWebTransportSessionLike,
   scopeKey: string,
+  ownerKeys: Set<string>,
+  initiallyStopped = false,
 ): BrowserWebTransportState {
-  const handshakeReady = session.ready.then(() => undefined);
-  const reader = handshakeReady.then(() => {
-    const readable = session.datagrams?.readable;
-    if (!readable) {
-      throw new Error("WebTransport datagram readable stream is unavailable.");
-    }
-    return readable.getReader();
-  });
-  const writer = handshakeReady.then(() => {
-    const writable = session.datagrams?.writable;
-    if (!writable) {
-      throw new Error("WebTransport datagram writable stream is unavailable.");
-    }
-    return writable.getWriter();
-  });
-  const ready = Promise.all([reader, writer]).then(() => undefined);
+  let acceptReady!: (value: unknown) => void;
+  let rejectReady!: (error: unknown) => void;
+  let acceptClosed!: (value: unknown) => void;
+  let rejectClosed!: (error: unknown) => void;
+  const handshakeReady = new Promise<unknown>((resolve, reject) => { acceptReady = resolve; rejectReady = reject; });
+  const connectionClosed = new Promise<unknown>((resolve, reject) => { acceptClosed = resolve; rejectClosed = reject; });
+  let stopHandshake!: () => void;
+  const stoppedHandshake = new Promise<null>(resolve => { stopHandshake = () => resolve(null); });
   const origin = handle.toJSON();
 
   const state: BrowserWebTransportState = {
+    task: snapshotTaskHandle(handle),
+    ownerKeys,
+    ownerReleased: false,
+    published: false,
+    cancelAccepted: false,
+    asyncClosing: false,
+    asyncAttempt: null,
+    connectionClosed: connectionClosed.then(() => undefined, () => undefined),
+    stopHandshake,
+    readerLock: null,
+    writerLock: null,
+    datagramOperations: new Set(),
+    unconfirmedFailure: null,
+    cleanup: null,
     consumerVersion,
     pendingDatagramCount: 0,
     pendingDatagramBytes: 0,
     datagramTerminal: null,
     datagramWaiters: new Set(),
-    reader,
-    ready,
+    reader: Promise.resolve(null),
+    ready: Promise.resolve(),
     session,
     streamSession: {
       transport: session,
       sessionOrigin: `${origin.kind}:${origin.slot}:${origin.generation}`,
       closed: false,
     },
-    settled: false,
+    settled: initiallyStopped,
     termination: null,
     scopeKey,
-    writer,
+    writer: Promise.resolve(null),
   };
+  // Host accessors can throw or reenter owner closure. The admitted task and
+  // actual connection must already be discoverable before any such access.
+  const taskKey = browserWebTransportStateKey(state.task);
+  INFLIGHT_WEBTRANSPORTS.set(taskKey, state);
+  OWNED_WEBTRANSPORTS.set(taskKey, state);
 
-  ready.catch((error) => {
+  state.reader = Promise.race([handshakeReady.then(() => {
+    if (state.settled) return null;
+    const readable = session.datagrams?.readable;
+    if (state.settled) return null;
+    if (!readable) throw new Error("WebTransport datagram readable stream is unavailable.");
+    try {
+      const acquire = readable.getReader;
+      if (state.settled) return null;
+      state.readerLock = acquire.call(readable);
+      return state.readerLock;
+    } catch (error) {
+      state.unconfirmedFailure ??= webTransportFailureOutcome("WebTransport datagram reader acquisition threw; native lock ownership cannot be confirmed.", "permanent");
+      throw error;
+    }
+  }), stoppedHandshake]);
+  state.writer = Promise.race([handshakeReady.then(() => {
+    if (state.settled) return null;
+    const writable = session.datagrams?.writable;
+    if (state.settled) return null;
+    if (!writable) throw new Error("WebTransport datagram writable stream is unavailable.");
+    try {
+      const acquire = writable.getWriter;
+      if (state.settled) return null;
+      state.writerLock = acquire.call(writable);
+      return state.writerLock;
+    } catch (error) {
+      state.unconfirmedFailure ??= webTransportFailureOutcome("WebTransport datagram writer acquisition threw; native lock ownership cannot be confirmed.", "permanent");
+      throw error;
+    }
+  }), stoppedHandshake]);
+  state.ready = Promise.all([state.reader, state.writer]).then(([reader, writer]) => {
+    if (!reader || !writer) throw new Error("WebTransport closed before datagram readiness.");
+  });
+
+  state.ready.catch((error) => {
     if (state.settled) {
       return;
     }
@@ -6816,7 +7045,7 @@ function createBrowserWebTransportState(
     );
   });
 
-  void session.closed
+  void connectionClosed
     .then(() => {
       if (state.settled) {
         return;
@@ -6838,8 +7067,27 @@ function createBrowserWebTransportState(
         handle,
         failure,
         consumerVersion,
+        // A broken closed accessor is not evidence that the connection ended.
+        // Attempt shutdown while retaining the permanent observation failure.
+        state.unconfirmedFailure
+          ? () => state.session.close({ reason: "WebTransport closure could not be observed." })
+          : null,
       );
     });
+
+  try {
+    const ready = session.ready;
+    if (!ready || typeof ready.then !== "function") throw new TypeError("WebTransport ready promise is unavailable");
+    void Promise.resolve(ready).then(acceptReady, rejectReady);
+  } catch (error) { rejectReady(error); }
+  try {
+    const closed = session.closed;
+    if (!closed || typeof closed.then !== "function") throw new TypeError("WebTransport closed promise is unavailable");
+    void Promise.resolve(closed).then(acceptClosed, rejectClosed);
+  } catch (error) {
+    state.unconfirmedFailure ??= webTransportFailureOutcome("WebTransport connection closure cannot be observed.", "permanent");
+    rejectClosed(error);
+  }
 
   return state;
 }
@@ -6891,7 +7139,7 @@ async function withBrowserScopeAsync<T>(
   const ownedCore = snapshotRegionHandle(scope.core);
   const runtime = scope.runtime;
   const ownerKey = browserWebTransportStateKey(ownedCore);
-  const bracket = { closed: false };
+  const bracket = { closed: false, closedOwners: null as Set<string> | null };
   ASYNC_SCOPE_BRACKETS.set(ownerKey, bracket);
   try {
     let completion: BrowserScopeBodyCompletion<T>;
@@ -6914,6 +7162,17 @@ async function withBrowserScopeAsync<T>(
         throw new BrowserScopeCleanupError(
           new RegionHandle(ownedCore, version, runtime), cleanup, completion,
         );
+      }
+    }
+    // A successful synchronous ABI close proves release of the handle, not
+    // settlement of native work. Retain the released subtree's cleanup target
+    // even after SDK ancestry was removed by that earlier close.
+    if (bracket.closedOwners) {
+      const cleanup = await drainBrowserOwnerResources(bracket.closedOwners, "scope_close");
+      if (cleanup.outcome !== "ok") {
+        const retryScope = new RegionHandle(ownedCore, version, runtime);
+        RELEASED_SCOPE_CLEANUP_RETRIES.set(retryScope, bracket.closedOwners);
+        throw new BrowserScopeCleanupError(retryScope, cleanup, completion);
       }
     }
     if (completion.kind === "threw") throw completion.error;
@@ -7123,6 +7382,8 @@ export class RegionHandle {
    */
   closeAsync(consumerVersion: AbiVersion | null = this.consumerVersion): Promise<BrowserOutcome<void>> {
     try {
+      const releasedOwners = RELEASED_SCOPE_CLEANUP_RETRIES.get(this);
+      if (releasedOwners) return drainBrowserOwnerResources(releasedOwners, "scope_close");
       const core = snapshotRegionHandle(this.core);
       const version = snapshotOwnerCloseVersion(consumerVersion);
       return closeFetchOwnerAsync(core, version, "scope_close");
@@ -7350,8 +7611,23 @@ export class RegionHandle {
     }
 
     let normalizedUrl: string;
+    let core: CoreRegionHandle;
+    let version: AbiVersion | null;
+    let scopeKey: string;
+    let ownerKeys: Set<string>;
+    let prepared: BrowserWebTransportOpenOptions;
     try {
+      core = snapshotRegionHandle(this.core);
+      version = snapshotOwnerCloseVersion(consumerVersion);
+      scopeKey = browserWebTransportStateKey(core);
+      ownerKeys = browserOwnerAncestry(scopeKey);
+      if (!browserMessageScopeIsTracked(scopeKey) || browserOwnerIsClosing(scopeKey)) {
+        return OutcomeFactory.err("capability_denied", "transient", "WebTransport owner is closing or unavailable.");
+      }
       normalizedUrl = normalizeBrowserWebTransportUrl(url);
+      prepared = Object.freeze({ label: options.label, cancelKind: options.cancelKind,
+        allowPooling: options.allowPooling, congestionControl: options.congestionControl,
+        requireUnreliableDatagrams: options.requireUnreliableDatagrams });
     } catch (error) {
       return webTransportFailureOutcome(errorMessage(error), "permanent");
     }
@@ -7361,41 +7637,68 @@ export class RegionHandle {
     if (!WebTransportCtor) {
       return webTransportCapabilityDenied(detectWebTransportSupport(globalObject));
     }
+    if (!browserMessageScopeIsTracked(scopeKey) || browserOwnerIsClosing(scopeKey)) {
+      return OutcomeFactory.err("capability_denied", "transient", "WebTransport owner is closing or unavailable.");
+    }
 
     const spawned = taskSpawn(
       {
-        scope: this.core,
-        label: options.label ?? "browser-webtransport",
-        cancel_kind: options.cancelKind ?? "abort_signal",
+        scope: core,
+        label: prepared.label ?? "browser-webtransport",
+        cancel_kind: prepared.cancelKind ?? "abort_signal",
       },
-      consumerVersion,
+      version,
     );
     if (spawned.outcome !== "ok") {
       return spawned;
     }
+    if (!browserMessageScopeIsTracked(scopeKey) || browserOwnerIsClosing(scopeKey)) {
+      const cancelled = webTransportCancellationOutcome("scope_close", "WebTransport owner closed during admission.");
+      // No host connection has been constructed, but terminal publication can
+      // still be refused. Retain this admitted task for the owner's next drain.
+      const state = createBrowserWebTransportState(spawned.value, version,
+        { ready: Promise.resolve(), closed: Promise.resolve(), close() {} }, scopeKey, ownerKeys, true);
+      if (!browserMessageScopeIsTracked(scopeKey)) {
+        state.ownerReleased = true;
+        INFLIGHT_WEBTRANSPORTS.delete(browserWebTransportStateKey(state.task));
+      }
+      void retireWebTransportAsync(state, version, "scope_close", "WebTransport owner closed during admission.", {});
+      return cancelled;
+    }
 
     try {
       const session = new WebTransportCtor(normalizedUrl, {
-        allowPooling: options.allowPooling ?? false,
-        congestionControl: options.congestionControl,
-        requireUnreliable: options.requireUnreliableDatagrams ?? false,
+        allowPooling: prepared.allowPooling ?? false,
+        congestionControl: prepared.congestionControl,
+        requireUnreliable: prepared.requireUnreliableDatagrams ?? false,
       });
       const state = createBrowserWebTransportState(
         spawned.value,
-        consumerVersion,
+        version,
         session,
-        browserWebTransportStateKey(this.core),
+        scopeKey,
+        ownerKeys,
       );
-      INFLIGHT_WEBTRANSPORTS.set(browserWebTransportStateKey(spawned.value), state);
+      const taskKey = browserWebTransportStateKey(state.task);
+      if (!browserMessageScopeIsTracked(scopeKey)) {
+        closeTrackedWebTransportState(state, "WebTransport owner closed during construction.");
+        INFLIGHT_WEBTRANSPORTS.delete(taskKey);
+        return webTransportCancellationOutcome("scope_close", "WebTransport owner closed during construction.");
+      }
+      if (browserOwnerIsClosing(scopeKey)) {
+        void retireWebTransportAsync(state, version, "scope_close", "WebTransport owner is closing.",
+          Object.freeze({ reason: "WebTransport owner is closing." }));
+        return webTransportCancellationOutcome("scope_close", "WebTransport owner is closing.");
+      }
     } catch (error) {
       const failure = webTransportFailureOutcome(
         `failed to construct browser WebTransport: ${errorMessage(error)}`,
         "permanent",
       );
-      return settleWebTransportTask(spawned.value, failure, consumerVersion) as BrowserOutcome<WebTransportHandle>;
+      return settleWebTransportTask(spawned.value, failure, version) as BrowserOutcome<WebTransportHandle>;
     }
 
-    return OutcomeFactory.ok(new WebTransportHandle(spawned.value, consumerVersion));
+    return OutcomeFactory.ok(new WebTransportHandle(spawned.value, version));
   }
 }
 
@@ -7589,10 +7892,12 @@ export class WebTransportHandle {
       let terminal = currentWebTransportTerminal(state);
       if (terminal) return terminal;
       const reader = ready.value;
+      if (!reader) return currentWebTransportTerminal(state) ?? webTransportFailureOutcome("WebTransport reader was not acquired");
       const read = reader.read;
       terminal = currentWebTransportTerminal(state);
       if (terminal) return terminal;
-      const readResult = await waitForWebTransportDatagramHost(state, read.call(reader));
+      const readResult = await waitForWebTransportDatagramHost(state,
+        trackWebTransportDatagramOperation(state, read.call(reader)));
       terminal = currentWebTransportTerminal(state);
       if (terminal) return terminal;
       if ("terminal" in readResult) return webTransportOperationTerminal(readResult.terminal);
@@ -7617,6 +7922,49 @@ export class WebTransportHandle {
         `browser WebTransport datagram receive failed: ${errorMessage(error)}`,
       );
     }
+  }
+
+  /**
+   * Close the connection and await datagrams, reliable streams, pending host
+   * admissions, lock release, and terminal task publication. The result is a
+   * cleanup receipt; successful cancellation returns ok. Failed attempts retain
+   * ownership for an explicit retry without repeating settled native cleanup.
+   */
+  closeAsync(
+    options: BrowserWebTransportCloseOptions = {},
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): Promise<BrowserOutcome<void>> {
+    try {
+      const core = snapshotTaskHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      const reason = options.reason;
+      const closeOptions = Object.freeze({ reason, closeCode: options.closeCode });
+      const key = browserWebTransportStateKey(core);
+      const state = OWNED_WEBTRANSPORTS.get(key);
+      if (!state) return Promise.resolve(TERMINAL_WEBTRANSPORTS.has(key)
+        ? OutcomeFactory.ok(undefined) : invalidHandleOutcome("unknown WebTransport cleanup owner"));
+      return retireWebTransportAsync(state, version, "webtransport_close",
+        reason ?? "WebTransport session closed by caller.", closeOptions);
+    } catch (error) { return Promise.resolve(ownerCloseFailure("webtransport_close_async", error)); }
+  }
+
+  /** Cancel with an explicit kind/token, then await the same cleanup barrier. */
+  cancelAsync(
+    tokenOrKind: CancellationToken | string,
+    message?: string,
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): Promise<BrowserOutcome<void>> {
+    try {
+      const core = snapshotTaskHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      const kind = tokenOrKind instanceof CancellationToken ? tokenOrKind.kind : tokenOrKind;
+      const reason = tokenOrKind instanceof CancellationToken ? tokenOrKind.message : message;
+      const key = browserWebTransportStateKey(core);
+      const state = OWNED_WEBTRANSPORTS.get(key);
+      if (!state) return Promise.resolve(TERMINAL_WEBTRANSPORTS.has(key)
+        ? OutcomeFactory.ok(undefined) : invalidHandleOutcome("unknown WebTransport cleanup owner"));
+      return retireWebTransportAsync(state, version, kind, reason, Object.freeze({ reason }));
+    } catch (error) { return Promise.resolve(ownerCloseFailure("webtransport_cancel_async", error)); }
   }
 
   close(
