@@ -582,7 +582,7 @@ serde_yaml = { version = "0.9", optional = true }
 # SQLite async wrapper - bundled by default for portability; "hooks" enables
 # progress_handler for budget-derived statement timeouts
 # (br-asupersync-server-stack-hardening-eeexl1.1.2)
-rusqlite = { version = "0.40", features = ["bundled", "hooks"], optional = true }
+rusqlite = { version = "0.43", features = ["bundled", "hooks"], optional = true }
 # SQL parser for secure SQL surface validation (asupersync-dn5hn8)
 sqlparser = { version = "0.62", optional = true }
 # SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM. Wipe

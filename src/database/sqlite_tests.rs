@@ -499,7 +499,7 @@ mod tests {
                                    INSERT INTO sink (v) SELECT x FROM c";
 
     fn run_signalled_infinite_query(
-        conn: &rusqlite::Connection,
+        conn: &mut rusqlite::Connection,
         started: std::sync::mpsc::SyncSender<()>,
     ) -> Result<(), SqliteError> {
         const RUNNING_PROGRESS_CALLBACKS: usize = 10_000;
@@ -523,7 +523,7 @@ mod tests {
     }
 
     fn run_signalled_infinite_query_diagnosed(
-        conn: &rusqlite::Connection,
+        conn: &mut rusqlite::Connection,
         started: std::sync::mpsc::SyncSender<()>,
     ) -> Result<(), SqliteOperationError> {
         const RUNNING_PROGRESS_CALLBACKS: usize = 10_000;
@@ -4214,8 +4214,8 @@ mod tests {
                 other => panic!("open failed: {other:?}"),
             };
             {
-                let guard = conn.inner.lock();
-                let raw = guard.get().unwrap();
+                let mut guard = conn.inner.lock();
+                let raw = guard.get_mut().unwrap();
                 raw.execute_batch("CREATE TABLE t(x); BEGIN; INSERT INTO t VALUES (1)")
                     .unwrap();
                 raw.authorizer(Some(|ctx: AuthContext<'_>| {
@@ -4296,9 +4296,9 @@ mod tests {
                 Outcome::Err(SqliteError::Sqlite(_))
             ));
             {
-                let guard = conn.inner.lock();
+                let mut guard = conn.inner.lock();
                 guard
-                    .get()
+                    .get_mut()
                     .unwrap()
                     .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                     .unwrap();
@@ -6669,7 +6669,7 @@ mod tests {
     fn connection_with_update_witness(
         pool: &BlockingPool,
     ) -> (SqliteConnection, std::sync::mpsc::Receiver<()>) {
-        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        let mut raw = rusqlite::Connection::open_in_memory().expect("open test connection");
         configure_connection_defaults(&raw, false).expect("configure test connection");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let mut started_tx = Some(started_tx);
