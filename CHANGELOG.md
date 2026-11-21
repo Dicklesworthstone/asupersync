@@ -17,6 +17,19 @@ artifacts.
 
 ## Version Timeline
 
+- **v0.7.0 Release (2026-11-21)**: 415+ commits since `v0.6.2`. Adds scoped
+  native gRPC unary requests, callable gRPC reflection, HTTP/3 owned duplex
+  CONNECT tunnels, ATP v2 graph/manifest commitments, browser-core
+  region-owned WebTransport/WebSocket/stream cleanup, resumable fallible
+  sink forwarding, task-causal Lab DPOR guidance and exact Notify/Semaphore/
+  OnceCell/Barrier/RwLock causality, plus security dependency upgrades
+  (`RUSTSEC-2026-0459`, `RUSTSEC-2026-0486`, `RUSTSEC-2026-0386`), a fix for
+  masked-poll combinator self-wakes under cancellation, workspace `rustfmt`
+  cleanup (GitHub #76), and signed CLI binaries for Linux (x86_64 and ARM64,
+  GitHub #79), macOS (ARM64 and x86_64), and Windows (x86_64). All ten
+  published workspace crates are republished at `0.7.0`. Minor bump follows
+  the `v0.6.0` precedent for nine public types losing `UnwindSafe`/
+  `RefUnwindSafe` (listed below).
 - **v0.6.2 (2026-11-03)**: an ATP fix for QUIC request retransmission
   storms, opt-in resume of authenticated QUIC transfers from durable chunks
   (`atp --quic-resume`), opt-in outbound work for native distributed nodes,
@@ -97,6 +110,32 @@ artifacts.
 
 ## [Unreleased]
 
+## [v0.7.0] - 2026-11-21
+
+Over 415 commits since `v0.6.2`, spanning native gRPC/HTTP/3/ATP protocol
+hardening, browser-core region-owned cleanup, task-causal Lab scheduling and
+synchronization primitives, security dependency upgrades, and full
+multi-platform CLI release binaries (including `linux-arm64`, GitHub #79).
+All ten published workspace crates are republished at `0.7.0`.
+
+### Breaking Changes
+
+Compiler-verified rustdoc JSON diff against `v0.6.2` (default and full release
+feature sets) confirmed zero removed public items, methods, fields, or
+variants and zero breaking additions. Following the `v0.6.0` semver precedent,
+this release bumps the minor version because nine public types lost
+`UnwindSafe` / `RefUnwindSafe`:
+
+- `asupersync::grpc::ChannelBuilder` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::io::ReaderStream<R>` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::lab::oracle::CancelCorrectnessOracle` (`UnwindSafe`)
+- `asupersync::net::tcp::split::ReadHalf` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::net::tcp::split::WriteHalf` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::net::unix::split::ReadHalf` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::net::unix::split::WriteHalf` (`UnwindSafe`, `RefUnwindSafe`)
+- `asupersync::remote::RemoteComputationSession<IO>` (`UnwindSafe`, `RefUnwindSafe`, `tls`)
+- `asupersync::remote::RemoteComputationSessionStart<IO>` (`UnwindSafe`, `RefUnwindSafe`, `tls`)
+
 ### Added
 
 - **Scoped native gRPC unary requests:** Opt-in registered dispatch and
@@ -114,9 +153,48 @@ artifacts.
   later. Explicit reflection handlers retain precedence. Requires
   `http2-streaming` and a registered duplex listener.
   (`br-asupersync-grpc-client-server-audit-jq0c7j`, item 11.)
+- **HTTP/3 owned duplex CONNECT tunnels:** Adds caller-driven owned CONNECT
+  tunnels over native HTTP/3 sessions and explicit-`Cx` streaming call shapes
+  across gRPC clients and balanced endpoint sets.
+- **ATP v2 graph and manifest commitments:** Negotiates versioned v2 graph
+  commitments across bounded-memory TCP/QUIC transports and full manifest
+  verification.
+- **Browser-core region-owned cleanup:** Retains runtime ownership through
+  asynchronous cleanup for WebTransport, native WebSockets, bounded byte
+  transfers, fetch quorums, and stream pipelines (`asupersync-browser-core`).
+- **Task-causal Lab DPOR and sync causality:** Preserves exact handoff
+  causality across `Notify`, `Semaphore`, `OnceCell`, `RwLock`, `Barrier`, and
+  resource pools, with task-causal DPOR schedule guidance.
+- **Resumable I/O and stream forwarding:** Adds buffer-aware async reads/writes,
+  independent duplex buffering, resumable native sink forwarding, bounded
+  sliding-window async admission, and scoped stream reduction.
+- **Linux ARM64 release binary (GitHub #79):** Release assets now include
+  signed `asupersync-linux-arm64.tar.gz` and `asupersync-darwin-amd64.tar.gz`
+  alongside `linux-amd64`, `darwin-arm64`, and `windows-amd64`.
 
 ### Fixed
 
+- **Masked-poll combinators under cancellation:** `commit_section`,
+  `try_commit_section`, `resource_bracket`, and `spork::event_manager` now
+  park cleanly on `Poll::Pending` while masked poll budget remains instead of
+  self-waking through `MaskGuard::drop` and spinning through their masked poll
+  budget prematurely. Fixes SQLite finishing-cancellation result precedence
+  and cancelled transaction helper rollback completion while preserving
+  outermost unmask wakes on completion, budget exhaustion, and drop.
+- **Current-thread `TcpStream` runtime handoff (GitHub #85):** Verified fixed
+  end-to-end across both `current_thread` and `worker_threads(2)` runtimes
+  (`tests/runtime_handoff`, 12/12 passing).
+- **Workspace `rustfmt` drift (GitHub #76):** Reformatted the workspace with
+  pinned `rustfmt` so `cargo fmt --all -- --check` exits 0, and made
+  `runtime_abort_vs_cancel_semantics_audit` whitespace-tolerant for `Acquire`
+  observation pins.
+- **WASM32 dead-code cleanliness:** Guarded native-only `pub(crate)` runtime
+  helpers under `wasm32` so `asupersync-browser-core` compiles cleanly for
+  `wasm32-unknown-unknown`.
+- **Client & protocol cancellation/deadlines:** Fixed Kafka producer/consumer
+  cancellation wakes, DNS/remote/NATS/PostgreSQL/MySQL/Redis owner-clock
+  deadlines, WebSocket server close deadlines, HTTP/1/HTTP/2/WebSocket/gRPC/ATP
+  frame and buffer limits, and `RwLock` arrival order after writer cancellation.
 - **Native worker hooks:** Panics in configured start and stop hooks are
   contained on normal native workers and the current-thread driver, matching
   the blocking pool's policy so a startup hook cannot strand accepted work.
@@ -142,6 +220,33 @@ artifacts.
   canonical positions as source indices. Reproduction prefixes retain earlier
   canonical evidence even when it occurs later in source order, and stop at
   the expected trace's actual end. (`br-asupersync-tjr6s9`, M7.)
+
+### Security & Dependencies
+
+- **Zero known advisories (`cargo audit`):** Upgraded `rusqlite` `0.40` ->
+  `0.43` (`libsqlite3-sys 0.40.0`, resolving `RUSTSEC-2026-0459`), refreshed
+  `Cargo.lock` (`rustix 1.1.6` resolving `RUSTSEC-2026-0486`; `tokio 1.54.1`
+  dev/compat resolving `RUSTSEC-2026-0386`), upgraded `sqlparser` `0.62` ->
+  `0.64`, and upgraded `sysinfo` `0.39` -> `0.40` (`0.40.4`).
+- Preserved intentional pins (`retained-regex-syntax = "=0.8.11"` for Unicode 16
+  table parity, `parking_lot 0.12` and `opentelemetry* 0.32` for public API
+  stability) and verified zero `tokio` runtime dependency under default and
+  `metrics` features.
+
+### Release Gate
+
+- `cargo fmt --all -- --check`: PASS (0 diffs).
+- `cargo clippy --lib --bins -- -D warnings`: PASS on `asupersync` (default and
+  `cli,tls,sqlite,quic,http3,metrics,zstd`) and all published satellite crates.
+- Contract & runtime gates: `api_surface_map_contract` (6/6),
+  `runtime_abort_vs_cancel_semantics_audit` (52/52), `runtime_handoff` (12/12),
+  `database::sqlite` (153/153), `combinator::bracket`, `web::request_region`
+  (71/71), `cx::resource_bracket`, `spork::event_manager`, plus all eight
+  satellite crate test suites (764 unit/integration tests + 16 doctests).
+- Cross-target & toolchain checks: stable Rust `1.99.1` (`tls,sqlite,cli`),
+  `wasm32-unknown-unknown` (`asupersync-browser-core`), `--no-default-features`,
+  and `asupersync` crate package size check (~9.5 MiB compressed, under the
+  10 MiB crates.io cap).
 
 ## [v0.6.2] - 2026-11-03
 
