@@ -27,13 +27,15 @@ const paths = {
   fetch: process.env.ASUPERSYNC_BROWSER_FETCH_SOURCE
     ?? fileURLToPath(new URL("../packages/browser/src/fetch.ts", import.meta.url)),
   websocket: fileURLToPath(new URL("../packages/browser/src/websocket.ts", import.meta.url)),
+  streamPipe: fileURLToPath(new URL("../packages/browser/src/stream-pipe.ts", import.meta.url)),
+  bytePipe: fileURLToPath(new URL("../packages/browser/src/byte-pipe.ts", import.meta.url)),
   core: process.env.ASUPERSYNC_BROWSER_CORE_SOURCE
     ?? fileURLToPath(new URL("../packages/browser-core/index.js", import.meta.url)),
   streams: fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url)),
 };
 const sources = Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, readFileSync(path, "utf8")]));
 const javaScript = Object.fromEntries(Object.entries(sources).map(([name, source]) => [
-  name, ["react", "sdk", "fetch", "websocket"].includes(name) ? stripTypeScriptTypes(source, { mode: "transform" }) : source,
+  name, ["react", "sdk", "fetch", "websocket", "streamPipe", "bytePipe"].includes(name) ? stripTypeScriptTypes(source, { mode: "transform" }) : source,
 ]));
 console.log(JSON.stringify({
   scenario_id: "react-owned-fetch-lifecycle",
@@ -293,13 +295,15 @@ async function fixture(t, options = {}) {
       throw new Error("Unexpected WASM ABI call: " + name);
     }));
   }, { context, identifier: "intentional-wasm-owner-ledger" });
-  const modules = Object.fromEntries(["sdk", "fetch", "websocket", "core", "streams"].map((name) => [
+  const modules = Object.fromEntries(["sdk", "fetch", "websocket", "streamPipe", "bytePipe", "core", "streams"].map((name) => [
     name, new SourceTextModule(javaScript[name], { context, identifier: paths[name] }),
   ]));
   await modules.sdk.link((specifier) => {
     if (specifier === "@asupersync/browser-core") return modules.core;
     if (specifier === "./fetch.js") return modules.fetch;
     if (specifier === "./websocket.js") return modules.websocket;
+    if (specifier === "./stream-pipe.js") return modules.streamPipe;
+    if (specifier === "./byte-pipe.js") return modules.bytePipe;
     if (specifier === "@asupersync/browser-core/webtransport-streams"
       || specifier === "./webtransport-streams.js") return modules.streams;
     assert.equal(specifier, "./asupersync.js");

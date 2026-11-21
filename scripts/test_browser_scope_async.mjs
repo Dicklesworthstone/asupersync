@@ -18,6 +18,7 @@ const files = [
   ["./fetch.js", "packages/browser/src/fetch.ts", true],
   ["./websocket.js", "packages/browser/src/websocket.ts", true],
   ["./stream-pipe.js", "packages/browser/src/stream-pipe.ts", true],
+  ["./byte-pipe.js", "packages/browser/src/byte-pipe.ts", true],
   ["./asupersync.js", "packages/browser-core/asupersync.js", false],
   ["./webtransport-streams.js", "packages/browser-core/webtransport-streams.js", false],
 ];

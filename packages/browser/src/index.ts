@@ -82,6 +82,7 @@ import {
 } from "./fetch.js";
 import { createBrowserWebSocketManager, type BrowserWebSocketHandle, type BrowserWebSocketOptions } from "./websocket.js";
 import { createBrowserStreamPipeManager, type BrowserStreamPipeHandle, type BrowserStreamPipeOptions } from "./stream-pipe.js";
+import { createBrowserBytePipeManager, type BrowserBytePipeHandle, type BrowserBytePipeOptions } from "./byte-pipe.js";
 export { BROWSER_FETCH_LIMITS } from "./fetch.js";
 export type { BrowserFetchOptions, BrowserFetchResponse, BrowserFetchRead, FetchStreamHandle } from "./fetch.js";
 export { BROWSER_WEBSOCKET_LIMITS } from "./websocket.js";
@@ -90,6 +91,8 @@ export type {
   BrowserWebSocketRead, BrowserWebSocketReady, BrowserWebSocketCloseOptions,
 } from "./websocket.js";
 export type { BrowserStreamPipeHandle, BrowserStreamPipeOptions } from "./stream-pipe.js";
+export { BROWSER_BYTE_PIPE_LIMITS } from "./byte-pipe.js";
+export type { BrowserBytePipeHandle, BrowserBytePipeOptions, BrowserBytePipeProgress } from "./byte-pipe.js";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
@@ -6230,10 +6233,22 @@ const SDK_WEBSOCKETS = createBrowserWebSocketManager({
   isTracked: browserMessageScopeIsTracked,
 });
 
+// Both adapters retain exclusive reservations through failed publication even
+// after the native reader/writer locks have been released.
+const SDK_PIPE_ENDPOINTS = new WeakSet<object>();
+
 const SDK_STREAM_PIPES = createBrowserStreamPipeManager({
   globalObject: defaultGlobalObject,
   isClosing: browserOwnerIsClosing,
   isTracked: browserMessageScopeIsTracked,
+  endpoints: SDK_PIPE_ENDPOINTS,
+});
+
+const SDK_BYTE_PIPES = createBrowserBytePipeManager({
+  globalObject: defaultGlobalObject,
+  isClosing: browserOwnerIsClosing,
+  isTracked: browserMessageScopeIsTracked,
+  endpoints: SDK_PIPE_ENDPOINTS,
 });
 
 // Reliable streams share the existing SDK session and its task/region owner.
@@ -6631,6 +6646,7 @@ function cancelBrowserTask(
   SDK_FETCHES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   SDK_WEBSOCKETS.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   SDK_STREAM_PIPES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
+  SDK_BYTE_PIPES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
     const receipt = settleWebTransportTask(ownedTask, terminal, version,
@@ -6660,6 +6676,7 @@ function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   SDK_FETCHES.closeScopes(ownerKeys, "scope_close");
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "scope_close");
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "scope_close");
+  SDK_BYTE_PIPES.closeScopes(ownerKeys, "scope_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
   recordClosedAsyncScopeBrackets(ownerKeys);
@@ -6672,6 +6689,7 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "runtime_close");
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "runtime_close");
+  SDK_BYTE_PIPES.closeScopes(ownerKeys, "runtime_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
   recordClosedAsyncScopeBrackets(ownerKeys);
@@ -6690,6 +6708,7 @@ async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string):
   // enter native shutdown before their independently owned sources are stopped.
   const receipts = await Promise.all([
     SDK_STREAM_PIPES.drainScopes(ownerKeys, kind),
+    SDK_BYTE_PIPES.drainScopes(ownerKeys, kind),
     SDK_FETCHES.drainScopes(ownerKeys, kind),
     SDK_WEBSOCKETS.drainScopes(ownerKeys, kind),
     drainOwnedBrowserMessageStreams(ownerKeys, kind),
@@ -7232,6 +7251,39 @@ export class RegionHandle {
         });
       }, readable, writable, options);
     } catch { return OutcomeFactory.err("compatibility_rejected", "permanent", "Stream piping requires a valid SDK region and native endpoints."); }
+  }
+
+  /**
+   * Transfer native Uint8Array streams with byte limits and write progress.
+   * One bounded, owned chunk copy is written at a time; the destination's
+   * readiness controls source consumption. Both endpoints transfer to this
+   * region on successful admission. closeAsync joins cleanup and task
+   * retirement. A rejected native cleanup remains owned, including on retry.
+   * Existing source/sink queues and host authority remain the caller's concern.
+   */
+  pipeBytesTo(
+    readable: ReadableStream<Uint8Array>,
+    writable: WritableStream<Uint8Array>,
+    options: BrowserBytePipeOptions = {},
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): BrowserOutcome<BrowserBytePipeHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome("pipe bounded browser-native bytes");
+    if (laneOutcome) return laneOutcome;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      return SDK_BYTE_PIPES.start(browserWebTransportStateKey(scope), () => {
+        const spawned = taskSpawn({ scope, label: "browser-byte-pipe", cancel_kind: "byte_pipe_cancel" }, version);
+        if (spawned.outcome !== "ok") return spawned;
+        const task = snapshotTaskHandle(spawned.value);
+        return OutcomeFactory.ok({
+          key: browserWebTransportStateKey(task),
+          cancel: (kind: string, message: string) => taskCancel({ task, kind, message }, version),
+          join: (outcome: BrowserOutcome<void>) => taskJoin(task,
+            outcome.outcome === "ok" ? OutcomeFactory.ok(undefined) : outcome, version) as BrowserOutcome<void>,
+        });
+      }, readable, writable, options);
+    } catch { return OutcomeFactory.err("compatibility_rejected", "permanent", "Byte piping requires a valid SDK region and native endpoints."); }
   }
 
   /**

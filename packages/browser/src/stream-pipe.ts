@@ -142,9 +142,11 @@ export function createBrowserStreamPipeManager(dependencies: {
   globalObject(): Record<string, unknown> | undefined;
   isClosing(scopeKey: string): boolean;
   isTracked(scopeKey: string): boolean;
+  /** Shared SDK endpoint reservations, including tasks awaiting publication. */
+  endpoints?: WeakSet<object>;
 }) {
   const active = new Map<string, Operation>();
-  const owned = new WeakSet<object>();
+  const owned = dependencies.endpoints ?? new WeakSet<object>();
   type Prepared = ReturnType<typeof prepare>;
 
   class Operation {

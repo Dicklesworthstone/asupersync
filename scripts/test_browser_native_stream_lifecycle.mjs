@@ -61,6 +61,7 @@ async function sdk() {
     "./fetch.js": ["../packages/browser/src/fetch.ts", true],
     "./websocket.js": ["../packages/browser/src/websocket.ts", true],
     "./stream-pipe.js": ["../packages/browser/src/stream-pipe.ts", true],
+    "./byte-pipe.js": ["../packages/browser/src/byte-pipe.ts", true],
     "@asupersync/browser-core/webtransport-streams": ["../packages/browser-core/webtransport-streams.js", false],
   };
   const modules = new Map();

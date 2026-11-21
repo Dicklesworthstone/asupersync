@@ -141,6 +141,88 @@ settlement, releases its locks, and publishes its terminal task successfully,
 a subsequent owner close can finish. This does not turn the earlier cleanup
 failure into successful cancellation.
 
+## Bounded byte transfers
+
+Use `RegionHandle.pipeBytesTo(readable, writable, options)` when a transfer
+requires an explicit byte budget and progress receipts. Both endpoints must be
+unlocked native streams from the SDK's JavaScript realm; the source must produce
+`Uint8Array` chunks. The application supplies these existing stream capabilities
+and stops using both endpoints after admission succeeds.
+
+```ts
+const result = await runtime.withScopeAsync(async scope => {
+  const pipe = unwrapOutcome(scope.pipeBytesTo(source, destination, {
+    maxChunkBytes: 64 * 1024,
+    maxBytes: 8 * 1024 * 1024,
+    signal,
+  }));
+
+  const outcome = await pipe.completed;
+  // Available after failure or cancellation as well as after success.
+  console.log(pipe.progress()); // { bytesWritten, chunksWritten }
+  return outcome;
+}, { label: "bounded-byte-copy" });
+const transferred = unwrapOutcome(result);
+```
+
+| Option | Default | Accepted values |
+| --- | --- | --- |
+| `maxChunkBytes` | 1,048,576 bytes (1 MiB) | Safe integers from 1 through 16,777,216 (16 MiB). |
+| `maxBytes` | `Number.MAX_SAFE_INTEGER` | Safe integers from 0 through `Number.MAX_SAFE_INTEGER`. |
+| `signal` | None | An unmodified native `AbortSignal` from the same realm, or `null`. |
+
+The defaults are exported as `BROWSER_BYTE_PIPE_LIMITS`. Invalid options, locked
+endpoints, an unavailable owner, or refused task admission produce a non-success
+outcome before the adapter acquires stream locks. An already-aborted signal
+returns a cancelled outcome without admitting a task.
+
+The adapter awaits destination readiness before every source read and awaits
+each write before reading again. Each accepted chunk is copied into an exact-size
+owned byte array. A source subarray contributes only its own byte range, and
+later mutation of the source array cannot change an in-flight write. Oversized
+chunks, non-byte values, detached views, and a chunk that would exceed the total
+budget are refused before that chunk reaches the destination. Oversized chunks
+are rejected rather than split; earlier successful writes remain committed.
+Empty chunks are permitted, including when `maxBytes` is zero. The pump yields
+to a host event turn after each 64 completed writes so an always-ready source
+cannot indefinitely starve timer or signal cancellation.
+
+This bounds the adapter's one owned chunk copy and total admitted byte count.
+It does not bound source allocations, preexisting source/destination queues,
+transforms, or application-retained data. A producer can allocate an oversized
+chunk before the adapter sees and rejects it. No network connection, network
+grant, Rust I/O bridge, or Rust executor dispatch is created by this method.
+
+| Handle member | Meaning |
+| --- | --- |
+| `completed` | The first transfer or retirement result; success contains `{ bytesWritten, chunksWritten }`. |
+| `progress()` | A fresh frozen snapshot of fulfilled native writes, including writes completed during cancellation. |
+| `cancel(reason?)` | Cancel active work and await a separate cleanup/publication receipt. |
+| `retire(reason?)` | Cancel any still-active work, or retry refused task cancellation, terminal publication, or lock release. |
+
+Progress counts native write promises that fulfilled. It does not prove remote
+delivery, storage durability, or rollback of a failed transfer. Pending writes
+and native destination close remain part of the cleanup barrier. Cancellation
+starts source cancellation and destination abortion before awaiting either, so
+one side's cleanup can depend on the other side starting. Repeated requests do
+not duplicate those effects, restart copying, or rewrite the first `completed`
+receipt.
+
+The byte adapter retains the original native cleanup promises. If source
+cancellation or destination abortion rejects, later retirement and owner-close
+attempts continue to report failure and retain the task; calling native cleanup
+again cannot establish that the original failed cleanup completed. ABI refusal
+and lock-release failure can be retried explicitly. An ambiguous host lock
+acquisition that throws without returning a reader/writer also remains owned.
+Endpoint reservations are shared with generic `pipeTo`, so either adapter
+continues to exclude the other while cleanup or task publication remains owned,
+even after native locks have been released.
+
+`scope.closeAsync()`, `runtime.closeAsync()`, and `withScopeAsync()` drain byte
+transfers alongside generic pipelines and the owner's other resources. The
+existing generic `pipeTo` retains its chunk-preserving API and `closed` receipt;
+`pipeBytesTo` is the additive API for bounded copies and byte progress.
+
 ## Scope and runtime shutdown
 
 `scope.closeAsync()` fences new descendant admission, requests cancellation of
@@ -175,3 +257,16 @@ They cover pending-write witnesses, asynchronous cancel/abort/close barriers,
 task counts, nested ownership, signal handling, refusal and retry, endpoint
 exclusivity, and reentrant admission/publication. These are native Node and
 checked-in WASM receipts, not a Rust rebuild or browser-engine execution.
+
+The bounded-byte suites exercise the actual manager and the SDK against the
+checked-in WASM ledger:
+
+```sh
+node --unhandled-rejections=strict --experimental-vm-modules --test \
+  scripts/test_browser_byte_pipe.mjs \
+  scripts/test_browser_byte_pipe_wasm.mjs
+```
+
+They additionally cover exact copied views, byte budgets, immutable progress,
+timer cancellation of always-ready sources, original cleanup-failure retention,
+ambiguous lock acquisition, and endpoint exclusivity across both pipe adapters.
