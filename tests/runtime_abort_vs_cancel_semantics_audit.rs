@@ -1906,16 +1906,16 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
             "src/cx/scope.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
             1,
         ),
-        // Classified (ecda43b5b, bi2462.156, q1fhxo): a `#[cfg(test)]` fixture
-        // in the drained blocking unit tests that builds a handle over a
-        // directly held publisher, so it can close the task's terminal
-        // publisher before the pool finishes. It is not a spawn adapter:
-        // production drained blocking work is spawned with `Cx::spawn` /
-        // `Cx::spawn_in`, whose pair factories are counted under src/cx/cx.rs.
+        // Classified (ecda43b5b, c394a7980, bi2462.156, q1fhxo): `#[cfg(test)]`
+        // fixtures in the drained blocking unit tests that build handles over
+        // directly held publishers to close or observe terminal publication
+        // before the pool finishes. Not a production spawn adapter: production
+        // drained blocking work is spawned with `Cx::spawn` / `Cx::spawn_in`,
+        // whose pair factories are counted under src/cx/cx.rs.
         (
             "src/runtime/spawn_blocking_inline_tests.rs|crate::runtime::task_handle::task_handle_channel::<"
                 .to_owned(),
-            1,
+            3,
         ),
         (
             "src/runtime/spawn_mailbox_inline_tests.rs|TaskHandle::new_pending(".to_owned(),
@@ -1925,13 +1925,14 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
             "src/runtime/state.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
             1,
         ),
-        // c5012547e moved task_handle.rs's unit tests into task_handle_inline_tests.rs:
-        // the production file keeps one of each constructor, the tests the rest.
+        // c5012547e moved task_handle.rs's unit tests into task_handle_inline_tests.rs;
+        // 0b733d056 / 1a144aa56 added test-only TaskHandle::new() fixtures there.
+        // The production file keeps one of each constructor, the tests the rest.
         ("src/runtime/task_handle.rs|TaskHandle::new(".to_owned(), 1),
         ("src/runtime/task_handle.rs|TaskHandle::new_pending(".to_owned(), 1),
         (
             "src/runtime/task_handle_inline_tests.rs|TaskHandle::new(".to_owned(),
-            26,
+            36,
         ),
         (
             "src/runtime/task_handle_inline_tests.rs|TaskHandle::new_pending(".to_owned(),

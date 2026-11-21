@@ -177,6 +177,13 @@ def build_entry_points(config: dict[str, Any], root: Path) -> list[dict[str, Any
     return sorted(entries, key=lambda item: item["use_case"])
 
 
+def display_repo_path(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def build_map(config_path: Path, lib_rs: Path, rustdoc_json: Path | None) -> dict[str, Any]:
     root = repo_root()
     config = load_json(config_path)
@@ -189,9 +196,9 @@ def build_map(config_path: Path, lib_rs: Path, rustdoc_json: Path | None) -> dic
         "generation": {
             "source_kind": "src-lib-rs-root-export-scan",
             "rustdoc_json_supported": True,
-            "rustdoc_json_input": str(rustdoc_json) if rustdoc_json else None,
-            "config_path": str(config_path),
-            "source_path": str(lib_rs),
+            "rustdoc_json_input": display_repo_path(rustdoc_json, root) if rustdoc_json else None,
+            "config_path": display_repo_path(config_path, root),
+            "source_path": display_repo_path(lib_rs, root),
             "command": "rch exec -- python3 scripts/generate_api_surface_map.py --check",
             "notes": [
                 "Default contract compares root public exports from src/lib.rs for fast drift detection.",
