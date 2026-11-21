@@ -32,9 +32,12 @@
         pending_first_read: bool,
         write_behavior: WriteBehavior,
         pending_first_flush: bool,
+        stall_reads: bool,
         stall_writes: bool,
         stall_flush: bool,
         stall_shutdown: bool,
+        read_calls: usize,
+        write_calls: usize,
         flush_calls: usize,
         shutdown_calls: usize,
     }
@@ -53,9 +56,12 @@
                 pending_first_read: false,
                 write_behavior: WriteBehavior::Immediate,
                 pending_first_flush: false,
+                stall_reads: false,
                 stall_writes: false,
                 stall_flush: false,
                 stall_shutdown: false,
+                read_calls: 0,
+                write_calls: 0,
                 flush_calls: 0,
                 shutdown_calls: 0,
             }
@@ -86,6 +92,10 @@
             self.pending_first_flush = true;
             self
         }
+
+        fn io_polls(&self) -> (usize, usize, usize, usize) {
+            (self.read_calls, self.write_calls, self.flush_calls, self.shutdown_calls)
+        }
     }
 
     fn encode_client_frame(frame: Frame) -> Vec<u8> {
@@ -112,6 +122,10 @@
             _cx: &mut std::task::Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            self.read_calls += 1;
+            if self.stall_reads {
+                return Poll::Pending;
+            }
             if self.pending_first_read {
                 self.pending_first_read = false;
                 _cx.waker().wake_by_ref();
@@ -131,6 +145,7 @@
             cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
+            self.write_calls += 1;
             if self.stall_writes {
                 return Poll::Pending;
             }
@@ -1009,6 +1024,313 @@
                 Some(if via_explicit_close { 1001 } else { 1000 }), None)));
         }
         }
+    }
+
+    struct ServerCloseWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for ServerCloseWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn server_close_clock(
+        start: u64,
+    ) -> (std::sync::Arc<crate::time::VirtualClock>, crate::time::TimerDriverHandle, Cx) {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+        use std::sync::Arc;
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(start)));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(92, 1), TaskId::new_for_test(92, 1),
+            Budget::INFINITE, None, None, None, Some(timer.clone()), None,
+        );
+        (clock, timer, cx)
+    }
+
+    fn server_close_socket(io: TestIo, timeout: Duration) -> ServerWebSocket<TestIo> {
+        let mut config = WebSocketConfig::default();
+        config.ping_interval = None;
+        config.close_config.close_timeout = timeout;
+        ServerWebSocket::from_upgraded(io, config,
+            AcceptResponse { accept_key: String::new(), protocol: None, extensions: Vec::new() }, &[])
+    }
+
+    // Poll once instead of blocking: a regression that parks a retry fails
+    // immediately. Making every transport operation ready also catches an
+    // expired connection that incorrectly resumes I/O and reports success.
+    fn assert_expired_server_performs_no_io(ws: &mut ServerWebSocket<TestIo>, cx: &Cx) {
+        ws.io.stall_reads = false;
+        ws.io.stall_writes = false;
+        ws.io.stall_flush = false;
+        ws.io.stall_shutdown = false;
+        let before = ws.io.io_polls();
+        for operation in ["recv", "close", "send_close", "ping", "send_ping", "send_pong"] {
+            let result = future::block_on(future::poll_once(async {
+                let payload = crate::bytes::Bytes::from_static(b"late");
+                match operation {
+                    "recv" => ws.recv(cx).await.map(|message| {
+                        assert!(message.is_none(), "an expired close has no successful peer receipt");
+                    }),
+                    "close" => ws.close(cx, CloseReason::normal()).await,
+                    "send_close" => ws.send(cx, Message::Close(Some(CloseReason::normal()))).await,
+                    "ping" => ws.ping(cx, payload).await,
+                    "send_ping" => ws.send(cx, Message::Ping(payload)).await,
+                    "send_pong" => ws.send(cx, Message::Pong(payload)).await,
+                    _ => unreachable!(),
+                }
+            }));
+            if matches!(operation, "ping" | "send_ping" | "send_pong") {
+                assert!(matches!(result, Some(Err(WsError::Io(ref error)))
+                    if error.kind() == io::ErrorKind::TimedOut), "{operation}: {result:?}");
+            } else {
+                assert!(matches!(result, Some(Ok(()))), "{operation}: {result:?}");
+            }
+            assert_eq!(ws.io.io_polls(), before, "{operation} touched an expired transport");
+        }
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    /// br-asupersync-fmw87f: send(Close), including its transport flush, owns
+    /// one absolute deadline even if its first waiter is dropped before completion.
+    #[test]
+    fn server_send_close_retains_deadline_across_dropped_write_and_flush() {
+        use crate::types::Time;
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        for park_flush in [false, true] {
+            let (clock, timer, first_cx) = server_close_clock(100);
+            let (_, _, later_cx) = server_close_clock(1_000_000);
+            let mut io = TestIo::new();
+            io.stall_writes = !park_flush;
+            io.stall_flush = park_flush;
+            let mut ws = server_close_socket(io, Duration::from_secs(10));
+            let counter = Arc::new(ServerCloseWake(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut first = Box::pin(ws.send(&first_cx, Message::Close(Some(CloseReason::normal()))));
+            assert!(first.as_mut().poll(&mut task).is_pending());
+            drop(first);
+            assert!(first_cx.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(ws.io.written.is_empty(), !park_flush);
+            assert_eq!(ws.close_handshake.our_reason(), Some(&CloseReason::normal()));
+
+            clock.set(Time::from_secs(106));
+            let _ambient = Cx::set_current(Some(later_cx.clone()));
+            let mut retry = Box::pin(ws.send(&later_cx, Message::Close(Some(CloseReason::going_away()))));
+            assert!(retry.as_mut().poll(&mut task).is_pending(), "retry changed clock domains");
+            clock.set(Time::from_secs(109));
+            assert_eq!(timer.process_timers(), 0);
+            assert!(retry.as_mut().poll(&mut task).is_pending());
+            let before = counter.0.load(Ordering::SeqCst);
+            clock.set(Time::from_secs(110));
+            assert!(timer.process_timers() > 0, "send(Close) must retain its first deadline");
+            assert!(counter.0.load(Ordering::SeqCst) > before, "the timer wakes a parked Close");
+            assert!(matches!(retry.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+            drop(retry);
+
+            assert!(ws.is_closed());
+            assert!(ws.close_handshake.timed_out());
+            assert_eq!(ws.close_handshake.our_reason(), Some(&CloseReason::normal()));
+            assert_eq!(ws.io.shutdown_calls, 0);
+            if park_flush {
+                assert_eq!(ws.io.written, encode_server_frame(CloseReason::normal().to_frame()));
+            } else {
+                assert!(ws.io.written.is_empty());
+            }
+            assert_expired_server_performs_no_io(&mut ws, &later_cx);
+        }
+    }
+
+    /// br-asupersync-fmw87f: a successfully written Close still bounds later
+    /// reads and user/automatic control writes, on the initiating clock.
+    #[test]
+    fn server_send_close_bounds_later_receives_and_control_io_on_original_clock() {
+        use crate::types::Time;
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        for (operation, park_flush) in [
+            ("recv", false), ("close", false),
+            ("ping", false), ("ping", true), ("pong", false), ("pong", true),
+            ("recv_pong", false), ("recv_pong", true), ("close_pong", false),
+        ] {
+            let (clock, timer, first_cx) = server_close_clock(100);
+            let (_, _, later_cx) = server_close_clock(1_000_000);
+            let peer_ping = operation.ends_with("_pong");
+            let mut io = if peer_ping {
+                TestIo::with_read_data(encode_client_frame(Frame::ping(
+                    crate::bytes::Bytes::from_static(b"peer"))))
+            } else {
+                TestIo::new()
+            };
+            io.stall_reads = !peer_ping;
+            let mut ws = server_close_socket(io, Duration::from_secs(10));
+            let sent = future::block_on(future::poll_once(
+                ws.send(&first_cx, Message::Close(Some(CloseReason::normal())))));
+            assert!(matches!(sent, Some(Ok(()))), "initial Close: {sent:?}");
+            if !matches!(operation, "recv" | "close") {
+                ws.io.stall_writes = !park_flush;
+                ws.io.stall_flush = park_flush;
+            }
+            clock.set(Time::from_secs(103));
+            let _ambient = Cx::set_current(Some(later_cx.clone()));
+            let counter = Arc::new(ServerCloseWake(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut waiting = Box::pin(async {
+                let payload = crate::bytes::Bytes::from_static(b"control");
+                match operation {
+                    "recv" | "recv_pong" => ws.recv(&later_cx).await.map(|message| {
+                        assert!(message.is_none(), "a peer Ping is not a successful close receipt");
+                    }),
+                    "close" | "close_pong" => ws.close(&later_cx, CloseReason::going_away()).await,
+                    "ping" => ws.ping(&later_cx, payload).await,
+                    "pong" => ws.send(&later_cx, Message::Pong(payload)).await,
+                    _ => unreachable!(),
+                }
+            });
+            assert!(waiting.as_mut().poll(&mut task).is_pending(), "{operation}, flush={park_flush}");
+            clock.set(Time::from_secs(109));
+            assert_eq!(timer.process_timers(), 0);
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            let before = counter.0.load(Ordering::SeqCst);
+            clock.set(Time::from_secs(110));
+            assert!(timer.process_timers() > 0, "{operation} did not retain the original deadline");
+            assert!(counter.0.load(Ordering::SeqCst) > before);
+            let result = waiting.as_mut().poll(&mut task);
+            if matches!(operation, "ping" | "pong") {
+                assert!(matches!(result, Poll::Ready(Err(WsError::Io(ref error)))
+                    if error.kind() == io::ErrorKind::TimedOut), "{operation}: {result:?}");
+            } else {
+                assert!(matches!(result, Poll::Ready(Ok(()))), "{operation}: {result:?}");
+            }
+            drop(waiting);
+            assert!(ws.is_closed());
+            assert!(ws.close_handshake.timed_out());
+            assert_eq!(ws.io.shutdown_calls, 0);
+            if peer_ping {
+                assert_eq!(ws.io.read_pos, ws.io.read_data.len(), "the peer Ping was actually read");
+                assert!(ws.io.write_calls >= 2, "the automatic Pong reached transport I/O");
+            }
+            assert_expired_server_performs_no_io(&mut ws, &later_cx);
+        }
+    }
+
+    /// br-asupersync-fmw87f: cancellation on the waiting caller wins over a
+    /// simultaneous expiry, without replacing or restarting the Close budget.
+    #[test]
+    fn server_close_waiters_preserve_cancellation_priority_at_expiry() {
+        use crate::types::Time;
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        for operation in ["recv", "close", "send_close", "pong"] {
+        for expire in [false, true] {
+            let (clock, timer, first_cx) = server_close_clock(100);
+            let (_, _, later_cx) = server_close_clock(1_000_000);
+            let mut io = TestIo::new();
+            io.stall_reads = true;
+            let mut ws = server_close_socket(io, Duration::from_secs(10));
+            assert!(matches!(future::block_on(future::poll_once(
+                ws.send(&first_cx, Message::Close(Some(CloseReason::normal()))))), Some(Ok(()))));
+            ws.io.stall_flush = operation == "send_close";
+            ws.io.stall_writes = operation == "pong";
+            clock.set(Time::from_secs(106));
+            let counter = Arc::new(ServerCloseWake(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            let mut waiting = Box::pin(async {
+                match operation {
+                    "recv" => ws.recv(&later_cx).await.map(|_| ()),
+                    "close" => ws.close(&later_cx, CloseReason::normal()).await,
+                    "send_close" => ws.send(&later_cx, Message::Close(Some(CloseReason::normal()))).await,
+                    "pong" => ws.send(&later_cx, Message::Pong(crate::bytes::Bytes::from_static(b"control"))).await,
+                    _ => unreachable!(),
+                }
+            });
+            assert!(waiting.as_mut().poll(&mut task).is_pending());
+            if expire {
+                clock.set(Time::from_secs(110));
+                assert!(timer.process_timers() > 0);
+            }
+            let before = counter.0.load(Ordering::SeqCst);
+            later_cx.set_cancel_requested(true);
+            assert!(counter.0.load(Ordering::SeqCst) > before, "{operation} did not register cancellation");
+            let result = waiting.as_mut().poll(&mut task);
+            assert!(matches!(result, Poll::Ready(Err(WsError::Io(ref error)))
+                if error.kind() == io::ErrorKind::Interrupted), "{operation}, expire={expire}: {result:?}");
+            drop(waiting);
+            assert!(later_cx.inner.read().cancel_waker_registrations.is_empty());
+            assert!(!ws.close_handshake.timed_out(), "cancellation must win over expiry");
+
+            clock.set(Time::from_secs(110));
+            assert_expired_server_performs_no_io(&mut ws, &Cx::for_testing());
+        }
+        }
+    }
+
+    #[test]
+    fn server_close_retry_before_deadline_preserves_frame_and_peer_reason() {
+        use crate::types::Time;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        for park_flush in [false, true] {
+            let (clock, _, first_cx) = server_close_clock(100);
+            let (_, _, later_cx) = server_close_clock(1_000_000);
+            let mut io = TestIo::with_read_data(encode_client_frame(
+                Frame::close(Some(4002), Some("peer drained"))));
+            if park_flush {
+                io.stall_flush = true;
+            } else {
+                io = io.with_partial_first_write(1);
+            }
+            let mut ws = server_close_socket(io, Duration::from_secs(10));
+            let mut first = Box::pin(ws.send(&first_cx, Message::Close(Some(CloseReason::normal()))));
+            assert!(first.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            drop(first);
+            clock.set(Time::from_secs(106));
+            ws.io.stall_flush = false;
+            let _ambient = Cx::set_current(Some(later_cx.clone()));
+            let received = future::block_on(future::poll_once(ws.recv(&later_cx)));
+            assert!(matches!(received, Some(Ok(Some(Message::Close(Some(ref reason)))))
+                if reason.raw_code == Some(4002) && reason.text.as_deref() == Some("peer drained")),
+                "{received:?}");
+            assert!(ws.is_closed());
+            assert!(!ws.close_handshake.timed_out());
+            assert_eq!(ws.io.written, encode_server_frame(CloseReason::normal().to_frame()));
+            assert_eq!(ws.io.shutdown_calls, 1);
+            let polls = ws.io.io_polls();
+            assert!(matches!(future::block_on(future::poll_once(ws.recv(&later_cx))), Some(Ok(None))));
+            assert_eq!(ws.io.io_polls(), polls, "a consumed peer Close must not repeat shutdown");
+        }
+    }
+
+    #[test]
+    fn server_zero_close_budget_never_polls_transport() {
+        let (_, _, cx) = server_close_clock(100);
+        let mut ws = server_close_socket(TestIo::new(), Duration::ZERO);
+        let sent = future::block_on(future::poll_once(
+            ws.send(&cx, Message::Close(Some(CloseReason::normal())))));
+        assert!(matches!(sent, Some(Ok(()))), "{sent:?}");
+        assert_eq!(ws.io.io_polls(), (0, 0, 0, 0));
+        assert!(ws.is_closed());
+        assert!(ws.close_handshake.timed_out());
+        assert_expired_server_performs_no_io(&mut ws, &cx);
     }
 
     #[test]
