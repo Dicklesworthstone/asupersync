@@ -744,6 +744,11 @@ impl ObservabilityState {
 /// Guard that restores the cancellation mask on drop.
 struct MaskGuard<'a> {
     inner: &'a Arc<parking_lot::RwLock<CxInner>>,
+    /// Whether exiting the outermost mask dispatches wakes to registered
+    /// cancel wakers when cancellation is requested. True for `Cx::masked`;
+    /// cleared by `Cx::masked_poll` when a masked-poll combinator parks with
+    /// remaining masked budget so it does not busy-spin via self-wakes.
+    wake_on_exit: bool,
 }
 
 impl Drop for MaskGuard<'_> {
@@ -754,7 +759,7 @@ impl Drop for MaskGuard<'_> {
             let mut inner = self.inner.write();
             let outermost = inner.mask_depth == 1;
             inner.mask_depth = inner.mask_depth.saturating_sub(1);
-            if outermost && inner.is_cancel_requested() {
+            if outermost && self.wake_on_exit && inner.is_cancel_requested() {
                 // A waiter may have consumed the original cancellation wake
                 // while it was masked. Making cancellation observable again
                 // must wake the current subscribers after releasing the lock.
@@ -769,6 +774,44 @@ impl Drop for MaskGuard<'_> {
             self.inner,
             super::cancel_observation::CancelObservation::MaskExit,
         );
+        effects.dispatch();
+    }
+}
+
+/// RAII guard for masked-poll combinators that suppress `MaskGuard::drop`'s
+/// unmask wake on `Poll::Pending` while masked poll budget remains.
+///
+/// Declare this guard before the polled inner future so that if the combinator
+/// is dropped while parked, the inner future drops first (retiring its own
+/// cancel-waker registration) and this guard then wakes any remaining
+/// cancel-waker subscribers if the context is now unmasked.
+pub(crate) struct MaskedPollWakeGuard<'a> {
+    inner: &'a Arc<parking_lot::RwLock<CxInner>>,
+    suppressed: bool,
+}
+
+impl MaskedPollWakeGuard<'_> {
+    #[inline]
+    pub(crate) fn set_suppressed(&mut self, suppressed: bool) {
+        self.suppressed = suppressed;
+    }
+}
+
+impl Drop for MaskedPollWakeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.suppressed {
+            return;
+        }
+        let effects = {
+            let mut inner = self.inner.write();
+            if inner.mask_depth == 0 && inner.is_cancel_requested() {
+                let wakers = inner.cancel_waker_snapshot();
+                inner.cancel_wakers_pending = false;
+                crate::types::task_context::CancelWakeEffects::new(wakers)
+            } else {
+                crate::types::task_context::CancelWakeEffects::empty()
+            }
+        };
         effects.dispatch();
     }
 }
@@ -3494,12 +3537,69 @@ impl<Caps> Cx<Caps> {
             inner.mask_depth += 1;
         }
 
-        let _guard = MaskGuard { inner: &self.inner };
+        let _guard = MaskGuard {
+            inner: &self.inner,
+            wake_on_exit: true,
+        };
         super::cancel_observation::record(
             &self.inner,
             super::cancel_observation::CancelObservation::MaskEnter,
         );
         f()
+    }
+
+    /// Creates a drop guard paired with [`Self::masked_poll`].
+    #[inline]
+    pub(crate) fn masked_poll_guard(&self) -> MaskedPollWakeGuard<'_> {
+        MaskedPollWakeGuard {
+            inner: &self.inner,
+            suppressed: false,
+        }
+    }
+
+    /// Runs a single poll closure with cancellation masked, optionally
+    /// suppressing the outermost unmask cancel-waker wakeup when the poll
+    /// returns `Poll::Pending` and more masked polls remain.
+    ///
+    /// Returns `(poll_result, suppressed_wake)`. Callers must record
+    /// `suppressed_wake` on a [`MaskedPollWakeGuard`] declared before the
+    /// polled future so dropping the combinator while parked still wakes any
+    /// surviving subscribers.
+    pub(crate) fn masked_poll<F, T>(
+        &self,
+        keep_parked_on_pending: bool,
+        f: F,
+    ) -> (std::task::Poll<T>, bool)
+    where
+        F: FnOnce() -> std::task::Poll<T>,
+    {
+        {
+            let mut inner = self.inner.write();
+            assert!(
+                inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
+                 and prevents cancellation from ever being observed. \
+                 Reduce nesting of Cx::masked() sections.",
+                crate::types::task_context::MAX_MASK_DEPTH,
+            );
+            inner.mask_depth += 1;
+        }
+
+        let mut guard = MaskGuard {
+            inner: &self.inner,
+            wake_on_exit: true,
+        };
+        super::cancel_observation::record(
+            &self.inner,
+            super::cancel_observation::CancelObservation::MaskEnter,
+        );
+        let polled = f();
+        let suppressed_wake = keep_parked_on_pending && polled.is_pending();
+        if suppressed_wake {
+            guard.wake_on_exit = false;
+        }
+        drop(guard);
+        (polled, suppressed_wake)
     }
 
     /// Traces an event for observability.

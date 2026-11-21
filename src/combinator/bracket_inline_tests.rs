@@ -396,6 +396,97 @@
     }
 
     #[test]
+    fn commit_section_parks_cancelled_oneshot_without_self_waking_until_budget_exhausted() {
+        struct CountWaker(AtomicUsize);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        let (tx, mut rx) = crate::channel::oneshot::channel::<i32>();
+        let wakes = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(commit_section(&cx, 3, rx.recv(&cx)));
+
+        // Polls 1 and 2 still have masked budget left: parking must NOT
+        // self-wake through MaskGuard::drop and spin through the budget.
+        assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        // External completion wakes once and delivers the committed value.
+        let sender_cx = test_cx();
+        tx.send(&sender_cx, 99).expect("receiver still waiting");
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(fut.as_mut().poll(&mut task_cx), Poll::Ready(Ok(99)));
+    }
+
+    #[test]
+    fn commit_section_wakes_on_final_masked_poll_and_on_drop_for_other_waiters() {
+        struct CountWaker(AtomicUsize);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // Case 1: hitting max_polls dispatches the unmask wake so the next
+        // poll runs unmasked and observes cancellation.
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        let (_tx, mut rx) = crate::channel::oneshot::channel::<i32>();
+        let wakes = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(commit_section(&cx, 2, rx.recv(&cx)));
+
+        assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        // Poll 2 exhausts the masked budget -> wakes so poll 3 observes cancel.
+        assert!(fut.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled))
+        );
+
+        // Case 2: dropping while parked wakes surviving external waiters.
+        let cx2 = test_cx();
+        cx2.set_cancel_requested(true);
+        let other_wakes = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let other_token = cx2.refresh_cancel_waker(None, &Waker::from(Arc::clone(&other_wakes)));
+        let (_tx2, mut rx2) = crate::channel::oneshot::channel::<i32>();
+        let inner_wakes = Arc::new(CountWaker(AtomicUsize::new(0)));
+        let inner_waker = Waker::from(Arc::clone(&inner_wakes));
+        let mut inner_task = Context::from_waker(&inner_waker);
+        let mut fut2 = Box::pin(commit_section(&cx2, 5, rx2.recv(&cx2)));
+
+        assert!(fut2.as_mut().poll(&mut inner_task).is_pending());
+        assert_eq!(inner_wakes.0.load(Ordering::SeqCst), 0);
+        assert_eq!(other_wakes.0.load(Ordering::SeqCst), 0);
+
+        drop(fut2);
+        // Inner future dropped first (retiring inner_waker), then wake_guard
+        // woke surviving subscribers (other_waker) without waking inner_waker.
+        assert_eq!(inner_wakes.0.load(Ordering::SeqCst), 0);
+        assert_eq!(other_wakes.0.load(Ordering::SeqCst), 1);
+        cx2.clear_cancel_waker(other_token);
+    }
+
+    #[test]
     fn commit_section_nested_masking_is_idempotent_once_budget_is_sufficient() {
         let cx = test_cx();
         cx.set_cancel_requested(true);

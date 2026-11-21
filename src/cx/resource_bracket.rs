@@ -282,6 +282,7 @@ where
     Fut: Future<Output = Outcome<T, E>>,
 {
     let callback_mask = mask.filter(|(_, limit)| *limit != 0).map(|(cx, _)| cx);
+    let mut wake_guard = callback_mask.map(Cx::masked_poll_guard);
     let constructed = catch_unwind(AssertUnwindSafe(|| under_mask(callback_mask, factory)));
     let mut future = match constructed {
         Ok(future) => Box::pin(future),
@@ -291,13 +292,27 @@ where
     };
     let mut masked_polls = 0;
     let outcome = poll_fn(|task_cx| {
-        let poll_mask = mask.filter(|(_, limit)| masked_polls < *limit).map(|(cx, _)| cx);
-        if poll_mask.is_some() { masked_polls += 1; }
-        match catch_unwind(AssertUnwindSafe(|| {
-            under_mask(poll_mask, || future.as_mut().poll(task_cx))
-        })) {
-            Ok(poll) => poll,
-            Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+        if let Some((cx, limit)) = mask.filter(|(_, limit)| masked_polls < *limit) {
+            masked_polls += 1;
+            let keep_parked = masked_polls < limit;
+            let (polled, suppressed) = cx.masked_poll(keep_parked, || {
+                match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task_cx))) {
+                    Ok(poll) => poll,
+                    Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+                }
+            });
+            if let Some(guard) = wake_guard.as_mut() {
+                guard.set_suppressed(suppressed);
+            }
+            polled
+        } else {
+            if let Some(guard) = wake_guard.as_mut() {
+                guard.set_suppressed(false);
+            }
+            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task_cx))) {
+                Ok(poll) => poll,
+                Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+            }
         }
     }).await;
     let retirement_panic = catch_unwind(AssertUnwindSafe(|| {

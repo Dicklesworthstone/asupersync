@@ -610,6 +610,7 @@ async fn run_handler<E: Send + Sync + 'static, X: Send + 'static>(
 
 async fn invoke<'a, X: 'a>(action: impl FnOnce() -> EventHandlerFuture<'a, X>, mask: Option<&Cx>)
     -> Outcome<(), X> {
+    let mut wake_guard = mask.map(Cx::masked_poll_guard);
     let constructed = if let Some(cx) = mask {
         cx.masked(|| catch_unwind(AssertUnwindSafe(action)))
     } else {
@@ -620,14 +621,22 @@ async fn invoke<'a, X: 'a>(action: impl FnOnce() -> EventHandlerFuture<'a, X>, m
         Err(payload) => return Outcome::Panicked(panic_payload(payload)),
     };
     let result = poll_fn(|task| {
-        let polled = if let Some(cx) = mask {
-            cx.masked(|| catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task))))
+        if let Some(cx) = mask {
+            let (polled, suppressed) = cx.masked_poll(true, || {
+                match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task))) {
+                    Ok(result) => result,
+                    Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+                }
+            });
+            if let Some(guard) = wake_guard.as_mut() {
+                guard.set_suppressed(suppressed);
+            }
+            polled
         } else {
-            catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task)))
-        };
-        match polled {
-            Ok(result) => result,
-            Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task))) {
+                Ok(result) => result,
+                Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+            }
         }
     }).await;
     let dropped = if let Some(cx) = mask {
