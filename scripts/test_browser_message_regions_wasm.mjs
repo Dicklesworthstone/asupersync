@@ -1,6 +1,6 @@
 /**
- * Region-owned reception over actual SDK source, the checked-in WASM ABI,
- * and Node's native MessageChannel/BroadcastChannel/WebSocket implementations.
+ * Region-owned operations over actual SDK source, the checked-in WASM ABI,
+ * and Node's native message, WebSocket, and WHATWG stream implementations.
  * This harness supplies browser-like globals for SDK admission; it is not a
  * browser-engine run, a Rust rebuild, or proof of Rust executor dispatch.
  * node --unhandled-rejections=strict --experimental-vm-modules --test scripts/test_browser_message_regions_wasm.mjs
@@ -21,6 +21,7 @@ const files = [
   ["@asupersync/browser-core", "packages/browser-core/index.js", false],
   ["./fetch.js", "packages/browser/src/fetch.ts", true],
   ["./websocket.js", "packages/browser/src/websocket.ts", true],
+  ["./stream-pipe.js", "packages/browser/src/stream-pipe.ts", true],
   ["./asupersync.js", "packages/browser-core/asupersync.js", false],
   ["./webtransport-streams.js", "packages/browser-core/webtransport-streams.js", false],
 ];
@@ -36,7 +37,7 @@ const wasmBytes = readFileSync(new URL(`../${wasmPath}`, import.meta.url));
 hashes[wasmPath] = createHash("sha256").update(wasmBytes).digest("hex");
 console.log(JSON.stringify({
   scenario_id: "browser-message-regions-packaged-wasm",
-  evidence_scope: "actual SDK, checked-in generated JS/WASM ABI, native Node message and WebSocket hosts",
+  evidence_scope: "actual SDK, checked-in generated JS/WASM ABI, native Node message, WebSocket, and stream hosts",
   no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch"],
   source_sha256: hashes,
 }));
@@ -490,4 +491,308 @@ test("WASM owner starts message cleanup while native fetch cancellation awaits i
   assert.equal(fetchCleanupStarted, true);
   assert.equal(messageEndpointClosed, true);
   assert.equal(body.locked, false);
+});
+
+function pipeDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+async function pipePending(promise) {
+  let settled = false;
+  void promise.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "owned pipe completion cannot outrun native cleanup");
+}
+function parkedPipe(source = {}, sink = {}) {
+  return {
+    readable: new ReadableStream(source, { highWaterMark: 0 }),
+    writable: new WritableStream(sink),
+  };
+}
+function pipeUnlocked(readable, writable) {
+  assert.equal(readable.locked, false, "native readable lock released");
+  assert.equal(writable.locked, false, "native writable lock released");
+}
+
+test("WASM stream pipe preserves arbitrary chunks and owns the task through sink close", { timeout: 5000 }, async t => {
+  const closingSink = pipeDeferred(), release = pipeDeferred();
+  t.after(release.resolve);
+  const { scope, snapshot } = await fixture(t);
+  const chunks = [{ sequence: 1 }, "text", Uint8Array.of(0, 255), undefined, null];
+  const received = [];
+  let next = 0;
+  const { readable, writable } = parkedPipe({
+    pull(controller) {
+      if (next === chunks.length) controller.close();
+      else controller.enqueue(chunks[next++]);
+    },
+  }, {
+    write(chunk) { received.push(chunk); },
+    close() { closingSink.resolve(); return release.promise; },
+  });
+  assert.equal(snapshot().tasks.total, 0);
+  const handle = ok(scope.pipeTo(readable, writable));
+  assert.equal(snapshot().tasks.total, 1, "pipe admission creates an actual checked-in ABI task");
+  await bounded(closingSink.promise);
+  await pipePending(handle.closed);
+  assert.equal(snapshot().tasks.total, 1, "sink close still belongs to the live task");
+  assert.equal(received.length, chunks.length);
+  for (let i = 0; i < chunks.length; i++) assert.equal(received[i], chunks[i]);
+  release.resolve();
+  ok(await bounded(handle.closed));
+  ok(await bounded(handle.retire()));
+  pipeUnlocked(readable, writable);
+  assert.equal(snapshot().tasks.total, 0);
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+  ok(await bounded(scope.closeAsync()));
+});
+
+test("WASM scope close waits for a parked pipe write and both native cleanup promises", { timeout: 5000 }, async t => {
+  const writing = pipeDeferred(), releaseWrite = pipeDeferred();
+  const aborting = pipeDeferred(), releaseAbort = pipeDeferred();
+  const cancelling = pipeDeferred(), releaseCancel = pipeDeferred();
+  t.after(() => { releaseWrite.resolve(); releaseAbort.resolve(); releaseCancel.resolve(); });
+  const { scope, snapshot } = await fixture(t);
+  let pulled = false;
+  const events = [];
+  const { readable, writable } = parkedPipe({
+    pull(controller) { if (!pulled) { pulled = true; controller.enqueue("pending write"); } },
+    cancel() { events.push("source cancel"); cancelling.resolve(); return releaseCancel.promise; },
+  }, {
+    write() { events.push("write"); writing.resolve(); return releaseWrite.promise; },
+    abort() { events.push("sink abort"); aborting.resolve(); return releaseAbort.promise; },
+    close() { assert.fail("cancelled pipe must not report graceful sink close"); },
+  });
+  const handle = ok(scope.pipeTo(readable, writable));
+  await bounded(writing.promise);
+  const closing = scope.closeAsync();
+  await pipePending(closing);
+  await pipePending(handle.closed);
+  assert.equal(snapshot().tasks.total, 1);
+  const unused = parkedPipe();
+  assert.equal(scope.pipeTo(unused.readable, unused.writable).outcome, "err");
+  pipeUnlocked(unused.readable, unused.writable);
+  releaseWrite.resolve();
+  await bounded(Promise.all([aborting.promise, cancelling.promise]));
+  await pipePending(closing);
+  releaseAbort.resolve();
+  await pipePending(closing);
+  assert.equal(snapshot().tasks.total, 1);
+  releaseCancel.resolve();
+  ok(await bounded(closing));
+  assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+  assert.deepEqual(events, ["write", "sink abort", "source cancel"]);
+  pipeUnlocked(readable, writable);
+  assert.equal(snapshot().tasks.total, 0);
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+  console.log(JSON.stringify({
+    scenario_id: "browser-pipe-native-cleanup-packaged-wasm",
+    wasm_task_counts: [0, 1, 1, 0],
+    pending_owner_close_before_native_cleanup: true,
+    native_readable_locked: readable.locked, native_writable_locked: writable.locked,
+    evidence_scope: "actual SDK; checked-in JS/WASM handle ledger; native Node WHATWG streams",
+    no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch", "arbitrary-chunk byte bounds"],
+  }));
+});
+
+test("WASM ancestor close drains descendant pipes while a sibling remains live", { timeout: 5000 }, async t => {
+  const { runtime, scope, snapshot } = await fixture(t);
+  const child = ok(scope.enterScope("pipe-child"));
+  const grandchild = ok(child.enterScope("pipe-grandchild"));
+  const sibling = ok(runtime.enterScope("pipe-sibling"));
+  const first = parkedPipe(), second = parkedPipe(), independent = parkedPipe();
+  const a = ok(child.pipeTo(first.readable, first.writable));
+  const b = ok(grandchild.pipeTo(second.readable, second.writable));
+  const c = ok(sibling.pipeTo(independent.readable, independent.writable));
+  assert.equal(snapshot().tasks.total, 3);
+  ok(await bounded(scope.closeAsync()));
+  assert.equal((await bounded(a.closed)).outcome, "cancelled");
+  assert.equal((await bounded(b.closed)).outcome, "cancelled");
+  await pipePending(c.closed);
+  assert.equal(snapshot().tasks.total, 1, "ancestor closure must preserve independent ownership");
+  pipeUnlocked(first.readable, first.writable);
+  pipeUnlocked(second.readable, second.writable);
+  ok(await bounded(sibling.closeAsync()));
+  assert.equal((await bounded(c.closed)).outcome, "cancelled");
+  pipeUnlocked(independent.readable, independent.writable);
+  assert.equal(snapshot().tasks.total, 0);
+});
+
+test("WASM runtime close drains every native stream pipe", { timeout: 5000 }, async t => {
+  const { runtime, scope, closeRuntime, snapshot } = await fixture(t);
+  const other = ok(runtime.enterScope("second-pipe-root"));
+  const first = parkedPipe(), second = parkedPipe();
+  const handles = [ok(scope.pipeTo(first.readable, first.writable)),
+    ok(other.pipeTo(second.readable, second.writable))];
+  assert.equal(snapshot().tasks.total, 2);
+  await closeRuntime();
+  for (const handle of handles) assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+  pipeUnlocked(first.readable, first.writable);
+  pipeUnlocked(second.readable, second.writable);
+  assert.equal(snapshot().tasks.total, 0);
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+});
+
+test("WASM pipe cancellation borrows the caller signal without mutating it", { timeout: 5000 }, async t => {
+  const { scope, snapshot } = await fixture(t);
+  const controller = new AbortController();
+  const add = controller.signal.addEventListener, remove = controller.signal.removeEventListener;
+  const before = getEventListeners(controller.signal, "abort").length;
+  const first = parkedPipe();
+  const a = ok(scope.pipeTo(first.readable, first.writable, { signal: controller.signal }));
+  assert.equal((await bounded(a.cancel("caller cancellation"))).outcome, "cancelled");
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(controller.signal.addEventListener, add);
+  assert.equal(controller.signal.removeEventListener, remove);
+  assert.equal(getEventListeners(controller.signal, "abort").length, before);
+  assert.equal(snapshot().tasks.total, 0);
+  pipeUnlocked(first.readable, first.writable);
+
+  const second = parkedPipe();
+  const b = ok(scope.pipeTo(second.readable, second.writable, { signal: controller.signal }));
+  const reason = { private: "caller-owned signal reason" };
+  controller.abort(reason);
+  assert.equal((await bounded(b.closed)).outcome, "cancelled");
+  assert.equal(controller.signal.reason, reason);
+  assert.equal(snapshot().tasks.total, 0);
+  pipeUnlocked(second.readable, second.writable);
+});
+
+test("WASM pipe admission leaves locked, pre-aborted, and untracked sources untouched", { timeout: 5000 }, async t => {
+  const { sdk, scope, snapshot } = await fixture(t);
+  let pulls = 0, cancels = 0, aborts = 0;
+  const { readable, writable } = parkedPipe({
+    pull() { pulls++; }, cancel() { cancels++; },
+  }, { abort() { aborts++; } });
+  const reader = readable.getReader();
+  assert.equal(scope.pipeTo(readable, writable).outcome, "err");
+  reader.releaseLock();
+  const writer = writable.getWriter();
+  assert.equal(scope.pipeTo(readable, writable).outcome, "err");
+  writer.releaseLock();
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(scope.pipeTo(readable, writable, { signal: controller.signal }).outcome, "cancelled");
+  const rawChild = ok(sdk.scopeEnter({ parent: scope.core, label: "raw-pipe-child" }));
+  const untracked = new sdk.RegionHandle(rawChild);
+  assert.equal(untracked.pipeTo(readable, writable).outcome, "err");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual([pulls, cancels, aborts, snapshot().tasks.total], [0, 0, 0, 0]);
+  pipeUnlocked(readable, writable);
+});
+
+test("WASM native pipe cleanup failure is not a successful owner drain", { timeout: 5000 }, async t => {
+  const { scope, snapshot } = await fixture(t);
+  const { readable, writable } = parkedPipe({}, {
+    abort() { throw new Error("PRIVATE_PIPE_CLEANUP_DETAIL"); },
+  });
+  const handle = ok(scope.pipeTo(readable, writable));
+  const closing = await bounded(scope.closeAsync());
+  assert.equal(closing.outcome, "err");
+  const terminal = await bounded(handle.closed);
+  assert.equal(terminal.outcome, "err");
+  assert.doesNotMatch(JSON.stringify({ closing, terminal }), /PRIVATE_PIPE_CLEANUP_DETAIL/);
+  pipeUnlocked(readable, writable);
+  assert.equal(snapshot().tasks.total, 0, "settled failure still retires the terminal ABI task");
+  ok(await bounded(scope.closeAsync()));
+});
+
+test("WASM synchronous scope close preserves live-pipe ownership on ABI refusal", { timeout: 5000 }, async t => {
+  const { scope, snapshot } = await fixture(t);
+  const { readable, writable } = parkedPipe();
+  const handle = ok(scope.pipeTo(readable, writable));
+  const closing = scope.close();
+  if (closing.outcome === "ok") {
+    assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+    pipeUnlocked(readable, writable);
+  } else {
+    assert.equal(closing.outcome, "err");
+    assert.equal(snapshot().tasks.total, 1);
+    await pipePending(handle.closed);
+    ok(await bounded(scope.closeAsync()));
+    assert.equal((await bounded(handle.closed)).outcome, "cancelled");
+    pipeUnlocked(readable, writable);
+  }
+  assert.equal(snapshot().tasks.total, 0);
+});
+
+test("WASM scope drain unifies live HTTP fetch with a backpressured owned pipe", { timeout: 5000 }, async t => {
+  const writing = pipeDeferred(), releaseWrite = pipeDeferred();
+  const aborting = pipeDeferred(), releaseAbort = pipeDeferred(), disconnected = pipeDeferred();
+  const payload = Buffer.from([4, 8, 15, 16, 23, 42]);
+  let requests = 0, peerEnded = false, sinkCloses = 0;
+  const received = [];
+  const server = createServer((_request, response) => {
+    requests++;
+    response.on("error", () => {});
+    response.on("close", disconnected.resolve);
+    response.writeHead(200, { "content-type": "application/octet-stream" });
+    response.flushHeaders();
+    response.write(payload);
+    // Deliberately keep the response open: received bytes are evidence of live
+    // streaming and owner cancellation must disconnect this real HTTP peer.
+    peerEnded = response.writableEnded;
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    releaseWrite.resolve();
+    releaseAbort.resolve();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const origin = "http://127.0.0.1:" + server.address().port;
+  const { scope, snapshot } = await fixture(t, {
+    globals: { fetch },
+    runtimeOptions: {
+      fetchAuthority: { allowedOrigins: [origin], allowedMethods: ["GET"] },
+    },
+  });
+  const request = ok(scope.fetch({ url: origin + "/owned-live-pipe" }));
+  assert.equal(ok(await bounded(request.response())).status, 200);
+  const readable = ok(request.toReadableStream());
+  const writable = new WritableStream({
+    write(bytes) {
+      received.push(...bytes);
+      writing.resolve();
+      return releaseWrite.promise;
+    },
+    abort() { aborting.resolve(); return releaseAbort.promise; },
+    close() { sinkCloses++; },
+  });
+  const pipe = ok(scope.pipeTo(readable, writable));
+  await bounded(writing.promise);
+  assert.deepEqual(received, [...payload]);
+  assert.equal(peerEnded, false, "the real response has not reached EOF");
+  assert.equal(requests, 1);
+  assert.equal(snapshot().tasks.total, 2, "fetch and pipe have independent owned tasks");
+  await pipePending(request.closed);
+  await pipePending(pipe.closed);
+
+  const closing = scope.closeAsync();
+  await bounded(disconnected.promise);
+  assert.equal((await bounded(request.closed)).outcome, "cancelled");
+  await pipePending(closing);
+  assert.equal(snapshot().tasks.total, 1, "pipe still owns the in-flight native sink write");
+  releaseWrite.resolve();
+  await bounded(aborting.promise);
+  await pipePending(closing);
+  await pipePending(pipe.closed);
+  releaseAbort.resolve();
+
+  ok(await bounded(closing));
+  assert.equal((await bounded(pipe.closed)).outcome, "cancelled",
+    "normal owner cancellation of the fetch source is not a pipe cleanup failure");
+  assert.equal(sinkCloses, 0);
+  pipeUnlocked(readable, writable);
+  assert.equal(snapshot().tasks.total, 0);
+  assert.equal(snapshot().tasks.cleanup_pending, 0);
+  console.log(JSON.stringify({
+    scenario_id: "browser-fetch-pipe-owned-drain-packaged-wasm",
+    live_streamed_bytes: received.length, requests, peer_response_reached_eof: peerEnded,
+    peer_disconnected_before_owner_close: true, native_sink_abort_awaited: true,
+    wasm_task_counts: [0, 2, 1, 0],
+    evidence_scope: "actual SDK; checked-in JS/WASM handle ledger; native Node fetch/HTTP/WHATWG streams",
+    no_claim: ["browser-engine execution", "Rust rebuild", "Rust executor dispatch"],
+  }));
 });

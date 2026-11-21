@@ -415,6 +415,13 @@ Stable operator markers are `capability_not_granted`,
 `ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
 `ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED`.
 
+For an existing pair of native stream endpoints, the additive
+[`RegionHandle.pipeTo()`](browser_stream_pipes.md) API owns the transfer through
+the region's task ledger. Asynchronous scope/runtime closure waits for native
+backpressure, cancellation, sink cleanup, and lock release. This transfers
+existing endpoint authority and does not change the standalone byte helpers or
+expose the Rust `AsyncRead`/`AsyncWrite` bridge.
+
 ### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
 
 These items have real Rust implementations but are not yet exposed in the

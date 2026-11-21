@@ -81,6 +81,7 @@ import {
   type FetchStreamHandle,
 } from "./fetch.js";
 import { createBrowserWebSocketManager, type BrowserWebSocketHandle, type BrowserWebSocketOptions } from "./websocket.js";
+import { createBrowserStreamPipeManager, type BrowserStreamPipeHandle, type BrowserStreamPipeOptions } from "./stream-pipe.js";
 export { BROWSER_FETCH_LIMITS } from "./fetch.js";
 export type { BrowserFetchOptions, BrowserFetchResponse, BrowserFetchRead, FetchStreamHandle } from "./fetch.js";
 export { BROWSER_WEBSOCKET_LIMITS } from "./websocket.js";
@@ -88,6 +89,7 @@ export type {
   BrowserWebSocketHandle, BrowserWebSocketOptions, BrowserWebSocketMessage,
   BrowserWebSocketRead, BrowserWebSocketReady, BrowserWebSocketCloseOptions,
 } from "./websocket.js";
+export type { BrowserStreamPipeHandle, BrowserStreamPipeOptions } from "./stream-pipe.js";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
@@ -6197,6 +6199,12 @@ const SDK_WEBSOCKETS = createBrowserWebSocketManager({
   isTracked: browserMessageScopeIsTracked,
 });
 
+const SDK_STREAM_PIPES = createBrowserStreamPipeManager({
+  globalObject: defaultGlobalObject,
+  isClosing: browserOwnerIsClosing,
+  isTracked: browserMessageScopeIsTracked,
+});
+
 // Reliable streams share the existing SDK session and its task/region owner.
 // This stable adapter is the shared manager's identity; it creates no transport
 // or additional runtime task and never exposes the handle's authority token.
@@ -6591,6 +6599,7 @@ function cancelBrowserTask(
   }
   SDK_FETCHES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   SDK_WEBSOCKETS.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
+  SDK_STREAM_PIPES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
     const receipt = settleWebTransportTask(ownedTask, terminal, version,
@@ -6619,6 +6628,7 @@ function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   const ownerKeys = deleteOwnedRegionKeys(browserWebTransportStateKey(handle));
   SDK_FETCHES.closeScopes(ownerKeys, "scope_close");
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "scope_close");
+  SDK_STREAM_PIPES.closeScopes(ownerKeys, "scope_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
 }
@@ -6629,14 +6639,17 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   RUNTIME_FETCH_GRANTS.delete(rootKey);
   SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
   SDK_WEBSOCKETS.closeScopes(ownerKeys, "runtime_close");
+  SDK_STREAM_PIPES.closeScopes(ownerKeys, "runtime_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
 }
 
 async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
   // Start all cancellations before waiting on a host. Fetch cleanup may
-  // itself depend on a message endpoint reaching its terminal state.
+  // itself depend on a message endpoint reaching its terminal state. Pipes
+  // enter native shutdown before their independently owned sources are stopped.
   const receipts = await Promise.all([
+    SDK_STREAM_PIPES.drainScopes(ownerKeys, kind),
     SDK_FETCHES.drainScopes(ownerKeys, kind),
     SDK_WEBSOCKETS.drainScopes(ownerKeys, kind),
     drainOwnedBrowserMessageStreams(ownerKeys, kind),
@@ -6914,7 +6927,7 @@ export class BrowserRuntime {
   }
 
   /**
-   * Cancel and await owned fetches, WebSockets and message receivers, then close the runtime through
+   * Cancel and await owned fetches, stream pipes, WebSockets and message receivers, then close the runtime through
    * the ABI. Other ABI close restrictions still apply. Failed attempts
    * restore fetch admission; a host that never settles keeps cleanup pending.
    */
@@ -6986,7 +6999,7 @@ export class RegionHandle {
   }
 
   /**
-   * Drain fetches, WebSockets and message receivers in this scope and its descendants before the ABI
+   * Drain fetches, stream pipes, WebSockets and message receivers in this scope and its descendants before the ABI
    * close. Admission is fenced while draining. ABI close errors propagate
    * unchanged; synchronous close and withScope keep their existing behavior.
    */
@@ -7079,6 +7092,39 @@ export class RegionHandle {
     const laneOutcome = this.runtime?.laneAvailabilityOutcome("receive browser-native messages");
     if (laneOutcome) return laneOutcome;
     return startOwnedBrowserMessageStream(this.core, source, options, consumerVersion);
+  }
+
+  /**
+   * Transfer existing native stream endpoints to one region-owned pipeline.
+   * Native pipeTo preserves chunks and backpressure, closes the destination on
+   * source EOF, and cancels/aborts both endpoints on failure or cancellation.
+   * closeAsync joins that cleanup and lock release before releasing this owner.
+   * No network authority, byte conversion, queue bound, or Rust I/O bridge is
+   * created. The caller must stop using both endpoints after admission succeeds.
+   */
+  pipeTo<T>(
+    readable: ReadableStream<T>,
+    writable: WritableStream<T>,
+    options: BrowserStreamPipeOptions = {},
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): BrowserOutcome<BrowserStreamPipeHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome("pipe browser-native streams");
+    if (laneOutcome) return laneOutcome;
+    try {
+      const scope = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      return SDK_STREAM_PIPES.start(browserWebTransportStateKey(scope), () => {
+        const spawned = taskSpawn({ scope, label: "browser-stream-pipe", cancel_kind: "stream_pipe_cancel" }, version);
+        if (spawned.outcome !== "ok") return spawned;
+        const task = snapshotTaskHandle(spawned.value);
+        return OutcomeFactory.ok({
+          key: browserWebTransportStateKey(task),
+          cancel: (kind: string, message: string) => taskCancel({ task, kind, message }, version),
+          join: (outcome: BrowserOutcome<void>) => taskJoin(task,
+            outcome.outcome === "ok" ? OutcomeFactory.ok(undefined) : outcome, version) as BrowserOutcome<void>,
+        });
+      }, readable, writable, options);
+    } catch { return OutcomeFactory.err("compatibility_rejected", "permanent", "Stream piping requires a valid SDK region and native endpoints."); }
   }
 
   /**
