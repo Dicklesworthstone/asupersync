@@ -90,6 +90,17 @@ export interface ReliableStreamManager<
    */
   whenClosed(state: State): Promise<Outcome<never>>;
 
+  /**
+   * Observe successful reliable-stream retirement independently of the owner
+   * outcome. Waits for closeSession and the same complete drain barrier, then
+   * returns ok(undefined) only if every observed native cancel, abort and lock
+   * release succeeded. A throwing acquisition leaves cleanup unconfirmed.
+   * Failures from previously completed children, incoming readers and late
+   * admissions remain sticky; this bounded immutable receipt never retries cleanup.
+   * Datagrams and the native transport connection are still excluded.
+   */
+  whenRetired(state: State): Promise<Outcome<void>>;
+
   /** Latch closure and return the same barrier, without changing closeSession. */
   closeSessionAndDrain(state: State, outcome: Outcome<never>): Promise<Outcome<never>>;
 }

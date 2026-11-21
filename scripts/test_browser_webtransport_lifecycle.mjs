@@ -1469,17 +1469,23 @@ test("WTS-DRAIN-EMPTY: share a passive barrier and preserve the first owner outc
   assert.equal(core.webtransportStreamsClosed, core.webtransport_streams_closed);
   const state = [...core.hostSessions.values()][0];
   const barrier = core.webtransport_streams_closed({ session });
+  const retired = core.streamManager.whenRetired(state);
   assert.equal(core.webtransport_streams_closed({ session }), barrier);
   assert.equal(core.streamManager.whenClosed(state), barrier);
+  assert.equal(core.streamManager.whenRetired(state), retired);
   let drained = false;
+  let retirementObserved = false;
   void barrier.then(() => { drained = true; });
+  void retired.then(() => { retirementObserved = true; });
   await turn();
   assert.equal(drained, false, "zero live streams must not imply a closed owner");
+  assert.equal(retirementObserved, false, "strict retirement must await owner closure too");
   assert.equal(host.events.length, 0, "observation neither closes nor admits host work");
   const primary = core.Outcome.err("internal_failure", "transient", "primary shutdown cause");
   assert.equal(core.streamManager.closeSessionAndDrain(state, primary), barrier);
   assert.equal(core.streamManager.closeSession(state, core.Outcome.panicked("later cause")), undefined);
   assert.equal(await barrier, primary);
+  assert.deepEqual(normalize(await retired), { outcome: "ok", value: undefined });
   assert.equal(await core.streamManager.whenClosed(state), primary);
   assert.equal((await core.webtransport_open_stream({ session })).outcome, "err");
   core.scope_close(scope);
@@ -1503,13 +1509,16 @@ test("WTS-DRAIN-ALL: await active I/O, both admission receipts, and late cleanup
   const opening = core.webtransport_open_stream({ session });
   const accepting = core.webtransport_accept_unidirectional_stream({ session });
   const barrier = core.webtransport_streams_closed({ session });
+  const retired = core.streamManager.whenRetired([...core.hostSessions.values()][0]);
   await turn();
   assert.deepEqual(active.events, [["write", [1, 2]]]);
   assert.equal(creations, 2, "creation reached the host before shutdown");
   assert.equal(host.events.filter(([kind]) => kind === "incoming-unidirectional-pull").length, 1);
   core.scope_close(scope);
   let drained = false;
+  let retirementObserved = false;
   void barrier.then(() => { drained = true; });
+  void retired.then(() => { retirementObserved = true; });
   await turn();
   assert.equal(drained, false);
   writeGate.resolve();
@@ -1525,9 +1534,11 @@ test("WTS-DRAIN-ALL: await active I/O, both admission receipts, and late cleanup
   await turn();
   assert.equal(late.events.filter(([kind]) => kind === "cancel").length, 1);
   assert.equal(drained, false, "late creation must finish its cleanup too");
+  assert.equal(retirementObserved, false, "strict retirement includes late native cleanup");
   lateGate.resolve();
   const opened = await opening;
   const terminal = await barrier;
+  assert.deepEqual(normalize(await retired), { outcome: "ok", value: undefined });
   assert.equal(opened.outcome, "cancelled");
   assert.deepEqual(normalize(terminal), normalize(opened));
   assert.equal(terminal.cancellation.message, "scope_close");
@@ -1642,6 +1653,7 @@ test("WTS-DRAIN-CLEANUP-REJECTIONS: await every attempt while preserving the own
   host.incomingBidi.enqueue(wire);
   const child = await incomingStream(core, session);
   const barrier = core.webtransport_streams_closed({ session });
+  const retired = core.streamManager.whenRetired([...core.hostSessions.values()][0]);
   const pending = core.webtransport_accept_unidirectional_stream({ session });
   await turn();
   core.scope_close(scope);
@@ -1651,6 +1663,10 @@ test("WTS-DRAIN-CLEANUP-REJECTIONS: await every attempt while preserving the own
   assert.equal(drained, false, "rejected child cleanup does not bypass the remaining collection cleanup");
   cleanup.reject(new Error("collection cleanup rejected"));
   const terminal = await barrier;
+  const retirement = await retired;
+  assert.equal(retirement.outcome, "err", "settled cleanup is not successful retirement");
+  assert.equal(retirement.failure.code, "internal_failure");
+  assert.equal(retirement.failure.message, "WebTransport reliable stream cleanup failed; successful retirement is unconfirmed");
   assert.equal(terminal.outcome, "cancelled");
   assert.equal(terminal.cancellation.message, "scope_close");
   assert.equal((await pending).outcome, "cancelled");
@@ -1682,4 +1698,155 @@ test("WTS-DRAIN-AUTHORITY: reject unrelated and throwing handles without changin
   assert.equal(calls.join.length, 0);
   core.scope_close(scope);
   assert.equal((await barrier).outcome, "cancelled");
+});
+
+for (const operation of ["cancel", "abort"]) {
+  test(`WTS-RETIRE-EARLY-${operation}: remember rejected cleanup after the child leaves the live set`, async () => {
+    const privateError = new Error("private-host-detail-owner-token-123");
+    const wire = duplex({ [operation]: () => Promise.reject(privateError) });
+    const { core, session, scope } = await fixture({ createStream: () => wire });
+    const state = [...core.hostSessions.values()][0];
+    const child = await openedStream(core, session);
+    assert.equal((await child.cancel("child finished before its owner")).outcome, "cancelled");
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+    const retired = core.streamManager.whenRetired(state);
+    let completed = false;
+    void retired.then(() => { completed = true; });
+    await turn();
+    assert.equal(completed, false);
+    core.scope_close(scope);
+    const result = await retired;
+    assert.equal(result.outcome, "err");
+    assert.equal(result.failure.message, "WebTransport reliable stream cleanup failed; successful retirement is unconfirmed");
+    assert.equal(JSON.stringify(result).includes(privateError.message), false);
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(Object.isFrozen(result.failure), true);
+    try { result.outcome = "ok"; } catch { /* Immutable shared retirement receipt. */ }
+    assert.equal(result.outcome, "err");
+    assert.equal(core.streamManager.whenRetired(state), retired);
+    assert.equal(await core.streamManager.whenRetired(state), result);
+    assert.equal(wire.events.filter(([kind]) => kind === operation).length, 1,
+      "a second native no-op must not hide the rejected original cleanup hook");
+  });
+}
+
+for (const side of ["read", "write"]) {
+  test(`WTS-RETIRE-NORMAL-${side}: remember failed lock release after successful EOF or FIN`, async () => {
+    const wire = duplex();
+    const endpoint = side === "read" ? wire.readable : wire.writable;
+    const acquireName = side === "read" ? "getReader" : "getWriter";
+    const acquire = endpoint[acquireName].bind(endpoint);
+    endpoint[acquireName] = () => {
+      const lock = acquire();
+      const release = lock.releaseLock.bind(lock);
+      lock.releaseLock = () => { release(); throw new Error("private lock release failure"); };
+      return lock;
+    };
+    const { core, session, scope } = await fixture({ createStream: () => wire });
+    const state = [...core.hostSessions.values()][0];
+    const child = await openedStream(core, session);
+    wire.input.close();
+    assert.deepEqual(normalize(await child.read()), { outcome: "ok", value: { done: true } });
+    assert.equal((await child.finish()).outcome, "ok");
+    assert.equal((await child.closed).outcome, "ok", "legacy operational outcome remains unchanged");
+    const retired = core.streamManager.whenRetired(state);
+    core.scope_close(scope);
+    assert.equal((await retired).outcome, "err", "release failure survives removal of a completed child");
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+  });
+}
+
+for (const direction of ["bidirectional", "unidirectional"]) {
+  test(`WTS-RETIRE-LATE-${direction}: await and report cleanup failure on a late host admission`, async () => {
+    const creation = deferred();
+    const cleanup = deferred();
+    const operation = direction === "bidirectional" ? "cancel" : "abort";
+    const wire = duplex({ [operation]: () => cleanup.promise });
+    const { core, session, scope, host } = await fixture({
+      createStream: () => creation.promise,
+      createUnidirectionalStream: () => creation.promise,
+    });
+    const state = [...core.hostSessions.values()][0];
+    const opening = direction === "bidirectional"
+      ? core.webtransport_open_stream({ session })
+      : core.webtransport_open_unidirectional_stream({ session });
+    await turn();
+    assert.equal(host.events.filter(([kind]) => kind === `create-${direction}`).length, 1);
+    const retired = core.streamManager.whenRetired(state);
+    core.scope_close(scope);
+    creation.resolve(direction === "bidirectional" ? wire : wire.writable);
+    let completed = false;
+    void retired.then(() => { completed = true; });
+    await turn();
+    assert.equal(wire.events.filter(([kind]) => kind === operation).length, 1);
+    assert.equal(completed, false, "late endpoint cleanup is still owned");
+    cleanup.reject(new Error("private late cleanup failure"));
+    assert.equal((await opening).outcome, "cancelled");
+    assert.equal((await retired).outcome, "err");
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+  });
+}
+
+test("WTS-RETIRE-INCOMING-CANCEL: collection cancellation failure is sticky and separately observable", async () => {
+  const cleanup = deferred();
+  const { core, session, scope, host } = await fixture({ cancelIncoming: () => cleanup.promise });
+  const state = [...core.hostSessions.values()][0];
+  const accepting = core.webtransport_accept_unidirectional_stream({ session });
+  await turn();
+  assert.equal(host.incomingUnidirectionalStreams.locked, true);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  let completed = false;
+  void retired.then(() => { completed = true; });
+  await turn();
+  assert.equal(completed, false);
+  cleanup.reject(new Error("private incoming cleanup failure"));
+  assert.equal((await accepting).outcome, "cancelled");
+  assert.equal((await retired).outcome, "err");
+  assert.equal(host.incomingUnidirectionalStreams.locked, false);
+  assert.equal(host.events.filter(([kind]) => kind === "incoming-unidirectional-cancel").length, 1);
+});
+
+test("WTS-RETIRE-INCOMING-EOF: collection lock release failure outlives successful EOF", async () => {
+  const { core, session, scope, host } = await fixture();
+  const state = [...core.hostSessions.values()][0];
+  const collection = host.incomingUnidirectionalStreams;
+  const acquire = collection.getReader.bind(collection);
+  collection.getReader = () => {
+    const reader = acquire();
+    const release = reader.releaseLock.bind(reader);
+    reader.releaseLock = () => { release(); throw new Error("private incoming release failure"); };
+    return reader;
+  };
+  host.incomingUni.close();
+  assert.deepEqual(normalize(await core.webtransport_accept_unidirectional_stream({ session })), { outcome: "ok", value: null });
+  assert.equal(collection.locked, false);
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  assert.equal((await retired).outcome, "err");
+});
+
+test("WTS-RETIRE-ACQUISITION: an acquired but unreturned collection lock cannot yield successful retirement", async () => {
+  const { core, session, scope, host } = await fixture();
+  const state = [...core.hostSessions.values()][0];
+  const collection = host.incomingUnidirectionalStreams;
+  const acquire = collection.getReader.bind(collection);
+  let orphan;
+  collection.getReader = () => {
+    orphan = acquire();
+    throw new Error("host failed after acquiring its reader");
+  };
+  assert.equal((await core.webtransport_accept_unidirectional_stream({ session })).outcome, "err");
+  assert.equal(collection.locked, true);
+  // Only this fixture holds the hidden native handle. Its external cleanup
+  // cannot retroactively become an observed successful SDK cleanup receipt.
+  await orphan.cancel();
+  orphan.releaseLock();
+  const retired = core.streamManager.whenRetired(state);
+  core.scope_close(scope);
+  assert.equal((await retired).outcome, "err");
+  assert.equal(collection.locked, false);
 });
