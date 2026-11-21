@@ -22,21 +22,6 @@ function message(error) {
   }
 }
 
-// Both throws and rejected host promises are contained. All cleanup attempts
-// start even when another resource fails; callers await their settlement.
-function attempt(operation, failed) {
-  try {
-    return Promise.resolve(operation()).catch(() => { failed?.(); });
-  } catch {
-    failed?.();
-    return Promise.resolve();
-  }
-}
-
-function release(lock, failed) {
-  try { lock?.releaseLock(); } catch { failed?.(); }
-}
-
 const READER_CLASS = typeof ReadableStreamDefaultReader === "undefined" ? undefined : ReadableStreamDefaultReader;
 const READER_CANCEL = READER_CLASS?.prototype.cancel;
 const READER_CLOSED = READER_CLASS && Object.getOwnPropertyDescriptor(READER_CLASS.prototype, "closed")?.get;
@@ -63,31 +48,9 @@ async function cancelReader(reader, reason, failed) {
     try { await Reflect.apply(cancel, reader, [reason]); }
     catch (cause) {
       const ended = terminal && await terminal;
-      if (!ended || !Object.is(ended.cause, cause)) failed?.();
+      if (!ended || !Object.is(ended.cause, cause)) failed?.(cause);
     }
-  } catch { failed?.(); }
-}
-
-function cancelReadable(readable, reason, failed) {
-  if (readable == null) return Promise.resolve();
-  try {
-    const cancel = readable.cancel;
-    if (cancel === READABLE_CANCEL && READABLE_LOCKED && READABLE_READER) {
-      // Late admissions may arrive already errored, before attach acquired a
-      // reader. A temporary native lock lets their cleanup use the same terminal
-      // witness. The synchronous locked getter brands the stream before access.
-      let unlocked = false;
-      try { unlocked = Reflect.apply(READABLE_LOCKED, readable, []) === false; } catch {}
-      if (unlocked) {
-        const reader = Reflect.apply(READABLE_READER, readable, []);
-        return cancelReader(reader, reason, failed).then(() => release(reader, failed));
-      }
-    }
-    return attempt(() => Reflect.apply(cancel, readable, [reason]), failed);
-  } catch {
-    failed?.();
-    return Promise.resolve();
-  }
+  } catch (cause) { failed?.(cause); }
 }
 
 // Read internal slots, not shadowable instance properties. A forged `buffer`
@@ -149,19 +112,100 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       const incoming = () => ({ reader: null, pending: false, ended: false, terminal: null, cleanup: null });
       ctx = {
         state, entries: new Set(), readyWaiters: new Set(), stopped: null, drained: deferred(),
-        cleanupFailed: false, retired: null,
+        cleanupFailed: false, retired: null, unconfirmedAcquisition: null,
         incoming: { bidirectional: incoming(), unidirectional: incoming() },
+        cleanupFailure: null, cleanupAttempt: null,
+        releaseAttempts: new WeakSet(), retainedLocks: new Map(),
       };
       sessions.set(state, ctx);
     }
     return ctx;
   }
 
-  // A single sticky bit includes failures from streams that finished before
-  // session closure. Never retain arbitrary host errors or an unbounded list
-  // of retired children, and never retry native no-ops to erase a failed hook.
-  function cleanupFailed(ctx) {
+  function cleanupFailed(ctx, operation, cause) {
+    // Keep upstream's bounded, sticky historical evidence independently of
+    // the failure consumed by an explicit drainCleanup attempt.
     ctx.cleanupFailed = true;
+    ctx.cleanupFailure ??= hostError(operation, cause);
+  }
+
+  function acquisitionFailed(ctx, entry, cause) {
+    // A throwing host can acquire a lock without returning it. Known locks
+    // can still be retried, but their release cannot prove this hidden owner's
+    // retirement. Retain admission capacity as well as the sticky uncertainty.
+    entry.unconfirmedCleanup = true;
+    ctx.unconfirmedAcquisition ??= fail("internal_failure", "permanent",
+      "WebTransport reliable stream acquisition failed; successful retirement is unconfirmed");
+    cleanupFailed(ctx, "acquisition", cause);
+  }
+
+  // Cleanup continues after a host failure. The legacy terminal promises keep
+  // their original outcomes; drainCleanup reports the separate cleanup receipt.
+  function attempt(ctx, operation, run) {
+    try {
+      return Promise.resolve(run()).catch((cause) => { cleanupFailed(ctx, operation, cause); });
+    } catch (cause) {
+      cleanupFailed(ctx, operation, cause);
+      return Promise.resolve();
+    }
+  }
+
+  function retireEntry(ctx, entry) {
+    if (entry.finished && entry.admissionFinished && entry.retainedLocks === 0 && !entry.unconfirmedCleanup) {
+      ctx.entries.delete(entry);
+    }
+  }
+
+  function release(ctx, entry, lock, retry = false) {
+    if (lock == null) return;
+    if (typeof lock !== "object" && typeof lock !== "function") {
+      cleanupFailed(ctx, "release", new TypeError("host returned an invalid stream lock"));
+      return;
+    }
+    // discard() and completion can encounter the same endpoint. A failed
+    // release is retried only by a later explicit drainCleanup call.
+    if (!retry && ctx.releaseAttempts.has(lock)) return;
+    ctx.releaseAttempts.add(lock);
+    try {
+      lock.releaseLock();
+      const retained = ctx.retainedLocks.get(lock);
+      if (retained) {
+        ctx.retainedLocks.delete(lock);
+        if (retained.entry) {
+          retained.entry.retainedLocks -= 1;
+          retireEntry(ctx, retained.entry);
+        }
+      }
+    } catch (cause) {
+      if (!ctx.retainedLocks.has(lock)) {
+        ctx.retainedLocks.set(lock, { entry });
+        if (entry) entry.retainedLocks += 1;
+      }
+      cleanupFailed(ctx, "release", cause);
+    }
+  }
+
+  function cancelReadable(ctx, entry, readable, reason) {
+    if (readable == null) return Promise.resolve();
+    try {
+      const cancel = readable.cancel;
+      if (cancel === READABLE_CANCEL && READABLE_LOCKED && READABLE_READER) {
+        // Late admissions may arrive already errored, before attach acquired a
+        // reader. A temporary native lock supplies the same terminal witness;
+        // retain that lock if release fails, just like an attached endpoint.
+        let unlocked = false;
+        try { unlocked = Reflect.apply(READABLE_LOCKED, readable, []) === false; } catch {}
+        if (unlocked) {
+          const reader = Reflect.apply(READABLE_READER, readable, []);
+          return cancelReader(reader, reason, cause => cleanupFailed(ctx, "cancel", cause))
+            .then(() => release(ctx, entry, reader));
+        }
+      }
+      return attempt(ctx, "cancel", () => Reflect.apply(cancel, readable, [reason]));
+    } catch (cause) {
+      cleanupFailed(ctx, "cancel", cause);
+      return Promise.resolve();
+    }
   }
 
   function closeSession(state, outcome) {
@@ -180,8 +224,9 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     // Pending host creations/accepts retain their reservations until the host
     // settles and any late stream has completed its own cleanup.
     for (const entry of entries) entry.stop?.(outcome);
-    // All members observe rejection internally and still settle only after
-    // cleanup/lock release. Report the first owner outcome, not a second join.
+    // All members observe rejection internally and settle after cleanup and
+    // lock-release attempts. Preserve the owner outcome; drainCleanup reports
+    // failures separately and retains locks that need an explicit retry.
     void Promise.all(pending).then(() => ctx.drained.resolve(outcome));
   }
 
@@ -195,12 +240,35 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       const outcome = ctx.cleanupFailed
         ? fail("internal_failure", "permanent", "WebTransport reliable stream cleanup failed; successful retirement is unconfirmed")
         : ok(undefined);
-      // Callers may retain this shared receipt before their owner retries its
-      // own retirement. They cannot turn the cached cleanup failure into ok.
+      // Preserve the upstream passive, immutable receipt. A successful later
+      // drainCleanup retry does not erase a historical failed cleanup hook.
       if (outcome.outcome === "err") Object.freeze(outcome.failure);
       return Object.freeze(outcome);
     });
     return ctx.retired;
+  }
+
+  function drainCleanup(state) {
+    const ctx = context(state);
+    if (ctx.cleanupAttempt) return ctx.cleanupAttempt;
+    const completion = deferred();
+    ctx.cleanupAttempt = completion.promise;
+    void ctx.drained.promise.then(() => {
+      // The first receipt must expose the actual cleanup failure. Retrying a
+      // transient release in this same call would silently turn it into success.
+      if (ctx.cleanupFailure === null) {
+        for (const [lock, retained] of [...ctx.retainedLocks]) {
+          release(ctx, retained.entry, lock, true);
+        }
+      }
+      const receipt = ctx.cleanupFailure ?? ctx.unconfirmedAcquisition ?? ok(undefined);
+      if (receipt.outcome === "err") Object.freeze(receipt.failure);
+      Object.freeze(receipt);
+      ctx.cleanupFailure = null;
+      ctx.cleanupAttempt = null;
+      completion.resolve(receipt);
+    });
+    return completion.promise;
   }
 
   function closeSessionAndDrain(state, outcome) {
@@ -216,8 +284,8 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     // Publish before invoking cancel: host hooks may synchronously reenter.
     const completion = deferred();
     source.cleanup = completion.promise;
-    void cancelReader(reader, outcome, () => cleanupFailed(ctx)).then(() => {
-      release(reader, () => cleanupFailed(ctx));
+    void cancelReader(reader, outcome, cause => cleanupFailed(ctx, "incoming cancel", cause)).then(() => {
+      release(ctx, null, reader);
       if (source.reader === reader) source.reader = null;
       completion.resolve();
     });
@@ -242,18 +310,18 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     return ctx.stopped ?? result;
   }
 
-  async function discard(ctx, host, reader, writer, reason, direction, incoming) {
+  async function discard(ctx, entry, host, reader, writer, reason, direction, incoming) {
     const receives = direction === "bidirectional" || incoming;
     const sends = direction === "bidirectional" || !incoming;
     await Promise.all([
-      receives ? attempt(() => reader ? cancelReader(reader, reason, () => cleanupFailed(ctx))
-        : cancelReadable(direction === "bidirectional" ? host?.readable : host, reason, () => cleanupFailed(ctx)),
-      () => cleanupFailed(ctx)) : undefined,
-      sends ? attempt(() => writer ? writer.abort(reason)
-        : (direction === "bidirectional" ? host?.writable : host)?.abort(reason), () => cleanupFailed(ctx)) : undefined,
+      receives ? attempt(ctx, "cancel", () => reader
+        ? cancelReader(reader, reason, cause => cleanupFailed(ctx, "cancel", cause))
+        : cancelReadable(ctx, entry, direction === "bidirectional" ? host?.readable : host, reason)) : undefined,
+      sends ? attempt(ctx, "abort", () => writer ? writer.abort(reason)
+        : (direction === "bidirectional" ? host?.writable : host)?.abort(reason)) : undefined,
     ]);
-    release(reader, () => cleanupFailed(ctx));
-    release(writer, () => cleanupFailed(ctx));
+    release(ctx, entry, reader);
+    release(ctx, entry, writer);
   }
 
   function bind(ctx, entry, reader, writer, direction) {
@@ -270,10 +338,10 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     function complete(outcome) {
       if (finished) return;
       finished = true;
-      release(reader, () => cleanupFailed(ctx));
-      release(writer, () => cleanupFailed(ctx));
+      release(ctx, entry, reader);
+      release(ctx, entry, writer);
       entry.finished = true;
-      if (entry.admissionFinished) ctx.entries.delete(entry);
+      retireEntry(ctx, entry);
       entry.stop = null;
       ctx = null;
       reader = null;
@@ -287,7 +355,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       stopping = outcome;
       // Native abort waits for an in-flight write. Do not declare the stream
       // drained or recycle admission capacity while host I/O still owns it.
-      void discard(ctx, null, reader, writer, outcome, "bidirectional", true)
+      void discard(ctx, entry, null, reader, writer, outcome, "bidirectional", true)
         .then(() => complete(outcome));
       return completion.promise;
     }
@@ -324,7 +392,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
             readDone = true;
             const completedReader = reader;
             reader = null;
-            release(completedReader, () => cleanupFailed(ctx));
+            release(ctx, entry, completedReader);
             if (stopping) return completion.promise;
             maybeComplete();
             return ok({ done: true });
@@ -384,7 +452,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
             writeDone = true;
             const completedWriter = writer;
             writer = null;
-            release(completedWriter, () => cleanupFailed(ctx));
+            release(ctx, entry, completedWriter);
             if (stopping) return completion.promise;
             maybeComplete();
             return ok(undefined);
@@ -438,7 +506,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       return { outcome: error("webtransport session stream capacity exhausted", true) };
     }
     // No host getter or await occurs between checking and reserving both bounds.
-    const entry = { released: deferred(), admitted: deferred() };
+    const entry = { released: deferred(), admitted: deferred(), retainedLocks: 0 };
     ctx.entries.add(entry);
     if (source) source.pending = true;
     return { ctx, entry, source };
@@ -454,10 +522,8 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
         if (!ctx.stopped) {
           const acquire = readable.getReader;
           if (!ctx.stopped) {
-            // A throwing host can have acquired a lock without returning it.
-            // Fallback cleanup cannot prove that hidden owner's retirement.
             try { reader = acquire.call(readable); }
-            catch (cause) { cleanupFailed(ctx); throw cause; }
+            catch (cause) { acquisitionFailed(ctx, entry, cause); throw cause; }
           }
         }
       }
@@ -467,12 +533,12 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
           const acquire = writable.getWriter;
           if (!ctx.stopped) {
             try { writer = acquire.call(writable); }
-            catch (cause) { cleanupFailed(ctx); throw cause; }
+            catch (cause) { acquisitionFailed(ctx, entry, cause); throw cause; }
           }
         }
       }
       if (ctx.stopped) {
-        await discard(ctx, host, reader, writer, ctx.stopped, direction, incoming);
+        await discard(ctx, entry, host, reader, writer, ctx.stopped, direction, incoming);
         return ctx.stopped;
       }
       if ((direction === "bidirectional" || incoming) && !reader
@@ -487,7 +553,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       }
       return ok(stream);
     } catch (cause) {
-      await discard(ctx, host, reader, writer, cause, direction, incoming);
+      await discard(ctx, entry, host, reader, writer, cause, direction, incoming);
       return ctx.stopped ?? hostError(operation, cause);
     }
   }
@@ -509,7 +575,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       host = await create.call(transport);
       return await attach(ctx, entry, host, direction, false);
     } catch (cause) {
-      await discard(ctx, host, null, null, cause, direction, false);
+      await discard(ctx, entry, host, null, null, cause, direction, false);
       return ctx.stopped ?? hostError("open", cause);
     } finally {
       finishAdmission(ctx, entry);
@@ -533,7 +599,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
         const acquire = collection.getReader;
         if (ctx.stopped) return ctx.stopped;
         try { source.reader = acquire.call(collection); }
-        catch (cause) { cleanupFailed(ctx); throw cause; }
+        catch (cause) { acquisitionFailed(ctx, entry, cause); throw cause; }
         if (!source.reader) throw new TypeError("host returned an invalid incoming collection reader");
         const reader = source.reader;
         // Observe failure while idle, but leave buffered incoming endpoints for
@@ -558,7 +624,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
         if (ctx.stopped || source.terminal) return ctx.stopped ?? source.terminal;
         source.ended = true;
         source.reader = null;
-        release(reader, () => cleanupFailed(ctx));
+        release(ctx, null, reader);
         return ok(null);
       }
       // Even if owner cancellation won while read() was pending, attach owns
@@ -584,8 +650,8 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     }
     entry.admissionFinished = true;
     entry.admitted.resolve();
-    if (entry.finished) ctx.entries.delete(entry);
+    retireEntry(ctx, entry);
   }
 
-  return Object.freeze({ open, accept, closeSession, whenClosed, whenRetired, closeSessionAndDrain });
+  return Object.freeze({ open, accept, closeSession, whenClosed, whenRetired, closeSessionAndDrain, drainCleanup });
 }

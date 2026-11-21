@@ -39,7 +39,8 @@ export interface ReliableStreamManagerOptions<
 
 /**
  * Reliable stream ownership for existing sessions, without creating tasks or
- * transport authority. Pending opens/accepts and live streams share 64 slots.
+ * transport authority. Pending opens/accepts, live streams, and streams with
+ * retained lock-release failures share 64 slots.
  * Each direction admits at most one pending accept and never prefetches streams.
  */
 export interface ReliableStreamManager<
@@ -83,8 +84,9 @@ export interface ReliableStreamManager<
   /**
    * Observe the single reliable-stream drain promise. It stays pending until
    * closeSession is called, then waits for all active/admitting streams and
-   * acquired incoming readers to settle cleanup and release locks. It preserves
-   * the first owner outcome, not an aggregate of child failures. This excludes
+   * acquired incoming readers to settle cleanup and attempt lock release. It
+   * preserves the first owner outcome, not an aggregate of child failures; use
+   * drainCleanup to observe cleanup failures and retry retained locks. This excludes
    * datagrams, the transport connection, unaccepted browser-owned endpoints,
    * and arbitrary caller work, and cannot force host promises to settle.
    */
@@ -105,6 +107,18 @@ export interface ReliableStreamManager<
 
   /** Latch closure and return the same barrier, without changing closeSession. */
   closeSessionAndDrain(state: State, outcome: Outcome<never>): Promise<Outcome<never>>;
+
+  /**
+   * Await whenClosed and report cleanup independently of the terminal outcome.
+   * Concurrent calls share one attempt. The first receipt exposes any cancel,
+   * abort, or lock-release failure without silently retrying. A later explicit
+   * call retries retained lock releases and can succeed after all locks release;
+   * already-settled cancellation/abort operations are never repeated. Success
+   * does not erase whenRetired's sticky historical failure. An acquisition that
+   * threw without returning its lock remains unconfirmed even after retries.
+   * This does not initiate closure or include datagrams/connection cleanup.
+   */
+  drainCleanup(state: State): Promise<Outcome<void>>;
 }
 
 /** Create a manager using only the provided session lookup and Outcome helpers. */
