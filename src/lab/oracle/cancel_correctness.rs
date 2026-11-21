@@ -29,6 +29,7 @@
 //! its stricter complete-stream checks and configured phase-duration bound.
 
 use crate::record::task::{TaskRecord, TaskState};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{
     CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId, Time,
 };
@@ -38,7 +39,6 @@ use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use std::time::Duration;
@@ -594,7 +594,11 @@ impl CancelCorrectnessOracle {
         }
         if record.state.is_terminal() {
             let observed = self.task_states.write().remove(&record.id).is_some();
-            let sampled = self.runtime_observations.write().remove(&record.id).is_some();
+            let sampled = self
+                .runtime_observations
+                .write()
+                .remove(&record.id)
+                .is_some();
             if observed || sampled {
                 self.completed_tasks
                     .write()

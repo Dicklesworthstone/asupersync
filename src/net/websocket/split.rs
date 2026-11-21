@@ -1228,7 +1228,8 @@ where
                                     &mut shared.write_buf,
                                     cx.entropy(),
                                 ) {
-                                    shared.force_close(CloseReason::new(error.as_close_code(), None));
+                                    shared
+                                        .force_close(CloseReason::new(error.as_close_code(), None));
                                     return Err(error);
                                 }
                                 shared.close_flush_pending = true;
@@ -1275,12 +1276,9 @@ where
 
                 // Need more data - read from socket
                 let deadline = self.shared.lock().heartbeat.deadline();
-                let read = super::heartbeat::wait_until(
-                    cx,
-                    deadline,
-                    std::pin::pin!(self.read_more(cx)),
-                )
-                .await?;
+                let read =
+                    super::heartbeat::wait_until(cx, deadline, std::pin::pin!(self.read_more(cx)))
+                        .await?;
                 let Some(n) = read else {
                     continue;
                 };
@@ -1313,12 +1311,14 @@ where
                 return Err(super::heartbeat::timeout_error());
             }
         }
-        cx.checkpoint().map_err(|_| {
-            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-        })?;
+        cx.checkpoint()
+            .map_err(|_| WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))?;
         let mut shared = self.shared.lock();
         shared.close_handshake.mark_response_sent();
-        Ok(shared.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
+        Ok(shared
+            .close_handshake
+            .take_peer_close()
+            .map(|reason| Message::Close(Some(reason))))
     }
 
     /// Check if the connection is open.
@@ -1537,12 +1537,16 @@ where
 
         let (enabled, max_message, max_encoded) = {
             let shared = self.shared.lock();
-            (shared.codec.permessage_deflate_enabled(), shared.config.max_message_size,
-                shared.config.max_frame_size)
+            (
+                shared.codec.permessage_deflate_enabled(),
+                shared.config.max_message_size,
+                shared.config.max_frame_size,
+            )
         };
         // Compression is synchronous and bounded, and must not hold the shared
         // read/write mutex while doing CPU work. No dictionary crosses messages.
-        let frame = super::compression::outgoing(Frame::from(msg), enabled, max_message, max_encoded)?;
+        let frame =
+            super::compression::outgoing(Frame::from(msg), enabled, max_message, max_encoded)?;
         self.send_frame_with_entropy(Some(cx), &frame, cx.entropy())
             .await
     }

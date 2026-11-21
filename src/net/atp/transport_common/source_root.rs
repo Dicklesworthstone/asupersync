@@ -32,13 +32,15 @@ fn inspect_root(root: &Path, preserve_symlinks: bool) -> Result<(String, bool), 
             .ok_or_else(|| source_error(root, "source file name is not valid Unicode"))?
             .to_string(),
     };
-    validate_portable_path_component(&name).map_err(|_| {
-        source_error(root, format!("source file name is not portable: {name:?}"))
-    })?;
+    validate_portable_path_component(&name)
+        .map_err(|_| source_error(root, format!("source file name is not portable: {name:?}")))?;
     match kind {
         PathLinkKind::Symlink(_) if preserve_symlinks => return Ok((name, false)),
         PathLinkKind::Symlink(_) => {
-            return Err(source_error(root, "source symlink rejected by metadata policy"));
+            return Err(source_error(
+                root,
+                "source symlink rejected by metadata policy",
+            ));
         }
         PathLinkKind::UnsupportedReparse => {
             return Err(source_error(root, "unsupported Windows reparse point"));

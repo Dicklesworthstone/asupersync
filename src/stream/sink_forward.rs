@@ -102,9 +102,7 @@ pub enum TrySinkForwardError<SourceError, SinkError> {
     },
 }
 
-impl<S: std::fmt::Display, K: std::fmt::Display> std::fmt::Display
-    for TrySinkForwardError<S, K>
-{
+impl<S: std::fmt::Display, K: std::fmt::Display> std::fmt::Display for TrySinkForwardError<S, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled(error) => write!(f, "sink forwarding cancelled: {error}"),

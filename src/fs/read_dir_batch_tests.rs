@@ -67,7 +67,10 @@ fn batch_preserves_error_position_and_allows_later_entries() {
     let mut source = vec![
         Ok(10),
         Ok(20),
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "entry error")),
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "entry error",
+        )),
         Ok(30),
     ]
     .into_iter();
@@ -119,8 +122,14 @@ fn real_directory_boundaries_preserve_every_entry_and_cached_readiness() {
         names.extend(futures_lite::future::block_on(collect_names(&mut entries)));
         names.sort();
         assert_eq!(names, expected, "count={count}");
-        assert!(matches!(Pin::new(&mut entries).poll_next(&mut cx), Poll::Ready(None)));
-        assert!(matches!(Pin::new(&mut entries).poll_next(&mut cx), Poll::Ready(None)));
+        assert!(matches!(
+            Pin::new(&mut entries).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        assert!(matches!(
+            Pin::new(&mut entries).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
     }
 }
 
@@ -147,8 +156,7 @@ fn restricted_caller_cannot_consume_or_discard_prefetched_entries() {
     let expected = make_files(root.path(), 3);
     let mut entries = futures_lite::future::block_on(read_dir(root.path())).unwrap();
     let cx = crate::cx::Cx::for_testing().restrict::<crate::cx::cap::None>();
-    let error = futures_lite::future::block_on(cx.with_ambient(entries.next_entry()))
-        .unwrap_err();
+    let error = futures_lite::future::block_on(cx.with_ambient(entries.next_entry())).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert!(
         error
@@ -175,8 +183,7 @@ fn restriction_does_not_poll_or_drop_an_owned_pending_batch() {
     let expected = make_files(root.path(), 3);
     let (mut entries, polls) = delayed_reader(root.path());
     let cx = crate::cx::Cx::for_testing().restrict::<crate::cx::cap::None>();
-    let error = futures_lite::future::block_on(cx.with_ambient(entries.next_entry()))
-        .unwrap_err();
+    let error = futures_lite::future::block_on(cx.with_ambient(entries.next_entry())).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert!(matches!(&entries.state, ReadDirState::Pending(_)));
@@ -197,15 +204,22 @@ fn blocking_job_failure_is_reported_once_then_iteration_finishes() {
     };
     let error = futures_lite::future::block_on(entries.next_entry()).unwrap_err();
     assert!(error.to_string().contains("injected blocking job failure"));
-    assert!(futures_lite::future::block_on(entries.next_entry()).unwrap().is_none());
-    assert!(futures_lite::future::block_on(entries.next_entry()).unwrap().is_none());
+    assert!(
+        futures_lite::future::block_on(entries.next_entry())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures_lite::future::block_on(entries.next_entry())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn invalid_directory_open_still_fails_before_returning_an_iterator() {
     let root = tempfile::tempdir().unwrap();
-    let error = futures_lite::future::block_on(read_dir(root.path().join("missing")))
-        .unwrap_err();
+    let error = futures_lite::future::block_on(read_dir(root.path().join("missing"))).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     let file = root.path().join("file");
     std::fs::write(&file, b"not a directory").unwrap();

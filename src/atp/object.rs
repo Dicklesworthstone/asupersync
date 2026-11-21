@@ -5,11 +5,11 @@
 //! and graph commit semantics used by CLI, SDK, daemon, proofs, mailbox,
 //! swarm, and dogfood components.
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};

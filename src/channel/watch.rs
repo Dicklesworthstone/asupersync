@@ -38,12 +38,12 @@
 //! tx.send(new_config)?;
 //! ```
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::MessageCausality;
@@ -572,7 +572,9 @@ impl<T> Sender<T> {
 
             // Execute the caller's closure without the value lock, while
             // serializing against concurrent send and send_modify operations.
-            f(candidate.as_mut().expect("candidate initialized before mutation"));
+            f(candidate
+                .as_mut()
+                .expect("candidate initialized before mutation"));
 
             let mut guard = self.inner.value.write();
             // Only a successful modifier publishes new evidence. A panic
@@ -580,7 +582,9 @@ impl<T> Sender<T> {
             let causality = MessageCausality::capture_current();
             let old = std::mem::replace(
                 &mut guard.0,
-                candidate.take().expect("candidate initialized before publication"),
+                candidate
+                    .take()
+                    .expect("candidate initialized before publication"),
             );
             guard.1 = guard.1.wrapping_add(1);
             guard.2 = causality;

@@ -9,8 +9,8 @@
 //! replacing or mutating the private copy after its final verification.
 
 use super::{File, Path, PathBuf, Read, Seek, SeekFrom, SparseWriter, SparseWriterError, Write};
-use crate::atp::journal::{CommitPolicy, FsyncPolicy};
 use crate::atp::journal::temp_management::TempFileCreationError;
+use crate::atp::journal::{CommitPolicy, FsyncPolicy};
 use crate::types::Outcome;
 use std::io;
 
@@ -25,7 +25,9 @@ impl SparseWriter {
             // The copied bytes will come from this owned inode, not from its
             // name. Verify the same inode: reopening a substituted pathname
             // could authorize different bytes from those subsequently copied.
-            self.lock_state().temp_file.as_ref()
+            self.lock_state()
+                .temp_file
+                .as_ref()
                 .ok_or_else(|| io::Error::other("missing owned staging descriptor"))?
                 .try_clone()
         } else {
@@ -52,17 +54,23 @@ impl SparseWriter {
                 let state = self.lock_state();
                 if state.publication_copy_path.is_some() {
                     return Err(SparseWriterError::CommitFailed(
-                        "an earlier publication copy is retained; inspect it before recovery".to_owned(),
+                        "an earlier publication copy is retained; inspect it before recovery"
+                            .to_owned(),
                     ));
                 }
-                let file = state.temp_file.as_ref().ok_or(SparseWriterError::NoTempFile)?;
+                let file = state
+                    .temp_file
+                    .as_ref()
+                    .ok_or(SparseWriterError::NoTempFile)?;
                 if state.temp_path.is_none() {
                     return Err(SparseWriterError::NoTempFile);
                 }
                 (
                     file.try_clone().map_err(commit_io)?,
                     state.final_path.clone(),
-                    state.expected_size.ok_or(SparseWriterError::IncompleteData)?,
+                    state
+                        .expected_size
+                        .ok_or(SparseWriterError::IncompleteData)?,
                 )
             };
             source.flush().map_err(commit_io)?;
@@ -77,7 +85,9 @@ impl SparseWriter {
             // The existing manager is rooted in the final destination's parent.
             // Use its exclusive, private creation and retain the descriptor;
             // do not reopen the generated name or copy directly over final_path.
-            let (copy_path, mut destination) = self.path_manager.lock()
+            let (copy_path, mut destination) = self
+                .path_manager
+                .lock()
                 .create_temp_file("verified-publication")
                 .map_err(|error| match error {
                     TempFileCreationError::Path(error) => {
@@ -99,7 +109,9 @@ impl SparseWriter {
                 self.verify_copy_against_verified_chunks(&mut destination, length)?;
                 // Match fs::copy's file-permission behavior, but only after all
                 // payload writes and verification. Creation itself stays private.
-                destination.set_permissions(source_metadata.permissions()).map_err(commit_io)?;
+                destination
+                    .set_permissions(source_metadata.permissions())
+                    .map_err(commit_io)?;
                 if self.config.fsync_policy != FsyncPolicy::Never {
                     // This is a different inode from the original staging file.
                     // Its final barrier must succeed BEFORE its name is published.
@@ -125,7 +137,9 @@ impl SparseWriter {
                 // original staging-name cleanup. It may still fail after visibility.
                 state.temp_file = None;
             }
-            self.path_manager.lock().mark_committed(&copy_path, &final_path)
+            self.path_manager
+                .lock()
+                .mark_committed(&copy_path, &final_path)
                 .map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
             Ok(final_path)
         })();
@@ -231,7 +245,10 @@ fn commit_io(error: io::Error) -> SparseWriterError {
 }
 
 fn retained_copy_error(error: SparseWriterError, path: &Path) -> SparseWriterError {
-    let message = format!("{error}; private publication copy retained at {}", path.display());
+    let message = format!(
+        "{error}; private publication copy retained at {}",
+        path.display()
+    );
     match error {
         SparseWriterError::SyncFailed(_) => SparseWriterError::SyncFailed(message),
         _ => SparseWriterError::CommitFailed(message),

@@ -182,11 +182,7 @@ where
     /// `Panicked`. Cleanup-induced loser cancellations do not replace an
     /// insufficient-success error. A spontaneous member cancellation only
     /// selects `Cancelled` if the quorum becomes impossible.
-    pub async fn join_quorum(
-        self,
-        cx: &Cx,
-        required: usize,
-    ) -> Result<Vec<T>, QuorumError<E>> {
+    pub async fn join_quorum(self, cx: &Cx, required: usize) -> Result<Vec<T>, QuorumError<E>> {
         let total = self.len();
         let mut selection = Selection::new(required, total);
         // Local bindings drop in reverse declaration order. Move the member
@@ -482,17 +478,27 @@ mod drop_order_tests {
 
             // Assert the planted failure only after releasing cleanup, so the
             // old-code control fails at this property rather than a watchdog.
-            let snapshot = observed.lock().unwrap().take().expect("prefix dropped once");
+            let snapshot = observed
+                .lock()
+                .unwrap()
+                .take()
+                .expect("prefix dropped once");
             assert_eq!(snapshot.len(), 2);
             for (requested, reason) in snapshot {
-                assert!(requested, "member was not cancelled before prefix destructor");
+                assert!(
+                    requested,
+                    "member was not cancelled before prefix destructor"
+                );
                 let reason = reason.expect("drop cancellation has an exact reason");
                 assert_eq!(reason.kind, CancelKind::User);
                 assert_eq!(reason.message.as_deref(), Some("abort"));
             }
             assert_eq!(dropped.is_err(), panic_on_drop);
             if let Err(payload) = dropped {
-                assert_eq!(payload.downcast_ref::<&str>(), Some(&"quorum prefix destructor"));
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"quorum prefix destructor")
+                );
             }
         }));
         let report = runtime.shutdown_drained(Duration::from_secs(5));

@@ -416,7 +416,8 @@ impl Server {
                 self.dispatch_http2_registered_unary(request).await,
             );
         }
-        let prepared = match self.prepare_registered_server_stream(request, Cx::current().as_ref()) {
+        let prepared = match self.prepare_registered_server_stream(request, Cx::current().as_ref())
+        {
             Ok(prepared) => prepared,
             Err(status) => {
                 return Http2ProducedResponse::buffered(self.http2_dispatch_error(&status));
@@ -445,9 +446,8 @@ impl Server {
     ) -> Result<PreparedServerStream, Status> {
         let service = self.resolve_registered_server_stream(&request.uri)?;
         let (path, request, trailers) = self.decode_http2_unary_request(request)?;
-        let request_cx = request_cx.ok_or_else(|| {
-            Status::internal("gRPC server streaming requires a runtime context")
-        })?;
+        let request_cx = request_cx
+            .ok_or_else(|| Status::internal("gRPC server streaming requires a runtime context"))?;
         let deadline = StreamDeadline::capture(request_cx, request.metadata(), &self.config);
         let compression = self.response_compression(request.metadata());
         let (codec, encoding) = self.streaming_output_codec(compression)?;
@@ -706,9 +706,7 @@ fn application_checkpoint(
             CancelKind::Timeout,
             Some("gRPC streaming deadline exceeded"),
         );
-        return Err(Status::deadline_exceeded(
-            "gRPC stream deadline exceeded",
-        ));
+        return Err(Status::deadline_exceeded("gRPC stream deadline exceeded"));
     }
     Ok(())
 }
@@ -734,7 +732,9 @@ pub(super) async fn forward_messages<S: ServerStreamSink>(
         poll_cancellable(owner, cx, std::future::ready(()), Some(deadline)).await?;
         if let Err(error) = sender.send_initial_headers(headers) {
             *transport_error = Some(error);
-            return Err(Status::unavailable("gRPC initial response headers could not be delivered"));
+            return Err(Status::unavailable(
+                "gRPC initial response headers could not be delivered",
+            ));
         }
     } else if !initial.is_empty() {
         return Err(Status::internal(
@@ -760,7 +760,10 @@ pub(super) async fn forward_messages<S: ServerStreamSink>(
             .encode_message(&message, &mut frame)
             .map_err(GrpcError::into_status)?;
         drop(message);
-        if sender.message_limit().is_some_and(|limit| frame.len() > limit) {
+        if sender
+            .message_limit()
+            .is_some_and(|limit| frame.len() > limit)
+        {
             return Err(Status::resource_exhausted(
                 "gRPC-Web response message exceeds wire limit",
             ));
@@ -851,7 +854,10 @@ fn initial_metadata_key_is_reserved(key: &str) -> bool {
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
 }
 
-fn bounded_initial_metadata(metadata: &Metadata, configured_limit: usize) -> Result<HeaderMap, Status> {
+fn bounded_initial_metadata(
+    metadata: &Metadata,
+    configured_limit: usize,
+) -> Result<HeaderMap, Status> {
     let limit = if configured_limit == 0 {
         MAX_INITIAL_METADATA_BYTES
     } else {
@@ -878,7 +884,9 @@ fn bounded_initial_metadata(metadata: &Metadata, configured_limit: usize) -> Res
             MetadataValue::Binary(_) => key.ends_with("-bin"),
         };
         if !valid_key || !valid_value || initial_metadata_key_is_reserved(key) {
-            return Err(Status::internal("invalid or reserved gRPC initial response metadata"));
+            return Err(Status::internal(
+                "invalid or reserved gRPC initial response metadata",
+            ));
         }
     }
     let mut headers = HeaderMap::new();

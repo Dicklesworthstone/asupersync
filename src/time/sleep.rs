@@ -10,13 +10,13 @@
 //! sleeps share a fallback timer; a custom injected clock may use a helper thread.
 
 use crate::cx::Cx;
+use crate::sync::atomic::{AtomicBool, Ordering};
 use crate::time::{TimerDriverHandle, TimerHandle};
 use crate::trace::TraceEvent;
 use crate::types::{CancelKind, Time};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -840,7 +840,10 @@ impl Sleep {
             // pinning its worker (a current_thread runtime freezes) where no
             // cleanup budget can reach it (br-asupersync-2u7bpm). A Sleep that
             // was already parked completes at once, as before.
-            if !self.polled.swap(true, crate::sync::atomic::Ordering::Relaxed) {
+            if !self
+                .polled
+                .swap(true, crate::sync::atomic::Ordering::Relaxed)
+            {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }

@@ -760,11 +760,17 @@ fn assert_signal_invocations(state: &SignalSerialState, numbers: &[u64]) {
     assert_eq!(state.retired.load(Ordering::Acquire), numbers.len());
     assert_eq!(state.active.load(Ordering::Acquire), 0);
     let generations = state.generations.lock().unwrap();
-    let observed: Vec<_> = generations.iter().map(|generation| generation.number).collect();
+    let observed: Vec<_> = generations
+        .iter()
+        .map(|generation| generation.number)
+        .collect();
     assert_eq!(observed, numbers);
     for (index, invocation) in generations.iter().enumerate() {
         for previous in &generations[..index] {
-            assert_ne!(invocation.region, previous.region, "fresh invocation region");
+            assert_ne!(
+                invocation.region, previous.region,
+                "fresh invocation region"
+            );
             assert_ne!(invocation.task, previous.task, "fresh invocation task");
         }
     }
@@ -982,7 +988,10 @@ async fn signal_cancel_drain_scenario(cx: Cx) {
     assert_eq!(report.joined, 1);
     assert_eq!(report.restart_batches, 0);
     assert!(matches!(report.outcome, Outcome::Cancelled(_)));
-    assert!(tx.is_closed(), "joined app must release its signal receiver");
+    assert!(
+        tx.is_closed(),
+        "joined app must release its signal receiver"
+    );
     assert!(matches!(
         tx.try_send(()),
         Err(asupersync::channel::mpsc::SendError::Disconnected(()))
@@ -1083,7 +1092,10 @@ fn managed_app_signal_bindings_reject_mismatched_sources_and_kinds_before_work()
             )
         };
         let result = parse(manifest).bind_managed(vec![binding], config());
-        assert!(result.is_err(), "invalid signal binding case {case} was accepted");
+        assert!(
+            result.is_err(),
+            "invalid signal binding case {case} was accepted"
+        );
         assert_eq!(calls.load(Ordering::Acquire), 0);
     }
 }
@@ -1120,7 +1132,10 @@ async fn signal_idle_stop_scenario(cx: Cx) {
     assert_eq!(report.restart_batches, 0);
     assert!(matches!(report.outcome, Outcome::Cancelled(_)));
     assert_eq!(calls.load(Ordering::Acquire), 0);
-    assert!(sender.is_closed(), "stopped controller retained the signal receiver");
+    assert!(
+        sender.is_closed(),
+        "stopped controller retained the signal receiver"
+    );
     assert!(matches!(
         sender.try_send(()),
         Err(asupersync::channel::mpsc::SendError::Disconnected(()))
@@ -1157,7 +1172,10 @@ async fn signal_parent_deadline_scenario(cx: Cx) {
     // No notification, workload timer, or self-wake can finish this wait.
     // The actual generation's inherited deadline must wake its MPSC receive.
     while sender.telemetry_snapshot(0).recv_waiter_count == 0 {
-        assert!(!sender.is_closed(), "deadline worker never parked on its source");
+        assert!(
+            !sender.is_closed(),
+            "deadline worker never parked on its source"
+        );
         yield_now().await;
     }
     let report = app.join().await.unwrap();
@@ -1267,27 +1285,23 @@ async fn stop_group_failure_scenario(cx: Cx, mode: ManagedRestartMode, failure: 
                         parked_stop_sibling(cx, Arc::clone(&observer))
                     },
                 ),
-                ManagedAppBinding::worker(
-                    "api.job.fail",
-                    mode,
-                    move |cx: Cx, _| {
-                        assert_pure_work_context(&cx);
-                        fail_starts.fetch_add(1, Ordering::AcqRel);
-                        gate.notify_waiters();
-                        let ready = Arc::clone(&ready);
-                        let gate = Arc::clone(&gate);
-                        async move {
-                            gate.wait_until(|| ready.load(Ordering::Acquire)).await;
-                            match failure {
-                                0 => Outcome::Err("stop policy domain failure"),
-                                1 => Outcome::Panicked(asupersync::types::PanicPayload::new(
-                                    "encoded stop policy panic",
-                                )),
-                                _ => panic!("actual stop policy poll panic"),
-                            }
+                ManagedAppBinding::worker("api.job.fail", mode, move |cx: Cx, _| {
+                    assert_pure_work_context(&cx);
+                    fail_starts.fetch_add(1, Ordering::AcqRel);
+                    gate.notify_waiters();
+                    let ready = Arc::clone(&ready);
+                    let gate = Arc::clone(&gate);
+                    async move {
+                        gate.wait_until(|| ready.load(Ordering::Acquire)).await;
+                        match failure {
+                            0 => Outcome::Err("stop policy domain failure"),
+                            1 => Outcome::Panicked(asupersync::types::PanicPayload::new(
+                                "encoded stop policy panic",
+                            )),
+                            _ => panic!("actual stop policy poll panic"),
                         }
-                    },
-                ),
+                    }
+                }),
             ],
             config,
         )
@@ -1368,7 +1382,10 @@ async fn stop_group_failure_scenario(cx: Cx, mode: ManagedRestartMode, failure: 
         assert!(matches!(report.outcome, Outcome::Panicked(_)));
         assert!(matches!(failed.outcome, Outcome::Panicked(_)));
     }
-    assert!(!cx.is_cancel_requested(), "ordinary group stop cancelled its parent");
+    assert!(
+        !cx.is_cancel_requested(),
+        "ordinary group stop cancelled its parent"
+    );
     parent.close().await.unwrap();
 }
 
@@ -1443,9 +1460,7 @@ async fn stop_policy_nonfailure_scenario(cx: Cx) {
             .unwrap()
             .with_stop_on_child_failure();
         let mut handle = supervisor.spawn(&cx).unwrap();
-        changed
-            .wait_until(|| retired.load(Ordering::Acquire))
-            .await;
+        changed.wait_until(|| retired.load(Ordering::Acquire)).await;
         witness
             .changed
             .wait_until(|| witness.parked.load(Ordering::Acquire))
@@ -1493,7 +1508,9 @@ fn managed_app_stop_policy_drains_siblings_and_preserves_failure_on_native_worke
             ManagedRestartMode::Permanent,
         ] {
             for failure in 0..3 {
-                native(workers, move |cx| stop_group_failure_scenario(cx, mode, failure));
+                native(workers, move |cx| {
+                    stop_group_failure_scenario(cx, mode, failure)
+                });
             }
         }
     }
@@ -1570,10 +1587,7 @@ fn grouped_configs(
     root: SupervisionConfig,
     workers: SupervisionConfig,
 ) -> std::collections::BTreeMap<String, SupervisionConfig> {
-    std::collections::BTreeMap::from([
-        ("root".to_string(), root),
-        ("workers".to_string(), workers),
-    ])
+    std::collections::BTreeMap::from([("root".to_string(), root), ("workers".to_string(), workers)])
 }
 
 fn grouped_route(name: &str, body: &'static str) -> ManagedAppBinding<&'static str> {
@@ -1639,7 +1653,10 @@ async fn grouped_local_restart_scenario(cx: Cx) {
         yield_now().await;
     }
     let router = tree.router();
-    for (path, body) in [("/health", b"root".as_slice()), ("/workers", b"workers".as_slice())] {
+    for (path, body) in [
+        ("/health", b"root".as_slice()),
+        ("/workers", b"workers".as_slice()),
+    ] {
         let response = router.handle_with_cx(&cx, Request::new("GET", path)).await;
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body.as_ref(), body);
@@ -1681,48 +1698,56 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
     let fail_ready = Arc::clone(&fail);
     let identities = Arc::new(std::sync::Mutex::new(Vec::new()));
     let worker_ids = Arc::clone(&identities);
-    let tree = parse(grouped_manifest(if stop { "stop" } else { "one_for_all" }, "stop"))
-        .bind_managed_groups(
-            vec![
-                grouped_route("api.route.health", "root"),
-                grouped_route("workers.route.health", "workers"),
-                ManagedAppBinding::worker(
-                    "api.actor.cache",
-                    ManagedRestartMode::Permanent,
-                    move |cx: Cx, _| {
-                        assert_pure_work_context(&cx);
-                        if root_count.fetch_add(1, Ordering::AcqRel) > 0 {
-                            assert!(observed.retired.load(Ordering::Acquire));
+    let tree = parse(grouped_manifest(
+        if stop { "stop" } else { "one_for_all" },
+        "stop",
+    ))
+    .bind_managed_groups(
+        vec![
+            grouped_route("api.route.health", "root"),
+            grouped_route("workers.route.health", "workers"),
+            ManagedAppBinding::worker(
+                "api.actor.cache",
+                ManagedRestartMode::Permanent,
+                move |cx: Cx, _| {
+                    assert_pure_work_context(&cx);
+                    if root_count.fetch_add(1, Ordering::AcqRel) > 0 {
+                        assert!(observed.retired.load(Ordering::Acquire));
+                    }
+                    parked_stop_sibling(cx, Arc::clone(&observed))
+                },
+            ),
+            ManagedAppBinding::worker(
+                "workers.actor.cache",
+                ManagedRestartMode::Temporary,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    assert_pure_work_context(&cx);
+                    worker_ids.lock().unwrap().push(generation);
+                    let attempt = worker_count.fetch_add(1, Ordering::AcqRel);
+                    let fail_ready = Arc::clone(&fail_ready);
+                    let fail_gate = Arc::clone(&fail_gate);
+                    async move {
+                        if attempt == 0 {
+                            fail_gate
+                                .wait_until(|| fail_ready.load(Ordering::Acquire))
+                                .await;
+                            assert!(!panic, "nested group failure");
+                            Outcome::Err("nested domain failure")
+                        } else {
+                            cx.cancelled().await;
+                            assert!(cx.checkpoint().is_err());
+                            Outcome::Cancelled(cx.cancel_reason().unwrap())
                         }
-                        parked_stop_sibling(cx, Arc::clone(&observed))
-                    },
-                ),
-                ManagedAppBinding::worker(
-                    "workers.actor.cache",
-                    ManagedRestartMode::Temporary,
-                    move |cx: Cx, generation: ManagedGeneration| {
-                        assert_pure_work_context(&cx);
-                        worker_ids.lock().unwrap().push(generation);
-                        let attempt = worker_count.fetch_add(1, Ordering::AcqRel);
-                        let fail_ready = Arc::clone(&fail_ready);
-                        let fail_gate = Arc::clone(&fail_gate);
-                        async move {
-                            if attempt == 0 {
-                                fail_gate.wait_until(|| fail_ready.load(Ordering::Acquire)).await;
-                                assert!(!panic, "nested group failure");
-                                Outcome::Err("nested domain failure")
-                            } else {
-                                cx.cancelled().await;
-                                assert!(cx.checkpoint().is_err());
-                                Outcome::Cancelled(cx.cancel_reason().unwrap())
-                            }
-                        }
-                    },
-                ),
-            ],
-            grouped_configs(config().with_restart_policy(RestartPolicy::OneForAll), config()),
-        )
-        .unwrap();
+                    }
+                },
+            ),
+        ],
+        grouped_configs(
+            config().with_restart_policy(RestartPolicy::OneForAll),
+            config(),
+        ),
+    )
+    .unwrap();
     let mut tree = tree.start(parent.cx()).unwrap();
     witness
         .changed
@@ -1733,7 +1758,10 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
     }
     let router = tree.router();
     assert_eq!(
-        router.handle_with_cx(&cx, Request::new("GET", "/workers")).await.status,
+        router
+            .handle_with_cx(&cx, Request::new("GET", "/workers"))
+            .await
+            .status,
         StatusCode::OK
     );
     fail.store(true, Ordering::Release);
@@ -1747,16 +1775,23 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
     assert!(!witness.retired.load(Ordering::Acquire));
     for path in ["/health", "/workers"] {
         assert_eq!(
-            router.handle_with_cx(&cx, Request::new("GET", path)).await.status,
+            router
+                .handle_with_cx(&cx, Request::new("GET", path))
+                .await
+                .status,
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
     {
         let mut joined = std::pin::pin!(tree.join());
         poll_fn(|task| {
-            assert!(joined.as_mut().poll(task).is_pending(), "tree returned before held cleanup");
+            assert!(
+                joined.as_mut().poll(task).is_pending(),
+                "tree returned before held cleanup"
+            );
             Poll::Ready(())
-        }).await;
+        })
+        .await;
     }
     witness.release.store(true, Ordering::Release);
     witness.changed.notify_waiters();
@@ -1774,7 +1809,10 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
             assert_ne!(identities[0].region, identities[1].region);
         }
         assert_eq!(
-            router.handle_with_cx(&cx, Request::new("GET", "/workers")).await.status,
+            router
+                .handle_with_cx(&cx, Request::new("GET", "/workers"))
+                .await
+                .status,
             StatusCode::OK
         );
         tree.abort();
@@ -1791,15 +1829,22 @@ async fn grouped_parent_policy_scenario(cx: Cx, stop: bool, panic: bool) {
     if stop {
         if panic {
             assert!(matches!(report.root.outcome, Outcome::Panicked(_)));
-            assert!(matches!(report.groups[0].report.outcome, Outcome::Panicked(_)));
+            assert!(matches!(
+                report.groups[0].report.outcome,
+                Outcome::Panicked(_)
+            ));
         } else {
             assert!(matches!(
                 &report.root.outcome,
                 Outcome::Err(ManagedSupervisorError::ChildFailed { child, .. })
                     if child.as_str() == "group:workers"
             ));
-            let failed = report.groups[0].report.children.iter()
-                .find(|child| child.name.as_str() == "workers.actor.cache").unwrap();
+            let failed = report.groups[0]
+                .report
+                .children
+                .iter()
+                .find(|child| child.name.as_str() == "workers.actor.cache")
+                .unwrap();
             assert!(matches!(
                 &failed.outcome,
                 Outcome::Err(ManagedAppWorkError::Domain("nested domain failure"))
@@ -1825,7 +1870,9 @@ fn managed_app_groups_apply_root_stop_and_one_for_all_after_nested_drain() {
     for workers in [1, 4] {
         for stop in [false, true] {
             for panic in [false, true] {
-                native(workers, move |cx| grouped_parent_policy_scenario(cx, stop, panic));
+                native(workers, move |cx| {
+                    grouped_parent_policy_scenario(cx, stop, panic)
+                });
             }
         }
     }
@@ -1860,17 +1907,35 @@ fn managed_app_groups_validate_all_configs_and_preserve_legacy_refusal() {
         vec![
             grouped_route("api.route.health", "root"),
             grouped_route("workers.route.health", "workers"),
-            ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
-                move |_: Cx, _| { one.fetch_add(1, Ordering::AcqRel); async { Outcome::Ok(()) } }),
-            ManagedAppBinding::worker("workers.actor.cache", ManagedRestartMode::Temporary,
-                move |_: Cx, _| { two.fetch_add(1, Ordering::AcqRel); async { Outcome::Ok(()) } }),
+            ManagedAppBinding::worker(
+                "api.actor.cache",
+                ManagedRestartMode::Temporary,
+                move |_: Cx, _| {
+                    one.fetch_add(1, Ordering::AcqRel);
+                    async { Outcome::Ok(()) }
+                },
+            ),
+            ManagedAppBinding::worker(
+                "workers.actor.cache",
+                ManagedRestartMode::Temporary,
+                move |_: Cx, _| {
+                    two.fetch_add(1, Ordering::AcqRel);
+                    async { Outcome::Ok(()) }
+                },
+            ),
         ]
     };
     assert!(matches!(
-        parse(grouped_manifest("one_for_one", "one_for_one"))
-            .bind_managed_groups(bindings(), grouped_configs(config(),
-                config().with_restart_policy(RestartPolicy::OneForAll))),
-        Err(ManagedAppBindError::Supervisor(ManagedSupervisorBindError::RestartPolicyMismatch))
+        parse(grouped_manifest("one_for_one", "one_for_one")).bind_managed_groups(
+            bindings(),
+            grouped_configs(
+                config(),
+                config().with_restart_policy(RestartPolicy::OneForAll)
+            )
+        ),
+        Err(ManagedAppBindError::Supervisor(
+            ManagedSupervisorBindError::RestartPolicyMismatch
+        ))
     ));
     let mut duplicate_route = grouped_manifest("one_for_one", "one_for_one");
     duplicate_route["services"][1]["routes"][0]["path"] = json!("/health/");
@@ -1918,7 +1983,11 @@ async fn grouped_normal_completion_and_authority_scenario(cx: Cx) {
         Err(ManagedAppBindError::Capability { unit, capability: AppCxCapabilityV1::Database })
             if unit == "workers.actor.cache"
     ));
-    assert_eq!(starts.load(Ordering::Acquire), 0, "nested preflight published root work");
+    assert_eq!(
+        starts.load(Ordering::Acquire),
+        0,
+        "nested preflight published root work"
+    );
     let report = parse(manifest)
         .bind_managed_groups(bindings(), grouped_configs(config(), config()))
         .unwrap()
@@ -1960,30 +2029,45 @@ async fn grouped_escalation_scenario(cx: Cx) {
             vec![
                 grouped_route("api.route.health", "root"),
                 grouped_route("workers.route.health", "workers"),
-                ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
-                    |_: Cx, _| async { Outcome::Ok(()) }),
-                ManagedAppBinding::worker("workers.actor.cache", ManagedRestartMode::Transient,
+                ManagedAppBinding::worker(
+                    "api.actor.cache",
+                    ManagedRestartMode::Temporary,
+                    |_: Cx, _| async { Outcome::Ok(()) },
+                ),
+                ManagedAppBinding::worker(
+                    "workers.actor.cache",
+                    ManagedRestartMode::Transient,
                     move |cx: Cx, generation: ManagedGeneration| {
                         assert_pure_work_context(&cx);
                         let attempt = counter.fetch_add(1, Ordering::AcqRel);
                         let observed = Arc::clone(&observed);
                         async move {
-                            assert_eq!(generation.number, 1, "inner restart allowance was exhausted");
+                            assert_eq!(
+                                generation.number, 1,
+                                "inner restart allowance was exhausted"
+                            );
                             if attempt == 0 {
                                 Outcome::Err("escalate to group owner")
                             } else {
                                 parked_stop_sibling(cx, observed).await
                             }
                         }
-                    }),
+                    },
+                ),
             ],
-            grouped_configs(config(), SupervisionConfig::new(0, Duration::from_secs(60))
-                .with_backoff(BackoffStrategy::None)
-                .with_escalation(EscalationPolicy::Escalate)),
+            grouped_configs(
+                config(),
+                SupervisionConfig::new(0, Duration::from_secs(60))
+                    .with_backoff(BackoffStrategy::None)
+                    .with_escalation(EscalationPolicy::Escalate),
+            ),
         )
         .unwrap();
     let mut tree = tree.start(parent.cx()).unwrap();
-    witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)).await;
+    witness
+        .changed
+        .wait_until(|| witness.parked.load(Ordering::Acquire))
+        .await;
     while !tree.routes_ready() {
         yield_now().await;
     }
@@ -2078,9 +2162,7 @@ fn managed_app_groups_propagate_native_finalizer_failure_without_replacement() {
                     )
                     .unwrap();
                 let mut tree = tree.start(parent.cx()).unwrap();
-                changed
-                    .wait_until(|| parked.load(Ordering::Acquire))
-                    .await;
+                changed.wait_until(|| parked.load(Ordering::Acquire)).await;
                 let generation = identity.lock().unwrap().unwrap();
                 let finalized = Arc::new(AtomicUsize::new(0));
                 let finalizer_count = Arc::clone(&finalized);
@@ -2161,54 +2243,82 @@ fn managed_app_groups_propagate_real_invocation_finalizer_failure_without_replac
         let published_identity = Arc::clone(&identity);
         let parked = Arc::new(AtomicBool::new(false));
         let saw_parked = Arc::clone(&parked);
-        let tree = parse(manifest).bind_managed_groups(
-            vec![
-                ManagedAppBinding::<&'static str>::worker(
-                    "api.actor.cache", ManagedRestartMode::Temporary,
-                    |_: Cx, _| async { Outcome::Ok(()) }),
-                ManagedAppBinding::worker(
-                    "workers.actor.cache", ManagedRestartMode::Transient,
-                    move |cx: Cx, generation: ManagedGeneration| {
-                        counter.fetch_add(1, Ordering::AcqRel);
-                        *published_identity.lock().unwrap() = Some(generation);
-                        let mut receiver = receiver.lock().unwrap().take().unwrap();
-                        let parked = Arc::clone(&saw_parked);
-                        async move {
-                            let mut receive = std::pin::pin!(receiver.recv(&cx));
-                            poll_fn(|task| {
-                                let result = receive.as_mut().poll(task);
-                                if result.is_pending() {
-                                    parked.store(true, Ordering::Release);
-                                }
-                                result
-                            }).await.unwrap();
-                            Outcome::Err("worker finished before failing cleanup")
-                        }
-                    }),
-            ],
-            grouped_configs(config(), config()),
-        ).unwrap();
+        let tree = parse(manifest)
+            .bind_managed_groups(
+                vec![
+                    ManagedAppBinding::<&'static str>::worker(
+                        "api.actor.cache",
+                        ManagedRestartMode::Temporary,
+                        |_: Cx, _| async { Outcome::Ok(()) },
+                    ),
+                    ManagedAppBinding::worker(
+                        "workers.actor.cache",
+                        ManagedRestartMode::Transient,
+                        move |cx: Cx, generation: ManagedGeneration| {
+                            counter.fetch_add(1, Ordering::AcqRel);
+                            *published_identity.lock().unwrap() = Some(generation);
+                            let mut receiver = receiver.lock().unwrap().take().unwrap();
+                            let parked = Arc::clone(&saw_parked);
+                            async move {
+                                let mut receive = std::pin::pin!(receiver.recv(&cx));
+                                poll_fn(|task| {
+                                    let result = receive.as_mut().poll(task);
+                                    if result.is_pending() {
+                                        parked.store(true, Ordering::Release);
+                                    }
+                                    result
+                                })
+                                .await
+                                .unwrap();
+                                Outcome::Err("worker finished before failing cleanup")
+                            }
+                        },
+                    ),
+                ],
+                grouped_configs(config(), config()),
+            )
+            .unwrap();
         let output = Arc::new(std::sync::Mutex::new(None));
         let published = Arc::clone(&output);
-        let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async move {
-            let report = tree.run(&Cx::current().unwrap()).await.unwrap();
-            *published.lock().unwrap() = Some(report);
-        }).unwrap();
+        let (task, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let report = tree.run(&Cx::current().unwrap()).await.unwrap();
+                *published.lock().unwrap() = Some(report);
+            })
+            .unwrap();
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_idle();
-        assert!(parked.load(Ordering::Acquire), "worker did not reach actual Pending");
+        assert!(
+            parked.load(Ordering::Acquire),
+            "worker did not reach actual Pending"
+        );
         let generation = identity.lock().unwrap().unwrap();
         let finalized = Arc::new(AtomicUsize::new(0));
         let finalizer_count = Arc::clone(&finalized);
-        assert!(lab.state.register_async_finalizer(generation.region, async move {
-            finalizer_count.fetch_add(1, Ordering::AcqRel);
-            panic!("real nested invocation finalizer failure");
-        }));
+        assert!(
+            lab.state
+                .register_async_finalizer(generation.region, async move {
+                    finalizer_count.fetch_add(1, Ordering::AcqRel);
+                    panic!("real nested invocation finalizer failure");
+                })
+        );
         release.send_blocking(()).unwrap();
         lab.run_until_idle();
-        assert!(matches!(join.try_join(), Ok(Some(())) | Err(JoinError::Cancelled(_))));
-        let report = output.lock().unwrap().take().expect("failed cleanup keeps its receipt");
-        assert_eq!(starts.load(Ordering::Acquire), 1, "failed cleanup admitted replacement");
+        assert!(matches!(
+            join.try_join(),
+            Ok(Some(())) | Err(JoinError::Cancelled(_))
+        ));
+        let report = output
+            .lock()
+            .unwrap()
+            .take()
+            .expect("failed cleanup keeps its receipt");
+        assert_eq!(
+            starts.load(Ordering::Acquire),
+            1,
+            "failed cleanup admitted replacement"
+        );
         assert_eq!(finalized.load(Ordering::Acquire), 1);
         assert!(matches!(report.root.outcome, Outcome::Panicked(_)));
         assert_eq!(report.root.started, 2);
@@ -2222,9 +2332,16 @@ fn managed_app_groups_propagate_real_invocation_finalizer_failure_without_replac
         assert_eq!(nested.joined, 1);
         assert_eq!(nested.restart_batches, 0);
         assert_eq!(nested.escalations, 1);
-        assert!(matches!(nested.children[0].cleanup_outcome, Some(Outcome::Panicked(_))));
-        let outer = report.root.children.iter()
-            .find(|child| child.name.as_str() == "group:workers").unwrap();
+        assert!(matches!(
+            nested.children[0].cleanup_outcome,
+            Some(Outcome::Panicked(_))
+        ));
+        let outer = report
+            .root
+            .children
+            .iter()
+            .find(|child| child.name.as_str() == "group:workers")
+            .unwrap();
         assert!(matches!(outer.cleanup_outcome, Some(Outcome::Panicked(_))));
         assert!(lab.state.region(generation.region).is_none());
         assert!(lab.state.tasks_is_empty());
@@ -2241,18 +2358,24 @@ fn managed_app_groups_reach_seeded_lab_quiescence() {
     for seed in [17, 41, 93] {
         let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(16384));
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async {
-            let cx = Cx::current().unwrap();
-            grouped_normal_completion_and_authority_scenario(cx.clone()).await;
-            grouped_escalation_scenario(cx.clone()).await;
-            grouped_local_restart_scenario(cx.clone()).await;
-            grouped_parent_policy_scenario(cx.clone(), true, false).await;
-            grouped_parent_policy_scenario(cx, false, false).await;
-        }).unwrap();
+        let (task, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                let cx = Cx::current().unwrap();
+                grouped_normal_completion_and_authority_scenario(cx.clone()).await;
+                grouped_escalation_scenario(cx.clone()).await;
+                grouped_local_restart_scenario(cx.clone()).await;
+                grouped_parent_policy_scenario(cx.clone(), true, false).await;
+                grouped_parent_policy_scenario(cx, false, false).await;
+            })
+            .unwrap();
         lab.scheduler.lock().schedule(task, 0);
         let virtual_time = lab.run_with_auto_advance();
         let report = lab.run_until_quiescent_with_report();
-        assert!(matches!(join.try_join(), Ok(Some(()))), "seed={seed}: {virtual_time:?} {report:?}");
+        assert!(
+            matches!(join.try_join(), Ok(Some(()))),
+            "seed={seed}: {virtual_time:?} {report:?}"
+        );
         assert!(lab.state.tasks_is_empty());
         assert!(lab.state.obligations_iter().all(|(_, o)| !o.is_pending()));
         assert!(report.lab_test_passed(), "seed={seed}: {report:?}");
@@ -2312,7 +2435,10 @@ async fn check_managed_blocking_pool_descendants(cx: Cx, expected: bool) {
 }
 
 async fn managed_blocking_pool_authority_scenario(cx: Cx) {
-    assert!(cx.blocking_pool_handle().is_some(), "test requires a real pool");
+    assert!(
+        cx.blocking_pool_handle().is_some(),
+        "test requires a real pool"
+    );
     for capabilities in [
         json!(["spawn"]),
         json!(["blocking"]),
@@ -2876,7 +3002,10 @@ async fn managed_slo_trigger_scenario(cx: Cx) {
             policies.load(Ordering::Acquire),
             if trigger == "startup" { 1 } else { 2 }
         );
-        assert_eq!(work.load(Ordering::Acquire), usize::from(trigger != "startup"));
+        assert_eq!(
+            work.load(Ordering::Acquire),
+            usize::from(trigger != "startup")
+        );
         assert_eq!(report.started, 1);
         assert_eq!(report.joined, 1);
         assert_eq!(report.restart_batches, 0);
@@ -2945,9 +3074,10 @@ fn managed_app_slo_worker_panic_precedes_factory_and_drains_controller() {
 mod managed_observability {
     use super::*;
     use asupersync::app::{
-        AppObservabilitySinkKindV1 as SinkKind, ManagedAppEvent, ManagedAppEventOutcome as ResultKind,
-        ManagedAppEventPhase as Phase, ManagedAppObservabilityBinding as Observer,
-        ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement as Requires,
+        AppObservabilitySinkKindV1 as SinkKind, ManagedAppEvent,
+        ManagedAppEventOutcome as ResultKind, ManagedAppEventPhase as Phase,
+        ManagedAppObservabilityBinding as Observer, ManagedAppResourceBinding,
+        ManagedAppResourceError, ManagedAppResourceRequirement as Requires,
     };
     use std::sync::Mutex;
 
@@ -3028,20 +3158,32 @@ mod managed_observability {
                     json!(["remote"]);
                 let calls = Arc::new(AtomicUsize::new(0));
                 let observed = Arc::clone(&calls);
-                let app = parse(manifest).bind_managed_with_adapters(
-                    routes(),
-                    ManagedAppAdapters::new().observability(Observer::new(
-                        "events", SinkKind::Trace, move |_, _| {
-                            observed.fetch_add(1, Ordering::AcqRel);
-                        })),
-                    config(),
-                ).unwrap();
+                let app = parse(manifest)
+                    .bind_managed_with_adapters(
+                        routes(),
+                        ManagedAppAdapters::new().observability(Observer::new(
+                            "events",
+                            SinkKind::Trace,
+                            move |_, _| {
+                                observed.fetch_add(1, Ordering::AcqRel);
+                            },
+                        )),
+                        config(),
+                    )
+                    .unwrap();
                 let router = app.router();
-                assert!(matches!(app.start(&cx), Err(ManagedAppBindError::Capability {
+                assert!(
+                    matches!(app.start(&cx), Err(ManagedAppBindError::Capability {
                     unit, capability: asupersync::app::AppCxCapabilityV1::Remote
-                }) if unit == "observability:events"));
-                assert_eq!(router.handle_with_cx(&cx, Request::new("GET", "/health")).await.status,
-                    StatusCode::SERVICE_UNAVAILABLE);
+                }) if unit == "observability:events")
+                );
+                assert_eq!(
+                    router
+                        .handle_with_cx(&cx, Request::new("GET", "/health"))
+                        .await
+                        .status,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
                 assert_eq!(calls.load(Ordering::Acquire), 0);
             });
         }
@@ -3089,64 +3231,89 @@ mod managed_observability {
         let panic_payload_drops = Arc::clone(&panic_drops);
         let parked = Arc::new(AtomicBool::new(false));
         let waiting = Arc::clone(&parked);
-        let app = parse(manifest).bind_managed_with_adapters(
-            vec![
-                ManagedAppBinding::route("api.route.health", AsyncCxFnHandler::new(|cx: Cx| {
-                    assert!(!cx.capabilities().time && !cx.capabilities().spawn);
-                    async { Response::new(StatusCode::BAD_REQUEST, "typed response survives observers") }
-                })),
-                ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Transient,
-                    move |cx: Cx, _: ManagedGeneration| {
-                        let attempt = started.fetch_add(1, Ordering::AcqRel);
-                        let dropped = Arc::clone(&dropped);
-                        let waiting = Arc::clone(&waiting);
-                        async move {
-                            let _drop = Dropped(dropped);
-                            if attempt == 0 {
-                                return Outcome::Err("restart after exact domain error");
+        let app = parse(manifest)
+            .bind_managed_with_adapters(
+                vec![
+                    ManagedAppBinding::route(
+                        "api.route.health",
+                        AsyncCxFnHandler::new(|cx: Cx| {
+                            assert!(!cx.capabilities().time && !cx.capabilities().spawn);
+                            async {
+                                Response::new(
+                                    StatusCode::BAD_REQUEST,
+                                    "typed response survives observers",
+                                )
                             }
-                            let mut cancelled = std::pin::pin!(cx.cancelled());
-                            poll_fn(|task| {
-                                let result = cancelled.as_mut().poll(task);
-                                if result.is_pending() {
-                                    waiting.store(true, Ordering::Release);
+                        }),
+                    ),
+                    ManagedAppBinding::worker(
+                        "api.actor.cache",
+                        ManagedRestartMode::Transient,
+                        move |cx: Cx, _: ManagedGeneration| {
+                            let attempt = started.fetch_add(1, Ordering::AcqRel);
+                            let dropped = Arc::clone(&dropped);
+                            let waiting = Arc::clone(&waiting);
+                            async move {
+                                let _drop = Dropped(dropped);
+                                if attempt == 0 {
+                                    return Outcome::Err("restart after exact domain error");
                                 }
-                                result
-                            }).await;
-                            let _ = cx.checkpoint();
-                            Outcome::Cancelled(cx.cancel_reason().unwrap())
-                        }
-                    }),
-            ],
-            ManagedAppAdapters::new()
-                .observability(Observer::new("panic", SinkKind::Trace, move |_, _| {
-                    std::panic::panic_any(ObserverPanicPayload(Arc::clone(&panic_payload_drops)));
-                }))
-                .observability(Observer::new("logs", SinkKind::Trace, move |cx, event| {
-                    assert_observer_context(cx, false);
-                    logs.log(LogEntry::info(format!("{} {:?}", event.unit, event.phase)));
-                }))
-                .observability(Observer::new("counts", SinkKind::Metrics, move |cx, _| {
-                    // A Pure work unit does not mask its separately authorized sink.
-                    assert_observer_context(cx, true);
-                    metric.increment();
-                }))
-                .observability(Observer::new("evidence", SinkKind::Evidence, move |cx, event| {
-                    assert_observer_context(cx, false);
-                    if event.unit == "api.actor.cache" && event.phase == Phase::Finished {
-                        assert!(retired.load(Ordering::Acquire)
-                            >= usize::try_from(event.generation.unwrap().number).unwrap());
-                    }
-                    records.lock().unwrap().push(event.clone());
-                })),
-            config(),
-        ).unwrap();
+                                let mut cancelled = std::pin::pin!(cx.cancelled());
+                                poll_fn(|task| {
+                                    let result = cancelled.as_mut().poll(task);
+                                    if result.is_pending() {
+                                        waiting.store(true, Ordering::Release);
+                                    }
+                                    result
+                                })
+                                .await;
+                                let _ = cx.checkpoint();
+                                Outcome::Cancelled(cx.cancel_reason().unwrap())
+                            }
+                        },
+                    ),
+                ],
+                ManagedAppAdapters::new()
+                    .observability(Observer::new("panic", SinkKind::Trace, move |_, _| {
+                        std::panic::panic_any(ObserverPanicPayload(Arc::clone(
+                            &panic_payload_drops,
+                        )));
+                    }))
+                    .observability(Observer::new("logs", SinkKind::Trace, move |cx, event| {
+                        assert_observer_context(cx, false);
+                        logs.log(LogEntry::info(format!("{} {:?}", event.unit, event.phase)));
+                    }))
+                    .observability(Observer::new("counts", SinkKind::Metrics, move |cx, _| {
+                        // A Pure work unit does not mask its separately authorized sink.
+                        assert_observer_context(cx, true);
+                        metric.increment();
+                    }))
+                    .observability(Observer::new(
+                        "evidence",
+                        SinkKind::Evidence,
+                        move |cx, event| {
+                            assert_observer_context(cx, false);
+                            if event.unit == "api.actor.cache" && event.phase == Phase::Finished {
+                                assert!(
+                                    retired.load(Ordering::Acquire)
+                                        >= usize::try_from(event.generation.unwrap().number)
+                                            .unwrap()
+                                );
+                            }
+                            records.lock().unwrap().push(event.clone());
+                        },
+                    )),
+                config(),
+            )
+            .unwrap();
         let router = app.router();
         let mut app = app.start(&cx).unwrap();
         while !app.routes_ready() || !parked.load(Ordering::Acquire) {
             yield_now().await;
         }
-        let response = router.handle_with_cx(&cx, Request::new("GET", "/health")).await;
+        let response = router
+            .handle_with_cx(&cx, Request::new("GET", "/health"))
+            .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         app.abort();
         let report = app.join().await.unwrap();
@@ -3159,19 +3326,32 @@ mod managed_observability {
         assert_eq!(collector.len(), 6);
         assert_eq!(counter.get(), 6);
         for start in events.iter().filter(|event| event.phase == Phase::Started) {
-            let finish = events.iter().find(|event| {
-                event.phase == Phase::Finished && event.region == start.region
-            }).unwrap();
+            let finish = events
+                .iter()
+                .find(|event| event.phase == Phase::Finished && event.region == start.region)
+                .unwrap();
             assert_eq!(finish.task, start.task);
             assert!(finish.at >= start.at);
         }
-        let finished: Vec<_> = events.iter().filter(|event| event.phase == Phase::Finished).collect();
+        let finished: Vec<_> = events
+            .iter()
+            .filter(|event| event.phase == Phase::Finished)
+            .collect();
         assert!(finished.iter().any(|event| event.unit == "api.route.health"
-            && event.outcome == Some(ResultKind::Failed) && event.http_status == Some(400)));
-        assert!(finished.iter().any(|event| event.generation.is_some_and(|g| g.number == 1)
-            && event.outcome == Some(ResultKind::Failed)));
-        assert!(finished.iter().any(|event| event.generation.is_some_and(|g| g.number == 2)
-            && event.outcome == Some(ResultKind::Cancelled)));
+            && event.outcome == Some(ResultKind::Failed)
+            && event.http_status == Some(400)));
+        assert!(
+            finished
+                .iter()
+                .any(|event| event.generation.is_some_and(|g| g.number == 1)
+                    && event.outcome == Some(ResultKind::Failed))
+        );
+        assert!(
+            finished
+                .iter()
+                .any(|event| event.generation.is_some_and(|g| g.number == 2)
+                    && event.outcome == Some(ResultKind::Cancelled))
+        );
         let stats = app.observability_stats();
         assert_eq!(stats.len(), 4);
         for stat in stats {
@@ -3179,7 +3359,10 @@ mod managed_observability {
                 assert!(stat.disabled);
                 assert!((1..=6).contains(&stat.attempted));
                 assert_eq!((stat.delivered, stat.panicked), (0, stat.attempted));
-                assert_eq!(u64::try_from(panic_drops.load(Ordering::Acquire)).unwrap(), stat.panicked);
+                assert_eq!(
+                    u64::try_from(panic_drops.load(Ordering::Acquire)).unwrap(),
+                    stat.panicked
+                );
             } else {
                 assert!(!stat.disabled);
                 assert_eq!(stat.attempted, 6);
@@ -3205,34 +3388,50 @@ mod managed_observability {
                     manifest["slo_hooks"] = json!([{
                         "name": "admission", "kind": "saturation", "target": "api.actor.cache"
                     }]);
-                    manifest["observability"] = json!([sink("events", "evidence", json!(["pure"]))]);
+                    manifest["observability"] =
+                        json!([sink("events", "evidence", json!(["pure"]))]);
                     let events = Arc::new(Mutex::new(Vec::new()));
                     let records = Arc::clone(&events);
                     let work = Arc::new(AtomicUsize::new(0));
                     let work_calls = Arc::clone(&work);
-                    let app = parse(manifest).bind_managed_with_adapters(
-                        vec![ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
-                            move |_: Cx, _| {
-                                work_calls.fetch_add(1, Ordering::AcqRel);
-                                async { Outcome::<(), &'static str>::Ok(()) }
-                            })],
-                        ManagedAppAdapters::new()
-                            .slo_hook(ManagedAppSloBinding::new("admission", AppSloHookKindV1::Saturation,
-                                "api.actor.cache", move |_, _| {
-                                    assert!(!panics, "policy panic remains the result");
-                                    ManagedAppSloDecision::Reject("saturated".to_owned())
-                                }))
-                            .observability(Observer::new("events", SinkKind::Evidence, move |_, event| {
-                                records.lock().unwrap().push(event.clone());
-                            })),
-                        config(),
-                    ).unwrap();
+                    let app = parse(manifest)
+                        .bind_managed_with_adapters(
+                            vec![ManagedAppBinding::worker(
+                                "api.actor.cache",
+                                ManagedRestartMode::Temporary,
+                                move |_: Cx, _| {
+                                    work_calls.fetch_add(1, Ordering::AcqRel);
+                                    async { Outcome::<(), &'static str>::Ok(()) }
+                                },
+                            )],
+                            ManagedAppAdapters::new()
+                                .slo_hook(ManagedAppSloBinding::new(
+                                    "admission",
+                                    AppSloHookKindV1::Saturation,
+                                    "api.actor.cache",
+                                    move |_, _| {
+                                        assert!(!panics, "policy panic remains the result");
+                                        ManagedAppSloDecision::Reject("saturated".to_owned())
+                                    },
+                                ))
+                                .observability(Observer::new(
+                                    "events",
+                                    SinkKind::Evidence,
+                                    move |_, event| {
+                                        records.lock().unwrap().push(event.clone());
+                                    },
+                                )),
+                            config(),
+                        )
+                        .unwrap();
                     let mut app = app.start(&cx).unwrap();
                     let report = app.join().await.unwrap();
                     assert_eq!(work.load(Ordering::Acquire), 0, "refused factory ran");
                     if panics {
-                        assert!(matches!(&report.children[0].outcome, Outcome::Panicked(payload)
-                            if payload.message() == "policy panic remains the result"));
+                        assert!(
+                            matches!(&report.children[0].outcome, Outcome::Panicked(payload)
+                            if payload.message() == "policy panic remains the result")
+                        );
                     } else {
                         assert!(matches!(&report.children[0].outcome,
                             Outcome::Err(ManagedAppWorkError::SloRejected { reason, .. }) if reason == "saturated"));
@@ -3240,7 +3439,14 @@ mod managed_observability {
                     let events = events.lock().unwrap();
                     assert_eq!(events.len(), 1);
                     assert_eq!(events[0].phase, Phase::AdmissionRejected);
-                    assert_eq!(events[0].outcome, Some(if panics { ResultKind::Panicked } else { ResultKind::Rejected }));
+                    assert_eq!(
+                        events[0].outcome,
+                        Some(if panics {
+                            ResultKind::Panicked
+                        } else {
+                            ResultKind::Rejected
+                        })
+                    );
                     assert!(events[0].region.is_none() && events[0].task.is_none());
                     assert_eq!(app.observability_stats()[0].delivered, 1);
                 }
@@ -3262,36 +3468,61 @@ mod managed_observability {
                     manifest["slo_hooks"] = json!([{
                         "name":"limit", "kind":"throughput", "target":"api.job.reload"
                     }]);
-                    manifest["observability"] = json!([sink("events", "evidence", json!(["pure"]))]);
+                    manifest["observability"] =
+                        json!([sink("events", "evidence", json!(["pure"]))]);
                     let events = Arc::new(Mutex::new(Vec::new()));
                     let records = Arc::clone(&events);
                     let admissions = Arc::new(AtomicUsize::new(0));
                     let count = Arc::clone(&admissions);
-                    let factory = |_: Cx, _: ManagedGeneration| async { Outcome::<(), &'static str>::Ok(()) };
+                    let factory =
+                        |_: Cx, _: ManagedGeneration| async { Outcome::<(), &'static str>::Ok(()) };
                     let (sender, receiver) = asupersync::channel::mpsc::channel(3);
                     sender.try_send(()).unwrap();
                     sender.try_send(()).unwrap();
                     let binding = if trigger == "signal" {
-                        ManagedAppBinding::signal_worker("api.job.reload", "reload", receiver,
-                            ManagedRestartMode::Temporary, factory)
+                        ManagedAppBinding::signal_worker(
+                            "api.job.reload",
+                            "reload",
+                            receiver,
+                            ManagedRestartMode::Temporary,
+                            factory,
+                        )
                     } else {
                         drop(receiver);
-                        ManagedAppBinding::worker("api.job.reload", ManagedRestartMode::Temporary, factory)
+                        ManagedAppBinding::worker(
+                            "api.job.reload",
+                            ManagedRestartMode::Temporary,
+                            factory,
+                        )
                     };
-                    let app = parse(manifest).bind_managed_with_adapters(vec![binding],
-                        ManagedAppAdapters::new()
-                            .slo_hook(ManagedAppSloBinding::new("limit", AppSloHookKindV1::Throughput,
-                                "api.job.reload", move |_, _| {
-                                    if count.fetch_add(1, Ordering::AcqRel) == 0 {
-                                        ManagedAppSloDecision::Admit(Budget::INFINITE)
-                                    } else {
-                                        ManagedAppSloDecision::Reject("stop this trigger".to_owned())
-                                    }
-                                }))
-                            .observability(Observer::new("events", SinkKind::Evidence, move |_, event| {
-                                records.lock().unwrap().push(event.clone());
-                            })),
-                        config()).unwrap();
+                    let app = parse(manifest)
+                        .bind_managed_with_adapters(
+                            vec![binding],
+                            ManagedAppAdapters::new()
+                                .slo_hook(ManagedAppSloBinding::new(
+                                    "limit",
+                                    AppSloHookKindV1::Throughput,
+                                    "api.job.reload",
+                                    move |_, _| {
+                                        if count.fetch_add(1, Ordering::AcqRel) == 0 {
+                                            ManagedAppSloDecision::Admit(Budget::INFINITE)
+                                        } else {
+                                            ManagedAppSloDecision::Reject(
+                                                "stop this trigger".to_owned(),
+                                            )
+                                        }
+                                    },
+                                ))
+                                .observability(Observer::new(
+                                    "events",
+                                    SinkKind::Evidence,
+                                    move |_, event| {
+                                        records.lock().unwrap().push(event.clone());
+                                    },
+                                )),
+                            config(),
+                        )
+                        .unwrap();
                     let mut app = app.start(&cx).unwrap();
                     app.join().await.unwrap();
                     let events = events.lock().unwrap();
@@ -3305,7 +3536,10 @@ mod managed_observability {
                         assert_eq!(events[2].outcome, Some(ResultKind::Rejected));
                         assert!(events[2].region.is_none());
                     }
-                    assert!(events.iter().all(|event| event.kind == asupersync::app::AppSpecV1WorkUnitKind::BackgroundJob));
+                    assert!(
+                        events.iter().all(|event| event.kind
+                            == asupersync::app::AppSpecV1WorkUnitKind::BackgroundJob)
+                    );
                     assert_eq!(app.observability_stats()[0].panicked, 0);
                 }
             });
@@ -3321,29 +3555,63 @@ mod managed_observability {
                     {"name":"events", "kind":"memory", "capability":"trace"},
                     {"name":"hidden", "kind":"memory", "capability":"trace"}
                 ]);
-                manifest["observability"][0]["required_capabilities"]["cx_capabilities"] = json!(["trace"]);
-                manifest["observability"][0]["required_capabilities"]["resources"] = json!(["events"]);
+                manifest["observability"][0]["required_capabilities"]["cx_capabilities"] =
+                    json!(["trace"]);
+                manifest["observability"][0]["required_capabilities"]["resources"] =
+                    json!(["events"]);
                 let spec = parse(manifest);
                 let count = Arc::new(AtomicUsize::new(0));
                 let hidden_drops = Arc::new(AtomicUsize::new(0));
                 let resources = vec![
                     ManagedAppResourceBinding::new(spec.resources[0].clone(), Arc::clone(&count)),
-                    ManagedAppResourceBinding::new(spec.resources[1].clone(), Dropped(Arc::clone(&hidden_drops))),
+                    ManagedAppResourceBinding::new(
+                        spec.resources[1].clone(),
+                        Dropped(Arc::clone(&hidden_drops)),
+                    ),
                 ];
-                let observer = Observer::with_resources("events", SinkKind::Trace,
-                    vec![Requires::of::<Arc<AtomicUsize>>("events")], |cx, _, resources| {
+                let observer = Observer::with_resources(
+                    "events",
+                    SinkKind::Trace,
+                    vec![Requires::of::<Arc<AtomicUsize>>("events")],
+                    |cx, _, resources| {
                         assert_observer_context(cx, false);
                         assert_eq!(resources.names().collect::<Vec<_>>(), vec!["events"]);
-                        assert!(matches!(resources.get::<Dropped>("hidden"), Err(ManagedAppResourceError::Undeclared(_))));
-                        resources.get::<Arc<AtomicUsize>>("events").unwrap().fetch_add(1, Ordering::AcqRel);
-                    });
-                let app = spec.bind_managed_with_adapters(routes(),
-                    ManagedAppAdapters::new().resources(resources).observability(observer), config()).unwrap();
-                assert_eq!(hidden_drops.load(Ordering::Acquire), 1, "sink retained the whole catalog");
+                        assert!(matches!(
+                            resources.get::<Dropped>("hidden"),
+                            Err(ManagedAppResourceError::Undeclared(_))
+                        ));
+                        resources
+                            .get::<Arc<AtomicUsize>>("events")
+                            .unwrap()
+                            .fetch_add(1, Ordering::AcqRel);
+                    },
+                );
+                let app = spec
+                    .bind_managed_with_adapters(
+                        routes(),
+                        ManagedAppAdapters::new()
+                            .resources(resources)
+                            .observability(observer),
+                        config(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    hidden_drops.load(Ordering::Acquire),
+                    1,
+                    "sink retained the whole catalog"
+                );
                 let router = app.router();
                 let mut app = app.start(&cx).unwrap();
-                while !app.routes_ready() { yield_now().await; }
-                assert_eq!(router.handle_with_cx(&cx, Request::new("GET", "/health")).await.status, StatusCode::OK);
+                while !app.routes_ready() {
+                    yield_now().await;
+                }
+                assert_eq!(
+                    router
+                        .handle_with_cx(&cx, Request::new("GET", "/health"))
+                        .await
+                        .status,
+                    StatusCode::OK
+                );
                 app.abort();
                 app.join().await.unwrap();
                 assert_eq!(count.load(Ordering::Acquire), 2);
@@ -3368,11 +3636,18 @@ mod managed_observability {
             } else {
                 Vec::new()
             };
-            let result = spec.bind_managed_with_adapters(routes(),
-                ManagedAppAdapters::new().resources(vec![resource]).observability(
-                    Observer::with_resources("events", SinkKind::Trace, requirements,
-                        |_, _, _| panic!("invalid resource adapter must never run"))),
-                config());
+            let result = spec.bind_managed_with_adapters(
+                routes(),
+                ManagedAppAdapters::new()
+                    .resources(vec![resource])
+                    .observability(Observer::with_resources(
+                        "events",
+                        SinkKind::Trace,
+                        requirements,
+                        |_, _, _| panic!("invalid resource adapter must never run"),
+                    )),
+                config(),
+            );
             if include_requirement {
                 assert!(matches!(result, Err(ManagedAppBindError::Resource(
                     ManagedAppResourceError::TypeMismatch { resource, .. })) if resource == "events"));
@@ -3402,39 +3677,58 @@ mod managed_observability {
                 let records = Arc::clone(&events);
                 let finalized = Arc::new(AtomicUsize::new(0));
                 let observed_finalizer = Arc::clone(&finalized);
-                let app = parse(manifest).bind_managed_with_adapters(
-                    vec![ManagedAppBinding::worker("api.actor.cache", ManagedRestartMode::Temporary,
-                        move |cx: Cx, _| {
-                            let mut receiver = receiver.lock().unwrap().take().unwrap();
-                            let waiting = Arc::clone(&waiting);
-                            async move {
-                                let mut receive = std::pin::pin!(receiver.recv(&cx));
-                                poll_fn(|task| {
-                                    let result = receive.as_mut().poll(task);
-                                    if result.is_pending() { waiting.store(true, Ordering::Release); }
-                                    result
-                                }).await.unwrap();
-                                Outcome::<(), &'static str>::Ok(())
-                            }
-                        })],
-                    ManagedAppAdapters::new().observability(Observer::new(
-                        "events", SinkKind::Evidence, move |_, event| {
-                            if event.phase == Phase::Finished {
-                                assert_eq!(observed_finalizer.load(Ordering::Acquire), 1,
-                                    "terminal telemetry preceded owned finalization");
-                            }
-                            records.lock().unwrap().push(event.clone());
-                        })),
-                    config(),
-                ).unwrap();
+                let app = parse(manifest)
+                    .bind_managed_with_adapters(
+                        vec![ManagedAppBinding::worker(
+                            "api.actor.cache",
+                            ManagedRestartMode::Temporary,
+                            move |cx: Cx, _| {
+                                let mut receiver = receiver.lock().unwrap().take().unwrap();
+                                let waiting = Arc::clone(&waiting);
+                                async move {
+                                    let mut receive = std::pin::pin!(receiver.recv(&cx));
+                                    poll_fn(|task| {
+                                        let result = receive.as_mut().poll(task);
+                                        if result.is_pending() {
+                                            waiting.store(true, Ordering::Release);
+                                        }
+                                        result
+                                    })
+                                    .await
+                                    .unwrap();
+                                    Outcome::<(), &'static str>::Ok(())
+                                }
+                            },
+                        )],
+                        ManagedAppAdapters::new().observability(Observer::new(
+                            "events",
+                            SinkKind::Evidence,
+                            move |_, event| {
+                                if event.phase == Phase::Finished {
+                                    assert_eq!(
+                                        observed_finalizer.load(Ordering::Acquire),
+                                        1,
+                                        "terminal telemetry preceded owned finalization"
+                                    );
+                                }
+                                records.lock().unwrap().push(event.clone());
+                            },
+                        )),
+                        config(),
+                    )
+                    .unwrap();
                 let mut app = app.start(parent.cx()).unwrap();
-                while !parked.load(Ordering::Acquire) { yield_now().await; }
+                while !parked.load(Ordering::Acquire) {
+                    yield_now().await;
+                }
                 let region = events.lock().unwrap()[0].region.unwrap();
                 let finalizer_count = Arc::clone(&finalized);
-                assert!(runtime.register_sync_finalizer_for_testing(region, move || {
-                    finalizer_count.fetch_add(1, Ordering::AcqRel);
-                    panic!("observed native finalizer failure");
-                }));
+                assert!(
+                    runtime.register_sync_finalizer_for_testing(region, move || {
+                        finalizer_count.fetch_add(1, Ordering::AcqRel);
+                        panic!("observed native finalizer failure");
+                    })
+                );
                 release.send_blocking(()).unwrap();
                 let report = app.join().await.unwrap();
                 assert!(matches!(&report.children[0].outcome, Outcome::Panicked(_)));

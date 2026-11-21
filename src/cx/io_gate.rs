@@ -186,7 +186,10 @@ impl<Caps, F> PinnedDrop for WithAmbient<Caps, F> {
         let mut this = self.project();
         // with_ambient already intersected the static capability row into this
         // mask, so erasing the marker cannot restore authority during cleanup.
-        let _ambient = this.cx.retype::<crate::cx::cap::All>().set_current_restricted();
+        let _ambient = this
+            .cx
+            .retype::<crate::cx::cap::All>()
+            .set_current_restricted();
         // Pin::set drops F in place before replacing it. Clearing the option
         // here keeps implicit field destruction from running user cleanup after
         // the ambient guard has restored the caller's context.

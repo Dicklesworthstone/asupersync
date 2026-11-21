@@ -124,7 +124,10 @@ impl<S: SymbolStream + Unpin> RaptorQReceiveSession<'_, S> {
 
     #[allow(clippy::result_large_err)]
     fn start_decode(&mut self, job: BlockDecodeJob) -> Result<(), Error> {
-        debug_assert!(self.decode_job.is_none(), "one owned decode job per session");
+        debug_assert!(
+            self.decode_job.is_none(),
+            "one owned decode job per session"
+        );
         self.decode_job = Some(
             self.state
                 .owner

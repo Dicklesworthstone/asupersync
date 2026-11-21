@@ -65,8 +65,8 @@ pub use service::{
     TowerAdapterWithProvider,
 };
 pub use service::{
-    AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, ReadinessRelease, Ready, Service,
-    ServiceExt,
+    AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, ReadinessRelease, Ready,
+    Service, ServiceExt,
 };
 pub use timeout::{Timeout, TimeoutError, TimeoutLayer};
 

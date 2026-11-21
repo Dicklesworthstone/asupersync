@@ -128,7 +128,11 @@ impl AsyncWrite for Socket {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(task, bytes);
         if let Poll::Ready(Ok(count)) = &result {
-            self.wire.bytes.lock().unwrap().extend_from_slice(&bytes[..*count]);
+            self.wire
+                .bytes
+                .lock()
+                .unwrap()
+                .extend_from_slice(&bytes[..*count]);
         }
         result
     }
@@ -157,7 +161,10 @@ fn pair(head: &[u8]) -> (Socket, TcpStream, Arc<Wire>) {
     peer.set_nonblocking(true).unwrap();
     let wire = Arc::new(Wire::default());
     (
-        Socket { inner: TcpStream::from_std(server).unwrap(), wire: Arc::clone(&wire) },
+        Socket {
+            inner: TcpStream::from_std(server).unwrap(),
+            wire: Arc::clone(&wire),
+        },
         TcpStream::from_std(peer).unwrap(),
         wire,
     )
@@ -201,12 +208,24 @@ struct CleanupGate {
     drops: Arc<AtomicUsize>,
 }
 
-fn gate(cx: &Cx) -> (CleanupGate, oneshot::Receiver<Cx>, oneshot::Sender<()>, Arc<AtomicUsize>) {
+fn gate(
+    cx: &Cx,
+) -> (
+    CleanupGate,
+    oneshot::Receiver<Cx>,
+    oneshot::Sender<()>,
+    Arc<AtomicUsize>,
+) {
     let (ready, parked) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let drops = Arc::new(AtomicUsize::new(0));
     (
-        CleanupGate { owner: cx.clone(), ready, release: released, drops: Arc::clone(&drops) },
+        CleanupGate {
+            owner: cx.clone(),
+            ready,
+            release: released,
+            drops: Arc::clone(&drops),
+        },
         parked,
         release,
         drops,
@@ -255,7 +274,13 @@ enum Ending {
 }
 
 async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
-    for ending in [Ending::Chunked, Ending::Trailers, Ending::Fixed, Ending::Empty, Ending::Head] {
+    for ending in [
+        Ending::Chunked,
+        Ending::Trailers,
+        Ending::Fixed,
+        Ending::Empty,
+        Ending::Head,
+    ] {
         let head: &[u8] = if ending == Ending::Head {
             b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n"
         } else {
@@ -286,12 +311,19 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
                         async move {
                             assert_task(&producer_cx);
                             if ending != Ending::Empty {
-                                sender.send_bytes(&producer_cx, Bytes::from_static(b"hello")).await?;
-                                sender.send_bytes(&producer_cx, Bytes::from_static(b"world")).await?;
+                                sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"hello"))
+                                    .await?;
+                                sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"world"))
+                                    .await?;
                             }
                             if ending == Ending::Trailers {
                                 let mut trailers = HeaderMap::new();
-                                trailers.insert(HeaderName::from_static("x-end"), HeaderValue::from_static("yes"));
+                                trailers.insert(
+                                    HeaderName::from_static("x-end"),
+                                    HeaderValue::from_static("yes"),
+                                );
                                 sender.send_trailers(&producer_cx, trailers).await?;
                             } else {
                                 sender.finish(&producer_cx)?;
@@ -301,12 +333,20 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
                     };
                     if matches!(ending, Ending::Fixed | Ending::Empty | Ending::Head) {
                         Http1ProducedResponse::with_content_length_and_max_frame_bytes(
-                            NonZeroUsize::MIN, NonZeroUsize::new(5).unwrap(), 200, "OK",
-                            if ending == Ending::Empty { 0 } else { 10 }, producer,
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(5).unwrap(),
+                            200,
+                            "OK",
+                            if ending == Ending::Empty { 0 } else { 10 },
+                            producer,
                         )
                     } else {
                         Http1ProducedResponse::chunked_with_max_frame_bytes(
-                            NonZeroUsize::MIN, NonZeroUsize::new(5).unwrap(), 200, "OK", producer,
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(5).unwrap(),
+                            200,
+                            "OK",
+                            producer,
                         )
                     }
                 }
@@ -314,9 +354,13 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
             config(),
         )
         .with_in_flight_requests(Arc::clone(&in_flight));
-        let mut serving = cx.spawn(move |connection| async move {
-            server.serve_produced_owned_with_peer_addr(&connection, socket, Some(peer_addr)).await
-        }).unwrap();
+        let mut serving = cx
+            .spawn(move |connection| async move {
+                server
+                    .serve_produced_owned_with_peer_addr(&connection, socket, Some(peer_addr))
+                    .await
+            })
+            .unwrap();
         let child = cleanup_parked.recv(&cx).await.unwrap();
         let request = identities.lock().unwrap()[0].clone();
         assert_ne!(request.task_id(), serving.task_id());
@@ -328,7 +372,10 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
         let pending = wire.text();
         match ending {
             Ending::Chunked | Ending::Trailers => {
-                assert!(pending.contains("5\r\nhello\r\n5\r\nworld\r\n"), "{ending:?}: {pending:?}");
+                assert!(
+                    pending.contains("5\r\nhello\r\n5\r\nworld\r\n"),
+                    "{ending:?}: {pending:?}"
+                );
                 assert!(!pending.contains("\r\n0\r\n"));
                 assert!(!pending.contains("x-end"));
             }
@@ -341,7 +388,8 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
         poll_fn(|task| {
             assert!(serving.poll_join(task).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         release.send_blocking(()).unwrap();
         let received = response(&mut peer).await;
         let state = serving.join(&cx).await.unwrap().unwrap();
@@ -353,7 +401,10 @@ async fn terminal_bytes_wait_for_subtree_retirement(cx: Cx) {
             Ending::Fixed => assert!(received.ends_with("helloworld")),
             Ending::Empty | Ending::Head => assert!(received.ends_with("\r\n\r\n")),
         }
-        assert_eq!(calls.load(Ordering::SeqCst), usize::from(ending != Ending::Head));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(ending != Ending::Head)
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(wire.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
@@ -381,24 +432,33 @@ async fn cancel_and_force_close_keep_cleanup_owned(cx: Cx) {
                 let (cleanup, ready) = setup.lock().unwrap().take().unwrap();
                 let acknowledged = Arc::clone(&acknowledgements);
                 async move {
-                    Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |producer_cx, mut sender| async move {
-                        assert_task(&producer_cx);
-                        assert_eq!(producer_cx.task_id(), request_cx.task_id());
-                        admit_child(&producer_cx, cleanup).await;
-                        sender.send_bytes(&producer_cx, Bytes::from_static(b"started")).await?;
-                        parked_until_cancelled(&producer_cx, ready).await;
-                        acknowledged.fetch_add(1, Ordering::SeqCst);
-                        Err(HttpError::BodyCancelled)
-                    })
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |producer_cx, mut sender| async move {
+                            assert_task(&producer_cx);
+                            assert_eq!(producer_cx.task_id(), request_cx.task_id());
+                            admit_child(&producer_cx, cleanup).await;
+                            sender
+                                .send_bytes(&producer_cx, Bytes::from_static(b"started"))
+                                .await?;
+                            parked_until_cancelled(&producer_cx, ready).await;
+                            acknowledged.fetch_add(1, Ordering::SeqCst);
+                            Err(HttpError::BodyCancelled)
+                        },
+                    )
                 }
             },
             config(),
         )
         .with_shutdown_signal(shutdown.clone())
         .with_in_flight_requests(Arc::clone(&in_flight));
-        let mut serving = cx.spawn(move |connection| async move {
-            server.serve_produced_owned(&connection, socket).await
-        }).unwrap();
+        let mut serving = cx
+            .spawn(move |connection| async move {
+                server.serve_produced_owned(&connection, socket).await
+            })
+            .unwrap();
         let producer = parked.recv(&cx).await.unwrap();
         assert_ne!(producer.task_id(), serving.task_id());
         assert_ne!(producer.region_id(), cx.region_id());
@@ -416,7 +476,8 @@ async fn cancel_and_force_close_keep_cleanup_owned(cx: Cx) {
         poll_fn(|task| {
             assert!(serving.poll_join(task).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         release.send_blocking(()).unwrap();
         let joined = serving.join(&cx).await;
         assert!(!matches!(joined, Err(JoinError::Panicked(_))), "{joined:?}");
@@ -447,21 +508,28 @@ async fn factory_and_poll_panics_preserve_terminal_gate(cx: Cx) {
                 let cleanup = setup.lock().unwrap().take().unwrap();
                 async move {
                     admit_child(&request_cx, cleanup).await;
-                    Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |producer_cx, sender| {
-                        assert_task(&producer_cx);
-                        assert!(!in_factory, "owned produced factory panic");
-                        async move {
-                            assert!(in_factory, "owned produced poll panic");
-                            Ok(sender)
-                        }
-                    })
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |producer_cx, sender| {
+                            assert_task(&producer_cx);
+                            assert!(!in_factory, "owned produced factory panic");
+                            async move {
+                                assert!(in_factory, "owned produced poll panic");
+                                Ok(sender)
+                            }
+                        },
+                    )
                 }
             },
             config(),
         );
-        let mut serving = cx.spawn(move |connection| async move {
-            server.serve_produced_owned(&connection, socket).await
-        }).unwrap();
+        let mut serving = cx
+            .spawn(move |connection| async move {
+                server.serve_produced_owned(&connection, socket).await
+            })
+            .unwrap();
         cleanup_parked.recv(&cx).await.unwrap();
         if in_factory {
             assert!(wire.text().is_empty());
@@ -472,7 +540,14 @@ async fn factory_and_poll_panics_preserve_terminal_gate(cx: Cx) {
         release.send_blocking(()).unwrap();
         assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 1);
         let received = response(&mut peer).await;
-        assert!(received.starts_with(if in_factory { "HTTP/1.1 500" } else { "HTTP/1.1 200" }), "{received:?}");
+        assert!(
+            received.starts_with(if in_factory {
+                "HTTP/1.1 500"
+            } else {
+                "HTTP/1.1 200"
+            }),
+            "{received:?}"
+        );
         assert_eq!(received.matches("HTTP/1.1 ").count(), 1);
         assert!(!received.contains("\r\n0\r\n"));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -508,9 +583,11 @@ async fn early_deadline_waits_for_cleanup_before_503(cx: Cx) {
         },
         limits,
     );
-    let mut serving = cx.spawn(move |connection| async move {
-        server.serve_produced_owned(&connection, socket).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(
+            move |connection| async move { server.serve_produced_owned(&connection, socket).await },
+        )
+        .unwrap();
     parked.recv(&cx).await.unwrap();
     cleanup_parked.recv(&cx).await.unwrap();
     assert!(wire.text().is_empty());
@@ -541,24 +618,35 @@ async fn finalizer_panic_never_publishes_successful_completion(cx: Cx) {
             move |request_cx: Cx, _request: StreamingServerRequest| {
                 assert_task(&request_cx);
                 let finalized = Arc::clone(&finalizers);
-                assert!(asupersync::runtime::Runtime::current_handle().unwrap()
-                    .register_sync_finalizer_for_testing(request_cx.region_id(), move || {
-                        finalized.fetch_add(1, Ordering::SeqCst);
-                        panic!("intentional owned HTTP/1 finalizer failure");
-                    }));
+                assert!(
+                    asupersync::runtime::Runtime::current_handle()
+                        .unwrap()
+                        .register_sync_finalizer_for_testing(request_cx.region_id(), move || {
+                            finalized.fetch_add(1, Ordering::SeqCst);
+                            panic!("intentional owned HTTP/1 finalizer failure");
+                        })
+                );
                 async move {
                     let producer = move |producer_cx: Cx, mut sender: OutgoingBodySender| async move {
                         assert_task(&producer_cx);
                         if length != Some(0) {
-                            sender.send_bytes(&producer_cx, Bytes::from_static(b"hello")).await?;
-                            sender.send_bytes(&producer_cx, Bytes::from_static(b"world")).await?;
+                            sender
+                                .send_bytes(&producer_cx, Bytes::from_static(b"hello"))
+                                .await?;
+                            sender
+                                .send_bytes(&producer_cx, Bytes::from_static(b"world"))
+                                .await?;
                         }
                         sender.finish(&producer_cx)?;
                         Ok(sender)
                     };
                     if let Some(length) = length {
                         Http1ProducedResponse::with_content_length(
-                            NonZeroUsize::MIN, 200, "OK", length, producer,
+                            NonZeroUsize::MIN,
+                            200,
+                            "OK",
+                            length,
+                            producer,
                         )
                     } else {
                         Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", producer)
@@ -567,9 +655,11 @@ async fn finalizer_panic_never_publishes_successful_completion(cx: Cx) {
             },
             config(),
         );
-        let mut serving = cx.spawn(move |connection| async move {
-            server.serve_produced_owned(&connection, socket).await
-        }).unwrap();
+        let mut serving = cx
+            .spawn(move |connection| async move {
+                server.serve_produced_owned(&connection, socket).await
+            })
+            .unwrap();
         assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 1);
         let received = response(&mut peer).await;
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
@@ -622,7 +712,11 @@ impl StreamingSseSource for Source {
         if self.event.is_some() || !self.idle {
             return Poll::Ready(self.next_event(cx));
         }
-        if self.waker.as_ref().is_none_or(|waker| !waker.will_wake(task.waker())) {
+        if self
+            .waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task.waker()))
+        {
             self.waker = Some(task.waker().clone());
         }
         // The source can park after queuing an event but before the transport
@@ -686,9 +780,11 @@ async fn sse_source_and_terminal_follow_request_retirement(cx: Cx) {
             config(),
         )
         .with_shutdown_signal(shutdown.clone());
-        let mut serving = cx.spawn(move |connection| async move {
-            server.serve_sse_owned(&connection, socket).await
-        }).unwrap();
+        let mut serving = cx
+            .spawn(
+                move |connection| async move { server.serve_sse_owned(&connection, socket).await },
+            )
+            .unwrap();
         if idle {
             let source = source_parked.recv(&cx).await.unwrap();
             assert_ne!(source.task_id(), serving.task_id());
@@ -699,7 +795,11 @@ async fn sse_source_and_terminal_follow_request_retirement(cx: Cx) {
         cleanup_parked.recv(&cx).await.unwrap();
         // SseEvent writes `field:value`; see the wire-format pins in
         // src/web/sse_inline_tests.rs.
-        assert!(wire.text().contains("event:update\ndata:owned event\n\n"), "{:?}", wire.text());
+        assert!(
+            wire.text().contains("event:update\ndata:owned event\n\n"),
+            "{:?}",
+            wire.text()
+        );
         assert!(!wire.text().contains("\r\n0\r\n"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert_eq!(cancelled.load(Ordering::SeqCst), usize::from(idle));
@@ -709,7 +809,11 @@ async fn sse_source_and_terminal_follow_request_retirement(cx: Cx) {
         assert!(!matches!(joined, Err(JoinError::Panicked(_))), "{joined:?}");
         let received = response(&mut peer).await;
         assert!(received.starts_with("HTTP/1.1 200"), "{received:?}");
-        assert!(received.to_ascii_lowercase().contains("content-type: text/event-stream"));
+        assert!(
+            received
+                .to_ascii_lowercase()
+                .contains("content-type: text/event-stream")
+        );
         assert_eq!(received.ends_with("0\r\n\r\n"), !idle, "{received:?}");
         assert_eq!(cancelled.load(Ordering::SeqCst), usize::from(idle));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -729,11 +833,16 @@ async fn borrowed_legacy_contract(cx: Cx) {
     let server = Http1StreamingServer::with_config_produced(
         move |_request_cx: Cx, _request: StreamingServerRequest| async move {
             let bytes = Bytes::copy_from_slice(borrowed.as_bytes());
-            Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |producer_cx, mut sender| async move {
-                sender.send_bytes(&producer_cx, bytes).await?;
-                sender.finish(&producer_cx)?;
-                Ok(sender)
-            })
+            Http1ProducedResponse::chunked(
+                NonZeroUsize::MIN,
+                200,
+                "OK",
+                move |producer_cx, mut sender| async move {
+                    sender.send_bytes(&producer_cx, bytes).await?;
+                    sender.finish(&producer_cx)?;
+                    Ok(sender)
+                },
+            )
         },
         config(),
     );
@@ -761,29 +870,40 @@ async fn listener_drain_includes_request_cleanup(cx: Cx) {
             assert!(request.peer_addr.is_some());
             let cleanup = setup.lock().unwrap().take().unwrap();
             async move {
-                Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |producer_cx, mut sender| async move {
-                    assert_task(&producer_cx);
-                    assert_eq!(producer_cx.task_id(), request_cx.task_id());
-                    admit_child(&producer_cx, cleanup).await;
-                    sender.send_bytes(&producer_cx, Bytes::from_static(b"listener event")).await?;
-                    sender.finish(&producer_cx)?;
-                    Ok(sender)
-                })
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    move |producer_cx, mut sender| async move {
+                        assert_task(&producer_cx);
+                        assert_eq!(producer_cx.task_id(), request_cx.task_id());
+                        admit_child(&producer_cx, cleanup).await;
+                        sender
+                            .send_bytes(&producer_cx, Bytes::from_static(b"listener event"))
+                            .await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
             }
         },
         Http1ListenerConfig::default()
             .http_config(config().connection)
             .drain_timeout(Duration::from_secs(5))
             .hard_drain_timeout(Duration::from_secs(10)),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
-    let mut serving = cx.spawn(move |listener_cx| async move {
-        listener.run_produced_owned_in(&listener_cx).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |listener_cx| async move { listener.run_produced_owned_in(&listener_cx).await })
+        .unwrap();
     let mut peer = TcpStream::connect(address).await.unwrap();
-    peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+    peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
     let child = cleanup_parked.recv(&cx).await.unwrap();
     assert_ne!(child.region_id(), cx.region_id());
     assert_eq!(manager.active_count(), 1);
@@ -792,7 +912,8 @@ async fn listener_drain_includes_request_cleanup(cx: Cx) {
     poll_fn(|task| {
         assert!(serving.poll_join(task).is_pending());
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     assert_eq!(manager.active_count(), 1);
     assert_eq!(in_flight.load(Ordering::SeqCst), 1);
     release.send_blocking(()).unwrap();
@@ -846,30 +967,49 @@ async fn error_does_not_hold_an_obligation_across_close(cx: Cx) {
             let errors_dropped = Arc::clone(&errors_dropped);
             async move {
                 admit_child(&request_cx, cleanup).await;
-                Http1ProducedResponse::chunked(NonZeroUsize::MIN, 200, "OK", move |producer_cx, _sender| async move {
-                    let token = producer_cx.try_register_obligation_checked(
-                        asupersync::record::ObligationKind::IoOp,
-                        producer_cx.task_id(),
-                    ).unwrap().unwrap();
-                    Err(HttpError::Io(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        ProducerError { token: Mutex::new(Some(token)), drops: errors_dropped },
-                    )))
-                })
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    move |producer_cx, _sender| async move {
+                        let token = producer_cx
+                            .try_register_obligation_checked(
+                                asupersync::record::ObligationKind::IoOp,
+                                producer_cx.task_id(),
+                            )
+                            .unwrap()
+                            .unwrap();
+                        Err(HttpError::Io(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            ProducerError {
+                                token: Mutex::new(Some(token)),
+                                drops: errors_dropped,
+                            },
+                        )))
+                    },
+                )
             }
         },
         config(),
     );
-    let mut serving = cx.spawn(move |connection| async move {
-        server.serve_produced_owned(&connection, socket).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(
+            move |connection| async move { server.serve_produced_owned(&connection, socket).await },
+        )
+        .unwrap();
     cleanup_parked.recv(&cx).await.unwrap();
-    assert_eq!(error_drops.load(Ordering::SeqCst), 1, "opaque source must retire before close");
+    assert_eq!(
+        error_drops.load(Ordering::SeqCst),
+        1,
+        "opaque source must retire before close"
+    );
     assert_eq!(wire.dropped.load(Ordering::SeqCst), 0);
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     release.send_blocking(()).unwrap();
     let error = serving.join(&cx).await.unwrap().unwrap_err();
-    let HttpError::Io(error) = error else { panic!("unexpected error: {error:?}") };
+    let HttpError::Io(error) = error else {
+        panic!("unexpected error: {error:?}")
+    };
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(error.to_string(), "producer failed with an owned resource");
     assert_eq!(error_drops.load(Ordering::SeqCst), 1);

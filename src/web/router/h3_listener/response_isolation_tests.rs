@@ -12,8 +12,8 @@ use crate::net::quic_native::handshake_driver::{
     QuicHandshakeDriver, client_config, server_config,
 };
 use crate::net::quic_native::{
-    NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint,
-    QuicUdpEndpointConfig, StreamId,
+    NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint, QuicUdpEndpointConfig,
+    StreamId,
 };
 use crate::web::{FnHandler, Response, Router, StatusCode, post};
 use futures_lite::future::zip;
@@ -166,7 +166,10 @@ async fn response(
         owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
         for event in events(cx, session, owner) {
             match event {
-                NativeH3Event::ResponseHeaders { stream_id, head: value } => {
+                NativeH3Event::ResponseHeaders {
+                    stream_id,
+                    head: value,
+                } => {
                     assert_eq!(stream_id, stream);
                     assert!(head.replace(value).is_none());
                 }
@@ -353,7 +356,10 @@ fn run_isolation(streaming: bool) {
             assert_eq!(held, StreamId(0));
             loop {
                 let state = slow.connection().inner().streams().stream(held).unwrap();
-                assert_eq!(state.read_offset, 0, "do not consume or replenish the held body");
+                assert_eq!(
+                    state.read_offset, 0,
+                    "do not consume or replenish the held body"
+                );
                 assert_eq!(state.recv_credit.limit(), WINDOW);
                 assert!(state.final_size.is_none() && state.recv_reset.is_none());
                 if state.recv_offset == WINDOW {
@@ -362,12 +368,15 @@ fn run_isolation(streaming: bool) {
                 slow.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
             }
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            cx.trace_with_fields("http3.response_peer_budget.parked", &[
-                ("streaming", if streaming { "true" } else { "false" }),
-                ("received_bytes", "64"),
-                ("consumed_bytes", "0"),
-                ("fin_received", "false"),
-            ]);
+            cx.trace_with_fields(
+                "http3.response_peer_budget.parked",
+                &[
+                    ("streaming", if streaming { "true" } else { "false" }),
+                    ("received_bytes", "64"),
+                    ("consumed_bytes", "0"),
+                    ("fin_received", "false"),
+                ],
+            );
 
             // There is still BODY_BYTES of free global capacity, but this
             // peer must not reserve a second backing while its first is held.
@@ -377,7 +386,14 @@ fn run_isolation(streaming: bool) {
             assert_eq!(calls.load(Ordering::SeqCst), 2);
             let served = request(&cx, &mut survivor, &mut survivor_h3, "/survivor").await;
             assert_eq!(served, StreamId(0));
-            response(&cx, &mut survivor, &mut survivor_h3, served, &[3; BODY_BYTES]).await;
+            response(
+                &cx,
+                &mut survivor,
+                &mut survivor_h3,
+                served,
+                &[3; BODY_BYTES],
+            )
+            .await;
             let held_state = slow.connection().inner().streams().stream(held).unwrap();
             assert_eq!(held_state.read_offset, 0);
             assert_eq!(held_state.recv_offset, WINDOW);
@@ -393,7 +409,11 @@ fn run_isolation(streaming: bool) {
             let mut terminal_streams = BTreeSet::new();
             for event in events(&cx, &mut slow_h3, &mut slow) {
                 match event {
-                    NativeH3Event::StreamReset { stream_id, error_code, .. } => {
+                    NativeH3Event::StreamReset {
+                        stream_id,
+                        error_code,
+                        ..
+                    } => {
                         assert!(stream_id == held || stream_id == denied);
                         assert_eq!(error_code, H3_REQUEST_CANCELLED);
                         assert!(terminal_streams.insert(stream_id));
@@ -405,11 +425,14 @@ fn run_isolation(streaming: bool) {
             assert_eq!(recovered, StreamId(8));
             response(&cx, &mut slow, &mut slow_h3, recovered, b"recovered").await;
             assert_eq!(calls.load(Ordering::SeqCst), 4);
-            cx.trace_with_fields("http3.response_peer_budget.recovered", &[
-                ("survivor_body", "exact_512_bytes"),
-                ("same_peer_recovery_body", "recovered"),
-                ("denied_response", "reset_before_headers"),
-            ]);
+            cx.trace_with_fields(
+                "http3.response_peer_budget.recovered",
+                &[
+                    ("survivor_body", "exact_512_bytes"),
+                    ("same_peer_recovery_body", "recovered"),
+                    ("denied_response", "reset_before_headers"),
+                ],
+            );
             shutdown_tx.send(&cx, ()).unwrap();
             zip(
                 acknowledge_goaway(&cx, &mut slow, &mut slow_h3, 12),
@@ -418,13 +441,10 @@ fn run_isolation(streaming: bool) {
             .await;
             acknowledge_until_drained(&cx, &mut slow, &mut survivor, &drained).await;
         };
-        let (report, ()) = crate::time::timeout(
-            cx.now(),
-            Duration::from_secs(20),
-            zip(serving, clients),
-        )
-        .await
-        .expect("peer isolation and same-peer recovery must complete over native UDP");
+        let (report, ()) =
+            crate::time::timeout(cx.now(), Duration::from_secs(20), zip(serving, clients))
+                .await
+                .expect("peer isolation and same-peer recovery must complete over native UDP");
         let report = report.unwrap();
         assert_eq!(report.accepted_connections, 2);
         assert_eq!(report.failed_connections, 0);
@@ -491,7 +511,11 @@ fn run_ingress_budget(streaming: bool) {
 
     const SERVER_RECEIVE_WINDOW: u64 = 128;
     const QUEUE_BYTES: usize = 64;
-    let reservation_bytes = if streaming { QUEUE_BYTES * 2 } else { BODY_BYTES };
+    let reservation_bytes = if streaming {
+        QUEUE_BYTES * 2
+    } else {
+        BODY_BYTES
+    };
     let runtime = crate::runtime::RuntimeBuilder::current_thread()
         .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
         .build()
@@ -526,7 +550,13 @@ fn run_ingress_budget(streaming: bool) {
                     let region = Arc::clone(&handler_region);
                     let calls = Arc::clone(&handler_calls);
                     async move {
-                        assert!(region.lock().unwrap().replace(request_cx.region_id()).is_none());
+                        assert!(
+                            region
+                                .lock()
+                                .unwrap()
+                                .replace(request_cx.region_id())
+                                .is_none()
+                        );
                         calls.fetch_add(1, Ordering::SeqCst);
                         Response::new(StatusCode::OK, Bytes::from(vec![7; BODY_BYTES]))
                     }
@@ -602,7 +632,13 @@ fn run_ingress_budget(streaming: bool) {
             let stream = held.connection_mut().open_bidi_stream(&cx).unwrap();
             assert_eq!(stream, StreamId(0));
             assert_eq!(
-                held.connection().inner().streams().stream(stream).unwrap().send_credit.limit(),
+                held.connection()
+                    .inner()
+                    .streams()
+                    .stream(stream)
+                    .unwrap()
+                    .send_credit
+                    .limit(),
                 WINDOW
             );
             let head = H3RequestHead::new(
@@ -642,16 +678,21 @@ fn run_ingress_budget(streaming: bool) {
             // It is stronger than a sleep, a sent packet, or a transport ACK.
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             assert!(held_region.lock().unwrap().is_none());
-            cx.trace_with_fields("http3.ingress_budget.partial_head", &[
-                ("streaming", if streaming { "true" } else { "false" }),
-                ("request_bytes_sent", "1"),
-                ("handler_calls", "0"),
-                ("admission_witness", "max_stream_data_above_initial"),
-            ]);
-            let first_denied = request(
-                &cx, &mut survivor, &mut survivor_h3, "/ingress-denied",
-            ).await;
-            assert_eq!(first_denied, stream, "different peers reuse the same stream ID");
+            cx.trace_with_fields(
+                "http3.ingress_budget.partial_head",
+                &[
+                    ("streaming", if streaming { "true" } else { "false" }),
+                    ("request_bytes_sent", "1"),
+                    ("handler_calls", "0"),
+                    ("admission_witness", "max_stream_data_above_initial"),
+                ],
+            );
+            let first_denied =
+                request(&cx, &mut survivor, &mut survivor_h3, "/ingress-denied").await;
+            assert_eq!(
+                first_denied, stream,
+                "different peers reuse the same stream ID"
+            );
             expect_ingress_refusal(&cx, &mut survivor, &mut survivor_h3, first_denied).await;
             assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
             assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -671,26 +712,39 @@ fn run_ingress_budget(streaming: bool) {
                 held.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
             }
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            let region = held_region.lock().unwrap().expect("the actual request region ran");
-            assert!(crate::runtime::Runtime::current_handle().unwrap()
-                .diagnostics().unwrap().explain_region_open(region).region_state.is_some());
+            let region = held_region
+                .lock()
+                .unwrap()
+                .expect("the actual request region ran");
+            assert!(
+                crate::runtime::Runtime::current_handle()
+                    .unwrap()
+                    .diagnostics()
+                    .unwrap()
+                    .explain_region_open(region)
+                    .region_state
+                    .is_some()
+            );
             // The upload is finished, but its region still owns a flow-blocked
             // response. Returning ingress credit at request FIN would admit this.
-            let second_denied = request(
-                &cx, &mut survivor, &mut survivor_h3, "/ingress-denied",
-            ).await;
+            let second_denied =
+                request(&cx, &mut survivor, &mut survivor_h3, "/ingress-denied").await;
             assert_eq!(second_denied, StreamId(4));
             expect_ingress_refusal(&cx, &mut survivor, &mut survivor_h3, second_denied).await;
             assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
-            cx.trace_with_fields("http3.ingress_budget.owned_response", &[
-                ("response_received_bytes", "64"),
-                ("response_consumed_bytes", "0"),
-                ("refused_requests", "2"),
-                ("denied_handler_calls", "0"),
-            ]);
+            cx.trace_with_fields(
+                "http3.ingress_budget.owned_response",
+                &[
+                    ("response_received_bytes", "64"),
+                    ("response_consumed_bytes", "0"),
+                    ("refused_requests", "2"),
+                    ("denied_handler_calls", "0"),
+                ],
+            );
 
             held.connection_mut()
-                .stop_stream_receiving(&cx, stream, H3_REQUEST_CANCELLED).unwrap();
+                .stop_stream_receiving(&cx, stream, H3_REQUEST_CANCELLED)
+                .unwrap();
             held.flush(&cx).await.unwrap();
             assert!(reset(&cx, &mut held, stream).await <= WINDOW);
             let retired = events(&cx, &mut held_h3, &mut held);
@@ -700,8 +754,13 @@ fn run_ingress_budget(streaming: bool) {
             } if *stream_id == stream && *error_code == H3_REQUEST_CANCELLED));
             let mut closed_seen = false;
             std::future::poll_fn(|task_cx| {
-                let closed = crate::runtime::Runtime::current_handle().unwrap()
-                    .diagnostics().unwrap().explain_region_open(region).region_state.is_none();
+                let closed = crate::runtime::Runtime::current_handle()
+                    .unwrap()
+                    .diagnostics()
+                    .unwrap()
+                    .explain_region_open(region)
+                    .region_state
+                    .is_none();
                 if closed && closed_seen {
                     return Poll::Ready(());
                 }
@@ -711,24 +770,32 @@ fn run_ingress_budget(streaming: bool) {
                 // before testing admission; a wire reset alone is insufficient.
                 task_cx.waker().wake_by_ref();
                 Poll::Pending
-            }).await;
-            let served = request(
-                &cx, &mut survivor, &mut survivor_h3, "/ingress-survivor",
-            ).await;
+            })
+            .await;
+            let served = request(&cx, &mut survivor, &mut survivor_h3, "/ingress-survivor").await;
             assert_eq!(served, StreamId(8));
-            response(&cx, &mut survivor, &mut survivor_h3, served, &[9; BODY_BYTES]).await;
+            response(
+                &cx,
+                &mut survivor,
+                &mut survivor_h3,
+                served,
+                &[9; BODY_BYTES],
+            )
+            .await;
             assert_eq!(calls.load(Ordering::SeqCst), 2);
             assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
             shutdown_tx.send(&cx, ()).unwrap();
             zip(
                 acknowledge_goaway(&cx, &mut held, &mut held_h3, 4),
                 acknowledge_goaway(&cx, &mut survivor, &mut survivor_h3, 12),
-            ).await;
+            )
+            .await;
             acknowledge_until_drained(&cx, &mut held, &mut survivor, &drained).await;
         };
-        let (report, ()) = crate::time::timeout(
-            cx.now(), Duration::from_secs(20), zip(serving, clients),
-        ).await.expect("shared ingress admission and cleanup must make native UDP progress");
+        let (report, ()) =
+            crate::time::timeout(cx.now(), Duration::from_secs(20), zip(serving, clients))
+                .await
+                .expect("shared ingress admission and cleanup must make native UDP progress");
         let report = report.unwrap();
         assert_eq!(report.accepted_connections, 2);
         assert_eq!(report.failed_connections, 0);
@@ -773,7 +840,10 @@ mod field_section_limits {
         .next()
         .unwrap()
         .unwrap();
-        (server_config(vec![cert], key, vec![b"h3".to_vec()]).unwrap(), ca)
+        (
+            server_config(vec![cert], key, vec![b"h3".to_vec()]).unwrap(),
+            ca,
+        )
     }
 
     fn field_head(extra: usize) -> Vec<u8> {
@@ -811,10 +881,18 @@ mod field_section_limits {
         // would itself be an invalid session composition.
         let stream = owner.connection_mut().open_bidi_stream(cx).unwrap();
         assert_eq!(
-            owner.connection().inner().streams().stream(stream).unwrap().send_credit.limit(),
+            owner
+                .connection()
+                .inner()
+                .streams()
+                .stream(stream)
+                .unwrap()
+                .send_credit
+                .limit(),
             WINDOW
         );
-        owner.connection_mut()
+        owner
+            .connection_mut()
             .write_stream(cx, stream, Bytes::copy_from_slice(&wire[..1]), false)
             .unwrap();
         owner.flush(cx).await.unwrap();
@@ -839,14 +917,20 @@ mod field_section_limits {
         loop {
             let ready = events(cx, session, owner);
             if !ready.is_empty() {
-                assert_eq!(ready, vec![NativeH3Event::StreamReset {
-                    stream_id: stream,
-                    error_code: 0x107,
-                    final_size: 0,
-                }]);
+                assert_eq!(
+                    ready,
+                    vec![NativeH3Event::StreamReset {
+                        stream_id: stream,
+                        error_code: 0x107,
+                        final_size: 0,
+                    }]
+                );
                 let state = owner.connection().inner().streams().stream(stream).unwrap();
                 assert_eq!(state.recv_reset, Some((0x107, 0)));
-                assert_eq!(state.recv_offset, 0, "no response bytes before field refusal");
+                assert_eq!(
+                    state.recv_offset, 0,
+                    "no response bytes before field refusal"
+                );
                 owner.flush(cx).await.unwrap();
                 return;
             }
@@ -908,19 +992,25 @@ mod field_section_limits {
             let handler_regions = Arc::clone(&regions);
             let denied_calls = Arc::clone(&forbidden);
             let router = Router::new()
-                .route("/field-ok", post(AsyncCxFnHandler::new(move |request_cx: Cx| {
-                    let calls = Arc::clone(&handler_calls);
-                    let regions = Arc::clone(&handler_regions);
-                    async move {
-                        regions.lock().unwrap().push(request_cx.region_id());
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        Response::new(StatusCode::OK, Bytes::from_static(b"field-ok"))
-                    }
-                })))
-                .route("/field-denied", post(FnHandler::new(move || {
-                    denied_calls.fetch_add(1, Ordering::SeqCst);
-                    Response::new(StatusCode::OK, "must not dispatch")
-                })))
+                .route(
+                    "/field-ok",
+                    post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                        let calls = Arc::clone(&handler_calls);
+                        let regions = Arc::clone(&handler_regions);
+                        async move {
+                            regions.lock().unwrap().push(request_cx.region_id());
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Response::new(StatusCode::OK, Bytes::from_static(b"field-ok"))
+                        }
+                    })),
+                )
+                .route(
+                    "/field-denied",
+                    post(FnHandler::new(move || {
+                        denied_calls.fetch_add(1, Ordering::SeqCst);
+                        Response::new(StatusCode::OK, "must not dispatch")
+                    })),
+                )
                 .without_default_trace();
             let transport = NativeQuicConnectionConfig {
                 max_local_bidi: 8,
@@ -935,7 +1025,8 @@ mod field_section_limits {
             config.max_requests_per_connection = 8;
             config.receive_window_bytes = SERVER_RECEIVE_WINDOW;
             config.max_request_field_section_size = Some(FIELD_LIMIT);
-            config.router = config.router
+            config.router = config
+                .router
                 .max_buffered_body_bytes(BODY_BYTES)
                 .max_total_buffered_body_bytes(BODY_BYTES * 4);
             config.max_total_request_body_reservation_bytes = Some(reservation_bytes);
@@ -943,15 +1034,24 @@ mod field_section_limits {
                 config.streaming_request_body_buffer_bytes = std::num::NonZeroUsize::new(64);
             }
             let listener = NativeH3Listener::bind(
-                &cx, "127.0.0.1:0".parse().unwrap(), router, tls, parameters(transport), config,
-            ).await.unwrap();
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                tls,
+                parameters(transport),
+                config,
+            )
+            .await
+            .unwrap();
             let address = listener.local_addr();
             let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
             let drained = AtomicBool::new(false);
             let serving = async {
-                let report = listener.serve_with_shutdown(&cx, async {
-                    shutdown_rx.recv(&cx).await.unwrap();
-                }).await;
+                let report = listener
+                    .serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    })
+                    .await;
                 drained.store(true, Ordering::SeqCst);
                 report
             };
@@ -965,11 +1065,16 @@ mod field_section_limits {
                     ..H3Settings::default()
                 };
                 let (mut first, mut first_h3) = connect_with_settings(
-                    &cx, address, 21, client_transport, ca.clone(), settings.clone(),
-                ).await;
-                let (mut second, mut second_h3) = connect_with_settings(
-                    &cx, address, 22, client_transport, ca, settings,
-                ).await;
+                    &cx,
+                    address,
+                    21,
+                    client_transport,
+                    ca.clone(),
+                    settings.clone(),
+                )
+                .await;
+                let (mut second, mut second_h3) =
+                    connect_with_settings(&cx, address, 22, client_transport, ca, settings).await;
 
                 let oversized = field_head(1);
                 let rejected = partial_head(&cx, &mut first, &mut first_h3, &oversized).await;
@@ -985,9 +1090,15 @@ mod field_section_limits {
 
                 // Complete the 257-byte field section WITHOUT FIN. A size
                 // check delayed to message completion cannot satisfy this.
-                first.connection_mut().write_stream(
-                    &cx, rejected, Bytes::copy_from_slice(&oversized[1..]), false,
-                ).unwrap();
+                first
+                    .connection_mut()
+                    .write_stream(
+                        &cx,
+                        rejected,
+                        Bytes::copy_from_slice(&oversized[1..]),
+                        false,
+                    )
+                    .unwrap();
                 first.flush(&cx).await.unwrap();
                 field_refusal(&cx, &mut first, &mut first_h3, rejected).await;
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -998,17 +1109,23 @@ mod field_section_limits {
                 let exact = field_head(0);
                 let recovered = partial_head(&cx, &mut first, &mut first_h3, &exact).await;
                 assert_eq!(recovered, StreamId(4));
-                first.connection_mut().write_stream(
-                    &cx, recovered, Bytes::copy_from_slice(&exact[1..]), true,
-                ).unwrap();
+                first
+                    .connection_mut()
+                    .write_stream(&cx, recovered, Bytes::copy_from_slice(&exact[1..]), true)
+                    .unwrap();
                 first.flush(&cx).await.unwrap();
                 response(&cx, &mut first, &mut first_h3, recovered, b"field-ok").await;
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
                 let region = regions.lock().unwrap()[0];
                 let mut closed_seen = false;
                 std::future::poll_fn(|task| {
-                    let closed = Runtime::current_handle().unwrap().diagnostics().unwrap()
-                        .explain_region_open(region).region_state.is_none();
+                    let closed = Runtime::current_handle()
+                        .unwrap()
+                        .diagnostics()
+                        .unwrap()
+                        .explain_region_open(region)
+                        .region_state
+                        .is_none();
                     if closed && closed_seen {
                         return Poll::Ready(());
                     }
@@ -1017,7 +1134,8 @@ mod field_section_limits {
                     // reap pass before testing another peer's admission.
                     task.waker().wake_by_ref();
                     Poll::Pending
-                }).await;
+                })
+                .await;
                 let served = request(&cx, &mut second, &mut second_h3, "/field-ok").await;
                 assert_eq!(served, StreamId(4));
                 response(&cx, &mut second, &mut second_h3, served, b"field-ok").await;
@@ -1028,12 +1146,14 @@ mod field_section_limits {
                 zip(
                     acknowledge_goaway(&cx, &mut first, &mut first_h3, 8),
                     acknowledge_goaway(&cx, &mut second, &mut second_h3, 8),
-                ).await;
+                )
+                .await;
                 acknowledge_until_drained(&cx, &mut first, &mut second, &drained).await;
             };
-            let (report, ()) = crate::time::timeout(
-                cx.now(), Duration::from_secs(20), zip(serving, clients),
-            ).await.expect("field-limit refusal and recovery must complete over native TLS/UDP");
+            let (report, ()) =
+                crate::time::timeout(cx.now(), Duration::from_secs(20), zip(serving, clients))
+                    .await
+                    .expect("field-limit refusal and recovery must complete over native TLS/UDP");
             let report = report.unwrap();
             assert_eq!(report.accepted_connections, 2);
             assert_eq!(report.failed_connections, 0);

@@ -758,7 +758,10 @@ impl std::error::Error for SourceFailure {}
 fn try_forward_source_error_retains_unflushed_prefix_and_fences_both_providers() {
     let cx = Cx::for_testing();
     let marker = Rc::new(());
-    let input = source([Ok(10), Err(SourceFailure(Rc::clone(&marker))), Ok(20)], true);
+    let input = source(
+        [Ok(10), Err(SourceFailure(Rc::clone(&marker))), Ok(20)],
+        true,
+    );
     let input_state = Rc::clone(&input.0);
     let output = sink();
     let output_state = Rc::clone(&output.0);
@@ -774,22 +777,28 @@ fn try_forward_source_error_retains_unflushed_prefix_and_fences_both_providers()
     assert!(Rc::ptr_eq(&preserved.0, &marker));
     assert!(matches!(error, TrySinkForwardError::Source(_)));
     drop(run);
-    assert_eq!(session.progress(), SinkForwardProgress {
-        accepted_items: 1,
-        flushed_items: 0,
-        has_pending: false,
-        source_exhausted: false,
-        complete: false,
-        failed: Some(SinkForwardStage::Source),
-    });
+    assert_eq!(
+        session.progress(),
+        SinkForwardProgress {
+            accepted_items: 1,
+            flushed_items: 0,
+            has_pending: false,
+            source_exhausted: false,
+            complete: false,
+            failed: Some(SinkForwardStage::Source),
+        }
+    );
     assert_eq!(output_state.borrow().items, [10]);
     assert_eq!(output_state.borrow().calls, [1, 1, 0, 0]);
     assert_eq!(input_state.borrow().polls, 2);
     cx.cancel_fast(CancelKind::User);
     let mut run = Box::pin(session.run(&cx));
-    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Err(
-        TrySinkForwardError::Failed { stage: SinkForwardStage::Source }
-    ))));
+    assert!(matches!(
+        poll_once(run.as_mut()),
+        Poll::Ready(Err(TrySinkForwardError::Failed {
+            stage: SinkForwardStage::Source
+        }))
+    ));
     drop(run);
     assert_eq!(output_state.borrow().calls, [1, 1, 0, 0]);
     assert_eq!(input_state.borrow().polls, 2);
@@ -815,7 +824,10 @@ fn try_forward_sink_errors_keep_their_type_stage_and_ownership_boundary() {
         let mut session = TrySinkForwardSession::new(input, output);
         let mut run = Box::pin(session.run(&cx));
         match poll_once(run.as_mut()) {
-            Poll::Ready(Err(TrySinkForwardError::Sink { stage: actual, error })) => {
+            Poll::Ready(Err(TrySinkForwardError::Sink {
+                stage: actual,
+                error,
+            })) => {
                 assert_eq!(actual, stage);
                 assert_eq!(error.kind(), io::ErrorKind::Other);
                 assert_eq!(error.to_string(), "scripted sink failure");
@@ -837,7 +849,11 @@ fn try_forward_sink_errors_keep_their_type_stage_and_ownership_boundary() {
         );
         assert_eq!(
             progress.flushed_items,
-            if stage == SinkForwardStage::Close { 2 } else { 0 }
+            if stage == SinkForwardStage::Close {
+                2
+            } else {
+                0
+            }
         );
         let calls = output_state.borrow().calls;
         let polls = input_state.borrow().polls;
@@ -851,7 +867,11 @@ fn try_forward_sink_errors_keep_their_type_stage_and_ownership_boundary() {
         let (_, _, pending) = session.into_parts();
         assert_eq!(pending, (stage == SinkForwardStage::Ready).then_some(10));
         if stage == SinkForwardStage::Send {
-            assert_eq!(output_state.borrow().items, [10], "failed send already consumed the item");
+            assert_eq!(
+                output_state.borrow().items,
+                [10],
+                "failed send already consumed the item"
+            );
         }
     }
 }
@@ -869,7 +889,10 @@ fn try_forward_cancellation_during_source_error_preserves_the_original_error() {
         fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.polls.set(self.polls.get() + 1);
             self.cx.cancel_fast(CancelKind::User);
-            Poll::Ready(Some(Err(self.error.take().expect("source must not be retried"))))
+            Poll::Ready(Some(Err(self
+                .error
+                .take()
+                .expect("source must not be retried"))))
         }
     }
 
@@ -896,9 +919,12 @@ fn try_forward_cancellation_during_source_error_preserves_the_original_error() {
     assert!(cx.inner.read().cancel_waker_registrations.is_empty());
     let active = Cx::for_testing();
     let mut run = Box::pin(session.run(&active));
-    assert!(matches!(poll_once(run.as_mut()), Poll::Ready(Err(
-        TrySinkForwardError::Failed { stage: SinkForwardStage::Source }
-    ))));
+    assert!(matches!(
+        poll_once(run.as_mut()),
+        Poll::Ready(Err(TrySinkForwardError::Failed {
+            stage: SinkForwardStage::Source
+        }))
+    ));
     drop(run);
     assert_eq!(polls.get(), 1);
     assert_eq!(output_state.borrow().calls, [0; 4]);
@@ -912,7 +938,11 @@ fn try_forward_drop_cancel_and_resume_retains_one_borrowed_non_unpin_item() {
     let marker = Rc::new(());
     let cx = Cx::for_testing();
     let input = source(
-        [Ok::<_, SourceFailure>(Item(&text, Rc::clone(&marker), PhantomPinned))],
+        [Ok::<_, SourceFailure>(Item(
+            &text,
+            Rc::clone(&marker),
+            PhantomPinned,
+        ))],
         true,
     );
     let input_state = Rc::clone(&input.0);
@@ -981,10 +1011,18 @@ fn try_forward_idle_flush_and_eof_close_resume_at_the_same_boundaries() {
     output_state.borrow_mut().flush_ready = true;
     let (wakes, waker) = counter();
     let mut run = Box::pin(session.run(&cx));
-    assert!(run.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        run.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     drop(run);
     assert_eq!(session.progress().flushed_items, 1);
-    assert_eq!(input_state.borrow().polls, 3, "resume must refresh the source wake");
+    assert_eq!(
+        input_state.borrow().polls,
+        3,
+        "resume must refresh the source wake"
+    );
     let source_waker = {
         let mut state = input_state.borrow_mut();
         state.items.push_back(Ok(6));
@@ -1043,7 +1081,10 @@ fn native_try_forward_reader_stream_preserves_bytes_and_half_close() {
         let runtime = if workers == 1 {
             RuntimeBuilder::current_thread().build().unwrap()
         } else {
-            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
         };
         runtime.block_on(async {
             let cx = Cx::for_testing();
@@ -1067,8 +1108,10 @@ fn native_try_forward_reader_stream_preserves_bytes_and_half_close() {
                 bytes
             };
             let ((result, ()), bytes) = futures_lite::future::zip(
-                futures_lite::future::zip(session.run(&cx), sending), receiving
-            ).await;
+                futures_lite::future::zip(session.run(&cx), sending),
+                receiving,
+            )
+            .await;
             let progress = result.unwrap();
             assert!(progress.complete);
             assert!(progress.accepted_items > 1);
@@ -1098,7 +1141,10 @@ fn native_try_forward_decodes_and_reencodes_lines_with_bounded_duplex_io() {
         let runtime = if workers == 1 {
             RuntimeBuilder::current_thread().build().unwrap()
         } else {
-            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
         };
         runtime.block_on(async {
             let cx = Cx::for_testing();
@@ -1118,8 +1164,10 @@ fn native_try_forward_decodes_and_reencodes_lines_with_bounded_duplex_io() {
                 bytes
             };
             let ((result, ()), bytes) = futures_lite::future::zip(
-                futures_lite::future::zip(session.run(&cx), sending), receiving
-            ).await;
+                futures_lite::future::zip(session.run(&cx), sending),
+                receiving,
+            )
+            .await;
             let progress = result.unwrap();
             assert!(progress.complete);
             assert!(progress.source_exhausted);

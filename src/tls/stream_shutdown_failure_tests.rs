@@ -203,7 +203,10 @@ fn assert_shutdown_retains_failure(stream: &mut Stream, kind: io::ErrorKind, mes
     assert!(!stream.shutdown_flushed);
     let calls = stream.io.calls;
     let buffered = stream.io.writer.buffer().to_vec();
-    assert!(!buffered.is_empty(), "must witness buffered bytes at the failure");
+    assert!(
+        !buffered.is_empty(),
+        "must witness buffered bytes at the failure"
+    );
     for _ in 0..3 {
         for transport in [false, true] {
             let Poll::Ready(Err(error)) = shutdown(stream, transport) else {
@@ -211,7 +214,10 @@ fn assert_shutdown_retains_failure(stream: &mut Stream, kind: io::ErrorKind, mes
             };
             assert_eq!(error.kind(), kind);
             assert_eq!(error.to_string(), message);
-            assert_eq!(stream.io.calls, calls, "shutdown touched the failed transport");
+            assert_eq!(
+                stream.io.calls, calls,
+                "shutdown touched the failed transport"
+            );
             assert_eq!(stream.io.shutdown_calls, 0);
             assert_eq!(stream.io.writer.buffer(), buffered.as_slice());
             assert!(stream.is_closed());
@@ -277,7 +283,11 @@ fn shutdown_after_handshake_failure_cannot_flush_an_abandoned_flight() {
                 if !client_side {
                     assert!(client.poll_handshake(&mut cx).is_pending());
                 }
-                let stream = if client_side { &mut client } else { &mut server };
+                let stream = if client_side {
+                    &mut client
+                } else {
+                    &mut server
+                };
                 stream.io.flush_error = Some(io::ErrorKind::BrokenPipe);
                 let Poll::Ready(Err(error)) = stream.poll_handshake(&mut cx) else {
                     panic!("the buffered handshake flight must fail its flush");
@@ -369,7 +379,6 @@ fn clean_half_close_still_flushes_and_allows_transport_shutdown() {
     }
 }
 
-
 #[test]
 fn fatal_close_notify_flush_failures_are_sticky_across_shutdown_apis() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
@@ -377,7 +386,11 @@ fn fatal_close_notify_flush_failures_are_sticky_across_shutdown_apis() {
             for transport in [false, true] {
                 for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
                     run_pair(version, true, move |mut client, mut server| {
-                        let stream = if client_side { &mut client } else { &mut server };
+                        let stream = if client_side {
+                            &mut client
+                        } else {
+                            &mut server
+                        };
                         stream.io.flush_error = Some(kind);
                         let Poll::Ready(Err(error)) = shutdown(stream, transport) else {
                             panic!("fatal close-notify flush must fail");
@@ -390,7 +403,8 @@ fn fatal_close_notify_flush_failures_are_sticky_across_shutdown_apis() {
                         stream.io.flush_error = None;
                         let calls = stream.io.calls;
                         for retry_transport in [false, true] {
-                            let Poll::Ready(Err(repeated)) = shutdown(stream, retry_transport) else {
+                            let Poll::Ready(Err(repeated)) = shutdown(stream, retry_transport)
+                            else {
                                 panic!("retained close-notify failure became success");
                             };
                             assert_eq!(repeated.kind(), kind);

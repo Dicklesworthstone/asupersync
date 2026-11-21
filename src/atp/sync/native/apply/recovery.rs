@@ -3,11 +3,10 @@
 use super::{
     DestructiveAuthorization, DirectoryEntryKind, DirectoryManifestEntry, DirectoryPath,
     NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectoryError,
-    NativeDirectoryLimits, NativeDirectorySnapshot, NativeDirectorySyncReport, NativeRoot,
-    Stamp, changed, checkpoint, directory_flags,
-    disjoint_roots, guarded_parent, io_error, metadata_stamp, open_guarded_file, os_error,
-    record_deletion, record_destination, refused, revalidate_complete, scan_root, stat_at,
-    validate_overwrite_metadata, verify_empty_directory,
+    NativeDirectoryLimits, NativeDirectorySnapshot, NativeDirectorySyncReport, NativeRoot, Stamp,
+    changed, checkpoint, directory_flags, disjoint_roots, guarded_parent, io_error, metadata_stamp,
+    open_guarded_file, os_error, record_deletion, record_destination, refused, revalidate_complete,
+    scan_root, stat_at, validate_overwrite_metadata, verify_empty_directory,
 };
 use crate::atp::sync::{BidirectionalSyncAction, PathNormalizationRules};
 use crate::cx::Cx;
@@ -47,14 +46,22 @@ impl NativeDirectoryRecoverySourceAction {
         state: NativeDirectoryActionState,
         quarantine_path: Option<PathBuf>,
     ) -> Self {
-        Self { path, action, state, quarantine_path }
+        Self {
+            path,
+            action,
+            state,
+            quarantine_path,
+        }
     }
 }
 
 impl From<&NativeDirectoryActionReceipt> for NativeDirectoryRecoverySourceAction {
     fn from(receipt: &NativeDirectoryActionReceipt) -> Self {
         Self::new(
-            receipt.path.clone(), receipt.action, receipt.state, receipt.quarantine_path.clone(),
+            receipt.path.clone(),
+            receipt.action,
+            receipt.state,
+            receipt.quarantine_path.clone(),
         )
     }
 }
@@ -87,7 +94,12 @@ impl NativeDirectoryRecoverySource {
         staging_directory: Option<PathBuf>,
         actions: Vec<NativeDirectoryRecoverySourceAction>,
     ) -> Self {
-        Self { plan_id: plan_id.into(), dry_run, staging_directory, actions }
+        Self {
+            plan_id: plan_id.into(),
+            dry_run,
+            staging_directory,
+            actions,
+        }
     }
 
     /// Decode and validate association JSON within an explicit byte bound.
@@ -105,11 +117,15 @@ impl NativeDirectoryRecoverySource {
     ) -> Result<Self, NativeDirectoryError> {
         limits.validate()?;
         if max_bytes == 0 || max_bytes > 64 * 1024 * 1024 {
-            return Err(refused(Path::new(""), "recovery source byte bound requires 1..=64 MiB"));
+            return Err(refused(
+                Path::new(""),
+                "recovery source byte bound requires 1..=64 MiB",
+            ));
         }
         if bytes.len() > max_bytes {
             return Err(NativeDirectoryError::Limit {
-                path: PathBuf::new(), limit: "max_recovery_source_bytes",
+                path: PathBuf::new(),
+                limit: "max_recovery_source_bytes",
             });
         }
         let source: Self = serde_json::from_slice(bytes)
@@ -122,8 +138,14 @@ impl NativeDirectoryRecoverySource {
 impl From<&NativeDirectorySyncReport> for NativeDirectoryRecoverySource {
     fn from(report: &NativeDirectorySyncReport) -> Self {
         Self::new(
-            report.plan_id.clone(), report.dry_run, report.staging_directory.clone(),
-            report.actions.iter().map(NativeDirectoryRecoverySourceAction::from).collect(),
+            report.plan_id.clone(),
+            report.dry_run,
+            report.staging_directory.clone(),
+            report
+                .actions
+                .iter()
+                .map(NativeDirectoryRecoverySourceAction::from)
+                .collect(),
         )
     }
 }
@@ -155,9 +177,16 @@ mod source_action_state {
             "staged" => Ok(NativeDirectoryActionState::Staged),
             "quarantined" => Ok(NativeDirectoryActionState::Quarantined),
             "published" => Ok(NativeDirectoryActionState::Published),
-            _ => Err(serde::de::Error::unknown_variant(&state, &[
-                "not_started", "unchanged", "staged", "quarantined", "published",
-            ])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &state,
+                &[
+                    "not_started",
+                    "unchanged",
+                    "staged",
+                    "quarantined",
+                    "published",
+                ],
+            )),
         }
     }
 }
@@ -246,15 +275,21 @@ pub struct PreparedNativeDirectoryRecovery {
 impl PreparedNativeDirectoryRecovery {
     /// Actual quarantined contents and current destinations in application order.
     #[must_use]
-    pub fn preview(&self) -> &[NativeDirectoryRecoveryEntry] { &self.entries }
+    pub fn preview(&self) -> &[NativeDirectoryRecoveryEntry] {
+        &self.entries
+    }
 
     /// Retained recovery job directory; arbitrary receipt paths are never followed.
     #[must_use]
-    pub fn recovery_directory(&self) -> &Path { &self.quarantine.root.path }
+    pub fn recovery_directory(&self) -> &Path {
+        &self.quarantine.root.path
+    }
 
     /// Identity supplied by the earlier synchronization report.
     #[must_use]
-    pub fn source_plan_id(&self) -> &str { &self.source_plan_id }
+    pub fn source_plan_id(&self) -> &str {
+        &self.source_plan_id
+    }
 
     /// Stable identity of these freshly captured restoration effects.
     ///
@@ -265,7 +300,9 @@ impl PreparedNativeDirectoryRecovery {
     /// originals, destinations, identities, or associations produce another ID.
     /// This is a local review binding, not authentication of an earlier report.
     #[must_use]
-    pub fn review_id(&self) -> &str { &self.review_id }
+    pub fn review_id(&self) -> &str {
+        &self.review_id
+    }
 
     /// Restore the exact captured originals through owned blocking work.
     ///
@@ -296,9 +333,10 @@ impl PreparedNativeDirectoryRecovery {
         cx: &Cx,
         authorization: DestructiveAuthorization,
     ) -> Result<NativeDirectoryRecoveryReport, NativeDirectoryError> {
-        cx.scoped_fs().run_io(move |worker| {
-            Ok(restore_owned(&worker, self, authorization))
-        }).await.map_err(NativeDirectoryError::Runtime)
+        cx.scoped_fs()
+            .run_io(move |worker| Ok(restore_owned(&worker, self, authorization)))
+            .await
+            .map_err(NativeDirectoryError::Runtime)
     }
 }
 
@@ -330,15 +368,27 @@ pub async fn prepare_native_directory_recovery(
 ) -> Result<PreparedNativeDirectoryRecovery, NativeDirectoryError> {
     limits.validate()?;
     let (job, inputs) = recovery_inputs(
-        &report.plan_id, report.dry_run, report.staging_directory.as_deref(),
+        &report.plan_id,
+        report.dry_run,
+        report.staging_directory.as_deref(),
         report.actions.iter().map(|receipt| RecoveryAssociation {
-            path: &receipt.path, action: receipt.action, state: receipt.state,
+            path: &receipt.path,
+            action: receipt.action,
+            state: receipt.state,
             quarantine_path: receipt.quarantine_path.as_deref(),
-        }), limits,
+        }),
+        limits,
     )?;
     prepare_recovery(
-        cx, report.plan_id.clone(), job, inputs, local_root.into(), remote_root.into(), limits,
-    ).await
+        cx,
+        report.plan_id.clone(),
+        job,
+        inputs,
+        local_root.into(),
+        remote_root.into(),
+        limits,
+    )
+    .await
 }
 
 /// Prepare recovery from a persisted, untrusted association source.
@@ -363,8 +413,15 @@ pub async fn prepare_native_directory_recovery_from_source(
     limits.validate()?;
     let (job, inputs) = source_inputs(source, limits)?;
     prepare_recovery(
-        cx, source.plan_id.clone(), job, inputs, local_root.into(), remote_root.into(), limits,
-    ).await
+        cx,
+        source.plan_id.clone(),
+        job,
+        inputs,
+        local_root.into(),
+        remote_root.into(),
+        limits,
+    )
+    .await
 }
 
 async fn prepare_recovery(
@@ -443,7 +500,11 @@ async fn prepare_recovery(
     }).await.map_err(NativeDirectoryError::Runtime)?
 }
 
-struct RecoveryInput { local: bool, path: DirectoryPath, source: DirectoryPath }
+struct RecoveryInput {
+    local: bool,
+    path: DirectoryPath,
+    source: DirectoryPath,
+}
 
 struct RecoveryAssociation<'a> {
     path: &'a DirectoryPath,
@@ -457,11 +518,16 @@ fn source_inputs(
     limits: NativeDirectoryLimits,
 ) -> Result<(PathBuf, Vec<RecoveryInput>), NativeDirectoryError> {
     recovery_inputs(
-        &source.plan_id, source.dry_run, source.staging_directory.as_deref(),
+        &source.plan_id,
+        source.dry_run,
+        source.staging_directory.as_deref(),
         source.actions.iter().map(|receipt| RecoveryAssociation {
-            path: &receipt.path, action: receipt.action, state: receipt.state,
+            path: &receipt.path,
+            action: receipt.action,
+            state: receipt.state,
             quarantine_path: receipt.quarantine_path.as_deref(),
-        }), limits,
+        }),
+        limits,
     )
 }
 
@@ -473,17 +539,26 @@ fn recovery_inputs<'a>(
     limits: NativeDirectoryLimits,
 ) -> Result<(PathBuf, Vec<RecoveryInput>), NativeDirectoryError> {
     let diagnostic = Path::new("");
-    if dry_run || plan_id.len() != 64
-        || !plan_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    if dry_run
+        || plan_id.len() != 64
+        || !plan_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || actions.len() > limits.max_entries.saturating_mul(2)
     {
-        return Err(refused(diagnostic, "invalid or oversized native recovery report"));
+        return Err(refused(
+            diagnostic,
+            "invalid or oversized native recovery report",
+        ));
     }
-    let job = staging_directory
-        .ok_or_else(|| refused(diagnostic, "report has no recovery directory"))?;
+    let job =
+        staging_directory.ok_or_else(|| refused(diagnostic, "report has no recovery directory"))?;
     let expected_job = format!("asupersync-sync-{plan_id}");
     if !job.is_absolute() || job.file_name() != Some(std::ffi::OsStr::new(&expected_job)) {
-        return Err(refused(job, "recovery directory does not match the source plan"));
+        return Err(refused(
+            job,
+            "recovery directory does not match the source plan",
+        ));
     }
     let mut inputs = Vec::new();
     let mut targets = BTreeSet::new();
@@ -496,37 +571,63 @@ fn recovery_inputs<'a>(
         };
         let source_name = format!("previous-{index:08x}");
         if path.as_os_str() != job.join(&source_name).as_os_str()
-            || !matches!(receipt.state,
-                NativeDirectoryActionState::Quarantined | NativeDirectoryActionState::Published)
+            || !matches!(
+                receipt.state,
+                NativeDirectoryActionState::Quarantined | NativeDirectoryActionState::Published
+            )
         {
-            return Err(refused(job, "receipt has a noncanonical recovery name or state"));
+            return Err(refused(
+                job,
+                "receipt has a noncanonical recovery name or state",
+            ));
         }
-        let local = match receipt.action {
-            BidirectionalSyncAction::CopyRemoteToLocal | BidirectionalSyncAction::DeleteLocal => true,
-            BidirectionalSyncAction::CopyLocalToRemote | BidirectionalSyncAction::DeleteRemote => false,
-            _ => return Err(refused(job, "receipt action cannot identify a recovery destination")),
-        };
-        if matches!(receipt.action, BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote)
-            && receipt.state != NativeDirectoryActionState::Quarantined
+        let local =
+            match receipt.action {
+                BidirectionalSyncAction::CopyRemoteToLocal
+                | BidirectionalSyncAction::DeleteLocal => true,
+                BidirectionalSyncAction::CopyLocalToRemote
+                | BidirectionalSyncAction::DeleteRemote => false,
+                _ => {
+                    return Err(refused(
+                        job,
+                        "receipt action cannot identify a recovery destination",
+                    ));
+                }
+            };
+        if matches!(
+            receipt.action,
+            BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote
+        ) && receipt.state != NativeDirectoryActionState::Quarantined
         {
-            return Err(refused(job, "deletion receipt has an impossible publication state"));
+            return Err(refused(
+                job,
+                "deletion receipt has an impossible publication state",
+            ));
         }
-        let normalized = DirectoryPath::normalize(receipt.path.as_str(), PathNormalizationRules::default())
-            .map_err(NativeDirectoryError::Manifest)?;
-        if &normalized != receipt.path || receipt.path.as_str().contains('\\')
+        let normalized =
+            DirectoryPath::normalize(receipt.path.as_str(), PathNormalizationRules::default())
+                .map_err(NativeDirectoryError::Manifest)?;
+        if &normalized != receipt.path
+            || receipt.path.as_str().contains('\\')
             || receipt.path.as_str().split('/').count() > limits.max_depth
             || !targets.insert((local, receipt.path.clone()))
             || inputs.len() >= limits.max_entries
         {
-            return Err(refused(job, "invalid, repeated or excessive recovery destination"));
+            return Err(refused(
+                job,
+                "invalid, repeated or excessive recovery destination",
+            ));
         }
         inputs.push(RecoveryInput {
-            local, path: normalized,
+            local,
+            path: normalized,
             source: DirectoryPath::normalize(&source_name, PathNormalizationRules::default())
                 .map_err(NativeDirectoryError::Manifest)?,
         });
     }
-    if inputs.is_empty() { return Err(refused(job, "report has no quarantined originals")); }
+    if inputs.is_empty() {
+        return Err(refused(job, "report has no quarantined originals"));
+    }
     Ok((job.to_path_buf(), inputs))
 }
 
@@ -552,7 +653,10 @@ fn recovery_review_id(
     hash.update((prepared.entries.len() as u64).to_be_bytes());
     for entry in &prepared.entries {
         checkpoint(cx)?;
-        hash_review_field(&mut hash, entry.destination_root.as_os_str().as_encoded_bytes());
+        hash_review_field(
+            &mut hash,
+            entry.destination_root.as_os_str().as_encoded_bytes(),
+        );
         hash_review_field(&mut hash, entry.path.as_str().as_bytes());
         hash_review_field(&mut hash, entry.quarantined.path.as_str().as_bytes());
         hash.update([u8::from(entry.current.is_some())]);
@@ -566,21 +670,37 @@ fn hash_review_field(hash: &mut Sha256, bytes: &[u8]) {
 }
 
 fn hash_review_stamp(hash: &mut Sha256, stamp: Stamp) {
-    for value in [stamp.identity.device, stamp.identity.inode, stamp.links, stamp.size] {
+    for value in [
+        stamp.identity.device,
+        stamp.identity.inode,
+        stamp.links,
+        stamp.size,
+    ] {
         hash.update(value.to_be_bytes());
     }
     for value in [stamp.mode, stamp.uid, stamp.gid] {
         hash.update(value.to_be_bytes());
     }
-    for value in [stamp.modified.0, stamp.modified.1, stamp.changed.0, stamp.changed.1] {
+    for value in [
+        stamp.modified.0,
+        stamp.modified.1,
+        stamp.changed.0,
+        stamp.changed.1,
+    ] {
         hash.update(value.to_be_bytes());
     }
 }
 
-fn validate_projection(prepared: &PreparedNativeDirectoryRecovery) -> Result<(), NativeDirectoryError> {
+fn validate_projection(
+    prepared: &PreparedNativeDirectoryRecovery,
+) -> Result<(), NativeDirectoryError> {
     for destination in [&prepared.local, &prepared.remote] {
         let mut projected = destination.manifest.clone();
-        for entry in prepared.entries.iter().filter(|entry| entry.destination_root == destination.root.path) {
+        for entry in prepared
+            .entries
+            .iter()
+            .filter(|entry| entry.destination_root == destination.root.path)
+        {
             let mut restored = entry.quarantined.clone();
             restored.path = entry.path.clone();
             projected.entries.insert(entry.path.clone(), restored);
@@ -610,18 +730,30 @@ fn checked_entry(
     limits: NativeDirectoryLimits,
 ) -> Result<(File, Stamp), NativeDirectoryError> {
     let display = snapshot.root.path.join(path.as_str());
-    let expected = snapshot.guards.get(path).copied().ok_or_else(|| changed(&display))?;
+    let expected = snapshot
+        .guards
+        .get(path)
+        .copied()
+        .ok_or_else(|| changed(&display))?;
     let (parent, name) = guarded_parent(snapshot, path)?;
     let file = if expected.kind(&display)? == DirectoryEntryKind::File {
         let file = open_guarded_file(&parent, name, &display, expected)?;
         let digest = super::super::hash_file(cx, &file, expected, &display, limits)?;
-        if snapshot.manifest.entries.get(path).and_then(|entry| entry.content_id.as_deref()) != Some(digest.as_str()) {
+        if snapshot
+            .manifest
+            .entries
+            .get(path)
+            .and_then(|entry| entry.content_id.as_deref())
+            != Some(digest.as_str())
+        {
             return Err(changed(&display));
         }
         file
     } else {
-        let file = File::from(openat(&parent, name, directory_flags(), Mode::empty())
-            .map_err(|error| os_error(&display, error))?);
+        let file = File::from(
+            openat(&parent, name, directory_flags(), Mode::empty())
+                .map_err(|error| os_error(&display, error))?,
+        );
         if stat_at(&parent, name, &display)? != Some(expected)
             || metadata_stamp(&file, &display)? != expected
         {
@@ -640,42 +772,75 @@ fn restore_owned(
     authorization: DestructiveAuthorization,
 ) -> NativeDirectoryRecoveryReport {
     let mut report = NativeDirectoryRecoveryReport {
-        source_plan_id: prepared.source_plan_id.clone(), dry_run: authorization.dry_run,
-        complete: false, failure: None,
-        actions: prepared.entries.iter().map(|entry| NativeDirectoryRecoveryReceipt {
-            path: entry.path.clone(), destination_root: entry.destination_root.clone(),
-            quarantine_path: prepared.quarantine.root.path.join(entry.quarantined.path.as_str()),
-            state: NativeDirectoryRecoveryState::NotStarted, durable: false,
-        }).collect(),
+        source_plan_id: prepared.source_plan_id.clone(),
+        dry_run: authorization.dry_run,
+        complete: false,
+        failure: None,
+        actions: prepared
+            .entries
+            .iter()
+            .map(|entry| NativeDirectoryRecoveryReceipt {
+                path: entry.path.clone(),
+                destination_root: entry.destination_root.clone(),
+                quarantine_path: prepared
+                    .quarantine
+                    .root
+                    .path
+                    .join(entry.quarantined.path.as_str()),
+                state: NativeDirectoryRecoveryState::NotStarted,
+                durable: false,
+            })
+            .collect(),
     };
     let result = (|| {
         checkpoint(cx)?;
-        if !authorization.dry_run && prepared.entries.iter().any(|entry| entry.current.is_some())
+        if !authorization.dry_run
+            && prepared.entries.iter().any(|entry| entry.current.is_some())
             && (!authorization.allow_overwrite || !authorization.allow_permission_change)
         {
-            return Err(refused(&prepared.quarantine.root.path,
-                "recovery exchange requires overwrite and permission-change authorization"));
+            return Err(refused(
+                &prepared.quarantine.root.path,
+                "recovery exchange requires overwrite and permission-change authorization",
+            ));
         }
         for snapshot in [&prepared.local, &prepared.remote, &prepared.quarantine] {
             revalidate_complete(cx, snapshot, prepared.limits)?;
         }
         // Metadata is also preflighted for the whole set, before any rename.
         for entry in &prepared.entries {
-            checked_entry(cx, &prepared.quarantine, &entry.quarantined.path, prepared.limits)?;
+            checked_entry(
+                cx,
+                &prepared.quarantine,
+                &entry.quarantined.path,
+                prepared.limits,
+            )?;
             if entry.current.is_some() {
                 let destination = if entry.destination_root == prepared.local.root.path {
                     &prepared.local
-                } else { &prepared.remote };
+                } else {
+                    &prepared.remote
+                };
                 checked_entry(cx, destination, &entry.path, prepared.limits)?;
             }
         }
-        if authorization.dry_run { return Ok(()); }
+        if authorization.dry_run {
+            return Ok(());
+        }
         for (entry, receipt) in prepared.entries.iter().zip(&mut report.actions) {
             checkpoint(cx)?;
             let destination = if entry.destination_root == prepared.local.root.path {
                 &mut prepared.local
-            } else { &mut prepared.remote };
-            restore_entry(cx, &mut prepared.quarantine, destination, entry, prepared.limits, receipt)?;
+            } else {
+                &mut prepared.remote
+            };
+            restore_entry(
+                cx,
+                &mut prepared.quarantine,
+                destination,
+                entry,
+                prepared.limits,
+                receipt,
+            )?;
         }
         for snapshot in [&prepared.local, &prepared.remote, &prepared.quarantine] {
             revalidate_complete(cx, snapshot, prepared.limits)?;
@@ -683,7 +848,9 @@ fn restore_owned(
         report.complete = true;
         Ok(())
     })();
-    if let Err(error) = result { report.failure = Some(error); }
+    if let Err(error) = result {
+        report.failure = Some(error);
+    }
     report
 }
 
@@ -701,54 +868,87 @@ fn restore_entry(
     let (original, original_stamp) = checked_entry(cx, quarantine, source_path, limits)?;
     let current = if entry.current.is_some() {
         Some(checked_entry(cx, destination, &entry.path, limits)?)
-    } else { None };
-    original.sync_all().map_err(|source| io_error(&source_display, source))?;
+    } else {
+        None
+    };
+    original
+        .sync_all()
+        .map_err(|source| io_error(&source_display, source))?;
     if let Some((file, _)) = &current {
-        file.sync_all().map_err(|source| io_error(&display, source))?;
+        file.sync_all()
+            .map_err(|source| io_error(&display, source))?;
     }
     // Re-open checked parents after potentially long hashing and inode syncing.
     let (source_parent, source_name) = guarded_parent(quarantine, source_path)?;
     let (target_parent, target_name) = guarded_parent(destination, &entry.path)?;
     if stat_at(&source_parent, source_name, &source_display)? != Some(original_stamp)
         || metadata_stamp(&original, &source_display)? != original_stamp
-        || stat_at(&target_parent, target_name, &display)? != current.as_ref().map(|(_, stamp)| *stamp)
+        || stat_at(&target_parent, target_name, &display)?
+            != current.as_ref().map(|(_, stamp)| *stamp)
     {
         return Err(changed(&display));
     }
     if let Some((file, stamp)) = &current {
-        if metadata_stamp(file, &display)? != *stamp { return Err(changed(&display)); }
+        if metadata_stamp(file, &display)? != *stamp {
+            return Err(changed(&display));
+        }
     }
     if entry.quarantined.kind == DirectoryEntryKind::Directory {
         verify_empty_directory(cx, &original, &source_display)?;
     }
     checkpoint(cx)?;
-    let flags = if current.is_some() { RenameFlags::RENAME_EXCHANGE } else { RenameFlags::RENAME_NOREPLACE };
-    renameat2(&source_parent, source_name, &target_parent, target_name, flags)
-        .map_err(|error| os_error(&display, error))?;
+    let flags = if current.is_some() {
+        RenameFlags::RENAME_EXCHANGE
+    } else {
+        RenameFlags::RENAME_NOREPLACE
+    };
+    renameat2(
+        &source_parent,
+        source_name,
+        &target_parent,
+        target_name,
+        flags,
+    )
+    .map_err(|error| os_error(&display, error))?;
     receipt.state = if current.is_some() {
         NativeDirectoryRecoveryState::Exchanged
-    } else { NativeDirectoryRecoveryState::Restored };
+    } else {
+        NativeDirectoryRecoveryState::Restored
+    };
     // No cancellation checkpoint between the effect, identity checks and syncs.
-    if stat_at(&target_parent, target_name, &display)?.is_none_or(|stamp| stamp.identity != original_stamp.identity)
+    if stat_at(&target_parent, target_name, &display)?
+        .is_none_or(|stamp| stamp.identity != original_stamp.identity)
         || stat_at(&source_parent, source_name, &source_display)?.map(|stamp| stamp.identity)
             != current.as_ref().map(|(_, stamp)| stamp.identity)
     {
         return Err(changed(&display));
     }
-    source_parent.sync_all().map_err(|source| io_error(&source_display, source))?;
-    target_parent.sync_all().map_err(|source| io_error(&display, source))?;
+    source_parent
+        .sync_all()
+        .map_err(|source| io_error(&source_display, source))?;
+    target_parent
+        .sync_all()
+        .map_err(|source| io_error(&display, source))?;
     receipt.durable = true;
     let mut restored = entry.quarantined.clone();
     restored.path = entry.path.clone();
-    destination.total_bytes = destination.total_bytes
-        .checked_sub(entry.current.as_ref().and_then(|entry| entry.metadata.size_bytes).unwrap_or(0))
+    destination.total_bytes = destination
+        .total_bytes
+        .checked_sub(
+            entry
+                .current
+                .as_ref()
+                .and_then(|entry| entry.metadata.size_bytes)
+                .unwrap_or(0),
+        )
         .and_then(|total| total.checked_add(restored.metadata.size_bytes.unwrap_or(0)))
         .ok_or_else(|| changed(&display))?;
     record_destination(destination, &restored, &target_parent, &original)?;
     if let (Some((current_file, _)), Some(current_entry)) = (current, &entry.current) {
         let mut retained = current_entry.clone();
         retained.path = source_path.clone();
-        quarantine.total_bytes = quarantine.total_bytes
+        quarantine.total_bytes = quarantine
+            .total_bytes
             .checked_sub(entry.quarantined.metadata.size_bytes.unwrap_or(0))
             .and_then(|total| total.checked_add(retained.metadata.size_bytes.unwrap_or(0)))
             .ok_or_else(|| changed(&source_display))?;

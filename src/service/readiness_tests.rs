@@ -516,7 +516,11 @@ fn deferred_readiness_cleanup_is_nested_reentrant_and_panic_complete() {
     drop(ReadinessRelease::new(move || {
         after.fetch_add(100, Ordering::SeqCst);
     }));
-    assert_eq!(retired.load(Ordering::SeqCst), 112, "the scope fully retired");
+    assert_eq!(
+        retired.load(Ordering::SeqCst),
+        112,
+        "the scope fully retired"
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -18,19 +18,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-const A_BYTES: &[u8] = b"request bytes must survive a cancelled forwarding future without loss or duplication";
+const A_BYTES: &[u8] =
+    b"request bytes must survive a cancelled forwarding future without loss or duplication";
 const B_BYTES: &[u8] = b"the independent response direction must preserve its own prefix and EOF";
 
 #[derive(Default)]
-struct GateState { open: AtomicBool, blocked: AtomicBool }
-struct Gated<S> { inner: S, state: Arc<GateState>, prefix: usize, written: usize }
+struct GateState {
+    open: AtomicBool,
+    blocked: AtomicBool,
+}
+struct Gated<S> {
+    inner: S,
+    state: Arc<GateState>,
+    prefix: usize,
+    written: usize,
+}
 impl<S: AsyncRead + Unpin> AsyncRead for Gated<S> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
     }
 }
 impl<S: AsyncWrite + Unpin> AsyncWrite for Gated<S> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let open = this.state.open.load(Ordering::Acquire);
         if !open && this.written == this.prefix {
@@ -39,9 +56,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Gated<S> {
             // must wake the task. The next run is explicitly polled by its owner.
             return Poll::Pending;
         }
-        let count = if open { bytes.len() } else { bytes.len().min(this.prefix - this.written) };
+        let count = if open {
+            bytes.len()
+        } else {
+            bytes.len().min(this.prefix - this.written)
+        };
         let result = Pin::new(&mut this.inner).poll_write(cx, &bytes[..count]);
-        if let Poll::Ready(Ok(n)) = &result { this.written += *n; }
+        if let Poll::Ready(Ok(n)) = &result {
+            this.written += *n;
+        }
         result
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -61,13 +84,17 @@ fn pair() -> (TcpStream, StdTcpStream) {
     local.set_nonblocking(true).unwrap();
     local.set_nodelay(true).unwrap();
     peer.set_nodelay(true).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    peer.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     (TcpStream::from_std(local).unwrap(), peer)
 }
 
 async fn witness_pending<T>(
-    future: impl Future<Output = T>, state: &GateState, observed: oneshot::Sender<()>,
+    future: impl Future<Output = T>,
+    state: &GateState,
+    observed: oneshot::Sender<()>,
 ) -> T {
     let mut future = std::pin::pin!(future);
     let mut observed = Some(observed);
@@ -81,7 +108,8 @@ async fn witness_pending<T>(
             }
         }
         result
-    }).await
+    })
+    .await
 }
 
 fn bounded(test: impl FnOnce() + Send + 'static) {
@@ -90,10 +118,13 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(30))
+    let result = receive
+        .recv_timeout(Duration::from_secs(30))
         .expect("native copy session must terminate, including cancellation and peer cleanup");
     thread.join().unwrap();
-    if let Err(payload) = result { std::panic::resume_unwind(payload); }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 fn one_way(multithread: bool) {
@@ -111,17 +142,28 @@ fn one_way(multithread: bool) {
     let owner = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on_with_cx(owner.clone(), async move {
         let state = Arc::new(GateState::default());
-        let gate = Gated { inner: socket, state: Arc::clone(&state), prefix: 7, written: 0 };
+        let gate = Gated {
+            inner: socket,
+            state: Arc::clone(&state),
+            prefix: 7,
+            written: 0,
+        };
         let mut session = CopySession::with_capacity(A_BYTES, gate, 17).unwrap();
         let (observed, mut wait) = oneshot::channel();
         let worker_state = Arc::clone(&state);
-        let mut task = owner.spawn(move |cx| async move {
-            let result = witness_pending(session.run(&cx), &worker_state, observed).await;
-            (session, result)
-        }).unwrap();
-        wait.recv(&owner).await.expect("witness an actual parked copy with read-ahead");
+        let mut task = owner
+            .spawn(move |cx| async move {
+                let result = witness_pending(session.run(&cx), &worker_state, observed).await;
+                (session, result)
+            })
+            .unwrap();
+        wait.recv(&owner)
+            .await
+            .expect("witness an actual parked copy with read-ahead");
         task.abort();
-        let (mut session, result) = task.join(&owner).await
+        let (mut session, result) = task
+            .join(&owner)
+            .await
             .expect("acknowledged cancellation must preserve the returned copy session");
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
         let paused = session.progress();
@@ -167,24 +209,38 @@ fn bidirectional(multithread: bool) {
     let owner = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on_with_cx(owner.clone(), async move {
         let state = Arc::new(GateState::default());
-        let b = Gated { inner: b, state: Arc::clone(&state), prefix: 5, written: 0 };
+        let b = Gated {
+            inner: b,
+            state: Arc::clone(&state),
+            prefix: 5,
+            written: 0,
+        };
         let mut session = BidirectionalCopySession::with_capacities(a, b, 19, 13).unwrap();
         let (observed, mut wait) = oneshot::channel();
         let worker_state = Arc::clone(&state);
-        let mut task = owner.spawn(move |cx| async move {
-            let result = witness_pending(session.run(&cx), &worker_state, observed).await;
-            (session, result)
-        }).unwrap();
-        wait.recv(&owner).await.expect("witness actual duplex backpressure before abort");
+        let mut task = owner
+            .spawn(move |cx| async move {
+                let result = witness_pending(session.run(&cx), &worker_state, observed).await;
+                (session, result)
+            })
+            .unwrap();
+        wait.recv(&owner)
+            .await
+            .expect("witness actual duplex backpressure before abort");
         task.abort();
-        let (mut session, result) = task.join(&owner).await
+        let (mut session, result) = task
+            .join(&owner)
+            .await
             .expect("cancelled task must return both retained directions");
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
         let paused = session.progress();
         assert_eq!(paused.a_to_b.written, 5);
         assert!(paused.a_to_b.buffered > 0);
         for direction in [paused.a_to_b, paused.b_to_a] {
-            assert_eq!(direction.read - direction.written, direction.buffered as u64);
+            assert_eq!(
+                direction.read - direction.written,
+                direction.buffered as u64
+            );
         }
         state.open.store(true, Ordering::Release);
         let totals = (A_BYTES.len() as u64, B_BYTES.len() as u64);
@@ -284,14 +340,26 @@ fn proxy_upload_then_response(multithread: bool) {
 }
 
 #[test]
-fn proxy_upload_then_response_current_thread() { bounded(|| proxy_upload_then_response(false)); }
+fn proxy_upload_then_response_current_thread() {
+    bounded(|| proxy_upload_then_response(false));
+}
 #[test]
-fn proxy_upload_then_response_two_workers() { bounded(|| proxy_upload_then_response(true)); }
+fn proxy_upload_then_response_two_workers() {
+    bounded(|| proxy_upload_then_response(true));
+}
 #[test]
-fn one_way_parked_cancellation_and_resume_current_thread() { bounded(|| one_way(false)); }
+fn one_way_parked_cancellation_and_resume_current_thread() {
+    bounded(|| one_way(false));
+}
 #[test]
-fn one_way_parked_cancellation_and_resume_two_workers() { bounded(|| one_way(true)); }
+fn one_way_parked_cancellation_and_resume_two_workers() {
+    bounded(|| one_way(true));
+}
 #[test]
-fn duplex_parked_cancellation_and_resume_current_thread() { bounded(|| bidirectional(false)); }
+fn duplex_parked_cancellation_and_resume_current_thread() {
+    bounded(|| bidirectional(false));
+}
 #[test]
-fn duplex_parked_cancellation_and_resume_two_workers() { bounded(|| bidirectional(true)); }
+fn duplex_parked_cancellation_and_resume_two_workers() {
+    bounded(|| bidirectional(true));
+}

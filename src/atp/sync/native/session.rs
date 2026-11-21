@@ -2,8 +2,8 @@
 
 use super::{
     BidirectionalSyncPlan, DirectoryManifest, NativeDirectoryError, NativeDirectoryLimits,
-    NativeDirectorySnapshot, NativeDirectorySyncReport, NativePlanBaseline, PreparedNativeDirectorySync,
-    Stamp, apply, checkpoint, prepare_native_directory_owned, refused,
+    NativeDirectorySnapshot, NativeDirectorySyncReport, NativePlanBaseline,
+    PreparedNativeDirectorySync, Stamp, apply, checkpoint, prepare_native_directory_owned, refused,
 };
 use crate::atp::sync::DestructiveAuthorization;
 use crate::cx::Cx;
@@ -114,8 +114,16 @@ impl NativeDirectorySyncSession {
         limits: NativeDirectoryLimits,
         max_state_bytes: usize,
     ) -> Result<Self, NativeDirectoryError> {
-        Self::open(cx, local_root.into(), remote_root.into(), state_directory.into(), limits,
-            max_state_bytes, true).await
+        Self::open(
+            cx,
+            local_root.into(),
+            remote_root.into(),
+            state_directory.into(),
+            limits,
+            max_state_bytes,
+            true,
+        )
+        .await
     }
 
     /// Reopen exact existing history; missing or invalid state is never reset.
@@ -140,8 +148,16 @@ impl NativeDirectorySyncSession {
         limits: NativeDirectoryLimits,
         max_state_bytes: usize,
     ) -> Result<Self, NativeDirectoryError> {
-        Self::open(cx, local_root.into(), remote_root.into(), state_directory.into(), limits,
-            max_state_bytes, false).await
+        Self::open(
+            cx,
+            local_root.into(),
+            remote_root.into(),
+            state_directory.into(),
+            limits,
+            max_state_bytes,
+            false,
+        )
+        .await
     }
 
     async fn open(
@@ -155,9 +171,21 @@ impl NativeDirectorySyncSession {
     ) -> Result<Self, NativeDirectoryError> {
         limits.validate()?;
         state::validate_bound(max_state_bytes)?;
-        let opened = cx.scoped_fs().run_io(move |worker| {
-            Ok(state::open(&worker, &local, &remote, &directory, limits, max_state_bytes, create))
-        }).await.map_err(NativeDirectoryError::Runtime)??;
+        let opened = cx
+            .scoped_fs()
+            .run_io(move |worker| {
+                Ok(state::open(
+                    &worker,
+                    &local,
+                    &remote,
+                    &directory,
+                    limits,
+                    max_state_bytes,
+                    create,
+                ))
+            })
+            .await
+            .map_err(NativeDirectoryError::Runtime)??;
         Ok(Self {
             lease: opened.lease,
             baseline: opened.baseline,
@@ -171,7 +199,9 @@ impl NativeDirectorySyncSession {
 
     /// Last durably observed generation; zero means no prior common history.
     #[must_use]
-    pub const fn generation(&self) -> u64 { self.generation }
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
 
     /// Last durably observed common inventory, absent before first application.
     ///
@@ -184,11 +214,15 @@ impl NativeDirectorySyncSession {
 
     /// Private directory containing the two state slots and writer lease.
     #[must_use]
-    pub fn state_directory(&self) -> &Path { &self.lease.directory.path }
+    pub fn state_directory(&self) -> &Path {
+        &self.lease.directory.path
+    }
 
     /// Whether an abandoned job or persistence failure requires drop and reopen.
     #[must_use]
-    pub const fn is_fenced(&self) -> bool { self.fenced }
+    pub const fn is_fenced(&self) -> bool {
+        self.fenced
+    }
 
     /// Scan both actual roots and review their changes against persisted history.
     ///
@@ -206,7 +240,10 @@ impl NativeDirectorySyncSession {
     ) -> Result<PreparedNativeDirectorySessionSync<'_>, NativeDirectoryError> {
         self.require_ready()?;
         let prepared = self.prepare_owned(cx).await?;
-        Ok(PreparedNativeDirectorySessionSync { session: self, prepared })
+        Ok(PreparedNativeDirectorySessionSync {
+            session: self,
+            prepared,
+        })
     }
 
     // Callers check require_ready before entering. The watch surface then
@@ -218,7 +255,10 @@ impl NativeDirectorySyncSession {
     ) -> Result<PreparedNativeDirectorySync, NativeDirectoryError> {
         checkpoint(cx)?;
         if !cx.capabilities().entropy {
-            return Err(refused(self.state_directory(), "session preparation requires context entropy"));
+            return Err(refused(
+                self.state_directory(),
+                "session preparation requires context entropy",
+            ));
         }
         let mut nonce = [0_u8; 16];
         cx.random_bytes(&mut nonce);
@@ -228,31 +268,41 @@ impl NativeDirectorySyncSession {
         let current = self.current;
         let limits = self.limits;
         let max_state_bytes = self.max_state_bytes;
-        let prepared = cx.scoped_fs().run_io(move |worker| {
-            Ok((|| {
-                lease.validate_current(&worker, current, max_state_bytes)?;
-                let mut prepared = prepare_native_directory_owned(
-                    &worker, NativePlanBaseline::Common(baseline), &lease.local.path,
-                    &lease.remote.path, limits,
-                )?;
-                lease.check_prepared(&worker, &prepared, max_state_bytes)?;
-                let mut hash = Sha256::new();
-                hash.update(b"asupersync.native-directory-session-plan.v1\0");
-                hash.update(prepared.plan_id.as_bytes());
-                hash.update(generation.to_be_bytes());
-                hash.update(lease.directory.identity.device.to_be_bytes());
-                hash.update(lease.directory.identity.inode.to_be_bytes());
-                hash.update(nonce);
-                prepared.plan_id = hex::encode(hash.finalize());
-                Ok(prepared)
-            })())
-        }).await.map_err(NativeDirectoryError::Runtime)??;
+        let prepared = cx
+            .scoped_fs()
+            .run_io(move |worker| {
+                Ok((|| {
+                    lease.validate_current(&worker, current, max_state_bytes)?;
+                    let mut prepared = prepare_native_directory_owned(
+                        &worker,
+                        NativePlanBaseline::Common(baseline),
+                        &lease.local.path,
+                        &lease.remote.path,
+                        limits,
+                    )?;
+                    lease.check_prepared(&worker, &prepared, max_state_bytes)?;
+                    let mut hash = Sha256::new();
+                    hash.update(b"asupersync.native-directory-session-plan.v1\0");
+                    hash.update(prepared.plan_id.as_bytes());
+                    hash.update(generation.to_be_bytes());
+                    hash.update(lease.directory.identity.device.to_be_bytes());
+                    hash.update(lease.directory.identity.inode.to_be_bytes());
+                    hash.update(nonce);
+                    prepared.plan_id = hex::encode(hash.finalize());
+                    Ok(prepared)
+                })())
+            })
+            .await
+            .map_err(NativeDirectoryError::Runtime)??;
         Ok(prepared)
     }
 
     fn require_ready(&self) -> Result<(), NativeDirectoryError> {
         if self.fenced {
-            return Err(refused(self.state_directory(), "session outcome is unresolved; drop and reopen"));
+            return Err(refused(
+                self.state_directory(),
+                "session outcome is unresolved; drop and reopen",
+            ));
         }
         Ok(())
     }
@@ -268,19 +318,27 @@ pub struct PreparedNativeDirectorySessionSync<'a> {
 impl PreparedNativeDirectorySessionSync<'_> {
     /// Existing deterministic three-way decisions, including unresolved conflicts.
     #[must_use]
-    pub fn preview(&self) -> &BidirectionalSyncPlan { self.prepared.preview() }
+    pub fn preview(&self) -> &BidirectionalSyncPlan {
+        self.prepared.preview()
+    }
 
     /// Identity unique to this review and its retained recovery staging job.
     #[must_use]
-    pub fn plan_id(&self) -> &str { self.prepared.plan_id() }
+    pub fn plan_id(&self) -> &str {
+        self.prepared.plan_id()
+    }
 
     /// Captured local inventory.
     #[must_use]
-    pub fn local(&self) -> &NativeDirectorySnapshot { self.prepared.local() }
+    pub fn local(&self) -> &NativeDirectorySnapshot {
+        self.prepared.local()
+    }
 
     /// Captured remote inventory.
     #[must_use]
-    pub fn remote(&self) -> &NativeDirectorySnapshot { self.prepared.remote() }
+    pub fn remote(&self) -> &NativeDirectorySnapshot {
+        self.prepared.remote()
+    }
 
     /// Apply reviewed changes and durably advance history only after convergence.
     ///
@@ -310,7 +368,13 @@ impl PreparedNativeDirectorySessionSync<'_> {
         authorization: DestructiveAuthorization,
         staging_root: impl Into<PathBuf>,
     ) -> Result<NativeDirectorySessionReport, NativeDirectoryError> {
-        self.apply_with_directory_sync(cx, authorization, staging_root.into(), std::fs::File::sync_all).await
+        self.apply_with_directory_sync(
+            cx,
+            authorization,
+            staging_root.into(),
+            std::fs::File::sync_all,
+        )
+        .await
     }
 
     // Production always syncs the real directory. Native tests can observe or
@@ -327,46 +391,59 @@ impl PreparedNativeDirectorySessionSync<'_> {
     {
         let Self { session, prepared } = self;
         session.require_ready()?;
-        let next_generation = session.generation.checked_add(1).ok_or_else(|| {
-            refused(session.state_directory(), "session generation is exhausted")
-        })?;
+        let next_generation = session
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| refused(session.state_directory(), "session generation is exhausted"))?;
         let lease = Arc::clone(&session.lease);
         let current = session.current;
         let limits = session.limits;
         let max_state_bytes = session.max_state_bytes;
         session.fenced = true;
-        let result = cx.scoped_fs().run_io(move |worker| {
-            Ok((|| {
-                lease.validate_current(&worker, current, max_state_bytes)?;
-                lease.check_prepared(&worker, &prepared, max_state_bytes)?;
-                lease.check_staging(&worker, &staging, limits)?;
-                if !authorization.dry_run {
-                    if let Some(projected) = prepared.preview.merged_manifest() {
-                        state::encoded_size(&worker, &projected, max_state_bytes)?;
-                    }
-                }
-                let sync = apply::apply_owned(&worker, prepared, authorization, &staging, true);
-                let mut publication = NativeDirectoryStatePublication::Unchanged;
-                let mut persistence_failure = None;
-                let mut updated = None;
-                if sync.complete && !sync.dry_run {
-                    if let Some(baseline) = &sync.verified_baseline {
-                        match state::publish_with_directory_sync(
-                            &worker, &lease, Some(current), next_generation, baseline, limits,
-                            max_state_bytes, &mut publication, sync_directory,
-                        ) {
-                            Ok(stamp) => updated = Some((baseline.clone(), stamp)),
-                            Err(error) => persistence_failure = Some(error),
+        let result = cx
+            .scoped_fs()
+            .run_io(move |worker| {
+                Ok((|| {
+                    lease.validate_current(&worker, current, max_state_bytes)?;
+                    lease.check_prepared(&worker, &prepared, max_state_bytes)?;
+                    lease.check_staging(&worker, &staging, limits)?;
+                    if !authorization.dry_run {
+                        if let Some(projected) = prepared.preview.merged_manifest() {
+                            state::encoded_size(&worker, &projected, max_state_bytes)?;
                         }
-                    } else {
-                        persistence_failure = Some(refused(
-                            &lease.directory.path, "completed application has no verified baseline",
-                        ));
                     }
-                }
-                Ok((sync, publication, persistence_failure, updated))
-            })())
-        }).await.map_err(NativeDirectoryError::Runtime)?;
+                    let sync = apply::apply_owned(&worker, prepared, authorization, &staging, true);
+                    let mut publication = NativeDirectoryStatePublication::Unchanged;
+                    let mut persistence_failure = None;
+                    let mut updated = None;
+                    if sync.complete && !sync.dry_run {
+                        if let Some(baseline) = &sync.verified_baseline {
+                            match state::publish_with_directory_sync(
+                                &worker,
+                                &lease,
+                                Some(current),
+                                next_generation,
+                                baseline,
+                                limits,
+                                max_state_bytes,
+                                &mut publication,
+                                sync_directory,
+                            ) {
+                                Ok(stamp) => updated = Some((baseline.clone(), stamp)),
+                                Err(error) => persistence_failure = Some(error),
+                            }
+                        } else {
+                            persistence_failure = Some(refused(
+                                &lease.directory.path,
+                                "completed application has no verified baseline",
+                            ));
+                        }
+                    }
+                    Ok((sync, publication, persistence_failure, updated))
+                })())
+            })
+            .await
+            .map_err(NativeDirectoryError::Runtime)?;
         let (sync, publication, persistence_failure, updated) = match result {
             Ok(result) => result,
             Err(error) => {

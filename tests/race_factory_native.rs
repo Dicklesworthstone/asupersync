@@ -55,14 +55,18 @@ where
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::new().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     // `JoinHandle<()>` resolves to `()`: a panicked owner is resumed here and a
     // dropped or cancelled one panics, so any owner failure fails the test.
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("real admitted native task");
         asupersync::time::timeout(cx.now(), Duration::from_secs(10), body(cx.clone()))
-            .await.expect("native race/drain watchdog");
+            .await
+            .expect("native race/drain watchdog");
     }));
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
@@ -78,7 +82,8 @@ async fn loser(child: Cx, mut receiver: mpsc::Receiver<()>, seen: Arc<Witness>) 
                 seen.changed.notify_waiters();
             }
             progress
-        }).await
+        })
+        .await
     };
     // The sender is still retained by the owner and never sends. Only the
     // branch's actual cancellation can release this witnessed pending receive.
@@ -90,21 +95,32 @@ async fn loser(child: Cx, mut receiver: mpsc::Receiver<()>, seen: Arc<Witness>) 
     seen.changed.notify_waiters();
     // Deliberately asynchronous cleanup, withheld until the owner verifies
     // that neither ordinary selection nor timeout published an early result.
-    seen.changed.wait_until(|| seen.released.load(Ordering::Acquire)).await;
+    seen.changed
+        .wait_until(|| seen.released.load(Ordering::Acquire))
+        .await;
     0
 }
 
 async fn winner(seen: Arc<Witness>) -> u8 {
-    seen.changed.wait_until(|| seen.parked.load(Ordering::Acquire)).await;
+    seen.changed
+        .wait_until(|| seen.parked.load(Ordering::Acquire))
+        .await;
     7
 }
 
 async fn wait_cancel<T>(future: &mut Pin<Box<impl Future<Output = T>>>, seen: &Witness) {
-    let mut cancelled = std::pin::pin!(seen.changed.wait_until(|| seen.cancelled.load(Ordering::Acquire)));
+    let mut cancelled = std::pin::pin!(
+        seen.changed
+            .wait_until(|| seen.cancelled.load(Ordering::Acquire))
+    );
     poll_fn(|task| {
-        assert!(future.as_mut().poll(task).is_pending(), "race returned before withheld cleanup");
+        assert!(
+            future.as_mut().poll(task).is_pending(),
+            "race returned before withheld cleanup"
+        );
         cancelled.as_mut().poll(task)
-    }).await;
+    })
+    .await;
     assert!(!seen.retired.load(Ordering::Acquire));
 }
 
@@ -644,7 +660,12 @@ fn factories_cancel_the_real_child_and_await_its_cleanup_on_both_native_runtimes
             seen.release();
             assert_eq!(race.await.unwrap(), 7);
             assert!(seen.retired.load(Ordering::Acquire));
-            eprintln!("scenario=factory-recv workers={workers} parent={:?} child={:?} parked=true cancelled=true retired=true elapsed={:?}", cx.task_id(), *seen.task.lock().unwrap(), start.elapsed());
+            eprintln!(
+                "scenario=factory-recv workers={workers} parent={:?} child={:?} parked=true cancelled=true retired=true elapsed={:?}",
+                cx.task_id(),
+                *seen.task.lock().unwrap(),
+                start.elapsed()
+            );
         });
     }
 }
@@ -660,19 +681,27 @@ fn timeout_waits_for_both_parked_losers_to_finish_cleanup() {
             let (_sb, rb) = mpsc::channel(1);
             let fa = Arc::clone(&a);
             let fb = Arc::clone(&b);
-            let mut race = Box::pin(cx.race_drained_with_timeout(Duration::from_millis(500), vec![
-                boxed(move |child| loser(child, ra, fa)),
-                boxed(move |child| loser(child, rb, fb)),
-            ]));
+            let mut race = Box::pin(cx.race_drained_with_timeout(
+                Duration::from_millis(500),
+                vec![
+                    boxed(move |child| loser(child, ra, fa)),
+                    boxed(move |child| loser(child, rb, fb)),
+                ],
+            ));
             wait_cancel(&mut race, &a).await;
             wait_cancel(&mut race, &b).await;
             assert!(a.parked.load(Ordering::Acquire) && b.parked.load(Ordering::Acquire));
             a.release();
             b.release();
-            assert!(matches!(race.await, Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
+            assert!(
+                matches!(race.await, Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout)
+            );
             assert!(a.retired.load(Ordering::Acquire) && b.retired.load(Ordering::Acquire));
             assert!(!cx.is_cancel_requested());
-            eprintln!("scenario=factory-timeout workers={workers} cancelled=2 retired=2 elapsed={:?}", start.elapsed());
+            eprintln!(
+                "scenario=factory-timeout workers={workers} cancelled=2 retired=2 elapsed={:?}",
+                start.elapsed()
+            );
         });
     }
 }
@@ -689,7 +718,9 @@ fn timeout_race_preserves_external_cancellation_cause() {
                     owner
                         .race_drained_with_timeout(
                             Duration::from_secs(3600),
-                            vec![boxed(move |child| owner_cancel_branch(child, receiver, s, false))],
+                            vec![boxed(move |child| {
+                                owner_cancel_branch(child, receiver, s, false)
+                            })],
                         )
                         .await
                 })
@@ -743,16 +774,20 @@ fn loser_cleanup_panic_is_not_hidden_by_a_successful_winner() {
 fn cancelled_and_masked_owners_never_invoke_a_factory() {
     native(1, |cx| async move {
         let denied = {
-            let _guard = cx.clone().restrict::<cap::CapSet<false, true, true, true, true>>()
+            let _guard = cx
+                .clone()
+                .restrict::<cap::CapSet<false, true, true, true, true>>()
                 .set_current_restricted();
             Cx::current().unwrap()
         };
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
-        let result = denied.race_drained_with(vec![boxed(move |_child| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            async { 1 }
-        })]).await;
+        let result = denied
+            .race_drained_with(vec![boxed(move |_child| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async { 1 }
+            })])
+            .await;
         assert!(matches!(result, Err(JoinError::Cancelled(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     });
@@ -764,8 +799,10 @@ fn cancelled_and_masked_owners_never_invoke_a_factory() {
         let mut future = Box::pin(cx.race_drained_with(vec![boxed::<(), _, _>(|_child| async {
             panic!("cancelled owner must not invoke its factory");
         })]));
-        assert!(matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())),
-            Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.kind == CancelKind::User));
+        assert!(
+            matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())),
+            Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.kind == CancelKind::User)
+        );
     });
 }
 
@@ -805,7 +842,9 @@ fn race_macro_factory_forms_share_native_cancel_and_drain_semantics() {
                 assert_eq!(race.await.unwrap(), 7);
                 assert!(seen.retired.load(Ordering::Acquire));
                 assert!(!cx.is_cancel_requested());
-                eprintln!("scenario=macro-factory workers={workers} form={form} parked=true cancelled=true retired=true");
+                eprintln!(
+                    "scenario=macro-factory workers={workers} form={form} parked=true cancelled=true retired=true"
+                );
             });
         }
     }
@@ -845,7 +884,9 @@ fn select_factory_heterogeneous_outputs_drain_before_returning() {
                 assert_eq!(race.await.unwrap(), 7);
                 assert!(seen.retired.load(Ordering::Acquire));
                 assert!(!cx.is_cancel_requested());
-                eprintln!("scenario=select-factory workers={workers} biased={biased} parked=true cancelled=true retired=true");
+                eprintln!(
+                    "scenario=select-factory workers={workers} biased={biased} parked=true cancelled=true retired=true"
+                );
             });
         }
     }
@@ -868,7 +909,12 @@ fn select_default_still_needs_no_spawn_and_accepts_non_send_borrows() {
             else => 41,
         })
     });
-    assert!(matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())), Poll::Ready(41)));
+    assert!(matches!(
+        future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop())),
+        Poll::Ready(41)
+    ));
     assert_eq!(calls.get(), 1);
 }
 
@@ -883,19 +929,25 @@ fn factory_sleep_loser_is_cancelled_without_waiting_for_its_deadline() {
                 boxed(move |child| async move {
                     let _retire = Retire(Arc::clone(&a));
                     *a.task.lock().unwrap() = Some(child.task_id());
-                    let mut sleep = std::pin::pin!(asupersync::time::sleep(child.now(), Duration::from_secs(3600)));
+                    let mut sleep = std::pin::pin!(asupersync::time::sleep(
+                        child.now(),
+                        Duration::from_secs(3600)
+                    ));
                     poll_fn(|task| {
                         let result = sleep.as_mut().poll(task);
                         if result.is_pending() && !a.parked.swap(true, Ordering::AcqRel) {
                             a.changed.notify_waiters();
                         }
                         result
-                    }).await;
+                    })
+                    .await;
                     assert_eq!(child.cancel_reason().unwrap().kind, CancelKind::RaceLost);
                     assert!(child.checkpoint().is_err());
                     a.cancelled.store(true, Ordering::Release);
                     a.changed.notify_waiters();
-                    a.changed.wait_until(|| a.released.load(Ordering::Acquire)).await;
+                    a.changed
+                        .wait_until(|| a.released.load(Ordering::Acquire))
+                        .await;
                     0
                 }),
                 boxed(move |_child| winner(b)),
@@ -905,7 +957,9 @@ fn factory_sleep_loser_is_cancelled_without_waiting_for_its_deadline() {
             assert_eq!(race.await.unwrap(), 7);
             assert!(seen.retired.load(Ordering::Acquire));
             assert!(!cx.is_cancel_requested());
-            eprintln!("scenario=factory-sleep workers={workers} deadline=3600s parked=true cancelled=true retired=true");
+            eprintln!(
+                "scenario=factory-sleep workers={workers} deadline=3600s parked=true cancelled=true retired=true"
+            );
         });
     }
 }

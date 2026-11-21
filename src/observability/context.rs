@@ -3,13 +3,13 @@
 //! A `DiagnosticContext` carries correlation IDs (task, region, span) and
 //! structured fields across asynchronous boundaries.
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{RegionId, TaskId};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone)]
 struct ContextStackEntry {

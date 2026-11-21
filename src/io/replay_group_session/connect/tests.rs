@@ -18,10 +18,19 @@ struct Fixture {
     shutdowns: usize,
 }
 impl Fixture {
-    fn new(input: &'static [u8]) -> Self { Self { input, ..Self::default() } }
+    fn new(input: &'static [u8]) -> Self {
+        Self {
+            input,
+            ..Self::default()
+        }
+    }
 }
 impl AsyncRead for Fixture {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let n = buf.remaining().min(this.input.len());
         buf.put_slice(&this.input[..n]);
@@ -30,17 +39,29 @@ impl AsyncRead for Fixture {
     }
 }
 impl AsyncWrite for Fixture {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.get_mut().output.extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let start = this.output.len();
-        for buf in bufs { this.output.extend_from_slice(buf); }
+        for buf in bufs {
+            this.output.extend_from_slice(buf);
+        }
         Poll::Ready(Ok(this.output.len() - start))
     }
-    fn is_write_vectored(&self) -> bool { true }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.get_mut().flushes += 1;
         Poll::Ready(Ok(()))
@@ -52,23 +73,39 @@ impl AsyncWrite for Fixture {
 }
 fn limits() -> GroupSessionCaptureLimits {
     GroupSessionCaptureLimits {
-        max_streams: 12, max_effects: 96,
+        max_streams: 12,
+        max_effects: 96,
         per_stream: IoCaptureLimits::new(32, 4096, 4096, 8),
-        entropy: EntropyCaptureLimits::new(32, 256, 4), clock_observations: 16,
+        entropy: EntropyCaptureLimits::new(32, 256, 4),
+        clock_observations: 16,
     }
 }
 fn session_with(limits: GroupSessionCaptureLimits) -> RecordingGroupSession<VirtualClock> {
-    RecordingGroupSession::new(Arc::new(DetEntropy::new(7)), Arc::new(VirtualClock::new()), limits).unwrap()
+    RecordingGroupSession::new(
+        Arc::new(DetEntropy::new(7)),
+        Arc::new(VirtualClock::new()),
+        limits,
+    )
+    .unwrap()
 }
-fn capture_session() -> RecordingGroupSession<VirtualClock> { session_with(limits()) }
-fn attempt(n: u64) -> ConnectionAttempt { ConnectionAttempt::new(n * 2, n * 2 + 1).unwrap() }
+fn capture_session() -> RecordingGroupSession<VirtualClock> {
+    session_with(limits())
+}
+fn attempt(n: u64) -> ConnectionAttempt {
+    ConnectionAttempt::new(n * 2, n * 2 + 1).unwrap()
+}
 fn resolved<T>(value: Poll<T>) -> T {
-    match value { Poll::Ready(value) => value, Poll::Pending => panic!("expected a completed operation") }
+    match value {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("expected a completed operation"),
+    }
 }
 fn poll<F: Future>(future: &mut Pin<Box<F>>, waker: &Waker) -> Poll<F::Output> {
     future.as_mut().poll(&mut Context::from_waker(waker))
 }
-fn immediate<F: Future>(future: F) -> F::Output { resolved(poll(&mut Box::pin(future), Waker::noop())) }
+fn immediate<F: Future>(future: F) -> F::Output {
+    resolved(poll(&mut Box::pin(future), Waker::noop()))
+}
 fn read(io: &mut (impl AsyncRead + Unpin), size: usize) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; size];
     let mut buf = ReadBuf::new(&mut bytes);
@@ -80,7 +117,10 @@ fn write(io: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> io::Result<usize> 
 }
 fn captured() -> RecordedGroupSession {
     let session = capture_session();
-    let mut io = immediate(session.connect_with(attempt(0), b"endpoint", 64, || async { Ok(Fixture::new(b"yes")) })).unwrap();
+    let mut io = immediate(session.connect_with(attempt(0), b"endpoint", 64, || async {
+        Ok(Fixture::new(b"yes"))
+    }))
+    .unwrap();
     assert_eq!(write(&mut io, b"hello").unwrap(), 5);
     assert_eq!(read(&mut io, 3).unwrap(), b"yes");
     assert_eq!(io.into_inner().output, b"hello");
@@ -100,7 +140,11 @@ fn successful_connection_owns_real_stream_and_replays_without_a_factory() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(write(&mut io, b"hello").unwrap(), 5);
     assert_eq!(read(&mut io, 3).unwrap(), b"yes");
-    assert_eq!(io.into_inner().output, b"hello", "journal bytes never reach the real provider");
+    assert_eq!(
+        io.into_inner().output,
+        b"hello",
+        "journal bytes never reach the real provider"
+    );
     let tape = session.finish().unwrap();
     assert_eq!(tape.stream_ids().collect::<Vec<_>>(), [0, 1]);
     assert_eq!(tape.effects(), 4);
@@ -116,9 +160,12 @@ fn successful_connection_owns_real_stream_and_replays_without_a_factory() {
 #[test]
 fn original_custom_error_is_not_replaced_by_capture_and_replay_retains_its_kind() {
     let session = capture_session();
-    let original = immediate(session.connect_with(attempt(0), b"private-endpoint", 64, || async {
-        Err::<Fixture, _>(io::Error::other("original-private-diagnostic"))
-    })).unwrap_err();
+    let original = immediate(
+        session.connect_with(attempt(0), b"private-endpoint", 64, || async {
+            Err::<Fixture, _>(io::Error::other("original-private-diagnostic"))
+        }),
+    )
+    .unwrap_err();
     assert_eq!(original.to_string(), "original-private-diagnostic");
     let tape = session.finish().unwrap();
     assert_eq!(tape.stream_ids().collect::<Vec<_>>(), [0]);
@@ -134,7 +181,8 @@ fn native_error_codes_survive_failed_connection_replay() {
     let session = capture_session();
     let original = immediate(session.connect_with(attempt(0), b"address", 64, || async {
         Err::<Fixture, _>(io::Error::from_raw_os_error(111))
-    })).unwrap_err();
+    }))
+    .unwrap_err();
     let replay = session.finish().unwrap().replay();
     let replayed = immediate(replay.connect(attempt(0), b"address")).unwrap_err();
     assert_eq!(replayed.raw_os_error(), original.raw_os_error());
@@ -145,16 +193,29 @@ fn native_error_codes_survive_failed_connection_replay() {
 #[test]
 fn failed_attempt_then_clock_entropy_and_retry_keep_one_cross_provider_order() {
     let session = capture_session();
-    assert_eq!(immediate(session.connect_with(attempt(0), b"first", 64, || async {
-        Err::<Fixture, _>(io::ErrorKind::PermissionDenied.into())
-    })).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        immediate(session.connect_with(attempt(0), b"first", 64, || async {
+            Err::<Fixture, _>(io::ErrorKind::PermissionDenied.into())
+        }))
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied
+    );
     let time = session.clock().now();
     let nonce = session.entropy().next_u64().to_le_bytes();
-    let mut io = immediate(session.connect_with(attempt(1), &nonce, 64, || async { Ok(Fixture::new(b"r")) })).unwrap();
+    let mut io = immediate(
+        session.connect_with(attempt(1), &nonce, 64, || async { Ok(Fixture::new(b"r")) }),
+    )
+    .unwrap();
     assert_eq!(read(&mut io, 1).unwrap(), b"r");
     io.into_inner();
     let replay = session.finish().unwrap().replay();
-    assert_eq!(immediate(replay.connect(attempt(0), b"first")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        immediate(replay.connect(attempt(0), b"first"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
     assert_eq!(replay.clock().try_now().unwrap(), time);
     let replay_nonce = replay.entropy().try_next_u64().unwrap().to_le_bytes();
     assert_eq!(replay_nonce, nonce);
@@ -170,9 +231,14 @@ fn changed_request_or_bound_data_identity_is_sticky_even_when_error_is_ignored()
         let replay = captured().replay();
         let (id, key): (_, &[u8]) = if changed_target {
             (ConnectionAttempt::new(0, 9).unwrap(), b"endpoint")
-        } else { (attempt(0), b"ENDPOINT") };
+        } else {
+            (attempt(0), b"ENDPOINT")
+        };
         assert!(immediate(replay.connect(id, key)).is_err());
-        assert!(matches!(replay.verify_complete(), Err(GroupSessionCompletionError::Diverged(_))));
+        assert!(matches!(
+            replay.verify_complete(),
+            Err(GroupSessionCompletionError::Diverged(_))
+        ));
     }
 }
 
@@ -181,37 +247,51 @@ fn unknown_extra_connection_invalidates_an_otherwise_complete_empty_window() {
     let replay = capture_session().finish().unwrap().replay();
     replay.verify_complete().unwrap();
     assert!(immediate(replay.connect(attempt(3), b"never-captured")).is_err());
-    assert!(matches!(replay.verify_complete(), Err(GroupSessionCompletionError::Diverged(_))));
+    assert!(matches!(
+        replay.verify_complete(),
+        Err(GroupSessionCompletionError::Diverged(_))
+    ));
 }
 
 #[test]
 fn reused_attempt_never_reopens_a_completed_journal() {
     let session = capture_session();
-    immediate(session.connect_with(attempt(0), b"x", 64, || async { Ok(Fixture::default()) })).unwrap().into_inner();
+    immediate(session.connect_with(attempt(0), b"x", 64, || async { Ok(Fixture::default()) }))
+        .unwrap()
+        .into_inner();
     let replay = session.finish().unwrap().replay();
     drop(immediate(replay.connect(attempt(0), b"x")).unwrap());
     replay.verify_complete().unwrap();
     assert!(immediate(replay.connect(attempt(0), b"x")).is_err());
-    assert!(matches!(replay.verify_complete(), Err(GroupSessionCompletionError::Diverged(_))));
+    assert!(matches!(
+        replay.verify_complete(),
+        Err(GroupSessionCompletionError::Diverged(_))
+    ));
 }
 
 #[test]
 fn request_and_stream_bounds_refuse_capture_without_losing_live_success() {
     for mode in 0..3 {
         let mut limits = limits();
-        if mode != 0 { limits.max_streams = mode - 1; }
+        if mode != 0 {
+            limits.max_streams = mode - 1;
+        }
         let session = session_with(limits);
         let max_key = if mode == 0 { 1 } else { 64 };
         let calls = AtomicUsize::new(0);
         let mut io = immediate(session.connect_with(attempt(0), b"long-key", max_key, || {
             calls.fetch_add(1, Ordering::SeqCst);
             async { Ok(Fixture::new(b"real")) }
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(read(&mut io, 4).unwrap(), b"real");
         assert_eq!(write(&mut io, b"sent").unwrap(), 4);
         assert_eq!(io.into_inner().output, b"sent");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Limit(_))));
+        assert!(matches!(
+            session.finish(),
+            Err(GroupSessionCaptureError::Limit(_))
+        ));
     }
 }
 
@@ -220,7 +300,10 @@ fn journal_has_its_own_limits_without_widening_data_limits() {
     let mut bounds = limits();
     bounds.per_stream = IoCaptureLimits::new(1, 1, 0, 0);
     let session = session_with(bounds);
-    let mut io = immediate(session.connect_with(attempt(0), b"key", 64, || async { Ok(Fixture::new(b"x")) })).unwrap();
+    let mut io = immediate(
+        session.connect_with(attempt(0), b"key", 64, || async { Ok(Fixture::new(b"x")) }),
+    )
+    .unwrap();
     assert_eq!(read(&mut io, 1).unwrap(), b"x");
     io.into_inner();
     let replay = session.finish().unwrap().replay();
@@ -234,28 +317,45 @@ fn journal_has_its_own_limits_without_widening_data_limits() {
 fn duplicate_data_identity_preserves_both_original_providers_and_refuses_capture() {
     let session = capture_session();
     let original = session.register(1, Fixture::new(b"old")).unwrap();
-    let mut io = immediate(session.connect_with(attempt(0), b"key", 64, || async { Ok(Fixture::new(b"new")) })).unwrap();
+    let mut io = immediate(session.connect_with(attempt(0), b"key", 64, || async {
+        Ok(Fixture::new(b"new"))
+    }))
+    .unwrap();
     assert_eq!(read(&mut io, 3).unwrap(), b"new");
     assert_eq!(original.into_inner().input, b"old");
     io.into_inner();
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::DuplicateStream(1))));
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::DuplicateStream(1))
+    ));
 }
 
-struct PendingDial { ready: Arc<AtomicBool>, drops: Arc<AtomicUsize>, bytes: &'static [u8] }
+struct PendingDial {
+    ready: Arc<AtomicBool>,
+    drops: Arc<AtomicUsize>,
+    bytes: &'static [u8],
+}
 impl Future for PendingDial {
     type Output = io::Result<Fixture>;
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.ready.load(Ordering::SeqCst) { Poll::Ready(Ok(Fixture::new(self.bytes))) }
-        else { Poll::Pending }
+        if self.ready.load(Ordering::SeqCst) {
+            Poll::Ready(Ok(Fixture::new(self.bytes)))
+        } else {
+            Poll::Pending
+        }
     }
 }
 impl Drop for PendingDial {
-    fn drop(&mut self) { self.drops.fetch_add(1, Ordering::SeqCst); }
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 #[derive(Default)]
 struct Counter(AtomicUsize);
 impl Wake for Counter {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 fn counting() -> (Arc<Counter>, Waker) {
     let counter = Arc::new(Counter::default());
@@ -270,14 +370,21 @@ fn concurrent_attempts_replay_reverse_completion_with_clock_prerequisite_and_wak
     let b_ready = Arc::new(AtomicBool::new(false));
     let drops = Arc::new(AtomicUsize::new(0));
     let mut a = Box::pin(session.connect_with(attempt(0), b"a", 64, || PendingDial {
-        ready: Arc::clone(&a_ready), drops: Arc::clone(&drops), bytes: b"A",
+        ready: Arc::clone(&a_ready),
+        drops: Arc::clone(&drops),
+        bytes: b"A",
     }));
     let mut b = Box::pin(session.connect_with(attempt(1), b"b", 64, || PendingDial {
-        ready: Arc::clone(&b_ready), drops: Arc::clone(&drops), bytes: b"B",
+        ready: Arc::clone(&b_ready),
+        drops: Arc::clone(&drops),
+        bytes: b"B",
     }));
     assert!(poll(&mut a, Waker::noop()).is_pending());
     assert!(poll(&mut b, Waker::noop()).is_pending());
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::LiveStreams(2))));
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::LiveStreams(2))
+    ));
     let time = session.clock().now();
     b_ready.store(true, Ordering::SeqCst);
     let mut stream_b = resolved(poll(&mut b, Waker::noop())).unwrap();
@@ -287,7 +394,8 @@ fn concurrent_attempts_replay_reverse_completion_with_clock_prerequisite_and_wak
     let mut stream_a = resolved(poll(&mut a, Waker::noop())).unwrap();
     assert_eq!(read(&mut stream_a, 1).unwrap(), b"A");
     stream_a.into_inner();
-    drop(a); drop(b);
+    drop(a);
+    drop(b);
     assert_eq!(drops.load(Ordering::SeqCst), 2);
     let replay = session.finish().unwrap().replay();
     let mut a = Box::pin(replay.connect(attempt(0), b"a"));
@@ -307,7 +415,10 @@ fn concurrent_attempts_replay_reverse_completion_with_clock_prerequisite_and_wak
     assert!(a_count.0.load(Ordering::SeqCst) > 0);
     let mut stream_a = resolved(poll(&mut a, &a_waker)).unwrap();
     assert_eq!(read(&mut stream_a, 1).unwrap(), b"A");
-    drop(stream_a); drop(stream_b); drop(a); drop(b);
+    drop(stream_a);
+    drop(stream_b);
+    drop(a);
+    drop(b);
     replay.verify_complete().unwrap();
 }
 
@@ -315,13 +426,20 @@ fn concurrent_attempts_replay_reverse_completion_with_clock_prerequisite_and_wak
 fn cancelled_attempt_drops_its_real_future_once_and_cannot_publish_a_partial_capture() {
     let session = capture_session();
     let drops = Arc::new(AtomicUsize::new(0));
-    let mut future = Box::pin(session.connect_with(attempt(0), b"wait", 64, || PendingDial {
-        ready: Arc::new(AtomicBool::new(false)), drops: Arc::clone(&drops), bytes: b"never",
-    }));
+    let mut future = Box::pin(
+        session.connect_with(attempt(0), b"wait", 64, || PendingDial {
+            ready: Arc::new(AtomicBool::new(false)),
+            drops: Arc::clone(&drops),
+            bytes: b"never",
+        }),
+    );
     assert!(poll(&mut future, Waker::noop()).is_pending());
     drop(future);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::AbandonedStream(0))));
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::AbandonedStream(0))
+    ));
 }
 
 #[test]
@@ -343,14 +461,22 @@ fn source_factory_and_poll_cannot_hide_same_session_effects() {
         let session = capture_session();
         let clock = session.clock();
         let stream = immediate(session.connect_with(attempt(0), b"opaque", 64, || {
-            if in_factory { clock.now(); }
+            if in_factory {
+                clock.now();
+            }
             async move {
-                if !in_factory { clock.now(); }
+                if !in_factory {
+                    clock.now();
+                }
                 Ok(Fixture::new(b"still-live"))
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(stream.into_inner().input, b"still-live");
-        assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Overlap)));
+        assert!(matches!(
+            session.finish(),
+            Err(GroupSessionCaptureError::Overlap)
+        ));
     }
 }
 
@@ -366,7 +492,9 @@ impl Future for DropDial {
 }
 impl Drop for DropDial {
     fn drop(&mut self) {
-        if let Some(clock) = &self.clock { clock.now(); }
+        if let Some(clock) = &self.clock {
+            clock.now();
+        }
         assert!(!self.panic, "connector destructor panic sentinel");
     }
 }
@@ -375,48 +503,99 @@ impl Drop for DropDial {
 fn source_destruction_is_inside_the_opaque_boundary_before_completion() {
     let session = capture_session();
     let io = immediate(session.connect_with(attempt(0), b"drop", 64, || DropDial {
-        clock: Some(session.clock()), panic: false,
-    })).unwrap();
+        clock: Some(session.clock()),
+        panic: false,
+    }))
+    .unwrap();
     io.into_inner();
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Overlap)));
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::Overlap)
+    ));
 }
 
 #[test]
 fn connector_construction_poll_and_destruction_panics_never_finish_capture() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let session = capture_session();
-    assert!(catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(
-        attempt(0), b"construct", 64, || -> std::future::Ready<io::Result<Fixture>> {
-            panic!("connector factory panic sentinel")
-        },
-    )))).is_err());
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Interrupted)));
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(
+            attempt(0),
+            b"construct",
+            64,
+            || -> std::future::Ready<io::Result<Fixture>> {
+                panic!("connector factory panic sentinel")
+            },
+        ))))
+        .is_err()
+    );
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::Interrupted)
+    ));
 
     let session = capture_session();
-    assert!(catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(attempt(0), b"poll", 64, || async {
-        panic!("connector poll panic sentinel");
-        #[allow(unreachable_code)]
-        Ok::<_, io::Error>(Fixture::default())
-    })))).is_err());
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Interrupted)));
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(
+            attempt(0),
+            b"poll",
+            64,
+            || async {
+                panic!("connector poll panic sentinel");
+                #[allow(unreachable_code)]
+                Ok::<_, io::Error>(Fixture::default())
+            }
+        ))))
+        .is_err()
+    );
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::Interrupted)
+    ));
 
     let session = capture_session();
-    assert!(catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(attempt(0), b"drop", 64, || DropDial {
-        clock: None, panic: true,
-    })))).is_err());
-    assert!(matches!(session.finish(), Err(GroupSessionCaptureError::Interrupted)));
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| immediate(session.connect_with(
+            attempt(0),
+            b"drop",
+            64,
+            || DropDial {
+                clock: None,
+                panic: true,
+            }
+        ))))
+        .is_err()
+    );
+    assert!(matches!(
+        session.finish(),
+        Err(GroupSessionCaptureError::Interrupted)
+    ));
 }
 
 fn journal_only(marker: &'static [u8], data: bool) -> RecordedGroupSession {
     let session = capture_session();
     let id = attempt(0);
-    let mut journal = session.register(id.journal_stream(), Fixture::new(marker)).unwrap();
+    let mut journal = session
+        .register(id.journal_stream(), Fixture::new(marker))
+        .unwrap();
     let target = id.data_stream().to_le_bytes();
-    let bufs = [IoSlice::new(REQUEST_DOMAIN), IoSlice::new(&target), IoSlice::new(b"key")];
-    resolved(Pin::new(&mut journal).poll_write_vectored(&mut Context::from_waker(Waker::noop()), &bufs)).unwrap();
+    let bufs = [
+        IoSlice::new(REQUEST_DOMAIN),
+        IoSlice::new(&target),
+        IoSlice::new(b"key"),
+    ];
+    resolved(
+        Pin::new(&mut journal).poll_write_vectored(&mut Context::from_waker(Waker::noop()), &bufs),
+    )
+    .unwrap();
     read(&mut journal, 1).unwrap();
     journal.into_inner();
-    if data { session.register(id.data_stream(), Fixture::default()).unwrap().into_inner(); }
+    if data {
+        session
+            .register(id.data_stream(), Fixture::default())
+            .unwrap()
+            .into_inner();
+    }
     session.finish().unwrap()
 }
 
@@ -425,7 +604,10 @@ fn malformed_success_or_missing_data_stream_is_sticky_not_a_fake_connection() {
     for (marker, data) in [(&[2][..], true), (&[1][..], false), (&[][..], true)] {
         let replay = journal_only(marker, data).replay();
         assert!(immediate(replay.connect(attempt(0), b"key")).is_err());
-        assert!(matches!(replay.verify_complete(), Err(GroupSessionCompletionError::Diverged(_))));
+        assert!(matches!(
+            replay.verify_complete(),
+            Err(GroupSessionCompletionError::Diverged(_))
+        ));
     }
 }
 
@@ -434,13 +616,22 @@ fn cancelled_replay_attempt_invalidates_its_peer_and_output_gate() {
     let session = capture_session();
     let clock = session.clock();
     clock.now();
-    immediate(session.connect_with(attempt(0), b"after-clock", 64, || async { Ok(Fixture::default()) })).unwrap().into_inner();
+    immediate(
+        session.connect_with(attempt(0), b"after-clock", 64, || async {
+            Ok(Fixture::default())
+        }),
+    )
+    .unwrap()
+    .into_inner();
     let replay = session.finish().unwrap().replay();
     let mut future = Box::pin(replay.connect(attempt(0), b"after-clock"));
     assert!(poll(&mut future, Waker::noop()).is_pending());
     drop(future);
     assert!(replay.clock().try_now().is_err());
-    assert!(matches!(replay.verify_complete(), Err(GroupSessionCompletionError::Diverged(_))));
+    assert!(matches!(
+        replay.verify_complete(),
+        Err(GroupSessionCompletionError::Diverged(_))
+    ));
     let result = immediate(replay.run(1, |_| Box::pin(async { "not accepted" })));
     assert!(matches!(result, Err(GroupSessionRunError::Replay(_))));
 }
@@ -448,11 +639,17 @@ fn cancelled_replay_attempt_invalidates_its_peer_and_output_gate() {
 #[test]
 fn successful_connection_preserves_vectored_flush_shutdown_and_eof() {
     let session = capture_session();
-    let mut io = immediate(session.connect_with(attempt(0), b"full-io", 64, || async { Ok(Fixture::default()) })).unwrap();
+    let mut io = immediate(session.connect_with(attempt(0), b"full-io", 64, || async {
+        Ok(Fixture::default())
+    }))
+    .unwrap();
     let bufs = [IoSlice::new(b"a"), IoSlice::new(b"bc")];
     let mut cx = Context::from_waker(Waker::noop());
     assert!(io.is_write_vectored());
-    assert_eq!(resolved(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)).unwrap(), 3);
+    assert_eq!(
+        resolved(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)).unwrap(),
+        3
+    );
     resolved(Pin::new(&mut io).poll_flush(&mut cx)).unwrap();
     resolved(Pin::new(&mut io).poll_shutdown(&mut cx)).unwrap();
     assert_eq!(read(&mut io, 1).unwrap(), b"");
@@ -462,7 +659,10 @@ fn successful_connection_preserves_vectored_flush_shutdown_and_eof() {
     let replay = session.finish().unwrap().replay();
     let mut io = immediate(replay.connect(attempt(0), b"full-io")).unwrap();
     assert!(io.is_write_vectored());
-    assert_eq!(resolved(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)).unwrap(), 3);
+    assert_eq!(
+        resolved(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)).unwrap(),
+        3
+    );
     resolved(Pin::new(&mut io).poll_flush(&mut cx)).unwrap();
     resolved(Pin::new(&mut io).poll_shutdown(&mut cx)).unwrap();
     assert_eq!(read(&mut io, 1).unwrap(), b"");
@@ -476,7 +676,12 @@ fn identity_validation_and_debug_do_not_expose_request_or_provider_data() {
     fn bounds<T: Send + Sync + Unpin>() {}
     bounds::<RecordingConnection<Fixture>>();
     let session = capture_session();
-    let io = immediate(session.connect_with(attempt(0), b"private-target", 64, || async { Ok(Fixture::new(b"private-data")) })).unwrap();
+    let io = immediate(
+        session.connect_with(attempt(0), b"private-target", 64, || async {
+            Ok(Fixture::new(b"private-data"))
+        }),
+    )
+    .unwrap();
     let debug = format!("{io:?}");
     assert!(!debug.contains("private-target"));
     assert!(!debug.contains("private-data"));

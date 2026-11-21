@@ -29,7 +29,11 @@ fn strict_config(drop_one_in: u32) -> RqConfig {
     }
 }
 
-fn strict_sender(addr: SocketAddr, source: PathBuf, config: RqConfig) -> Result<SendReport, RqError> {
+fn strict_sender(
+    addr: SocketAddr,
+    source: PathBuf,
+    config: RqConfig,
+) -> Result<SendReport, RqError> {
     let runtime = RuntimeBuilder::multi_thread()
         .worker_threads(2)
         .enable_platform_reactor(true)
@@ -93,12 +97,14 @@ fn relay_direction(
     let mut input = [0u8; 4096];
     let result = (|| -> std::io::Result<()> {
         loop {
-            while let Some(mut frame) = codec
-                .decode(&mut buffered)
-                .map_err(std::io::Error::other)?
+            while let Some(mut frame) =
+                codec.decode(&mut buffered).map_err(std::io::Error::other)?
             {
                 if action.target() == Some(frame.frame_type())
-                    && frame.header.extensions.contains_key(&CONTROL_AUTH_EXTENSION)
+                    && frame
+                        .header
+                        .extensions
+                        .contains_key(&CONTROL_AUTH_EXTENSION)
                     && !handled.swap(true, Ordering::SeqCst)
                 {
                     match &action {
@@ -158,8 +164,12 @@ fn proxy(
         let (client, _) = listener.accept().unwrap();
         let server = std::net::TcpStream::connect(receiver).unwrap();
         for stream in [&client, &server] {
-            stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(20))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
             stream.set_nodelay(true).unwrap();
         }
         let client_read = client.try_clone().unwrap();
@@ -178,7 +188,10 @@ fn proxy(
 fn strict_receiver(
     destination: PathBuf,
     config: RqConfig,
-) -> (SocketAddr, thread::JoinHandle<Result<ReceiveReport, RqError>>) {
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<ReceiveReport, RqError>>,
+) {
     spawn_receiver_with_options(
         destination,
         config,
@@ -201,7 +214,10 @@ fn strict_full_object_roundtrips_with_loss_and_existing_legacy_mode_still_works(
         if drop_one_in > 0 {
             assert!(send.feedback_rounds > 0, "a repair round really occurred");
         }
-        assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), payload);
+        assert_eq!(
+            std::fs::read(destination.join("payload.bin")).unwrap(),
+            payload
+        );
     }
 
     let (source, destination, payload, _) = fixture("legacy_roundtrip");
@@ -209,7 +225,10 @@ fn strict_full_object_roundtrips_with_loss_and_existing_legacy_mode_still_works(
     let send = run_sender(addr, source, strict_config(0)).unwrap();
     assert!(receiver.join().unwrap().unwrap().committed);
     assert!(send.receipt.committed);
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -221,7 +240,10 @@ fn strict_control_refuses_legacy_selection_and_preserves_signed_noop() {
         Err(RqError::Authentication(_))
     ));
     assert!(receiver.join().unwrap().is_err());
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), original);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        original
+    );
 
     std::fs::write(destination.join("payload.bin"), &payload).unwrap();
     let (addr, receiver) = strict_receiver(destination.clone(), strict_config(0));
@@ -230,7 +252,10 @@ fn strict_control_refuses_legacy_selection_and_preserves_signed_noop() {
     assert_eq!(send.bytes_sent, 0);
     assert_eq!(send.symbols_sent, 0);
     assert!(send.receipt.committed_paths.is_empty());
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), payload);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
 }
 
 #[test]
@@ -251,18 +276,27 @@ fn strict_control_rejects_real_mitm_round_feedback_and_proof_tampering() {
             FrameType::ObjectComplete => {
                 assert!(matches!(received, Err(RqError::Authentication(_))));
                 assert!(send.is_err());
-                assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), original);
+                assert_eq!(
+                    std::fs::read(destination.join("payload.bin")).unwrap(),
+                    original
+                );
             }
             FrameType::ObjectRequest => {
                 assert!(matches!(send, Err(RqError::Authentication(_))));
                 assert!(received.is_err());
-                assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), original);
+                assert_eq!(
+                    std::fs::read(destination.join("payload.bin")).unwrap(),
+                    original
+                );
             }
             FrameType::Proof => {
                 assert!(matches!(send, Err(RqError::Authentication(_))));
                 // The peer committed before its genuine proof was tampered.
                 assert!(received.unwrap().committed);
-                assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), payload);
+                assert_eq!(
+                    std::fs::read(destination.join("payload.bin")).unwrap(),
+                    payload
+                );
             }
             _ => unreachable!(),
         }
@@ -282,8 +316,15 @@ fn strict_control_rejects_a_genuine_completion_replayed_into_a_fresh_session() {
     assert!(receiver.join().unwrap().unwrap().committed);
     relay.join().unwrap();
     assert!(observed.load(Ordering::SeqCst));
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), payload);
-    let old_completion = captured.lock().unwrap().clone().expect("genuine signed frame");
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        payload
+    );
+    let old_completion = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("genuine signed frame");
 
     // Force FullObject again with identical source/path/key. Fresh session
     // challenges must still make the first transfer's valid tag unusable.
@@ -298,5 +339,8 @@ fn strict_control_rejects_a_genuine_completion_replayed_into_a_fresh_session() {
     relay.join().unwrap();
     assert!(replayed.load(Ordering::SeqCst));
     assert!(matches!(received, Err(RqError::Authentication(_))));
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), original);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        original
+    );
 }

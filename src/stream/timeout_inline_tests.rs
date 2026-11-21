@@ -113,7 +113,10 @@ fn item_allowances_start_on_demand_and_exclude_consumer_backpressure() {
     assert_eq!(registrations(&cx), 1);
     clock.advance_to(Time::from_millis(550));
     stream.get_mut().ready = true;
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(Ok(7))));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(Some(Ok(7)))
+    );
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
 
@@ -126,15 +129,24 @@ fn item_allowances_start_on_demand_and_exclude_consumer_backpressure() {
     assert_eq!(driver.process_timers(), 1);
     assert!(count.0.load(Ordering::SeqCst) > 0);
     stream.get_mut().ready = true;
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(Ok(8))));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(Some(Ok(8)))
+    );
     assert!(driver.is_empty(), "a ready item wins the fired timer");
     assert_eq!(registrations(&cx), 0);
 
     stream.get_mut().ended = true;
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(None)
+    );
     let polls = stream.get_ref().polls;
     assert!(stream.is_terminated());
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(None)
+    );
     assert_eq!(stream.get_ref().polls, polls, "EOF is fused");
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
@@ -150,16 +162,24 @@ fn elapsed_is_one_error_and_does_not_consume_the_pending_item() {
     assert_eq!(driver.process_timers(), 1);
     assert_eq!(
         Pin::new(&mut stream).poll_next(&mut task),
-        Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(Elapsed::new(Time::from_millis(10))))))
+        Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(Elapsed::new(
+            Time::from_millis(10)
+        )))))
     );
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
     let polls = stream.get_ref().polls;
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(None)
+    );
     assert_eq!(stream.get_ref().polls, polls);
     let mut recovered = stream.into_inner();
     recovered.ready = true;
-    assert_eq!(Pin::new(&mut recovered).poll_next(&mut task), Poll::Ready(Some(42)));
+    assert_eq!(
+        Pin::new(&mut recovered).poll_next(&mut task),
+        Poll::Ready(Some(42))
+    );
 }
 
 #[test]
@@ -177,7 +197,10 @@ fn dropping_next_does_not_restart_the_current_item_allowance() {
     drop(next);
     clock.advance_to(Time::from_millis(10));
     let mut next = Box::pin(stream.next());
-    assert!(matches!(next.as_mut().poll(&mut task), Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))));
+    assert!(matches!(
+        next.as_mut().poll(&mut task),
+        Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))
+    ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
 }
@@ -228,12 +251,22 @@ fn cancellation_preserves_the_entire_reason_and_wakes_a_quiet_source() {
             Pin::new(&mut stream).poll_next(&mut task),
             Poll::Ready(Some(Err(StreamTimeoutError::Cancelled(reason))))
         );
-        assert_eq!(stream.get_ref().polls, 1, "pre-poll cancellation consumes no item");
+        assert_eq!(
+            stream.get_ref().polls,
+            1,
+            "pre-poll cancellation consumes no item"
+        );
         assert!(driver.is_empty());
         assert_eq!(registrations(&cx), 0);
-        assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut task),
+            Poll::Ready(None)
+        );
         let mut recovered = stream.into_inner();
-        assert_eq!(Pin::new(&mut recovered).poll_next(&mut task), Poll::Ready(Some(9)));
+        assert_eq!(
+            Pin::new(&mut recovered).poll_next(&mut task),
+            Poll::Ready(Some(9))
+        );
     }
 }
 
@@ -270,7 +303,10 @@ fn ready_values_and_source_errors_win_expiry_and_concurrent_cancellation() {
             }
             .timeout(&cx, Duration::from_millis(100));
             let mut task = Context::from_waker(Waker::noop());
-            assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(Ok(value))));
+            assert_eq!(
+                Pin::new(&mut stream).poll_next(&mut task),
+                Poll::Ready(Some(Ok(value)))
+            );
             assert!(driver.is_empty());
             assert_eq!(registrations(&cx), 0);
             if cancel {
@@ -279,7 +315,10 @@ fn ready_values_and_source_errors_win_expiry_and_concurrent_cancellation() {
                     Poll::Ready(Some(Err(StreamTimeoutError::Cancelled(_))))
                 ));
             } else {
-                assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+                assert_eq!(
+                    Pin::new(&mut stream).poll_next(&mut task),
+                    Poll::Ready(None)
+                );
             }
         }
     }
@@ -302,12 +341,16 @@ fn cancellation_during_source_eof_is_not_reported_as_clean_eof() {
     ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(None)
+    );
 }
 
 #[test]
 fn owner_deadline_wakes_the_stream_and_keeps_deadline_attribution() {
-    let (cx, clock, driver) = virtual_context(Budget::INFINITE.with_deadline(Time::from_millis(10)));
+    let (cx, clock, driver) =
+        virtual_context(Budget::INFINITE.with_deadline(Time::from_millis(10)));
     let mut stream = Source::pending([]).timeout(&cx, Duration::from_secs(1));
     let (count, waker) = counter();
     let mut task = Context::from_waker(&waker);
@@ -326,7 +369,8 @@ fn owner_deadline_wakes_the_stream_and_keeps_deadline_attribution() {
 
 #[test]
 fn masked_owner_deadline_rearms_for_the_item_without_spinning() {
-    let (cx, clock, driver) = virtual_context(Budget::INFINITE.with_deadline(Time::from_millis(10)));
+    let (cx, clock, driver) =
+        virtual_context(Budget::INFINITE.with_deadline(Time::from_millis(10)));
     let mut stream = Source::pending([]).timeout(&cx, Duration::from_millis(100));
     let (count, waker) = counter();
     let mut task = Context::from_waker(&waker);
@@ -364,14 +408,23 @@ fn zero_duration_still_requires_timer_authority_and_preserves_ready_items() {
         Poll::Ready(Some(Err(StreamTimeoutError::TimerUnavailable)))
     );
     assert_eq!(stream.get_ref().polls, 0);
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(None));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(None)
+    );
 
     let (cx, _, driver) = virtual_context(Budget::INFINITE);
     let mut ready = iter([3]).timeout(&cx, Duration::ZERO);
-    assert_eq!(Pin::new(&mut ready).poll_next(&mut task), Poll::Ready(Some(Ok(3))));
+    assert_eq!(
+        Pin::new(&mut ready).poll_next(&mut task),
+        Poll::Ready(Some(Ok(3)))
+    );
     assert_eq!(Pin::new(&mut ready).poll_next(&mut task), Poll::Ready(None));
     let mut pending = Source::pending([]).timeout(&cx, Duration::ZERO);
-    assert!(matches!(Pin::new(&mut pending).poll_next(&mut task), Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))));
+    assert!(matches!(
+        Pin::new(&mut pending).poll_next(&mut task),
+        Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))
+    ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
 }
@@ -390,7 +443,10 @@ fn explicit_timer_is_not_redirected_by_the_ambient_context() {
     assert!(ambient_driver.is_empty());
     clock.advance_to(Time::from_millis(100));
     let _ = driver.process_timers();
-    assert!(matches!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))));
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(Some(Err(StreamTimeoutError::Elapsed(_))))
+    ));
     assert!(!cx.is_cancel_requested());
     assert!(driver.is_empty());
     assert!(ambient_driver.is_empty());
@@ -421,14 +477,20 @@ fn pinned_local_and_borrowed_sources_do_not_gain_extra_bounds() {
     };
     let mut stream = std::pin::pin!(source.timeout(&cx, Duration::from_secs(1)));
     let mut task = Context::from_waker(Waker::noop());
-    assert_eq!(stream.as_mut().poll_next(&mut task), Poll::Ready(Some(Ok(value))));
+    assert_eq!(
+        stream.as_mut().poll_next(&mut task),
+        Poll::Ready(Some(Ok(value)))
+    );
     assert_eq!(stream.as_mut().poll_next(&mut task), Poll::Ready(None));
 
     let borrowed = String::from("borrowed");
     let mut stream = iter([borrowed.as_str()]).timeout(&cx, Duration::from_secs(1));
     fn assert_send<T: Send>(_: &T) {}
     assert_send(&stream);
-    assert_eq!(Pin::new(&mut stream).poll_next(&mut task), Poll::Ready(Some(Ok("borrowed"))));
+    assert_eq!(
+        Pin::new(&mut stream).poll_next(&mut task),
+        Poll::Ready(Some(Ok("borrowed")))
+    );
     assert!(driver.is_empty());
 }
 
@@ -481,23 +543,32 @@ fn native_parked_stream_wakes_on_its_timer_or_explicit_context_cancellation() {
                     };
                     let runtime = builder.with_timer_driver(timer.clone()).build().unwrap();
                     let result = runtime.block_on(async {
-                        let mut stream = Parked { rescue, polls }
-                            .timeout(&cx, Duration::from_millis(100));
+                        let mut stream =
+                            Parked { rescue, polls }.timeout(&cx, Duration::from_millis(100));
                         let mut parked_tx = Some(parked_tx);
                         let result = std::future::poll_fn(|task| {
                             let result = Pin::new(&mut stream).poll_next(task);
                             if result.is_pending() {
                                 *saved_waker.lock() = Some(task.waker().clone());
                                 if let Some(tx) = parked_tx.take() {
-                                    tx.send((timer.pending_count(), registrations(&cx))).unwrap();
+                                    tx.send((timer.pending_count(), registrations(&cx)))
+                                        .unwrap();
                                 }
                             }
                             result
-                        }).await;
+                        })
+                        .await;
                         assert!(stream.next().await.is_none(), "one terminal adapter error");
                         result
                     });
-                    done_tx.send((result, runtime.is_quiescent(), timer.pending_count(), registrations(&cx))).unwrap();
+                    done_tx
+                        .send((
+                            result,
+                            runtime.is_quiescent(),
+                            timer.pending_count(),
+                            registrations(&cx),
+                        ))
+                        .unwrap();
                 }
             });
             let parked = parked_rx.recv_timeout(Duration::from_secs(3));
@@ -523,13 +594,29 @@ fn native_parked_stream_wakes_on_its_timer_or_explicit_context_cancellation() {
                 .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
                 .expect("native stream must finish after the rescue wake");
             worker.join().unwrap();
-            assert_eq!(parked.unwrap(), (1, 1), "source actually parked with both wake sources");
-            assert!(woke_without_rescue, "native wait missed its timer/cancellation wake");
+            assert_eq!(
+                parked.unwrap(),
+                (1, 1),
+                "source actually parked with both wake sources"
+            );
+            assert!(
+                woke_without_rescue,
+                "native wait missed its timer/cancellation wake"
+            );
             if cancel {
                 assert_eq!(result, Some(Err(StreamTimeoutError::Cancelled(reason))));
-                assert_eq!(polls.load(Ordering::SeqCst), 1, "cancellation skips the source poll");
+                assert_eq!(
+                    polls.load(Ordering::SeqCst),
+                    1,
+                    "cancellation skips the source poll"
+                );
             } else {
-                assert_eq!(result, Some(Err(StreamTimeoutError::Elapsed(Elapsed::new(Time::from_millis(5100))))));
+                assert_eq!(
+                    result,
+                    Some(Err(StreamTimeoutError::Elapsed(Elapsed::new(
+                        Time::from_millis(5100)
+                    ))))
+                );
                 assert!(polls.load(Ordering::SeqCst) >= 2);
             }
             assert_eq!((timers, observers), (0, 0));
@@ -608,8 +695,15 @@ fn native_foreign_owner_unmask_wakes_without_advancing_the_item_clock() {
             .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
             .expect("masked native stream must finish after the rescue wake");
         worker.join().unwrap();
-        assert_eq!(parked.unwrap(), (1, 1), "masked cancellation keeps its observer");
-        assert!(woke_without_rescue, "unmask must wake a foreign context's wait");
+        assert_eq!(
+            parked.unwrap(),
+            (1, 1),
+            "masked cancellation keeps its observer"
+        );
+        assert!(
+            woke_without_rescue,
+            "unmask must wake a foreign context's wait"
+        );
         assert_eq!(result, Some(Err(StreamTimeoutError::Cancelled(reason))));
         assert_eq!(timer.now(), Time::from_millis(5000));
         assert!(timer.is_empty());
@@ -701,7 +795,10 @@ fn native_spawn_join_preserves_the_stream_cancellation_result_and_drains() {
             .expect("spawned stream must finish after the rescue wake");
         worker.join().unwrap();
         assert_eq!((timers, observers), (1, 1));
-        assert!(woke_without_rescue, "native cancellation must wake the parked child");
+        assert!(
+            woke_without_rescue,
+            "native cancellation must wake the parked child"
+        );
         assert!(
             matches!(
                 &joined,

@@ -10,9 +10,9 @@ use std::fmt;
 
 // For IdempotencyKey generation - use a simple approach without external deps
 mod rand_simple {
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);

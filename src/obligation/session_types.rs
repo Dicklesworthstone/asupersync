@@ -159,9 +159,9 @@
 use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::record::ObligationKind;
+use crate::sync::atomic::AtomicU64;
 use std::future::Future;
 use std::marker::PhantomData;
-use crate::sync::atomic::AtomicU64;
 
 /// br-asupersync-wue53y: process-global counter of async session
 /// transitions that consumed the linear channel via an Err arm

@@ -73,7 +73,8 @@ impl CancelSignal {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             if let Some(waker) = waker {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
                 if let Err(payload) = result
                     && first_panic.is_none()
                 {
@@ -209,7 +210,10 @@ impl<F: Future> Future for CancelAware<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-        assert!(this.future.as_ref().get_ref().is_some(), "polled after completion");
+        assert!(
+            this.future.as_ref().get_ref().is_some(),
+            "polled after completion"
+        );
         this.cancel_signal.register(this.registration, cx.waker());
         let result = this
             .future
@@ -338,8 +342,18 @@ mod tests {
         ));
         let (a, wa) = counter();
         let (b, wb) = counter();
-        assert!(first.as_mut().poll(&mut Context::from_waker(&wa)).is_pending());
-        assert!(second.as_mut().poll(&mut Context::from_waker(&wb)).is_pending());
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&wa))
+                .is_pending()
+        );
+        assert!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&wb))
+                .is_pending()
+        );
         signal.cancel();
         signal.cancel();
         // These assertions precede repolling: success cannot be supplied by
@@ -348,7 +362,9 @@ mod tests {
         assert_eq!(b.0.load(Ordering::SeqCst), 1);
         for future in [&mut first, &mut second] {
             assert!(matches!(
-                future.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
                 Poll::Ready(CancelResult::Cancelled)
             ));
         }
@@ -364,8 +380,16 @@ mod tests {
         ));
         let (old, old_waker) = counter();
         let (new, new_waker) = counter();
-        assert!(fut.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
-        assert!(fut.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+        assert!(
+            fut.as_mut()
+                .poll(&mut Context::from_waker(&old_waker))
+                .is_pending()
+        );
+        assert!(
+            fut.as_mut()
+                .poll(&mut Context::from_waker(&new_waker))
+                .is_pending()
+        );
         signal.cancel();
         assert_eq!(old.0.load(Ordering::SeqCst), 0);
         assert_eq!(new.0.load(Ordering::SeqCst), 1);
@@ -380,7 +404,11 @@ mod tests {
             CancellationMode::BestEffort,
             signal.clone(),
         ));
-        assert!(fut.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            fut.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         drop(fut);
         assert_eq!(Arc::strong_count(&count), 2);
         signal.cancel();
@@ -469,7 +497,11 @@ mod tests {
             CancellationMode::BestEffort,
             signal.clone(),
         ));
-        assert!(fut.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            fut.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         signal.cancel();
     }
 
@@ -494,8 +526,16 @@ mod tests {
             CancellationMode::Strict,
             signal.clone(),
         ));
-        assert!(bad.as_mut().poll(&mut Context::from_waker(&bad_waker)).is_pending());
-        assert!(good.as_mut().poll(&mut Context::from_waker(&good_waker)).is_pending());
+        assert!(
+            bad.as_mut()
+                .poll(&mut Context::from_waker(&bad_waker))
+                .is_pending()
+        );
+        assert!(
+            good.as_mut()
+                .poll(&mut Context::from_waker(&good_waker))
+                .is_pending()
+        );
         assert!(std::panic::catch_unwind(|| signal.cancel()).is_err());
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert!(signal.is_cancel_requested());

@@ -89,7 +89,11 @@ fn configs(
     for cert in &chain {
         roots.add(cert.clone()).unwrap();
     }
-    let client_roots = if trust_server { roots.clone() } else { rustls::RootCertStore::empty() };
+    let client_roots = if trust_server {
+        roots.clone()
+    } else {
+        rustls::RootCertStore::empty()
+    };
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&[version])
@@ -97,7 +101,10 @@ fn configs(
         .with_root_certificates(client_roots);
     let client = if mutual {
         builder
-            .with_client_auth_cert(chain.clone(), PrivateKey::from_pem(KEY_PEM).unwrap().clone_inner())
+            .with_client_auth_cert(
+                chain.clone(),
+                PrivateKey::from_pem(KEY_PEM).unwrap().clone_inner(),
+            )
             .unwrap()
     } else {
         builder.with_no_client_auth()
@@ -106,9 +113,10 @@ fn configs(
         .with_protocol_versions(&[version])
         .unwrap();
     let builder = if mutual {
-        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots), provider,
-        ).build().unwrap();
+        let verifier =
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .unwrap();
         builder.with_client_cert_verifier(verifier)
     } else {
         builder.with_no_client_auth()
@@ -130,10 +138,15 @@ fn streams(
         ..MemoryIo::default()
     };
     let client = ClientConnection::new(
-        Arc::clone(client), ServerName::try_from("localhost").unwrap(),
-    ).unwrap();
+        Arc::clone(client),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
     let server = ServerConnection::new(Arc::clone(server)).unwrap();
-    (TlsStream::new_client(client_io, client), TlsStream::new_server(server_io, server))
+    (
+        TlsStream::new_client(client_io, client),
+        TlsStream::new_server(server_io, server),
+    )
 }
 
 fn handshake(
@@ -158,7 +171,10 @@ fn handshake(
             break;
         }
     }
-    (client_result.expect("bounded client handshake"), server_result.expect("bounded server handshake"))
+    (
+        client_result.expect("bounded client handshake"),
+        server_result.expect("bounded server handshake"),
+    )
 }
 
 fn establish(client: &mut TlsStream<MemoryIo>, server: &mut TlsStream<MemoryIo>) {
@@ -169,7 +185,8 @@ fn establish(client: &mut TlsStream<MemoryIo>, server: &mut TlsStream<MemoryIo>)
 
 fn expected_binding() -> Vec<u8> {
     Certificate::from_pem(CERT_PEM).unwrap()[0]
-        .tls_server_end_point_channel_binding().unwrap()
+        .tls_server_end_point_channel_binding()
+        .unwrap()
 }
 
 fn assert_incomplete(stream: &TlsStream<MemoryIo>) {
@@ -195,13 +212,28 @@ fn tls12_and_tls13_clients_bind_the_server_leaf_without_io() {
         establish(&mut client, &mut server);
         let calls = client.io.io_calls;
         let expected = expected_binding();
-        assert_eq!(client.tls_server_end_point_channel_binding().unwrap(), expected);
-        assert_eq!(client.tls_server_end_point_channel_binding().unwrap(), expected);
-        assert_eq!(client.io.io_calls, calls, "channel binding must perform no I/O");
+        assert_eq!(
+            client.tls_server_end_point_channel_binding().unwrap(),
+            expected
+        );
+        assert_eq!(
+            client.tls_server_end_point_channel_binding().unwrap(),
+            expected
+        );
+        assert_eq!(
+            client.io.io_calls, calls,
+            "channel binding must perform no I/O"
+        );
         if client.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_2) {
-            assert!(matches!(client.tls_exporter_channel_binding(), Err(TlsError::Configuration(_))));
+            assert!(matches!(
+                client.tls_exporter_channel_binding(),
+                Err(TlsError::Configuration(_))
+            ));
         } else {
-            assert_eq!(client.tls_exporter_channel_binding().unwrap(), server.tls_exporter_channel_binding().unwrap());
+            assert_eq!(
+                client.tls_exporter_channel_binding().unwrap(),
+                server.tls_exporter_channel_binding().unwrap()
+            );
         }
     }
 }
@@ -220,7 +252,10 @@ fn server_end_point_waits_for_the_final_handshake_flush() {
     assert_incomplete(&client);
     client.io.block_flush = false;
     establish(&mut client, &mut server);
-    assert_eq!(client.tls_server_end_point_channel_binding().unwrap(), expected_binding());
+    assert_eq!(
+        client.tls_server_end_point_channel_binding().unwrap(),
+        expected_binding()
+    );
 }
 
 #[test]
@@ -228,12 +263,18 @@ fn server_role_never_binds_a_mutual_tls_client_certificate() {
     let (cc, sc) = configs(&rustls::version::TLS13, true, true);
     let (mut client, mut server) = streams(&cc, &sc);
     establish(&mut client, &mut server);
-    assert!(server.peer_leaf_certificate_der().is_some(), "mutual TLS presented a client leaf");
+    assert!(
+        server.peer_leaf_certificate_der().is_some(),
+        "mutual TLS presented a client leaf"
+    );
     assert!(matches!(
         server.tls_server_end_point_channel_binding(),
         Err(TlsError::Configuration(_))
     ));
-    assert_eq!(client.tls_server_end_point_channel_binding().unwrap(), expected_binding());
+    assert_eq!(
+        client.tls_server_end_point_channel_binding().unwrap(),
+        expected_binding()
+    );
 }
 
 #[test]
@@ -250,7 +291,10 @@ fn untrusted_server_and_failed_final_flush_expose_no_binding() {
     assert!(client.poll_handshake(&mut cx).is_pending());
     assert!(server.poll_handshake(&mut cx).is_pending());
     client.io.flush_error = Some(io::ErrorKind::BrokenPipe);
-    assert!(matches!(client.poll_handshake(&mut cx), Poll::Ready(Err(_))));
+    assert!(matches!(
+        client.poll_handshake(&mut cx),
+        Poll::Ready(Err(_))
+    ));
     assert_disconnected(&client);
 }
 
@@ -266,10 +310,16 @@ fn local_shutdown_and_peer_close_notify_revoke_stream_bindings() {
 
     let (mut client, mut server) = streams(&cc, &sc);
     establish(&mut client, &mut server);
-    assert!(matches!(Pin::new(&mut server).poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut server).poll_shutdown(&mut cx),
+        Poll::Ready(Ok(()))
+    ));
     let mut bytes = [0; 1];
     let mut buf = ReadBuf::new(&mut bytes);
-    assert!(matches!(Pin::new(&mut client).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut client).poll_read(&mut cx, &mut buf),
+        Poll::Ready(Ok(()))
+    ));
     assert!(buf.filled().is_empty());
     assert_disconnected(&client);
 }
@@ -286,15 +336,26 @@ fn resumed_tls13_keeps_certificate_binding_but_rejects_early_access() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut bytes = [0; 1];
     let mut buf = ReadBuf::new(&mut bytes);
-    assert!(Pin::new(&mut first).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut first)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     let (mut resumed, mut peer) = streams(&cc, &sc);
-    let TlsConnection::Client(conn) = &mut resumed.conn else { unreachable!() };
+    let TlsConnection::Client(conn) = &mut resumed.conn else {
+        unreachable!()
+    };
     assert!(conn.early_data().is_some(), "session ticket enabled 0-RTT");
     assert_incomplete(&resumed);
     establish(&mut resumed, &mut peer);
-    let TlsConnection::Client(conn) = &resumed.conn else { unreachable!() };
+    let TlsConnection::Client(conn) = &resumed.conn else {
+        unreachable!()
+    };
     assert_eq!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
-    assert_eq!(resumed.tls_server_end_point_channel_binding().unwrap(), binding);
+    assert_eq!(
+        resumed.tls_server_end_point_channel_binding().unwrap(),
+        binding
+    );
     assert_ne!(resumed.tls_exporter_channel_binding().unwrap(), exporter);
 }
 

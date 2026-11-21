@@ -218,12 +218,15 @@ impl WorkerReadiness {
             }
             match self.try_ready() {
                 Err(error) => Poll::Ready(Err(error)),
-                Ok(Some(ready)) if after.is_none_or(|previous| ready.generation.number > previous) => {
+                Ok(Some(ready))
+                    if after.is_none_or(|previous| ready.generation.number > previous) =>
+                {
                     Poll::Ready(Ok(ready))
                 }
                 Ok(_) => Poll::Pending,
             }
-        }).await
+        })
+        .await
     }
 }
 
@@ -235,15 +238,21 @@ impl FactoryOwner {
         let region = cx.region_id();
         let valid = {
             let mut state = self.0.state.lock();
-            let valid = state.factory_alive && !state.active
+            let valid = state.factory_alive
+                && !state.active
                 && state.snapshot.phase != WorkerReadinessPhase::InvalidGeneration
                 && generation.number != 0
-                && state.snapshot.generation.is_none_or(|old| generation.number > old.number)
-                && generation.task == task && generation.region == region;
+                && state
+                    .snapshot
+                    .generation
+                    .is_none_or(|old| generation.number > old.number)
+                && generation.task == task
+                && generation.region == region;
             if valid {
                 state.active = true;
                 state.snapshot = WorkerReadinessState {
-                    generation: Some(generation), phase: WorkerReadinessPhase::Initializing,
+                    generation: Some(generation),
+                    phase: WorkerReadinessPhase::Initializing,
                 };
             } else {
                 state.snapshot.phase = WorkerReadinessPhase::InvalidGeneration;
@@ -251,7 +260,10 @@ impl FactoryOwner {
             valid
         };
         notify(&self.0);
-        valid.then(|| GenerationGuard { shared: Arc::clone(&self.0), generation })
+        valid.then(|| GenerationGuard {
+            shared: Arc::clone(&self.0),
+            generation,
+        })
     }
 }
 
@@ -312,7 +324,9 @@ impl GenerationGuard {
                 true
             }
         };
-        if changed { notify(&self.shared); }
+        if changed {
+            notify(&self.shared);
+        }
     }
 }
 
@@ -342,7 +356,9 @@ struct Cancellation<'a> {
 
 impl Drop for Cancellation<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
@@ -353,9 +369,12 @@ async fn observe<F: Future + Send>(cx: &Cx, guard: &GenerationGuard, future: F) 
         cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
         // Observation must not acknowledge cancellation on behalf of a blind
         // user future or change the managed wrapper's terminal classification.
-        if cx.is_cancel_requested() { guard.phase(WorkerReadinessPhase::Stopping); }
+        if cx.is_cancel_requested() {
+            guard.phase(WorkerReadinessPhase::Stopping);
+        }
         future.as_mut().poll(task)
-    }).await
+    })
+    .await
 }
 
 /// Build a retained initialization/run factory and its independent readiness view.
@@ -392,12 +411,18 @@ where
 {
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
-            snapshot: WorkerReadinessState { generation: None, phase: WorkerReadinessPhase::NotStarted },
-            factory_alive: true, active: false,
+            snapshot: WorkerReadinessState {
+                generation: None,
+                phase: WorkerReadinessPhase::NotStarted,
+            },
+            factory_alive: true,
+            active: false,
         }),
         changed: Notify::new(),
     });
-    let readiness = WorkerReadiness { shared: Arc::clone(&shared) };
+    let readiness = WorkerReadiness {
+        shared: Arc::clone(&shared),
+    };
     let owner = FactoryOwner(shared);
     let initialize = Arc::new(initialize);
     let run = Arc::new(run);
@@ -407,10 +432,14 @@ where
         let run = Arc::clone(&run);
         async move {
             let Some(guard) = guard else {
-                return Outcome::Panicked(PanicPayload::new("invalid initialized worker generation"));
+                return Outcome::Panicked(PanicPayload::new(
+                    "invalid initialized worker generation",
+                ));
             };
             if cx.checkpoint().is_err() {
-                return Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::shutdown));
+                return Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(CancelReason::shutdown),
+                );
             }
             let state = match observe(&cx, &guard, initialize(cx.clone(), generation)).await {
                 Outcome::Ok(state) => state,
@@ -427,7 +456,13 @@ where
             observe(&cx, &guard, running).await
         }
     };
-    (ReadinessFactory { inner: factory, readiness: readiness.clone() }, readiness)
+    (
+        ReadinessFactory {
+            inner: factory,
+            readiness: readiness.clone(),
+        },
+        readiness,
+    )
 }
 
 impl<E: Send + 'static> DynamicSupervisor<E> {

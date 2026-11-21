@@ -491,7 +491,11 @@ fn native_permits_are_live_obligations_until_sent_or_dropped() {
             let record = live(&diagnostics, holder, ObligationKind::SendPermit)
                 .pop()
                 .expect("live SendPermit record");
-            assert_eq!(record.region_id, cx.region_id(), "{flavor}: held in the holder's region");
+            assert_eq!(
+                record.region_id,
+                cx.region_id(),
+                "{flavor}: held in the holder's region"
+            );
             permit.try_send(7).expect("receiver is live");
             assert_eq!(rx.recv(&cx).await.expect("receive"), 7);
             assert!(

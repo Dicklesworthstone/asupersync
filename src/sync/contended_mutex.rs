@@ -68,9 +68,9 @@ pub struct LockMetricsSnapshot {
 #[cfg(feature = "lock-metrics")]
 mod inner {
     use super::LockMetricsSnapshot;
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use crate::sync::lock_ordering::{self, LockModule, LockRank};
     use std::collections::VecDeque;
-    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
     use std::time::Instant;
 

@@ -2101,7 +2101,8 @@ mod reactor_handoff {
             let result = future.as_mut().poll(cx);
             if let Some(go) = go.take() {
                 assert!(result.is_pending(), "the receiving runtime must park first");
-                go.send(()).expect("release peer after reactor registration");
+                go.send(())
+                    .expect("release peer after reactor registration");
             }
             result
         })
@@ -2133,7 +2134,9 @@ mod reactor_handoff {
 
     async fn tcp_exchange(mut stream: TcpStream, go: mpsc::Sender<()>) {
         let mut bytes = [0_u8; 4];
-        after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+        after_pending(stream.read_exact(&mut bytes), go)
+            .await
+            .unwrap();
         assert_eq!(&bytes, b"pong");
         stream.write_all(b"ack!").await.unwrap();
     }
@@ -2217,7 +2220,9 @@ mod reactor_handoff {
                     } else {
                         second.block_on(async move {
                             let mut bytes = [0_u8; 4];
-                            after_pending(read.read_exact(&mut bytes), go).await.unwrap();
+                            after_pending(read.read_exact(&mut bytes), go)
+                                .await
+                                .unwrap();
                             assert_eq!(&bytes, b"pong");
                             write.write_all(b"ack!").await.unwrap();
                         });
@@ -2313,7 +2318,11 @@ mod reactor_handoff {
         peer.set_write_timeout(Some(LIMIT)).unwrap();
         let (send, receive) = mpsc::channel();
         let peer = thread::spawn(move || peer_exchange(peer, receive));
-        (asupersync::net::unix::UnixStream::from_std(stream).unwrap(), send, peer)
+        (
+            asupersync::net::unix::UnixStream::from_std(stream).unwrap(),
+            send,
+            peer,
+        )
     }
 
     #[cfg(unix)]
@@ -2369,7 +2378,9 @@ mod reactor_handoff {
                                 .await
                                 .unwrap();
                         } else {
-                            after_pending(read.read_exact(&mut bytes), go).await.unwrap();
+                            after_pending(read.read_exact(&mut bytes), go)
+                                .await
+                                .unwrap();
                             assert_eq!(&bytes, b"pong");
                             write.write_all(b"ack!").await.unwrap();
                         }
@@ -2405,7 +2416,9 @@ mod reactor_handoff {
                     after_pending(fd.readable(), go).await.unwrap();
                     while read < bytes.len() {
                         let n = fd
-                            .async_io(Interest::READABLE, |mut stream| stream.read(&mut bytes[read..]))
+                            .async_io(Interest::READABLE, |mut stream| {
+                                stream.read(&mut bytes[read..])
+                            })
                             .await
                             .unwrap();
                         assert_ne!(n, 0, "peer must deliver the complete payload");
@@ -2415,7 +2428,9 @@ mod reactor_handoff {
                     let mut written = 0;
                     while written < 4 {
                         let n = fd
-                            .async_io(Interest::WRITABLE, |mut stream| stream.write(&b"ack!"[written..]))
+                            .async_io(Interest::WRITABLE, |mut stream| {
+                                stream.write(&b"ack!"[written..])
+                            })
                             .await
                             .unwrap();
                         assert_ne!(n, 0, "acknowledgement must make progress");

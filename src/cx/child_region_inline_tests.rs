@@ -1,597 +1,521 @@
-    use super::*;
-    use crate::cx::Cx;
-    use crate::runtime::RuntimeBuilder;
-    use crate::types::Budget;
+use super::*;
+use crate::cx::Cx;
+use crate::runtime::RuntimeBuilder;
+use crate::types::Budget;
 
-    /// A budget whose deadline is `secs` seconds from now on the runtime
-    /// clock. That clock's zero is the first time the process reads it, so an
-    /// absolute deadline such as `with_deadline_at_secs(10)` has usually
-    /// passed by the time a test in a full lib run gets here, and budget
-    /// deadlines are enforced by a timer (br-asupersync-pev2xi): work spawned
-    /// under a passed deadline is cancelled (br-asupersync-r7vhmw).
-    fn deadline_budget_in(secs: u64) -> Budget {
-        let deadline = crate::time::wall_now() + std::time::Duration::from_secs(secs);
-        Budget::with_deadline_at_ns(deadline.as_nanos())
+/// A budget whose deadline is `secs` seconds from now on the runtime
+/// clock. That clock's zero is the first time the process reads it, so an
+/// absolute deadline such as `with_deadline_at_secs(10)` has usually
+/// passed by the time a test in a full lib run gets here, and budget
+/// deadlines are enforced by a timer (br-asupersync-pev2xi): work spawned
+/// under a passed deadline is cancelled (br-asupersync-r7vhmw).
+fn deadline_budget_in(secs: u64) -> Budget {
+    let deadline = crate::time::wall_now() + std::time::Duration::from_secs(secs);
+    Budget::with_deadline_at_ns(deadline.as_nanos())
+}
+
+#[test]
+fn inherit_spec_has_no_budget_override() {
+    let spec = ChildRegionSpec::inherit();
+    assert!(spec.budget.is_none());
+    assert!(spec.capability_budget.is_none());
+    assert_eq!(spec.requirements, CapabilityBudgetRequirements::NONE);
+}
+
+#[test]
+fn display_names_each_failure_mode() {
+    assert!(
+        ChildRegionError::NoRuntimeGateway
+            .to_string()
+            .contains("no runtime gateway")
+    );
+    assert!(
+        ChildRegionError::RuntimeUnavailable
+            .to_string()
+            .contains("no longer")
+    );
+}
+
+#[test]
+fn detached_context_fails_closed_without_runtime_gateway() {
+    let cx = Cx::detached_cancel_context();
+    let mut opening = cx.open_child_region(ChildRegionSpec::inherit());
+    let waker = std::task::Waker::noop();
+    let mut task_context = std::task::Context::from_waker(waker);
+    match std::pin::Pin::new(&mut opening).poll(&mut task_context) {
+        std::task::Poll::Ready(Err(ChildRegionError::NoRuntimeGateway)) => {}
+        other => panic!("expected NoRuntimeGateway, got {other:?}"),
     }
+}
 
-    #[test]
-    fn inherit_spec_has_no_budget_override() {
-        let spec = ChildRegionSpec::inherit();
-        assert!(spec.budget.is_none());
-        assert!(spec.capability_budget.is_none());
-        assert_eq!(spec.requirements, CapabilityBudgetRequirements::NONE);
-    }
-
-    #[test]
-    fn display_names_each_failure_mode() {
+/// A restricted opener's child keeps the opener's compile-time capability
+/// set (asupersync-cwxavr). The type annotations are the assertion: before
+/// the fix, the child's context was always `Cx<cap::All>`.
+#[test]
+fn a_restricted_opener_keeps_its_capability_set_in_the_child() {
+    use crate::cx::cap;
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    let restricted: Cx<cap::None> = parent.restrict();
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let opening: ChildRegionOpening<cap::None> =
+            restricted.open_child_region(ChildRegionSpec::inherit());
+        let child: ChildRegion<cap::None> = opening
+            .await
+            .expect("a restricted context still mints a child region");
+        let child_cx: &Cx<cap::None> = child.cx();
+        assert_eq!(child_cx.region_id(), child.region_id());
         assert!(
-            ChildRegionError::NoRuntimeGateway
-                .to_string()
-                .contains("no runtime gateway")
+            restricted.runtime_mask.contains(child_cx.runtime_mask),
+            "the child's runtime mask never exceeds the opener's"
         );
-        assert!(
-            ChildRegionError::RuntimeUnavailable
-                .to_string()
-                .contains("no longer")
-        );
-    }
+        child.close().await.expect("child region closes");
+    });
+}
 
-    #[test]
-    fn detached_context_fails_closed_without_runtime_gateway() {
-        let cx = Cx::detached_cancel_context();
-        let mut opening = cx.open_child_region(ChildRegionSpec::inherit());
-        let waker = std::task::Waker::noop();
-        let mut task_context = std::task::Context::from_waker(waker);
-        match std::pin::Pin::new(&mut opening).poll(&mut task_context) {
-            std::task::Poll::Ready(Err(ChildRegionError::NoRuntimeGateway)) => {}
-            other => panic!("expected NoRuntimeGateway, got {other:?}"),
+/// Yields until the scheduler has published the slot's mint outcome.
+async fn await_publication(slot: &AdmittedRegionSlot) {
+    for _ in 0..10_000 {
+        if !slot.is_pending() {
+            return;
         }
+        crate::runtime::yield_now().await;
     }
+    panic!("the scheduler never minted the region");
+}
 
-    /// A restricted opener's child keeps the opener's compile-time capability
-    /// set (asupersync-cwxavr). The type annotations are the assertion: before
-    /// the fix, the child's context was always `Cx<cap::All>`.
-    #[test]
-    fn a_restricted_opener_keeps_its_capability_set_in_the_child() {
-        use crate::cx::cap;
+/// An opening dropped before it resolves (a timeout, a lost race, an
+/// aborted task) must not leave the region the scheduler mints for it
+/// open with no owner until some ancestor closes. That holds whether the
+/// opening is dropped before the region is minted or after it was
+/// published but never taken: either way the slot ends up empty because
+/// the region was handed to its close backstop.
+#[test]
+fn a_dropped_opening_never_leaves_its_minted_region_to_nobody() {
+    for published_before_drop in [false, true] {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
         let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        let restricted: Cx<cap::None> = parent.restrict();
         runtime.block_on_with_cx(parent.clone(), async move {
-            let opening: ChildRegionOpening<cap::None> =
-                restricted.open_child_region(ChildRegionSpec::inherit());
-            let child: ChildRegion<cap::None> = opening
-                .await
-                .expect("a restricted context still mints a child region");
-            let child_cx: &Cx<cap::None> = child.cx();
-            assert_eq!(child_cx.region_id(), child.region_id());
-            assert!(
-                restricted.runtime_mask.contains(child_cx.runtime_mask),
-                "the child's runtime mask never exceeds the opener's"
-            );
-            child.close().await.expect("child region closes");
-        });
-    }
-
-    /// Yields until the scheduler has published the slot's mint outcome.
-    async fn await_publication(slot: &AdmittedRegionSlot) {
-        for _ in 0..10_000 {
-            if !slot.is_pending() {
-                return;
-            }
-            crate::runtime::yield_now().await;
-        }
-        panic!("the scheduler never minted the region");
-    }
-
-    /// An opening dropped before it resolves (a timeout, a lost race, an
-    /// aborted task) must not leave the region the scheduler mints for it
-    /// open with no owner until some ancestor closes. That holds whether the
-    /// opening is dropped before the region is minted or after it was
-    /// published but never taken: either way the slot ends up empty because
-    /// the region was handed to its close backstop.
-    #[test]
-    fn a_dropped_opening_never_leaves_its_minted_region_to_nobody() {
-        for published_before_drop in [false, true] {
-            let runtime = RuntimeBuilder::current_thread()
-                .build()
-                .expect("current-thread runtime builds");
-            let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-            runtime.block_on_with_cx(parent.clone(), async move {
-                let owner = parent
-                    .open_child_region(ChildRegionSpec::inherit())
-                    .await
-                    .expect("the owner region opens");
-                // Queue the Create command, keeping a view of its slot.
-                let opening = owner.cx().open_child_region(ChildRegionSpec::inherit());
-                let slot = Arc::clone(&opening.pending.as_ref().expect("a queued opening").0);
-                if published_before_drop {
-                    // Minted and published, but never polled or taken.
-                    await_publication(&slot).await;
-                }
-                drop(opening);
-                await_publication(&slot).await;
-                assert!(
-                    slot.take().is_none(),
-                    "published_before_drop={published_before_drop}: \
-                     the minted region was left in the slot for nobody"
-                );
-                owner.close().await.expect("the owner region closes");
-            });
-        }
-    }
-
-    #[test]
-    fn open_child_region_mints_distinct_region_and_spawns_body() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        let parent_region = parent.region_id();
-        runtime.block_on_with_cx(parent.clone(), async move {
-            let child = parent
+            let owner = parent
                 .open_child_region(ChildRegionSpec::inherit())
                 .await
-                .expect("ambient Cx mints an owned child region");
-            assert_ne!(
-                child.region_id(),
-                parent_region,
-                "child must be minted as a distinct region"
+                .expect("the owner region opens");
+            // Queue the Create command, keeping a view of its slot.
+            let opening = owner.cx().open_child_region(ChildRegionSpec::inherit());
+            let slot = Arc::clone(&opening.pending.as_ref().expect("a queued opening").0);
+            if published_before_drop {
+                // Minted and published, but never polled or taken.
+                await_publication(&slot).await;
+            }
+            drop(opening);
+            await_publication(&slot).await;
+            assert!(
+                slot.take().is_none(),
+                "published_before_drop={published_before_drop}: \
+                     the minted region was left in the slot for nobody"
             );
-            assert_eq!(child.cx().region_id(), child.region_id());
-
-            let mut body = child
-                .cx()
-                .spawn(|_task_cx| async move { 7_u32 })
-                .expect("child principal context spawns through the gateway");
-            let value = body.join(child.cx()).await.expect("body joins");
-            assert_eq!(value, 7);
-
-            child.close().await.expect("close reaches quiescence");
+            owner.close().await.expect("the owner region closes");
         });
     }
+}
 
-    #[test]
-    fn child_region_preserves_caller_budget_attenuation_on_native_workers() {
-        for workers in [1, 4] {
-            let runtime = if workers == 1 {
-                RuntimeBuilder::current_thread().build().unwrap()
-            } else {
-                RuntimeBuilder::new()
-                    .worker_threads(workers)
-                    .build()
-                    .unwrap()
-            };
-            let parent_budget = deadline_budget_in(600)
-                .with_poll_quota(4096)
-                .with_cost_quota(512);
-            // Request contexts share the runtime root region. Their private
-            // limits are deliberately stricter than that region's record.
-            let parent = runtime.request_cx_with_budget(parent_budget);
-            let envelope = CapabilityBudget::new()
-                .with_io_bytes(128)
-                .with_memory_bytes(256)
-                .with_cpu_units(64)
-                .with_artifact_bytes(32)
-                .with_cleanup_budget(Budget::new().with_poll_quota(128));
-            parent
-                .apply_child_capability_budget(envelope, CapabilityBudgetRequirements::NONE)
-                .unwrap();
-            runtime.block_on_with_cx(parent.clone(), async move {
-                let mut relaxed = ChildRegionSpec::inherit().with_budget(Budget::INFINITE);
-                relaxed.capability_budget = Some(
-                    CapabilityBudget::new()
-                        .with_io_bytes(4096)
-                        .with_memory_bytes(8192)
-                        .with_cpu_units(4096)
-                        .with_artifact_bytes(4096)
-                        .with_cleanup_budget(Budget::INFINITE),
-                );
-                for spec in [ChildRegionSpec::inherit(), relaxed] {
-                    // Since 7b7e852f9 the driver behind block_on_with_cx charges
-                    // `parent` one poll-quota unit per root poll, and a child
-                    // inherits the caller's remaining budget. Sample that live
-                    // budget in the same poll that opens the child.
-                    let caller_budget = parent.budget();
-                    assert!(caller_budget.poll_quota < parent_budget.poll_quota);
-                    assert_eq!(
-                        caller_budget,
-                        parent_budget.with_poll_quota(caller_budget.poll_quota)
-                    );
-                    let child = parent.open_child_region(spec).await.unwrap();
-                    assert_eq!(child.cx().budget(), caller_budget);
-                    assert_eq!(child.cx().capability_budget(), envelope);
-                    let mut body = child
-                        .cx()
-                        .spawn(move |cx| async move {
-                            assert_eq!(cx.capability_budget(), envelope);
-                            assert_eq!(cx.budget().deadline, parent_budget.deadline);
-                            assert_eq!(cx.budget().cost_quota, parent_budget.cost_quota);
-                            assert!(cx.budget().poll_quota <= parent_budget.poll_quota);
-                            crate::runtime::yield_now().await;
-                            assert_eq!(cx.capability_budget(), envelope);
-                            let ambient = Cx::current().expect("native task context");
-                            assert_eq!(ambient.capability_budget(), envelope);
-                            7_u32
-                        })
-                        .unwrap();
-                    assert_eq!(body.join(child.cx()).await.unwrap(), 7);
-                    child.close().await.unwrap();
-                    assert_eq!(parent.capability_budget(), envelope);
-                    // Root polls (7b7e852f9) are the only spend: the child
-                    // neither replenishes the quota nor replaces another limit.
-                    let after_close = parent.budget();
-                    assert!(after_close.poll_quota <= caller_budget.poll_quota);
-                    assert_eq!(after_close, parent_budget.with_poll_quota(after_close.poll_quota));
-                }
-                let tighter_budget = deadline_budget_in(300)
-                    .with_poll_quota(2048)
-                    .with_cost_quota(256);
-                assert!(tighter_budget.deadline < parent_budget.deadline);
-                let mut tighter = ChildRegionSpec::inherit().with_budget(tighter_budget);
-                tighter.capability_budget = Some(CapabilityBudget::new().with_io_bytes(64));
-                let child = parent.open_child_region(tighter).await.unwrap();
-                assert_eq!(child.cx().budget().deadline, tighter_budget.deadline);
-                assert_eq!(child.cx().budget().poll_quota, 2048);
-                assert_eq!(child.cx().budget().cost_quota, Some(256));
-                assert_eq!(child.cx().capability_budget(), envelope.with_io_bytes(64));
-                child.close().await.unwrap();
-                assert_eq!(parent.capability_budget(), envelope);
-            });
-            assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
-        }
-    }
+#[test]
+fn open_child_region_mints_distinct_region_and_spawns_body() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    let parent_region = parent.region_id();
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let child = parent
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("ambient Cx mints an owned child region");
+        assert_ne!(
+            child.region_id(),
+            parent_region,
+            "child must be minted as a distinct region"
+        );
+        assert_eq!(child.cx().region_id(), child.region_id());
 
-    #[test]
-    fn child_region_cannot_replenish_an_exhausted_caller_envelope() {
-        let runtime = RuntimeBuilder::current_thread().build().unwrap();
-        let parent = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut body = child
+            .cx()
+            .spawn(|_task_cx| async move { 7_u32 })
+            .expect("child principal context spawns through the gateway");
+        let value = body.join(child.cx()).await.expect("body joins");
+        assert_eq!(value, 7);
+
+        child.close().await.expect("close reaches quiescence");
+    });
+}
+
+#[test]
+fn child_region_preserves_caller_budget_attenuation_on_native_workers() {
+    for workers in [1, 4] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        let parent_budget = deadline_budget_in(600)
+            .with_poll_quota(4096)
+            .with_cost_quota(512);
+        // Request contexts share the runtime root region. Their private
+        // limits are deliberately stricter than that region's record.
+        let parent = runtime.request_cx_with_budget(parent_budget);
+        let envelope = CapabilityBudget::new()
+            .with_io_bytes(128)
+            .with_memory_bytes(256)
+            .with_cpu_units(64)
+            .with_artifact_bytes(32)
+            .with_cleanup_budget(Budget::new().with_poll_quota(128));
         parent
-            .apply_child_capability_budget(
-                CapabilityBudget::new().with_io_bytes(0),
-                CapabilityBudgetRequirements::NONE,
-            )
+            .apply_child_capability_budget(envelope, CapabilityBudgetRequirements::NONE)
             .unwrap();
         runtime.block_on_with_cx(parent.clone(), async move {
-            let mut spec = ChildRegionSpec::inherit();
-            spec.capability_budget = Some(CapabilityBudget::new().with_io_bytes(4096));
-            spec.requirements = CapabilityBudgetRequirements::NONE.require_io_bytes();
-            assert!(matches!(
-                parent.open_child_region(spec).await,
-                Err(ChildRegionError::Create(
-                    RegionCreateError::CapabilityBudgetRefused {
-                        reason: crate::types::CapabilityBudgetRefusal::Exhausted(
-                            crate::types::CapabilityBudgetDimension::IoBytes
-                        ),
-                        ..
-                    }
-                ))
-            ));
-            // A refusal must not poison the parent or silently replenish it.
-            let child = parent
-                .open_child_region(ChildRegionSpec::inherit())
-                .await
-                .unwrap();
-            assert_eq!(child.cx().capability_budget().io_bytes, Some(0));
+            let mut relaxed = ChildRegionSpec::inherit().with_budget(Budget::INFINITE);
+            relaxed.capability_budget = Some(
+                CapabilityBudget::new()
+                    .with_io_bytes(4096)
+                    .with_memory_bytes(8192)
+                    .with_cpu_units(4096)
+                    .with_artifact_bytes(4096)
+                    .with_cleanup_budget(Budget::INFINITE),
+            );
+            for spec in [ChildRegionSpec::inherit(), relaxed] {
+                // Since 7b7e852f9 the driver behind block_on_with_cx charges
+                // `parent` one poll-quota unit per root poll, and a child
+                // inherits the caller's remaining budget. Sample that live
+                // budget in the same poll that opens the child.
+                let caller_budget = parent.budget();
+                assert!(caller_budget.poll_quota < parent_budget.poll_quota);
+                assert_eq!(
+                    caller_budget,
+                    parent_budget.with_poll_quota(caller_budget.poll_quota)
+                );
+                let child = parent.open_child_region(spec).await.unwrap();
+                assert_eq!(child.cx().budget(), caller_budget);
+                assert_eq!(child.cx().capability_budget(), envelope);
+                let mut body = child
+                    .cx()
+                    .spawn(move |cx| async move {
+                        assert_eq!(cx.capability_budget(), envelope);
+                        assert_eq!(cx.budget().deadline, parent_budget.deadline);
+                        assert_eq!(cx.budget().cost_quota, parent_budget.cost_quota);
+                        assert!(cx.budget().poll_quota <= parent_budget.poll_quota);
+                        crate::runtime::yield_now().await;
+                        assert_eq!(cx.capability_budget(), envelope);
+                        let ambient = Cx::current().expect("native task context");
+                        assert_eq!(ambient.capability_budget(), envelope);
+                        7_u32
+                    })
+                    .unwrap();
+                assert_eq!(body.join(child.cx()).await.unwrap(), 7);
+                child.close().await.unwrap();
+                assert_eq!(parent.capability_budget(), envelope);
+                // Root polls (7b7e852f9) are the only spend: the child
+                // neither replenishes the quota nor replaces another limit.
+                let after_close = parent.budget();
+                assert!(after_close.poll_quota <= caller_budget.poll_quota);
+                assert_eq!(
+                    after_close,
+                    parent_budget.with_poll_quota(after_close.poll_quota)
+                );
+            }
+            let tighter_budget = deadline_budget_in(300)
+                .with_poll_quota(2048)
+                .with_cost_quota(256);
+            assert!(tighter_budget.deadline < parent_budget.deadline);
+            let mut tighter = ChildRegionSpec::inherit().with_budget(tighter_budget);
+            tighter.capability_budget = Some(CapabilityBudget::new().with_io_bytes(64));
+            let child = parent.open_child_region(tighter).await.unwrap();
+            assert_eq!(child.cx().budget().deadline, tighter_budget.deadline);
+            assert_eq!(child.cx().budget().poll_quota, 2048);
+            assert_eq!(child.cx().budget().cost_quota, Some(256));
+            assert_eq!(child.cx().capability_budget(), envelope.with_io_bytes(64));
             child.close().await.unwrap();
-            assert_eq!(parent.capability_budget().io_bytes, Some(0));
+            assert_eq!(parent.capability_budget(), envelope);
         });
         assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
     }
+}
 
-    #[test]
-    fn child_region_work_runs_under_the_planned_capability_budget() {
-        // asupersync-mkybj0: the region record carried the planned envelope
-        // but its principal (and so every task spawned through it) did not.
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        runtime.block_on_with_cx(parent.clone(), async move {
-            let mut planned = CapabilityBudget::UNSPECIFIED;
-            planned.io_bytes = Some(128);
-            planned.memory_bytes = Some(256);
-            let mut spec = ChildRegionSpec::inherit();
-            spec.capability_budget = Some(planned);
-            let child = parent
-                .open_child_region(spec)
-                .await
-                .expect("owned child region mints");
-            assert_eq!(child.cx().capability_budget(), planned);
+#[test]
+fn child_region_cannot_replenish_an_exhausted_caller_envelope() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let parent = runtime.request_cx_with_budget(Budget::INFINITE);
+    parent
+        .apply_child_capability_budget(
+            CapabilityBudget::new().with_io_bytes(0),
+            CapabilityBudgetRequirements::NONE,
+        )
+        .unwrap();
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let mut spec = ChildRegionSpec::inherit();
+        spec.capability_budget = Some(CapabilityBudget::new().with_io_bytes(4096));
+        spec.requirements = CapabilityBudgetRequirements::NONE.require_io_bytes();
+        assert!(matches!(
+            parent.open_child_region(spec).await,
+            Err(ChildRegionError::Create(
+                RegionCreateError::CapabilityBudgetRefused {
+                    reason: crate::types::CapabilityBudgetRefusal::Exhausted(
+                        crate::types::CapabilityBudgetDimension::IoBytes
+                    ),
+                    ..
+                }
+            ))
+        ));
+        // A refusal must not poison the parent or silently replenish it.
+        let child = parent
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
+        assert_eq!(child.cx().capability_budget().io_bytes, Some(0));
+        child.close().await.unwrap();
+        assert_eq!(parent.capability_budget().io_bytes, Some(0));
+    });
+    assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+}
 
-            let mut body = child
-                .cx()
-                .spawn(|task_cx| async move { task_cx.capability_budget() })
-                .expect("child principal context spawns through the gateway");
-            let seen = body.join(child.cx()).await.expect("body joins");
-            assert_eq!(seen, planned, "spawned work must run under the envelope");
+#[test]
+fn child_region_work_runs_under_the_planned_capability_budget() {
+    // asupersync-mkybj0: the region record carried the planned envelope
+    // but its principal (and so every task spawned through it) did not.
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let mut planned = CapabilityBudget::UNSPECIFIED;
+        planned.io_bytes = Some(128);
+        planned.memory_bytes = Some(256);
+        let mut spec = ChildRegionSpec::inherit();
+        spec.capability_budget = Some(planned);
+        let child = parent
+            .open_child_region(spec)
+            .await
+            .expect("owned child region mints");
+        assert_eq!(child.cx().capability_budget(), planned);
 
-            // A nested request can only tighten: a looser ask stays clamped.
-            let mut looser = CapabilityBudget::UNSPECIFIED;
-            looser.io_bytes = Some(512);
-            looser.memory_bytes = Some(64);
-            let mut nested_spec = ChildRegionSpec::inherit();
-            nested_spec.capability_budget = Some(looser);
-            let nested = child
-                .cx()
-                .open_child_region(nested_spec)
-                .await
-                .expect("nested child region mints");
-            let mut nested_body = nested
-                .cx()
-                .spawn(|task_cx| async move { task_cx.capability_budget() })
-                .expect("nested principal spawns");
-            let nested_seen = nested_body
-                .join(nested.cx())
-                .await
-                .expect("nested body joins");
-            assert_eq!(nested_seen.io_bytes, Some(128));
-            assert_eq!(nested_seen.memory_bytes, Some(64));
+        let mut body = child
+            .cx()
+            .spawn(|task_cx| async move { task_cx.capability_budget() })
+            .expect("child principal context spawns through the gateway");
+        let seen = body.join(child.cx()).await.expect("body joins");
+        assert_eq!(seen, planned, "spawned work must run under the envelope");
 
-            nested.close().await.expect("nested close reaches quiescence");
-            child.close().await.expect("close reaches quiescence");
-        });
-    }
+        // A nested request can only tighten: a looser ask stays clamped.
+        let mut looser = CapabilityBudget::UNSPECIFIED;
+        looser.io_bytes = Some(512);
+        looser.memory_bytes = Some(64);
+        let mut nested_spec = ChildRegionSpec::inherit();
+        nested_spec.capability_budget = Some(looser);
+        let nested = child
+            .cx()
+            .open_child_region(nested_spec)
+            .await
+            .expect("nested child region mints");
+        let mut nested_body = nested
+            .cx()
+            .spawn(|task_cx| async move { task_cx.capability_budget() })
+            .expect("nested principal spawns");
+        let nested_seen = nested_body
+            .join(nested.cx())
+            .await
+            .expect("nested body joins");
+        assert_eq!(nested_seen.io_bytes, Some(128));
+        assert_eq!(nested_seen.memory_bytes, Some(64));
 
-    #[test]
-    fn close_resolves_only_at_true_quiescence_draining_an_oblivious_body() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        runtime.block_on_with_cx(parent.clone(), async move {
-            let child = parent
-                .open_child_region(ChildRegionSpec::inherit())
-                .await
-                .expect("owned child region mints");
-            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let body_done = std::sync::Arc::clone(&done);
-            // Deliberately cancellation-oblivious: no checkpoints. The close
-            // protocol MAY cancel this work; what this test pins is that
-            // close() cannot RESOLVE until the region truly reaches Closed —
-            // an in-flight body is drained, never silently dropped, and the
-            // waiter observes completion of whatever the body actually ran.
-            let body = child
-                .cx()
-                .spawn(move |_task_cx| async move {
-                    for _ in 0..64 {
-                        crate::runtime::yield_now().await;
-                    }
-                    body_done.store(true, std::sync::atomic::Ordering::Release);
-                })
-                .expect("body spawns into the child");
+        nested
+            .close()
+            .await
+            .expect("nested close reaches quiescence");
+        child.close().await.expect("close reaches quiescence");
+    });
+}
 
-            child.close().await.expect("quiescent close resolves");
-            assert!(
-                done.load(std::sync::atomic::Ordering::Acquire),
-                "close resolved before the drained body finished its stores"
-            );
-            let _ = body;
-        });
-    }
+#[test]
+fn close_resolves_only_at_true_quiescence_draining_an_oblivious_body() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let child = parent
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("owned child region mints");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let body_done = std::sync::Arc::clone(&done);
+        // Deliberately cancellation-oblivious: no checkpoints. The close
+        // protocol MAY cancel this work; what this test pins is that
+        // close() cannot RESOLVE until the region truly reaches Closed —
+        // an in-flight body is drained, never silently dropped, and the
+        // waiter observes completion of whatever the body actually ran.
+        let body = child
+            .cx()
+            .spawn(move |_task_cx| async move {
+                for _ in 0..64 {
+                    crate::runtime::yield_now().await;
+                }
+                body_done.store(true, std::sync::atomic::Ordering::Release);
+            })
+            .expect("body spawns into the child");
 
-    #[test]
-    fn early_close_cancels_checkpoint_aware_body_and_still_quiesces() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        runtime.block_on_with_cx(parent.clone(), async move {
-            let child = parent
-                .open_child_region(ChildRegionSpec::inherit())
-                .await
-                .expect("owned child region mints");
-            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            // The handle stays bound (underscore-prefixed) so the body task
-            // is not dropped mid-test; quiescence, not the handle, ends it.
-            let _body = child
-                .cx()
-                .spawn(move |task_cx| async move {
-                    loop {
-                        task_cx.checkpoint()?;
-                        crate::runtime::yield_now().await;
-                    }
-                    #[allow(unreachable_code)]
-                    Ok::<(), crate::error::Error>(())
-                })
-                .expect("aware body spawns");
-
-            // Close while the body is still looping: the documented contract
-            // is that remaining children are CANCELLED, so the aware body
-            // must abort without ever setting done — and the close must then
-            // still reach true quiescence (which implies every task, this
-            // body included, reached a terminal state before close resolved).
-            child.close().await.expect("close reaches quiescence");
-            assert!(
-                !done.load(std::sync::atomic::Ordering::Acquire),
-                "an aborted checkpoint-aware body must not run to completion"
-            );
-        });
-    }
-
-    #[test]
-    fn independent_cancel_stops_child_body_and_parent_keeps_working() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime builds");
-        let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
-        runtime.block_on_with_cx(parent.clone(), async move {
-            let child = parent
-                .open_child_region(ChildRegionSpec::inherit())
-                .await
-                .expect("owned child region mints");
-            let mut body = child
-                .cx()
-                .spawn(|task_cx| async move {
-                    loop {
-                        task_cx.checkpoint()?;
-                        crate::runtime::yield_now().await;
-                    }
-                    #[allow(unreachable_code)]
-                    Ok::<(), crate::error::Error>(())
-                })
-                .expect("cancellable body spawns");
-            child
-                .cancel(CancelReason::user("independent cancel"))
-                .expect("cancel enqueues while the runtime is live");
-            assert!(
-                body.join(child.cx()).await.is_err(),
-                "the cancelled child body must not complete successfully"
-            );
-
-            // The parent context remains fully operational afterwards.
-            let mut sibling = parent
-                .spawn(|_task_cx| async move { 11_u16 })
-                .expect("parent still spawns after child cancel");
-            assert_eq!(
-                sibling.join(&parent).await.expect("sibling joins"),
-                11,
-                "independent child cancellation must not disturb the parent"
-            );
-
-            child
-                .close()
-                .await
-                .expect("post-cancel close still reaches quiescence");
-        });
-    }
-
-    #[test]
-    fn lab_runtime_drains_region_commands_deterministically() {
-        let _report = crate::lab::run_async_under_lab(0x5EED_u64, |root_cx: Cx| async move {
-            let child = root_cx
-                .open_child_region(ChildRegionSpec::inherit())
-                .await
-                .expect("lab runtime drains the mint command");
-            let mut body = child
-                .cx()
-                .spawn(|_task_cx| async move { 3_u8 })
-                .expect("child spawn works under lab admission");
-            assert_eq!(body.join(child.cx()).await.expect("body joins"), 3);
-            child.close().await.expect("lab quiescence reached");
-        });
-    }
-
-    /// Parks until released and ignores cancellation: a task that never
-    /// reaches a checkpoint or a cancel-aware await.
-    struct Released(
-        Arc<(
-            std::sync::atomic::AtomicBool,
-            Mutex<Option<std::task::Waker>>,
-        )>,
-    );
-
-    impl Future for Released {
-        type Output = ();
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            let (released, waker) = &*self.0;
-            *waker.lock() = Some(cx.waker().clone());
-            if released.load(std::sync::atomic::Ordering::SeqCst) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        }
-    }
-
-    #[test]
-    fn close_within_times_out_on_lab_time_and_names_the_straggler() {
-        use crate::lab::{LabConfig, LabRuntime};
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::time::Duration;
-
-        let bound = Duration::from_millis(50);
-        let mut observed = Vec::new();
-        for seed in [0x34_C400_u64, 0x34_C401, 0x34_C402] {
-            let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(100_000));
-            let root = lab.state.create_root_region(Budget::INFINITE);
-            let result = Arc::new(Mutex::new(None));
-            let result_slot = Arc::clone(&result);
-            let (owner, _join) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::current().expect("lab task cx");
-                    let child = cx
-                        .open_child_region(ChildRegionSpec::inherit())
-                        .await
-                        .expect("child region");
-                    let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
-                    let gate_for_task = Arc::clone(&gate);
-                    let started = Arc::new(AtomicBool::new(false));
-                    let started_flag = Arc::clone(&started);
-                    let straggler_id = Arc::new(Mutex::new(None));
-                    let id_slot = Arc::clone(&straggler_id);
-                    let mut straggler = child
-                        .cx()
-                        .spawn(move |task_cx| async move {
-                            *id_slot.lock() = Some(task_cx.task_id());
-                            started_flag.store(true, Ordering::SeqCst);
-                            Released(gate_for_task).await;
-                        })
-                        .expect("spawn straggler");
-                    while !started.load(Ordering::SeqCst) {
-                        crate::runtime::yield_now().await;
-                    }
-                    let report = child.close_within(bound).await.expect("close report");
-                    let named = report.stragglers == vec![(*straggler_id.lock()).expect("ran")];
-                    // Still owned by the closing region: releasing it lets
-                    // the region close normally.
-                    gate.0.store(true, Ordering::SeqCst);
-                    if let Some(waker) = gate.1.lock().take() {
-                        waker.wake();
-                    }
-                    // It ignored the cancellation, so it joins as Cancelled.
-                    let _ = straggler.join(&cx).await;
-                    *result_slot.lock() = Some((report.outcome, report.elapsed, named));
-                })
-                .expect("create owner");
-            lab.scheduler.lock().schedule(owner, 0);
-            let run = lab.run_with_auto_advance();
-            let (outcome, elapsed, named) = result
-                .lock()
-                .take()
-                .unwrap_or_else(|| panic!("seed {seed:#x}: the owner did not finish ({run:?})"));
-            assert_eq!(outcome, ChildRegionCloseOutcome::TimedOut, "seed {seed:#x}");
-            assert!(
-                named,
-                "seed {seed:#x}: the report names exactly the straggler"
-            );
-            assert!(
-                elapsed >= bound,
-                "seed {seed:#x}: elapsed {elapsed:?} < {bound:?}"
-            );
-            assert_eq!(lab.state.live_task_count(), 0, "seed {seed:#x}");
-            observed.push(elapsed);
-        }
+        child.close().await.expect("quiescent close resolves");
         assert!(
-            observed.windows(2).all(|pair| pair[0] == pair[1]),
-            "virtual-time elapsed differs across seeds: {observed:?}"
+            done.load(std::sync::atomic::Ordering::Acquire),
+            "close resolved before the drained body finished its stores"
         );
-    }
+        let _ = body;
+    });
+}
 
-    struct CountWakes(std::sync::atomic::AtomicUsize);
+#[test]
+fn early_close_cancels_checkpoint_aware_body_and_still_quiesces() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let child = parent
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("owned child region mints");
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The handle stays bound (underscore-prefixed) so the body task
+        // is not dropped mid-test; quiescence, not the handle, ends it.
+        let _body = child
+            .cx()
+            .spawn(move |task_cx| async move {
+                loop {
+                    task_cx.checkpoint()?;
+                    crate::runtime::yield_now().await;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), crate::error::Error>(())
+            })
+            .expect("aware body spawns");
 
-    impl std::task::Wake for CountWakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Close while the body is still looping: the documented contract
+        // is that remaining children are CANCELLED, so the aware body
+        // must abort without ever setting done — and the close must then
+        // still reach true quiescence (which implies every task, this
+        // body included, reached a terminal state before close resolved).
+        child.close().await.expect("close reaches quiescence");
+        assert!(
+            !done.load(std::sync::atomic::Ordering::Acquire),
+            "an aborted checkpoint-aware body must not run to completion"
+        );
+    });
+}
+
+#[test]
+fn independent_cancel_stops_child_body_and_parent_keeps_working() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime builds");
+    let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+    runtime.block_on_with_cx(parent.clone(), async move {
+        let child = parent
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("owned child region mints");
+        let mut body = child
+            .cx()
+            .spawn(|task_cx| async move {
+                loop {
+                    task_cx.checkpoint()?;
+                    crate::runtime::yield_now().await;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), crate::error::Error>(())
+            })
+            .expect("cancellable body spawns");
+        child
+            .cancel(CancelReason::user("independent cancel"))
+            .expect("cancel enqueues while the runtime is live");
+        assert!(
+            body.join(child.cx()).await.is_err(),
+            "the cancelled child body must not complete successfully"
+        );
+
+        // The parent context remains fully operational afterwards.
+        let mut sibling = parent
+            .spawn(|_task_cx| async move { 11_u16 })
+            .expect("parent still spawns after child cancel");
+        assert_eq!(
+            sibling.join(&parent).await.expect("sibling joins"),
+            11,
+            "independent child cancellation must not disturb the parent"
+        );
+
+        child
+            .close()
+            .await
+            .expect("post-cancel close still reaches quiescence");
+    });
+}
+
+#[test]
+fn lab_runtime_drains_region_commands_deterministically() {
+    let _report = crate::lab::run_async_under_lab(0x5EED_u64, |root_cx: Cx| async move {
+        let child = root_cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("lab runtime drains the mint command");
+        let mut body = child
+            .cx()
+            .spawn(|_task_cx| async move { 3_u8 })
+            .expect("child spawn works under lab admission");
+        assert_eq!(body.join(child.cx()).await.expect("body joins"), 3);
+        child.close().await.expect("lab quiescence reached");
+    });
+}
+
+/// Parks until released and ignores cancellation: a task that never
+/// reaches a checkpoint or a cancel-aware await.
+struct Released(
+    Arc<(
+        std::sync::atomic::AtomicBool,
+        Mutex<Option<std::task::Waker>>,
+    )>,
+);
+
+impl Future for Released {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let (released, waker) = &*self.0;
+        *waker.lock() = Some(cx.waker().clone());
+        if released.load(std::sync::atomic::Ordering::SeqCst) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
     }
+}
 
-    /// A close awaited outside the runtime is woken by the runtime's teardown
-    /// and fails closed, instead of pending forever on a region that can no
-    /// longer finish closing (the monitor-watch teardown shape, werypv).
-    #[test]
-    fn teardown_wakes_a_close_awaited_outside_the_runtime() {
-        use crate::lab::{LabConfig, LabRuntime};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+#[test]
+fn close_within_times_out_on_lab_time_and_names_the_straggler() {
+    use crate::lab::{LabConfig, LabRuntime};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
-        let mut lab = LabRuntime::new(LabConfig::new(0x0C1_05E0).max_steps(4096));
+    let bound = Duration::from_millis(50);
+    let mut observed = Vec::new();
+    for seed in [0x34_C400_u64, 0x34_C401, 0x34_C402] {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(100_000));
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let slot = Arc::new(Mutex::new(None));
-        let slot_for_owner = Arc::clone(&slot);
+        let result = Arc::new(Mutex::new(None));
+        let result_slot = Arc::clone(&result);
         let (owner, _join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
@@ -600,401 +524,309 @@
                     .open_child_region(ChildRegionSpec::inherit())
                     .await
                     .expect("child region");
-                // Never finishes, so the region cannot reach Closed.
-                let _parked = child
+                let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
+                let gate_for_task = Arc::clone(&gate);
+                let started = Arc::new(AtomicBool::new(false));
+                let started_flag = Arc::clone(&started);
+                let straggler_id = Arc::new(Mutex::new(None));
+                let id_slot = Arc::clone(&straggler_id);
+                let mut straggler = child
                     .cx()
-                    .spawn(|_task_cx| std::future::pending::<()>())
-                    .expect("spawn parked task");
-                *slot_for_owner.lock() = Some(child);
+                    .spawn(move |task_cx| async move {
+                        *id_slot.lock() = Some(task_cx.task_id());
+                        started_flag.store(true, Ordering::SeqCst);
+                        Released(gate_for_task).await;
+                    })
+                    .expect("spawn straggler");
+                while !started.load(Ordering::SeqCst) {
+                    crate::runtime::yield_now().await;
+                }
+                let report = child.close_within(bound).await.expect("close report");
+                let named = report.stragglers == vec![(*straggler_id.lock()).expect("ran")];
+                // Still owned by the closing region: releasing it lets
+                // the region close normally.
+                gate.0.store(true, Ordering::SeqCst);
+                if let Some(waker) = gate.1.lock().take() {
+                    waker.wake();
+                }
+                // It ignored the cancellation, so it joins as Cancelled.
+                let _ = straggler.join(&cx).await;
+                *result_slot.lock() = Some((report.outcome, report.elapsed, named));
             })
             .expect("create owner");
         lab.scheduler.lock().schedule(owner, 0);
-        lab.run_until_idle();
-        let child = slot
+        let run = lab.run_with_auto_advance();
+        let (outcome, elapsed, named) = result
             .lock()
             .take()
-            .expect("the owner opened the child region");
-
-        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
-        let waker = std::task::Waker::from(Arc::clone(&wakes));
-        let mut context = Context::from_waker(&waker);
-        let mut closing = Box::pin(child.close());
-        assert!(closing.as_mut().poll(&mut context).is_pending());
-        lab.run_until_idle();
+            .unwrap_or_else(|| panic!("seed {seed:#x}: the owner did not finish ({run:?})"));
+        assert_eq!(outcome, ChildRegionCloseOutcome::TimedOut, "seed {seed:#x}");
         assert!(
-            closing.as_mut().poll(&mut context).is_pending(),
-            "the parked task keeps the region closing"
+            named,
+            "seed {seed:#x}: the report names exactly the straggler"
         );
-        let before = wakes.0.load(Ordering::SeqCst);
-
-        drop(lab);
         assert!(
-            wakes.0.load(Ordering::SeqCst) > before,
-            "teardown wakes the waiting close"
+            elapsed >= bound,
+            "seed {seed:#x}: elapsed {elapsed:?} < {bound:?}"
         );
-        assert!(matches!(
-            closing.as_mut().poll(&mut context),
-            Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
-        ));
+        assert_eq!(lab.state.live_task_count(), 0, "seed {seed:#x}");
+        observed.push(elapsed);
     }
+    assert!(
+        observed.windows(2).all(|pair| pair[0] == pair[1]),
+        "virtual-time elapsed differs across seeds: {observed:?}"
+    );
+}
 
-    /// `close_within` reports a region that reached `Closed` before its bound
-    /// as quiescent, even when it is first polled after the deadline: the
-    /// timeout checks the deadline before it polls the region.
-    #[test]
-    fn close_within_reports_an_already_closed_region_as_quiescent() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("build runtime");
-        runtime.block_on(async {
-            let cx = Cx::current().expect("root cx");
+struct CountWakes(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for CountWakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A close awaited outside the runtime is woken by the runtime's teardown
+/// and fails closed, instead of pending forever on a region that can no
+/// longer finish closing (the monitor-watch teardown shape, werypv).
+#[test]
+fn teardown_wakes_a_close_awaited_outside_the_runtime() {
+    use crate::lab::{LabConfig, LabRuntime};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut lab = LabRuntime::new(LabConfig::new(0x0C1_05E0).max_steps(4096));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let slot = Arc::new(Mutex::new(None));
+    let slot_for_owner = Arc::clone(&slot);
+    let (owner, _join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("lab task cx");
             let child = cx
                 .open_child_region(ChildRegionSpec::inherit())
                 .await
                 .expect("child region");
-            // An empty region closes as soon as the cancel is applied.
-            child
-                .cancel(CancelReason::user("closed before the bounded close"))
-                .expect("cancel");
-            let close_state = Arc::clone(&child.close_notify);
-            let mut turns = 0_u32;
-            while !close_state.lock().closed {
-                turns += 1;
-                assert!(turns < 100_000, "the cancelled region never closed");
-                crate::runtime::yield_now().await;
-            }
+            // Never finishes, so the region cannot reach Closed.
+            let _parked = child
+                .cx()
+                .spawn(|_task_cx| std::future::pending::<()>())
+                .expect("spawn parked task");
+            *slot_for_owner.lock() = Some(child);
+        })
+        .expect("create owner");
+    lab.scheduler.lock().schedule(owner, 0);
+    lab.run_until_idle();
+    let child = slot
+        .lock()
+        .take()
+        .expect("the owner opened the child region");
 
-            let report = child
-                .close_within(Duration::ZERO)
-                .await
-                .expect("close report");
-            assert_eq!(
-                report.outcome,
-                ChildRegionCloseOutcome::Quiescent,
-                "{report:?}"
-            );
-            assert!(report.stragglers.is_empty(), "{report:?}");
-        });
-    }
+    let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&waker);
+    let mut closing = Box::pin(child.close());
+    assert!(closing.as_mut().poll(&mut context).is_pending());
+    lab.run_until_idle();
+    assert!(
+        closing.as_mut().poll(&mut context).is_pending(),
+        "the parked task keeps the region closing"
+    );
+    let before = wakes.0.load(Ordering::SeqCst);
 
-    /// The runtime owns this future, including its retirement. Counting actual
-    /// polls and Drop distinguishes refusal from silently skipping cleanup.
-    struct ShutdownProbe {
-        polls: Arc<std::sync::atomic::AtomicUsize>,
-        drops: Arc<std::sync::atomic::AtomicUsize>,
-        wake_again: bool,
-    }
+    drop(lab);
+    assert!(
+        wakes.0.load(Ordering::SeqCst) > before,
+        "teardown wakes the waiting close"
+    );
+    assert!(matches!(
+        closing.as_mut().poll(&mut context),
+        Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
+    ));
+}
 
-    impl Future for ShutdownProbe {
-        type Output = ();
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.wake_again {
-                cx.waker().wake_by_ref();
-            }
-            Poll::Pending
-        }
-    }
-
-    impl Drop for ShutdownProbe {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    #[test]
-    fn managed_shutdown_enforces_actual_finalizers_and_retains_reclaimed_receipts() {
-        use crate::error::ErrorKind;
-        use crate::lab::{LabConfig, LabRuntime};
-        use crate::types::{Outcome, Time};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // First two cases enforce exact zero/two polls. Third uses a real timer
-        // to wake cleanup that never wakes itself. Fourth activates an expired
-        // ceiling after legacy cleanup has already parked without a timer.
-        for case in 0..4 {
-            let mut lab = LabRuntime::new(LabConfig::new(0x34_C100 + case).max_steps(4096));
-            let root = lab.state.create_root_region(Budget::INFINITE);
-            let opened = Arc::new(Mutex::new(None));
-            let child_slot = Arc::clone(&opened);
-            let result = Arc::new(Mutex::new(None));
-            let result_slot = Arc::clone(&result);
-            let (release, mut wait) = crate::channel::oneshot::channel();
-            let (begin_legacy, mut legacy_wait) = crate::channel::oneshot::channel();
-            let budget = match case {
-                0 => Budget::INFINITE.with_poll_quota(0),
-                1 => Budget::INFINITE.with_poll_quota(2),
-                2 => Budget::INFINITE.with_deadline(Time::from_nanos(100)),
-                _ => Budget::INFINITE.with_deadline(Time::ZERO),
-            };
-            let (owner, mut join) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::current().expect("registered owner");
-                    let child = cx
-                        .open_child_region(ChildRegionSpec::inherit())
-                        .await
-                        .unwrap();
-                    *child_slot.lock() = Some(child.region_id());
-                    if case == 3 {
-                        legacy_wait.recv_uninterruptible().await.unwrap();
-                        child
-                            .cancel(CancelReason::user("legacy close first"))
-                            .unwrap();
-                    }
-                    wait.recv_uninterruptible().await.unwrap();
-                    child
-                        .cancel_with_budget(CancelReason::user("bounded cleanup test"), budget)
-                        .unwrap();
-                    *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
-                })
-                .unwrap();
-            lab.scheduler.lock().schedule(owner, 0);
-            lab.run_until_idle();
-            let child = opened.lock().expect("actual child region opened");
-            let receipt = lab.state.region(child).unwrap().close_receipt_handle();
-            let polls = Arc::new(AtomicUsize::new(0));
-            let drops = Arc::new(AtomicUsize::new(0));
-            assert!(lab.state.register_async_finalizer(
-                child,
-                ShutdownProbe {
-                    polls: Arc::clone(&polls),
-                    drops: Arc::clone(&drops),
-                    wake_again: case == 1,
-                }
-            ));
-            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
-            if case == 3 {
-                // Drive the real registered owner's command. Mutating state
-                // directly while the scheduler is idle does not admit a
-                // finalizer task through run_until_idle.
-                begin_legacy.send(&owner_cx, ()).unwrap();
-                lab.run_until_idle();
-                assert_eq!(polls.load(Ordering::SeqCst), 1);
-                assert_eq!(drops.load(Ordering::SeqCst), 0);
-                assert!(lab.state.region(child).unwrap().shutdown_budget().is_none());
-                assert!(receipt.lock().is_none());
-            }
-            release.send(&owner_cx, ()).unwrap();
-            lab.run_until_idle();
-            if case == 2 {
-                assert_eq!(polls.load(Ordering::SeqCst), 1);
-                assert_eq!(drops.load(Ordering::SeqCst), 0);
-                assert!(result.lock().is_none());
-                assert!(join.try_join().unwrap().is_none());
-                assert!(receipt.lock().is_none());
-                assert_eq!(lab.advance_to_next_timer(), 1);
-                lab.run_until_idle();
-            }
-            assert!(
-                join.try_join().unwrap().is_some(),
-                "case {case} owner awaits real close"
-            );
-            let outcome = result
-                .lock()
-                .take()
-                .expect("actual close receipt published");
-            let expected = if case < 2 {
-                ErrorKind::PollQuotaExhausted
-            } else {
-                ErrorKind::DeadlineExceeded
-            };
-            assert!(
-                matches!(&outcome.cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
-            );
-            if case == 3 {
-                assert!(matches!(outcome.outcome, Outcome::Cancelled(ref reason)
-                    if *reason == CancelReason::user("bounded cleanup test")));
-            } else {
-                assert!(
-                    outcome.outcome.is_err(),
-                    "canonical scheduler error remains unit-derived"
-                );
-            }
-            assert_eq!(polls.load(Ordering::SeqCst), [0, 2, 1, 1][case as usize]);
-            assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert!(
-                lab.state.region(child).is_none(),
-                "close reclaims original generation"
-            );
-            assert!(
-                matches!(&receipt.lock().as_ref().unwrap().cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
-            );
-            assert_eq!(lab.state.live_task_count(), 0);
-            assert_eq!(lab.state.pending_obligation_count(), 0);
-            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
-            lab.state
-                .close_region_command(root, &CancelReason::user("test complete"));
-            lab.run_until_idle();
-            assert!(lab.state.region(root).is_none());
-            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
-        }
-    }
-
-    #[test]
-    fn ordinary_ancestor_cancel_preserves_descendant_shutdown_ceiling_and_unbounded_sibling() {
-        use crate::error::ErrorKind;
-        use crate::lab::{LabConfig, LabRuntime};
-        use crate::types::Outcome;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-        struct CleanupRetirement(Arc<AtomicUsize>);
-
-        impl Drop for CleanupRetirement {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
+/// `close_within` reports a region that reached `Closed` before its bound
+/// as quiescent, even when it is first polled after the deadline: the
+/// timeout checks the deadline before it polls the region.
+#[test]
+fn close_within_reports_an_already_closed_region_as_quiescent() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("root cx");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("child region");
+        // An empty region closes as soon as the cancel is applied.
+        child
+            .cancel(CancelReason::user("closed before the bounded close"))
+            .expect("cancel");
+        let close_state = Arc::clone(&child.close_notify);
+        let mut turns = 0_u32;
+        while !close_state.lock().closed {
+            turns += 1;
+            assert!(turns < 100_000, "the cancelled region never closed");
+            crate::runtime::yield_now().await;
         }
 
-        // br-asupersync-jrdfmh: None at the cancellation root must not hide
-        // a descendant's existing ceiling from that descendant's children.
-        let mut lab = LabRuntime::new(LabConfig::new(0x34_C300).max_steps(4096));
+        let report = child
+            .close_within(Duration::ZERO)
+            .await
+            .expect("close report");
+        assert_eq!(
+            report.outcome,
+            ChildRegionCloseOutcome::Quiescent,
+            "{report:?}"
+        );
+        assert!(report.stragglers.is_empty(), "{report:?}");
+    });
+}
+
+/// The runtime owns this future, including its retirement. Counting actual
+/// polls and Drop distinguishes refusal from silently skipping cleanup.
+struct ShutdownProbe {
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+    drops: Arc<std::sync::atomic::AtomicUsize>,
+    wake_again: bool,
+}
+
+impl Future for ShutdownProbe {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.wake_again {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for ShutdownProbe {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn managed_shutdown_enforces_actual_finalizers_and_retains_reclaimed_receipts() {
+    use crate::error::ErrorKind;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::{Outcome, Time};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // First two cases enforce exact zero/two polls. Third uses a real timer
+    // to wake cleanup that never wakes itself. Fourth activates an expired
+    // ceiling after legacy cleanup has already parked without a timer.
+    for case in 0..4 {
+        let mut lab = LabRuntime::new(LabConfig::new(0x34_C100 + case).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let opened = Arc::new(Mutex::new(None));
-        let opened_slot = Arc::clone(&opened);
+        let child_slot = Arc::clone(&opened);
         let result = Arc::new(Mutex::new(None));
         let result_slot = Arc::clone(&result);
-        let (begin_cancel, mut wait_cancel) = crate::channel::oneshot::channel();
-        let reason = CancelReason::user("ordinary ancestor cancellation");
-        let owner_reason = reason.clone();
+        let (release, mut wait) = crate::channel::oneshot::channel();
+        let (begin_legacy, mut legacy_wait) = crate::channel::oneshot::channel();
+        let budget = match case {
+            0 => Budget::INFINITE.with_poll_quota(0),
+            1 => Budget::INFINITE.with_poll_quota(2),
+            2 => Budget::INFINITE.with_deadline(Time::from_nanos(100)),
+            _ => Budget::INFINITE.with_deadline(Time::ZERO),
+        };
         let (owner, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::current().unwrap();
-                let ancestor = cx
+                let cx = Cx::current().expect("registered owner");
+                let child = cx
                     .open_child_region(ChildRegionSpec::inherit())
                     .await
                     .unwrap();
-                let bounded = ancestor
-                    .cx()
-                    .open_child_region(ChildRegionSpec::inherit())
-                    .await
+                *child_slot.lock() = Some(child.region_id());
+                if case == 3 {
+                    legacy_wait.recv_uninterruptible().await.unwrap();
+                    child
+                        .cancel(CancelReason::user("legacy close first"))
+                        .unwrap();
+                }
+                wait.recv_uninterruptible().await.unwrap();
+                child
+                    .cancel_with_budget(CancelReason::user("bounded cleanup test"), budget)
                     .unwrap();
-                let grandchild = bounded
-                    .cx()
-                    .open_child_region(ChildRegionSpec::inherit())
-                    .await
-                    .unwrap();
-                let sibling = ancestor
-                    .cx()
-                    .open_child_region(ChildRegionSpec::inherit())
-                    .await
-                    .unwrap();
-                *opened_slot.lock() = Some((
-                    ancestor.region_id(),
-                    bounded.region_id(),
-                    grandchild.region_id(),
-                    sibling.region_id(),
-                ));
-                wait_cancel.recv_uninterruptible().await.unwrap();
-                ancestor.cancel(owner_reason).unwrap();
-                *result_slot.lock() = Some(ancestor.close_with_outcome().await.unwrap());
-                drop((bounded, grandchild, sibling));
+                *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
             })
             .unwrap();
         lab.scheduler.lock().schedule(owner, 0);
         lab.run_until_idle();
-        let (ancestor, bounded, grandchild, sibling) = opened.lock().unwrap();
-        let budgets = [ancestor, bounded, grandchild, sibling].map(|region| {
-            let record = lab.state.region(region).unwrap();
-            assert!(record.shutdown_budget().is_none());
-            record.shutdown_budget_handle()
-        });
-        let receipts = [bounded, grandchild, sibling]
-            .map(|region| lab.state.region(region).unwrap().close_receipt_handle());
-        let ceiling = Budget::INFINITE.with_poll_quota(2);
-        assert!(
-            lab.state
-                .region(bounded)
-                .unwrap()
-                .tighten_shutdown_budget(ceiling)
-        );
-        assert!(budgets[2].read().is_none());
-
+        let child = opened.lock().expect("actual child region opened");
+        let receipt = lab.state.region(child).unwrap().close_receipt_handle();
         let polls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
         assert!(lab.state.register_async_finalizer(
-            grandchild,
+            child,
             ShutdownProbe {
                 polls: Arc::clone(&polls),
                 drops: Arc::clone(&drops),
-                wake_again: true,
+                wake_again: case == 1,
             }
         ));
-        let sibling_started = Arc::new(AtomicBool::new(false));
-        let started = Arc::clone(&sibling_started);
-        let sibling_drops = Arc::new(AtomicUsize::new(0));
-        let retired = Arc::clone(&sibling_drops);
-        let (finish_sibling, mut wait_sibling) = crate::channel::oneshot::channel();
-        assert!(lab.state.register_async_finalizer(sibling, async move {
-            let _retirement = CleanupRetirement(retired);
-            started.store(true, Ordering::SeqCst);
-            wait_sibling.recv_uninterruptible().await.unwrap();
-        }));
-
         let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
-        begin_cancel.send(&owner_cx, ()).unwrap();
+        if case == 3 {
+            // Drive the real registered owner's command. Mutating state
+            // directly while the scheduler is idle does not admit a
+            // finalizer task through run_until_idle.
+            begin_legacy.send(&owner_cx, ()).unwrap();
+            lab.run_until_idle();
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert!(lab.state.region(child).unwrap().shutdown_budget().is_none());
+            assert!(receipt.lock().is_none());
+        }
+        release.send(&owner_cx, ()).unwrap();
         lab.run_until_idle();
-        assert_eq!(*budgets[1].read(), Some(ceiling));
-        assert_eq!(*budgets[2].read(), Some(ceiling));
-        assert!(budgets[0].read().is_none());
-        assert!(budgets[3].read().is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        if case == 2 {
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert!(result.lock().is_none());
+            assert!(join.try_join().unwrap().is_none());
+            assert!(receipt.lock().is_none());
+            assert_eq!(lab.advance_to_next_timer(), 1);
+            lab.run_until_idle();
+        }
+        assert!(
+            join.try_join().unwrap().is_some(),
+            "case {case} owner awaits real close"
+        );
+        let outcome = result
+            .lock()
+            .take()
+            .expect("actual close receipt published");
+        let expected = if case < 2 {
+            ErrorKind::PollQuotaExhausted
+        } else {
+            ErrorKind::DeadlineExceeded
+        };
+        assert!(
+            matches!(&outcome.cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
+        );
+        if case == 3 {
+            assert!(matches!(outcome.outcome, Outcome::Cancelled(ref reason)
+                    if *reason == CancelReason::user("bounded cleanup test")));
+        } else {
+            assert!(
+                outcome.outcome.is_err(),
+                "canonical scheduler error remains unit-derived"
+            );
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), [0, 2, 1, 1][case as usize]);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-        for receipt in &receipts[..2] {
-            assert!(matches!(
-                receipt.lock().as_ref().unwrap().cleanup_outcome,
-                Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
-            ));
-        }
-        // The lab admits finalizer tasks after draining both lifecycle commands.
-        // Their scheduler outcomes retain the unit-error mapping; the separate
-        // cleanup receipts above preserve the exact exhausted quota.
-        {
-            let grandchild_receipt = receipts[1].lock();
-            let outcome = &grandchild_receipt.as_ref().unwrap().outcome;
-            assert!(
-                matches!(outcome, Outcome::Err(error) if error.kind() == ErrorKind::Internal),
-                "canonical grandchild outcome: {outcome:?}"
-            );
-        }
-        assert!(lab.state.region(bounded).is_none());
-        assert!(lab.state.region(grandchild).is_none());
-        assert!(sibling_started.load(Ordering::SeqCst));
-        assert_eq!(sibling_drops.load(Ordering::SeqCst), 0);
-        assert!(receipts[2].lock().is_none());
-        assert!(result.lock().is_none());
-        assert!(join.try_join().unwrap().is_none());
-
-        // The sibling completes through its real wake and success path, without
-        // ever receiving an explicit ceiling to make it retire.
-        finish_sibling.send(&owner_cx, ()).unwrap();
-        lab.run_until_idle();
-        assert!(join.try_join().unwrap().is_some());
-        assert_eq!(sibling_drops.load(Ordering::SeqCst), 1);
-        assert!(budgets[3].read().is_none());
-        {
-            let sibling_receipt = receipts[2].lock();
-            let sibling_receipt = sibling_receipt.as_ref().unwrap();
-            assert!(
-                matches!(&sibling_receipt.outcome, Outcome::Ok(())),
-                "canonical sibling outcome: {:?}",
-                sibling_receipt.outcome
-            );
-            assert!(matches!(
-                sibling_receipt.cleanup_outcome,
-                Some(Outcome::Ok(()))
-            ));
-        }
-        let outcome = result.lock().take().unwrap();
-        assert!(matches!(outcome.outcome, Outcome::Cancelled(ref actual) if *actual == reason));
-        assert!(matches!(
-            outcome.cleanup_outcome,
-            Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
-        ));
-        assert!(lab.state.region(ancestor).is_none());
-        assert!(lab.state.region(sibling).is_none());
+        assert!(
+            lab.state.region(child).is_none(),
+            "close reclaims original generation"
+        );
+        assert!(
+            matches!(&receipt.lock().as_ref().unwrap().cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
+        );
         assert_eq!(lab.state.live_task_count(), 0);
         assert_eq!(lab.state.pending_obligation_count(), 0);
         assert!(lab.run_until_quiescent_with_report().lab_test_passed());
@@ -1004,392 +836,576 @@
         assert!(lab.state.region(root).is_none());
         assert!(lab.run_until_quiescent_with_report().lab_test_passed());
     }
+}
+
+#[test]
+fn ordinary_ancestor_cancel_preserves_descendant_shutdown_ceiling_and_unbounded_sibling() {
+    use crate::error::ErrorKind;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::Outcome;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CleanupRetirement(Arc<AtomicUsize>);
+
+    impl Drop for CleanupRetirement {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // br-asupersync-jrdfmh: None at the cancellation root must not hide
+    // a descendant's existing ceiling from that descendant's children.
+    let mut lab = LabRuntime::new(LabConfig::new(0x34_C300).max_steps(4096));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let opened = Arc::new(Mutex::new(None));
+    let opened_slot = Arc::clone(&opened);
+    let result = Arc::new(Mutex::new(None));
+    let result_slot = Arc::clone(&result);
+    let (begin_cancel, mut wait_cancel) = crate::channel::oneshot::channel();
+    let reason = CancelReason::user("ordinary ancestor cancellation");
+    let owner_reason = reason.clone();
+    let (owner, mut join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            let ancestor = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let bounded = ancestor
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let grandchild = bounded
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let sibling = ancestor
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            *opened_slot.lock() = Some((
+                ancestor.region_id(),
+                bounded.region_id(),
+                grandchild.region_id(),
+                sibling.region_id(),
+            ));
+            wait_cancel.recv_uninterruptible().await.unwrap();
+            ancestor.cancel(owner_reason).unwrap();
+            *result_slot.lock() = Some(ancestor.close_with_outcome().await.unwrap());
+            drop((bounded, grandchild, sibling));
+        })
+        .unwrap();
+    lab.scheduler.lock().schedule(owner, 0);
+    lab.run_until_idle();
+    let (ancestor, bounded, grandchild, sibling) = opened.lock().unwrap();
+    let budgets = [ancestor, bounded, grandchild, sibling].map(|region| {
+        let record = lab.state.region(region).unwrap();
+        assert!(record.shutdown_budget().is_none());
+        record.shutdown_budget_handle()
+    });
+    let receipts = [bounded, grandchild, sibling]
+        .map(|region| lab.state.region(region).unwrap().close_receipt_handle());
+    let ceiling = Budget::INFINITE.with_poll_quota(2);
+    assert!(
+        lab.state
+            .region(bounded)
+            .unwrap()
+            .tighten_shutdown_budget(ceiling)
+    );
+    assert!(budgets[2].read().is_none());
+
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    assert!(lab.state.register_async_finalizer(
+        grandchild,
+        ShutdownProbe {
+            polls: Arc::clone(&polls),
+            drops: Arc::clone(&drops),
+            wake_again: true,
+        }
+    ));
+    let sibling_started = Arc::new(AtomicBool::new(false));
+    let started = Arc::clone(&sibling_started);
+    let sibling_drops = Arc::new(AtomicUsize::new(0));
+    let retired = Arc::clone(&sibling_drops);
+    let (finish_sibling, mut wait_sibling) = crate::channel::oneshot::channel();
+    assert!(lab.state.register_async_finalizer(sibling, async move {
+        let _retirement = CleanupRetirement(retired);
+        started.store(true, Ordering::SeqCst);
+        wait_sibling.recv_uninterruptible().await.unwrap();
+    }));
+
+    let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
+    begin_cancel.send(&owner_cx, ()).unwrap();
+    lab.run_until_idle();
+    assert_eq!(*budgets[1].read(), Some(ceiling));
+    assert_eq!(*budgets[2].read(), Some(ceiling));
+    assert!(budgets[0].read().is_none());
+    assert!(budgets[3].read().is_none());
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    for receipt in &receipts[..2] {
+        assert!(matches!(
+            receipt.lock().as_ref().unwrap().cleanup_outcome,
+            Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
+        ));
+    }
+    // The lab admits finalizer tasks after draining both lifecycle commands.
+    // Their scheduler outcomes retain the unit-error mapping; the separate
+    // cleanup receipts above preserve the exact exhausted quota.
+    {
+        let grandchild_receipt = receipts[1].lock();
+        let outcome = &grandchild_receipt.as_ref().unwrap().outcome;
+        assert!(
+            matches!(outcome, Outcome::Err(error) if error.kind() == ErrorKind::Internal),
+            "canonical grandchild outcome: {outcome:?}"
+        );
+    }
+    assert!(lab.state.region(bounded).is_none());
+    assert!(lab.state.region(grandchild).is_none());
+    assert!(sibling_started.load(Ordering::SeqCst));
+    assert_eq!(sibling_drops.load(Ordering::SeqCst), 0);
+    assert!(receipts[2].lock().is_none());
+    assert!(result.lock().is_none());
+    assert!(join.try_join().unwrap().is_none());
+
+    // The sibling completes through its real wake and success path, without
+    // ever receiving an explicit ceiling to make it retire.
+    finish_sibling.send(&owner_cx, ()).unwrap();
+    lab.run_until_idle();
+    assert!(join.try_join().unwrap().is_some());
+    assert_eq!(sibling_drops.load(Ordering::SeqCst), 1);
+    assert!(budgets[3].read().is_none());
+    {
+        let sibling_receipt = receipts[2].lock();
+        let sibling_receipt = sibling_receipt.as_ref().unwrap();
+        assert!(
+            matches!(&sibling_receipt.outcome, Outcome::Ok(())),
+            "canonical sibling outcome: {:?}",
+            sibling_receipt.outcome
+        );
+        assert!(matches!(
+            sibling_receipt.cleanup_outcome,
+            Some(Outcome::Ok(()))
+        ));
+    }
+    let outcome = result.lock().take().unwrap();
+    assert!(matches!(outcome.outcome, Outcome::Cancelled(ref actual) if *actual == reason));
+    assert!(matches!(
+        outcome.cleanup_outcome,
+        Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
+    ));
+    assert!(lab.state.region(ancestor).is_none());
+    assert!(lab.state.region(sibling).is_none());
+    assert_eq!(lab.state.live_task_count(), 0);
+    assert_eq!(lab.state.pending_obligation_count(), 0);
+    assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+    lab.state
+        .close_region_command(root, &CancelReason::user("test complete"));
+    lab.run_until_idle();
+    assert!(lab.state.region(root).is_none());
+    assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+}
+
+#[test]
+fn managed_close_distinguishes_cancelled_body_from_descendant_cleanup_failure() {
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::Outcome;
+
+    for failing_cleanup in [false, true] {
+        let mut lab = LabRuntime::new(LabConfig::new(0x34_C200).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let opened = Arc::new(Mutex::new(None));
+        let opened_slot = Arc::clone(&opened);
+        let result = Arc::new(Mutex::new(None));
+        let result_slot = Arc::clone(&result);
+        let (release, mut wait) = crate::channel::oneshot::channel();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let child = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let grandchild = child
+                    .cx()
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let mut body = child
+                    .cx()
+                    .spawn(|body_cx| async move {
+                        loop {
+                            if body_cx.is_cancel_requested() {
+                                return;
+                            }
+                            crate::runtime::yield_now().await;
+                        }
+                    })
+                    .unwrap();
+                *opened_slot.lock() = Some((child.region_id(), grandchild.region_id()));
+                wait.recv_uninterruptible().await.unwrap();
+                child
+                    .cancel_with_budget(
+                        CancelReason::user("subtree cleanup"),
+                        Budget::INFINITE.with_poll_quota(2),
+                    )
+                    .unwrap();
+                // Observe real task cancellation; its terminal must not enter
+                // the separate cleanup-failure field.
+                let _ = body.join(&cx).await;
+                *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
+                drop(grandchild);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        // The body yields continuously: use a bounded scheduler prefix to
+        // obtain the actual admitted subtree, then request cancellation.
+        for _ in 0..256 {
+            if opened.lock().is_some() {
+                break;
+            }
+            lab.step_for_test();
+        }
+        let (child, grandchild) = opened.lock().expect("actual subtree admitted");
+        assert!(lab.state.register_sync_finalizer(grandchild, move || {
+            assert!(!failing_cleanup, "actual descendant cleanup panic");
+        }));
+        let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
+        release.send(&owner_cx, ()).unwrap();
+        lab.run_until_idle();
+        assert!(join.try_join().unwrap().is_some());
+        let outcome = result.lock().take().unwrap();
+        assert!(
+            outcome.outcome.is_cancelled(),
+            "legacy canonical child outcome preserved"
+        );
+        if failing_cleanup {
+            assert!(
+                matches!(outcome.cleanup_outcome, Some(Outcome::Panicked(ref payload)) if payload.message() == "actual descendant cleanup panic")
+            );
+        } else {
+            assert!(matches!(outcome.cleanup_outcome, Some(Outcome::Ok(()))));
+        }
+        assert!(lab.state.region(child).is_none());
+        assert!(lab.state.region(grandchild).is_none());
+        assert_eq!(lab.state.live_task_count(), 0);
+        assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+        lab.state
+            .close_region_command(root, &CancelReason::user("test complete"));
+        lab.run_until_idle();
+        assert!(lab.state.region(root).is_none());
+    }
+}
+
+/// Bounded close follows the owning region's clock even when a monitor
+/// polls it outside that runtime (br-asupersync-issue65-criticisms-kpmoy5.2.4).
+#[cfg(not(target_arch = "wasm32"))]
+mod close_clock_tests {
+    use super::*;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::runtime::TaskHandle;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::Time;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::Waker;
+
+    type ReleaseGate = Arc<(AtomicBool, Mutex<Option<Waker>>)>;
+
+    fn parked_child(
+        seed: u64,
+        start: Time,
+    ) -> (LabRuntime, ChildRegion, TaskHandle<()>, ReleaseGate) {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(4096));
+        lab.advance_time_to(start);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
+        let task_gate = Arc::clone(&gate);
+        let slot = Arc::new(Mutex::new(None));
+        let owner_slot = Arc::clone(&slot);
+        let (owner, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let child = Cx::current()
+                    .expect("lab owner context")
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .expect("child region");
+                let body = child
+                    .cx()
+                    .spawn(move |_task_cx| Released(task_gate))
+                    .expect("spawn cancellation-blind straggler");
+                // Keep the handle alive until the test finishes so its
+                // drop cannot cancel admission before the body's first poll.
+                *owner_slot.lock() = Some((child, body));
+            })
+            .expect("create owner");
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        let (child, body) = slot.lock().take().expect("owner published child");
+        assert!(gate.1.lock().is_some(), "the straggler actually parked");
+        (lab, child, body, gate)
+    }
+
+    fn foreign_context(start: Time) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+        let clock = Arc::new(VirtualClock::new());
+        clock.advance_to(start);
+        let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(driver.clone()),
+            None,
+        );
+        cx.set_cancel_reason(CancelReason::shutdown());
+        (cx, clock, driver)
+    }
+
+    fn poll_under<F: Future>(
+        future: Pin<&mut F>,
+        context: &mut Context<'_>,
+        ambient: Option<&Cx>,
+    ) -> Poll<F::Output> {
+        let _ambient = ambient.map(|cx| Cx::set_current(Some(cx.clone())));
+        if ambient.is_none() {
+            assert!(Cx::current().is_none(), "polling outside every runtime");
+        }
+        future.poll(context)
+    }
+
+    fn ready_report<F>(
+        future: Pin<&mut F>,
+        context: &mut Context<'_>,
+        ambient: Option<&Cx>,
+    ) -> ChildRegionCloseReport
+    where
+        F: Future<Output = Result<ChildRegionCloseReport, ChildRegionError>>,
+    {
+        match poll_under(future, context, ambient) {
+            Poll::Ready(Ok(report)) => report,
+            other => panic!("expected a completed bounded close, got {other:?}"),
+        }
+    }
+
+    fn release_and_drain(
+        lab: &mut LabRuntime,
+        gate: &ReleaseGate,
+        close_state: &Arc<Mutex<RegionCloseState>>,
+    ) {
+        gate.0.store(true, Ordering::SeqCst);
+        let waker = gate.1.lock().take().expect("parked straggler's waker");
+        waker.wake();
+        lab.run_until_idle();
+        assert!(close_state.lock().closed, "the owned straggler drains");
+        assert_eq!(lab.state.live_task_count(), 0);
+    }
 
     #[test]
-    fn managed_close_distinguishes_cancelled_body_from_descendant_cleanup_failure() {
-        use crate::lab::{LabConfig, LabRuntime};
-        use crate::types::Outcome;
-
-        for failing_cleanup in [false, true] {
-            let mut lab = LabRuntime::new(LabConfig::new(0x34_C200).max_steps(4096));
-            let root = lab.state.create_root_region(Budget::INFINITE);
-            let opened = Arc::new(Mutex::new(None));
-            let opened_slot = Arc::clone(&opened);
-            let result = Arc::new(Mutex::new(None));
-            let result_slot = Arc::clone(&result);
-            let (release, mut wait) = crate::channel::oneshot::channel();
-            let (owner, mut join) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::current().unwrap();
-                    let child = cx
-                        .open_child_region(ChildRegionSpec::inherit())
-                        .await
-                        .unwrap();
-                    let grandchild = child
-                        .cx()
-                        .open_child_region(ChildRegionSpec::inherit())
-                        .await
-                        .unwrap();
-                    let mut body = child
-                        .cx()
-                        .spawn(|body_cx| async move {
-                            loop {
-                                if body_cx.is_cancel_requested() {
-                                    return;
-                                }
-                                crate::runtime::yield_now().await;
-                            }
-                        })
-                        .unwrap();
-                    *opened_slot.lock() = Some((child.region_id(), grandchild.region_id()));
-                    wait.recv_uninterruptible().await.unwrap();
-                    child
-                        .cancel_with_budget(
-                            CancelReason::user("subtree cleanup"),
-                            Budget::INFINITE.with_poll_quota(2),
-                        )
-                        .unwrap();
-                    // Observe real task cancellation; its terminal must not enter
-                    // the separate cleanup-failure field.
-                    let _ = body.join(&cx).await;
-                    *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
-                    drop(grandchild);
-                })
-                .unwrap();
-            lab.scheduler.lock().schedule(owner, 0);
-            // The body yields continuously: use a bounded scheduler prefix to
-            // obtain the actual admitted subtree, then request cancellation.
-            for _ in 0..256 {
-                if opened.lock().is_some() {
-                    break;
-                }
-                lab.step_for_test();
-            }
-            let (child, grandchild) = opened.lock().expect("actual subtree admitted");
-            assert!(lab.state.register_sync_finalizer(grandchild, move || {
-                assert!(!failing_cleanup, "actual descendant cleanup panic");
-            }));
-            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
-            release.send(&owner_cx, ()).unwrap();
-            lab.run_until_idle();
-            assert!(join.try_join().unwrap().is_some());
-            let outcome = result.lock().take().unwrap();
-            assert!(
-                outcome.outcome.is_cancelled(),
-                "legacy canonical child outcome preserved"
-            );
-            if failing_cleanup {
-                assert!(
-                    matches!(outcome.cleanup_outcome, Some(Outcome::Panicked(ref payload)) if payload.message() == "actual descendant cleanup panic")
-                );
-            } else {
-                assert!(matches!(outcome.cleanup_outcome, Some(Outcome::Ok(()))));
-            }
-            assert!(lab.state.region(child).is_none());
-            assert!(lab.state.region(grandchild).is_none());
-            assert_eq!(lab.state.live_task_count(), 0);
-            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
-            lab.state
-                .close_region_command(root, &CancelReason::user("test complete"));
-            lab.run_until_idle();
-            assert!(lab.state.region(root).is_none());
-        }
-    }
-
-    /// Bounded close follows the owning region's clock even when a monitor
-    /// polls it outside that runtime (br-asupersync-issue65-criticisms-kpmoy5.2.4).
-    #[cfg(not(target_arch = "wasm32"))]
-    mod close_clock_tests {
-        use super::*;
-        use crate::lab::{LabConfig, LabRuntime};
-        use crate::runtime::TaskHandle;
-        use crate::time::{TimerDriverHandle, VirtualClock};
-        use crate::types::Time;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::task::Waker;
-
-        type ReleaseGate = Arc<(AtomicBool, Mutex<Option<Waker>>)>;
-
-        fn parked_child(
-            seed: u64,
-            start: Time,
-        ) -> (LabRuntime, ChildRegion, TaskHandle<()>, ReleaseGate) {
-            let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(4096));
-            lab.advance_time_to(start);
-            let root = lab.state.create_root_region(Budget::INFINITE);
-            let gate = Arc::new((AtomicBool::new(false), Mutex::new(None)));
-            let task_gate = Arc::clone(&gate);
-            let slot = Arc::new(Mutex::new(None));
-            let owner_slot = Arc::clone(&slot);
-            let (owner, _join) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    let child = Cx::current()
-                        .expect("lab owner context")
-                        .open_child_region(ChildRegionSpec::inherit())
-                        .await
-                        .expect("child region");
-                    let body = child
-                        .cx()
-                        .spawn(move |_task_cx| Released(task_gate))
-                        .expect("spawn cancellation-blind straggler");
-                    // Keep the handle alive until the test finishes so its
-                    // drop cannot cancel admission before the body's first poll.
-                    *owner_slot.lock() = Some((child, body));
-                })
-                .expect("create owner");
-            lab.scheduler.lock().schedule(owner, 0);
-            lab.run_until_idle();
-            let (child, body) = slot.lock().take().expect("owner published child");
-            assert!(gate.1.lock().is_some(), "the straggler actually parked");
-            (lab, child, body, gate)
-        }
-
-        fn foreign_context(start: Time) -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
-            let clock = Arc::new(VirtualClock::new());
-            clock.advance_to(start);
-            let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
-            let cx = Cx::new_with_drivers(
-                RegionId::new_for_test(0, 1),
-                TaskId::new_for_test(0, 0),
-                Budget::INFINITE,
-                None,
-                None,
-                None,
-                Some(driver.clone()),
-                None,
-            );
-            cx.set_cancel_reason(CancelReason::shutdown());
-            (cx, clock, driver)
-        }
-
-        fn poll_under<F: Future>(
-            future: Pin<&mut F>,
-            context: &mut Context<'_>,
-            ambient: Option<&Cx>,
-        ) -> Poll<F::Output> {
-            let _ambient = ambient.map(|cx| Cx::set_current(Some(cx.clone())));
-            if ambient.is_none() {
-                assert!(Cx::current().is_none(), "polling outside every runtime");
-            }
-            future.poll(context)
-        }
-
-        fn ready_report<F>(
-            future: Pin<&mut F>,
-            context: &mut Context<'_>,
-            ambient: Option<&Cx>,
-        ) -> ChildRegionCloseReport
-        where
-            F: Future<Output = Result<ChildRegionCloseReport, ChildRegionError>>,
-        {
-            match poll_under(future, context, ambient) {
-                Poll::Ready(Ok(report)) => report,
-                other => panic!("expected a completed bounded close, got {other:?}"),
-            }
-        }
-
-        fn release_and_drain(
-            lab: &mut LabRuntime,
-            gate: &ReleaseGate,
-            close_state: &Arc<Mutex<RegionCloseState>>,
-        ) {
-            gate.0.store(true, Ordering::SeqCst);
-            let waker = gate.1.lock().take().expect("parked straggler's waker");
-            waker.wake();
-            lab.run_until_idle();
-            assert!(close_state.lock().closed, "the owned straggler drains");
-            assert_eq!(lab.state.live_task_count(), 0);
-        }
-
-        #[test]
-        fn bounded_close_uses_owner_timer_outside_ambient_runtime() {
-            for (seed, ambient_start, advance_ambient) in [
-                (0x34_C500, None, false),
-                (0x34_C501, Some(Time::ZERO), false),
-                (0x34_C502, Some(Time::from_secs(10_000)), true),
-            ] {
-                let start = Time::from_secs(5_000);
-                let bound = Duration::from_millis(50);
-                let deadline = start + bound;
-                let (mut lab, child, straggler, gate) = parked_child(seed, start);
-                let owner_timer = child.cx().timer_driver().expect("owner timer");
-                let close_state = Arc::clone(&child.close_notify);
-                let straggler_id = straggler.task_id();
-                // A cleanup deadline must not become a cancellation checkpoint.
-                child.cx().set_cancel_reason(CancelReason::shutdown());
-                let ambient = ambient_start.map(foreign_context);
-                let ambient_cx = ambient.as_ref().map(|(cx, _, _)| cx);
-                let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
-                let waker = Waker::from(Arc::clone(&wakes));
-                let mut context = Context::from_waker(&waker);
-                let mut closing = Box::pin(child.close_within(bound));
-
-                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
-                assert_eq!(owner_timer.next_deadline(), Some(deadline));
-                assert_eq!(owner_timer.pending_count(), 1);
-                lab.run_until_idle();
-                assert!(!close_state.lock().closed);
-                let before_foreign = wakes.0.load(Ordering::SeqCst);
-                if let Some((_, clock, driver)) = &ambient {
-                    assert!(driver.is_empty(), "no timer belongs to the foreign runtime");
-                    if advance_ambient {
-                        clock.advance_to(Time::from_secs(20_000));
-                    }
-                    assert_eq!(driver.process_timers(), 0);
-                    assert_eq!(wakes.0.load(Ordering::SeqCst), before_foreign);
-                }
-                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
-
-                lab.advance_time_to(deadline.saturating_sub_nanos(1));
-                assert_eq!(owner_timer.process_timers(), 0);
-                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
-                let before_expiry = wakes.0.load(Ordering::SeqCst);
-                lab.advance_time_to(deadline);
-                assert_eq!(owner_timer.process_timers(), 1);
-                assert!(wakes.0.load(Ordering::SeqCst) > before_expiry);
-                // Expiry asks the owning scheduler for its live-task snapshot.
-                assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
-                lab.run_until_idle();
-                let report = ready_report(closing.as_mut(), &mut context, ambient_cx);
-                assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
-                assert_eq!(report.elapsed, bound);
-                assert_eq!(report.stragglers, vec![straggler_id]);
-                assert!(owner_timer.is_empty(), "completion disarms before future drop");
-                if let Some((_, _, driver)) = &ambient {
-                    assert!(driver.is_empty());
-                }
-                release_and_drain(&mut lab, &gate, &close_state);
-            }
-        }
-
-        #[test]
-        fn bounded_close_cleans_timer_when_quiescence_wins() {
+    fn bounded_close_uses_owner_timer_outside_ambient_runtime() {
+        for (seed, ambient_start, advance_ambient) in [
+            (0x34_C500, None, false),
+            (0x34_C501, Some(Time::ZERO), false),
+            (0x34_C502, Some(Time::from_secs(10_000)), true),
+        ] {
             let start = Time::from_secs(5_000);
-            let (mut lab, child, _straggler, gate) = parked_child(0x34_C503, start);
-            let timer = child.cx().timer_driver().unwrap();
+            let bound = Duration::from_millis(50);
+            let deadline = start + bound;
+            let (mut lab, child, straggler, gate) = parked_child(seed, start);
+            let owner_timer = child.cx().timer_driver().expect("owner timer");
             let close_state = Arc::clone(&child.close_notify);
-            let mut context = Context::from_waker(Waker::noop());
-            let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
-            assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
-            assert_eq!(timer.pending_count(), 1);
-            lab.run_until_idle();
-            lab.advance_time_to(start + Duration::from_millis(25));
-            release_and_drain(&mut lab, &gate, &close_state);
-            let report = ready_report(closing.as_mut(), &mut context, None);
-            assert_eq!(report.outcome, ChildRegionCloseOutcome::Quiescent);
-            assert_eq!(report.elapsed, Duration::from_millis(25));
-            assert!(report.stragglers.is_empty());
-            assert!(timer.is_empty(), "quiescence disarms before future drop");
-        }
+            let straggler_id = straggler.task_id();
+            // A cleanup deadline must not become a cancellation checkpoint.
+            child.cx().set_cancel_reason(CancelReason::shutdown());
+            let ambient = ambient_start.map(foreign_context);
+            let ambient_cx = ambient.as_ref().map(|(cx, _, _)| cx);
+            let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut context = Context::from_waker(&waker);
+            let mut closing = Box::pin(child.close_within(bound));
 
-        #[test]
-        fn dropping_bounded_close_disarms_timer_but_retains_straggler() {
-            let (mut lab, child, _straggler, gate) =
-                parked_child(0x34_C504, Time::from_secs(5_000));
-            let timer = child.cx().timer_driver().unwrap();
-            let close_state = Arc::clone(&child.close_notify);
-            let mut context = Context::from_waker(Waker::noop());
-            let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
-            assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
-            assert_eq!(timer.pending_count(), 1);
-            drop(closing);
-            assert!(timer.is_empty());
+            assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+            assert_eq!(owner_timer.next_deadline(), Some(deadline));
+            assert_eq!(owner_timer.pending_count(), 1);
             lab.run_until_idle();
-            assert!(!close_state.lock().closed, "dropping the wait does not detach the task");
-            assert_eq!(lab.state.live_task_count(), 1);
-            release_and_drain(&mut lab, &gate, &close_state);
-        }
-
-        #[test]
-        fn bounded_close_handles_zero_and_saturated_bounds() {
-            for (seed, start, bound, expected_elapsed) in [
-                (0x34_C505, Time::from_secs(5_000), Duration::ZERO, Duration::ZERO),
-                (
-                    0x34_C506,
-                    Time::MAX.saturating_sub_nanos(1_000_000),
-                    Duration::MAX,
-                    Duration::from_millis(1),
-                ),
-            ] {
-                let (mut lab, child, straggler, gate) = parked_child(seed, start);
-                let timer = child.cx().timer_driver().unwrap();
-                let close_state = Arc::clone(&child.close_notify);
-                let mut context = Context::from_waker(Waker::noop());
-                let mut closing = Box::pin(child.close_within(bound));
-                assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
-                if bound.is_zero() {
-                    assert!(timer.is_empty(), "zero bound never arms a timer");
-                } else {
-                    // Start inside the timer wheel's horizon while overflowing
-                    // the requested duration, so the saturated deadline is exact.
-                    assert_eq!(timer.next_deadline(), Some(Time::MAX));
-                    lab.advance_time_to(Time::MAX);
-                    assert_eq!(timer.process_timers(), 1);
-                    assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+            assert!(!close_state.lock().closed);
+            let before_foreign = wakes.0.load(Ordering::SeqCst);
+            if let Some((_, clock, driver)) = &ambient {
+                assert!(driver.is_empty(), "no timer belongs to the foreign runtime");
+                if advance_ambient {
+                    clock.advance_to(Time::from_secs(20_000));
                 }
-                lab.run_until_idle();
-                let report = ready_report(closing.as_mut(), &mut context, None);
-                assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
-                assert_eq!(report.elapsed, expected_elapsed);
-                assert_eq!(report.stragglers, vec![straggler.task_id()]);
-                assert!(timer.is_empty());
-                release_and_drain(&mut lab, &gate, &close_state);
+                assert_eq!(driver.process_timers(), 0);
+                assert_eq!(wakes.0.load(Ordering::SeqCst), before_foreign);
             }
-        }
+            assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
 
-        #[test]
-        fn bounded_close_refuses_denied_time_but_still_requests_cleanup() {
-            let (mut lab, mut child, _straggler, gate) =
-                parked_child(0x34_C507, Time::from_secs(5_000));
-            let timer = child.cx().timer_driver().unwrap();
-            let close_state = Arc::clone(&child.close_notify);
-            child.cx.runtime_mask = crate::cx::cap::CapMask::none();
-            let (ambient, _, foreign_timer) = foreign_context(Time::from_secs(10_000));
-            let mut context = Context::from_waker(Waker::noop());
-            let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
-            assert!(matches!(
-                poll_under(closing.as_mut(), &mut context, Some(&ambient)),
-                Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
-            ));
-            assert!(timer.is_empty());
-            assert!(foreign_timer.is_empty());
-            drop(closing);
+            lab.advance_time_to(deadline.saturating_sub_nanos(1));
+            assert_eq!(owner_timer.process_timers(), 0);
+            assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
+            let before_expiry = wakes.0.load(Ordering::SeqCst);
+            lab.advance_time_to(deadline);
+            assert_eq!(owner_timer.process_timers(), 1);
+            assert!(wakes.0.load(Ordering::SeqCst) > before_expiry);
+            // Expiry asks the owning scheduler for its live-task snapshot.
+            assert!(poll_under(closing.as_mut(), &mut context, ambient_cx).is_pending());
             lab.run_until_idle();
-            release_and_drain(&mut lab, &gate, &close_state);
-        }
-
-        #[test]
-        fn bounded_close_without_driver_uses_explicit_wall_clock() {
-            let (mut lab, mut child, _straggler, gate) =
-                parked_child(0x34_C508, Time::from_secs(5_000));
-            let owner_timer = child.cx().timer_driver().unwrap();
-            let close_state = Arc::clone(&child.close_notify);
-            // Preserve the real admitted region and gateway, but model a
-            // principal whose authorized context has no timer driver.
-            child.cx = Cx::new_with_drivers(
-                child.region_id(),
-                child.cx().task_id(),
-                Budget::INFINITE,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
-            let (ambient, _, foreign_timer) = foreign_context(Time::MAX);
-            let mut context = Context::from_waker(Waker::noop());
-            let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
-            assert!(poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending());
-            lab.run_until_idle();
+            let report = ready_report(closing.as_mut(), &mut context, ambient_cx);
+            assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
+            assert_eq!(report.elapsed, bound);
+            assert_eq!(report.stragglers, vec![straggler_id]);
             assert!(
-                poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending(),
-                "a saturated foreign clock cannot expire a wall-clock bound"
+                owner_timer.is_empty(),
+                "completion disarms before future drop"
             );
-            assert!(owner_timer.is_empty());
-            assert!(foreign_timer.is_empty());
-            drop(closing);
+            if let Some((_, _, driver)) = &ambient {
+                assert!(driver.is_empty());
+            }
             release_and_drain(&mut lab, &gate, &close_state);
         }
     }
+
+    #[test]
+    fn bounded_close_cleans_timer_when_quiescence_wins() {
+        let start = Time::from_secs(5_000);
+        let (mut lab, child, _straggler, gate) = parked_child(0x34_C503, start);
+        let timer = child.cx().timer_driver().unwrap();
+        let close_state = Arc::clone(&child.close_notify);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
+        assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+        lab.run_until_idle();
+        lab.advance_time_to(start + Duration::from_millis(25));
+        release_and_drain(&mut lab, &gate, &close_state);
+        let report = ready_report(closing.as_mut(), &mut context, None);
+        assert_eq!(report.outcome, ChildRegionCloseOutcome::Quiescent);
+        assert_eq!(report.elapsed, Duration::from_millis(25));
+        assert!(report.stragglers.is_empty());
+        assert!(timer.is_empty(), "quiescence disarms before future drop");
+    }
+
+    #[test]
+    fn dropping_bounded_close_disarms_timer_but_retains_straggler() {
+        let (mut lab, child, _straggler, gate) = parked_child(0x34_C504, Time::from_secs(5_000));
+        let timer = child.cx().timer_driver().unwrap();
+        let close_state = Arc::clone(&child.close_notify);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
+        assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+        drop(closing);
+        assert!(timer.is_empty());
+        lab.run_until_idle();
+        assert!(
+            !close_state.lock().closed,
+            "dropping the wait does not detach the task"
+        );
+        assert_eq!(lab.state.live_task_count(), 1);
+        release_and_drain(&mut lab, &gate, &close_state);
+    }
+
+    #[test]
+    fn bounded_close_handles_zero_and_saturated_bounds() {
+        for (seed, start, bound, expected_elapsed) in [
+            (
+                0x34_C505,
+                Time::from_secs(5_000),
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            (
+                0x34_C506,
+                Time::MAX.saturating_sub_nanos(1_000_000),
+                Duration::MAX,
+                Duration::from_millis(1),
+            ),
+        ] {
+            let (mut lab, child, straggler, gate) = parked_child(seed, start);
+            let timer = child.cx().timer_driver().unwrap();
+            let close_state = Arc::clone(&child.close_notify);
+            let mut context = Context::from_waker(Waker::noop());
+            let mut closing = Box::pin(child.close_within(bound));
+            assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+            if bound.is_zero() {
+                assert!(timer.is_empty(), "zero bound never arms a timer");
+            } else {
+                // Start inside the timer wheel's horizon while overflowing
+                // the requested duration, so the saturated deadline is exact.
+                assert_eq!(timer.next_deadline(), Some(Time::MAX));
+                lab.advance_time_to(Time::MAX);
+                assert_eq!(timer.process_timers(), 1);
+                assert!(poll_under(closing.as_mut(), &mut context, None).is_pending());
+            }
+            lab.run_until_idle();
+            let report = ready_report(closing.as_mut(), &mut context, None);
+            assert_eq!(report.outcome, ChildRegionCloseOutcome::TimedOut);
+            assert_eq!(report.elapsed, expected_elapsed);
+            assert_eq!(report.stragglers, vec![straggler.task_id()]);
+            assert!(timer.is_empty());
+            release_and_drain(&mut lab, &gate, &close_state);
+        }
+    }
+
+    #[test]
+    fn bounded_close_refuses_denied_time_but_still_requests_cleanup() {
+        let (mut lab, mut child, _straggler, gate) =
+            parked_child(0x34_C507, Time::from_secs(5_000));
+        let timer = child.cx().timer_driver().unwrap();
+        let close_state = Arc::clone(&child.close_notify);
+        child.cx.runtime_mask = crate::cx::cap::CapMask::none();
+        let (ambient, _, foreign_timer) = foreign_context(Time::from_secs(10_000));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut closing = Box::pin(child.close_within(Duration::from_millis(50)));
+        assert!(matches!(
+            poll_under(closing.as_mut(), &mut context, Some(&ambient)),
+            Poll::Ready(Err(ChildRegionError::RuntimeUnavailable))
+        ));
+        assert!(timer.is_empty());
+        assert!(foreign_timer.is_empty());
+        drop(closing);
+        lab.run_until_idle();
+        release_and_drain(&mut lab, &gate, &close_state);
+    }
+
+    #[test]
+    fn bounded_close_without_driver_uses_explicit_wall_clock() {
+        let (mut lab, mut child, _straggler, gate) =
+            parked_child(0x34_C508, Time::from_secs(5_000));
+        let owner_timer = child.cx().timer_driver().unwrap();
+        let close_state = Arc::clone(&child.close_notify);
+        // Preserve the real admitted region and gateway, but model a
+        // principal whose authorized context has no timer driver.
+        child.cx = Cx::new_with_drivers(
+            child.region_id(),
+            child.cx().task_id(),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (ambient, _, foreign_timer) = foreign_context(Time::MAX);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut closing = Box::pin(child.close_within(Duration::from_secs(3_600)));
+        assert!(poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending());
+        lab.run_until_idle();
+        assert!(
+            poll_under(closing.as_mut(), &mut context, Some(&ambient)).is_pending(),
+            "a saturated foreign clock cannot expire a wall-clock bound"
+        );
+        assert!(owner_timer.is_empty());
+        assert!(foreign_timer.is_empty());
+        drop(closing);
+        release_and_drain(&mut lab, &gate, &close_state);
+    }
+}

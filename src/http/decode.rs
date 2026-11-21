@@ -1,9 +1,9 @@
 //! Explicit, bounded content decoding shared by buffered and streaming HTTP messages.
 
 mod body;
-pub use body::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
 #[cfg(not(target_arch = "wasm32"))]
 pub use body::ContentDecodePlan;
+pub use body::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
 
 use super::compress::{ContentEncoding, DecompressionLimit, Decompressor};
 use super::{Method, Response};
@@ -67,7 +67,9 @@ impl Response {
         request_method: &Method,
         limit: DecompressionLimit,
     ) -> io::Result<()> {
-        let Some(decoder) = ContentDecoder::for_response(request_method, self.status, &self.headers)? else {
+        let Some(decoder) =
+            ContentDecoder::for_response(request_method, self.status, &self.headers)?
+        else {
             return Ok(());
         };
         if decoder.is_identity() {
@@ -115,10 +117,14 @@ impl ContentDecoder {
             return Ok(None);
         }
         let decoder = Self::from_fields(headers.iter().filter_map(|(name, value)| {
-            name.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
+            name.eq_ignore_ascii_case("content-encoding")
+                .then_some(value.as_str())
         }))?;
         if !decoder.is_identity()
-            && (status == 206 || headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-range")))
+            && (status == 206
+                || headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("content-range")))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -129,11 +135,17 @@ impl ContentDecoder {
     }
 
     pub(crate) fn from_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> io::Result<Self> {
-        Ok(Self { codings: content_codings(fields, false)? })
+        Ok(Self {
+            codings: content_codings(fields, false)?,
+        })
     }
 
-    pub(crate) fn from_request_fields<'a>(fields: impl IntoIterator<Item = &'a str>) -> io::Result<Self> {
-        Ok(Self { codings: content_codings(fields, true)? })
+    pub(crate) fn from_request_fields<'a>(
+        fields: impl IntoIterator<Item = &'a str>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            codings: content_codings(fields, true)?,
+        })
     }
 
     pub(crate) fn is_identity(&self) -> bool {
@@ -186,7 +198,9 @@ pub fn declared_empty(headers: &[(String, String)]) -> bool {
 
 fn check_size(size: usize, limit: DecompressionLimit) -> io::Result<()> {
     if size > limit.get() {
-        Err(super::compress::decompression_limit_error("decoded response exceeds output limit"))
+        Err(super::compress::decompression_limit_error(
+            "decoded response exceeds output limit",
+        ))
     } else {
         Ok(())
     }
@@ -237,12 +251,32 @@ fn content_codings<'a>(
             // Response decoding historically classifies unknown tokens alike.
             // Requests distinguish malformed token syntax (400) from a valid
             // but unsupported coding (415), without changing that public API.
-            if strict_tokens && !token.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*'
-                        | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
-            }) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed request content coding"));
+            if strict_tokens
+                && !token.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b'!' | b'#'
+                                | b'$'
+                                | b'%'
+                                | b'&'
+                                | b'\''
+                                | b'*'
+                                | b'+'
+                                | b'-'
+                                | b'.'
+                                | b'^'
+                                | b'_'
+                                | b'`'
+                                | b'|'
+                                | b'~'
+                        )
+                })
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "malformed request content coding",
+                ));
             }
             if codings.len() == MAX_CONTENT_CODINGS {
                 return Err(io::Error::new(
@@ -298,9 +332,12 @@ fn decoder_for(
             limit.get(),
         )))),
         #[cfg(not(feature = "compression"))]
-        ContentEncoding::Gzip | ContentEncoding::Deflate | ContentEncoding::Brotli => Err(
-            io::Error::new(io::ErrorKind::Unsupported, "response codec requires compression feature"),
-        ),
+        ContentEncoding::Gzip | ContentEncoding::Deflate | ContentEncoding::Brotli => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "response codec requires compression feature",
+            ))
+        }
     }
 }
 

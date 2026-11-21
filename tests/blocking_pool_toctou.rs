@@ -205,7 +205,11 @@ fn blocking_helper_boundary_census_requires_classification() {
         ("runtime/spawn_blocking.rs", "spawn_blocking_io", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_pool", 1),
         ("runtime/spawn_blocking.rs", "spawn_blocking_on_thread", 1),
-        ("runtime/spawn_blocking.rs", "spawn_blocking_io_off_worker", 1),
+        (
+            "runtime/spawn_blocking.rs",
+            "spawn_blocking_io_off_worker",
+            1,
+        ),
         // The strict siblings (`try_*`): they report a refusal and have no inline fallback. `try_spawn_blocking` is the
         // public dispatcher, `try_spawn_blocking_on_pool` and `try_spawn_blocking_on_thread` its two sinks, and
         // `try_spawn_blocking_io_on_thread` the committed write-behind thread starter that already refused on a failed

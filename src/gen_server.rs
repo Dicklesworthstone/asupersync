@@ -69,10 +69,10 @@
 //! }
 //! ```
 
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::actor::{ActorId, ActorState, dispatch_actor_shutdown_wakes, prepare_actor_abort};
 use crate::channel::mpsc;

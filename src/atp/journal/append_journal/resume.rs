@@ -13,11 +13,11 @@
 //! actual writer restoration still requires an independently matched Offer.
 
 use super::{
-    AppendJournal, JournalEntry, JournalError, JournalRecord, MerkleRoot, ObjectId,
-    ResumeChunkKey, TransferResumeStatus, TransferResumeSummary,
+    AppendJournal, JournalEntry, JournalError, JournalRecord, MerkleRoot, ObjectId, ResumeChunkKey,
+    TransferResumeStatus, TransferResumeSummary,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::types::Outcome;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl AppendJournal {
     /// Reconstruct authenticated progress with explicit per-transfer work limits.
@@ -52,7 +52,10 @@ impl AppendJournal {
         if let Err(error) = self.require_storage_ready() {
             return Outcome::Err(error);
         }
-        let entries = self.transfer_entries.get(transfer_id).map_or(&[][..], Vec::as_slice);
+        let entries = self
+            .transfer_entries
+            .get(transfer_id)
+            .map_or(&[][..], Vec::as_slice);
         if entries.len() > max_records {
             return Outcome::Err(projection_limit("records"));
         }
@@ -64,7 +67,10 @@ impl AppendJournal {
             };
             remaining = next;
         }
-        if entries.iter().any(|entry| !entry.record.verify_signature(&self.auth_key)) {
+        if entries
+            .iter()
+            .any(|entry| !entry.record.verify_signature(&self.auth_key))
+        {
             return Outcome::Err(invalid("resume journal record authentication failed"));
         }
         match build_with_range_limit(transfer_id, entries, max_ranges) {
@@ -110,11 +116,17 @@ fn receipt(
     total: Option<u64>,
     max_ranges: usize,
 ) -> Result<&mut Receipt, JournalError> {
-    let end = offset.checked_add(size)
+    let end = offset
+        .checked_add(size)
         .filter(|end| size != 0 && total.is_none_or(|total| *end <= total))
-        .ok_or_else(|| invalid("resume chunk has zero size, overflow, or exceeds offered transfer size"))?;
+        .ok_or_else(|| {
+            invalid("resume chunk has zero size, overflow, or exceeds offered transfer size")
+        })?;
     if let Some((previous, entry)) = receipts.range(..offset).next_back() {
-        if previous.checked_add(entry.size).is_none_or(|end| end > offset) {
+        if previous
+            .checked_add(entry.size)
+            .is_none_or(|end| end > offset)
+        {
             return Err(invalid("resume chunks overlap"));
         }
     }
@@ -130,7 +142,10 @@ fn receipt(
     if receipts.len() >= max_ranges && !receipts.contains_key(&offset) {
         return Err(projection_limit("ranges"));
     }
-    Ok(receipts.entry(offset).or_insert_with(|| Receipt { size, ..Receipt::default() }))
+    Ok(receipts.entry(offset).or_insert_with(|| Receipt {
+        size,
+        ..Receipt::default()
+    }))
 }
 
 pub(super) fn build(
@@ -158,15 +173,27 @@ fn build_with_range_limit(
             return Err(invalid("resume transfer records are not strictly ordered"));
         }
         last_sequence = Some(entry.sequence);
-        if entry.record.transfer_id().is_some_and(|id| id != transfer_id) {
+        if entry
+            .record
+            .transfer_id()
+            .is_some_and(|id| id != transfer_id)
+        {
             return Err(invalid("resume transfer record identity mismatch"));
         }
-        if matches!(&entry.record, JournalRecord::ProofDigest { .. } | JournalRecord::CompactionBoundary { .. }) {
+        if matches!(
+            &entry.record,
+            JournalRecord::ProofDigest { .. } | JournalRecord::CompactionBoundary { .. }
+        ) {
             continue;
         }
 
         match &entry.record {
-            JournalRecord::Offer { object_id, manifest_root, total_size, .. } => {
+            JournalRecord::Offer {
+                object_id,
+                manifest_root,
+                total_size,
+                ..
+            } => {
                 if terminal.is_some() {
                     return Err(invalid("resume offer follows a terminal decision"));
                 }
@@ -175,7 +202,9 @@ fn build_with_range_limit(
                         return Err(invalid("resume offer total_size conflict"));
                     }
                     if id != object_id || root != manifest_root {
-                        return Err(invalid("resume offer object identity or manifest root conflict"));
+                        return Err(invalid(
+                            "resume offer object identity or manifest root conflict",
+                        ));
                     }
                 }
                 if largest_end > *total_size {
@@ -183,22 +212,37 @@ fn build_with_range_limit(
                 }
                 offered = Some((object_id, manifest_root, *total_size));
             }
-            JournalRecord::CommitIntent { final_manifest_root, .. } => {
+            JournalRecord::CommitIntent {
+                final_manifest_root,
+                ..
+            } => {
                 if offered.is_some_and(|(_, root, _)| root != final_manifest_root) {
-                    return Err(invalid("resume commit intent differs from offered manifest root"));
+                    return Err(invalid(
+                        "resume commit intent differs from offered manifest root",
+                    ));
                 }
                 match terminal {
                     None => {}
                     Some(Terminal::Intent(root)) if root == final_manifest_root => {}
-                    _ => return Err(invalid("resume commit intent conflicts with an earlier terminal decision")),
+                    _ => {
+                        return Err(invalid(
+                            "resume commit intent conflicts with an earlier terminal decision",
+                        ));
+                    }
                 }
                 terminal = Some(Terminal::Intent(final_manifest_root));
             }
-            JournalRecord::CommitComplete { final_path, committed_size, .. } => {
+            JournalRecord::CommitComplete {
+                final_path,
+                committed_size,
+                ..
+            } => {
                 if offered.is_some_and(|(_, _, size)| size != *committed_size)
                     || largest_end > *committed_size
                 {
-                    return Err(invalid("resume completion size conflicts with recorded payload"));
+                    return Err(invalid(
+                        "resume completion size conflicts with recorded payload",
+                    ));
                 }
                 match terminal {
                     // A standalone legacy completion is still non-resumable.
@@ -206,7 +250,11 @@ fn build_with_range_limit(
                     None | Some(Terminal::Intent(_)) => {}
                     Some(Terminal::Complete(path, size))
                         if path == final_path.as_str() && size == *committed_size => {}
-                    _ => return Err(invalid("resume completion conflicts with an earlier terminal decision")),
+                    _ => {
+                        return Err(invalid(
+                            "resume completion conflicts with an earlier terminal decision",
+                        ));
+                    }
                 }
                 terminal = Some(Terminal::Complete(final_path, *committed_size));
             }
@@ -214,37 +262,79 @@ fn build_with_range_limit(
                 match terminal {
                     None => {}
                     Some(Terminal::Cancelled(previous)) if previous == reason.as_str() => {}
-                    _ => return Err(invalid("resume cancellation conflicts with an earlier terminal decision")),
+                    _ => {
+                        return Err(invalid(
+                            "resume cancellation conflicts with an earlier terminal decision",
+                        ));
+                    }
                 }
                 terminal = Some(Terminal::Cancelled(reason));
             }
-            JournalRecord::Rollback { rollback_reason, checkpoint_sequence, .. } => {
+            JournalRecord::Rollback {
+                rollback_reason,
+                checkpoint_sequence,
+                ..
+            } => {
                 match terminal {
                     None => {}
                     Some(Terminal::RolledBack(reason, sequence))
-                        if reason == rollback_reason.as_str() && sequence == *checkpoint_sequence => {}
-                    _ => return Err(invalid("resume rollback conflicts with an earlier terminal decision")),
+                        if reason == rollback_reason.as_str()
+                            && sequence == *checkpoint_sequence => {}
+                    _ => {
+                        return Err(invalid(
+                            "resume rollback conflicts with an earlier terminal decision",
+                        ));
+                    }
                 }
                 terminal = Some(Terminal::RolledBack(rollback_reason, *checkpoint_sequence));
             }
             record => {
                 if terminal.is_some() {
-                    return Err(invalid("resume payload or acceptance follows a terminal decision"));
+                    return Err(invalid(
+                        "resume payload or acceptance follows a terminal decision",
+                    ));
                 }
                 let (offset, size) = match record {
-                    JournalRecord::ChunkReceived { chunk_offset, chunk_size, .. }
-                    | JournalRecord::ChunkVerified { chunk_offset, chunk_size, .. }
-                    | JournalRecord::ChunkWritten { chunk_offset, chunk_size, .. }
-                    | JournalRecord::RepairDecode { chunk_offset, chunk_size, .. } => (*chunk_offset, *chunk_size),
+                    JournalRecord::ChunkReceived {
+                        chunk_offset,
+                        chunk_size,
+                        ..
+                    }
+                    | JournalRecord::ChunkVerified {
+                        chunk_offset,
+                        chunk_size,
+                        ..
+                    }
+                    | JournalRecord::ChunkWritten {
+                        chunk_offset,
+                        chunk_size,
+                        ..
+                    }
+                    | JournalRecord::RepairDecode {
+                        chunk_offset,
+                        chunk_size,
+                        ..
+                    } => (*chunk_offset, *chunk_size),
                     JournalRecord::Accept { .. } => continue,
                     _ => return Err(invalid("unsupported resume transition")),
                 };
-                let current = receipt(&mut receipts, offset, size, offered.map(|(_, _, size)| size), max_ranges)?;
+                let current = receipt(
+                    &mut receipts,
+                    offset,
+                    size,
+                    offered.map(|(_, _, size)| size),
+                    max_ranges,
+                )?;
                 largest_end = largest_end.max(offset + size); // Checked by receipt.
                 match record {
                     JournalRecord::ChunkReceived { chunk_hash, .. } => {
-                        if current.verified_hash.is_some_and(|hash| hash != *chunk_hash) {
-                            return Err(invalid("resume received hash conflicts with previous verification"));
+                        if current
+                            .verified_hash
+                            .is_some_and(|hash| hash != *chunk_hash)
+                        {
+                            return Err(invalid(
+                                "resume received hash conflicts with previous verification",
+                            ));
                         }
                         current.received = Some(*chunk_hash);
                         current.verified = false;
@@ -256,11 +346,16 @@ fn build_with_range_limit(
                         current.written = false;
                     }
                     JournalRecord::ChunkVerified { verified_hash, .. } => {
-                        if current.verified_hash.is_some_and(|hash| hash != *verified_hash) {
+                        if current
+                            .verified_hash
+                            .is_some_and(|hash| hash != *verified_hash)
+                        {
                             return Err(invalid("resume chunk verified hash conflict"));
                         }
                         if current.received.is_some_and(|hash| hash != *verified_hash) {
-                            return Err(invalid("resume verified hash differs from received payload"));
+                            return Err(invalid(
+                                "resume verified hash differs from received payload",
+                            ));
                         }
                         current.verified_hash = Some(*verified_hash);
                         current.verified = true;
@@ -282,34 +377,47 @@ fn build_with_range_limit(
     let status = match terminal {
         Some(Terminal::Intent(_)) => TransferResumeStatus::CommitIntentPending,
         Some(Terminal::Complete(path, size)) => TransferResumeStatus::Committed {
-            final_path: path.to_owned(), committed_size: size,
+            final_path: path.to_owned(),
+            committed_size: size,
         },
-        Some(Terminal::Cancelled(reason)) => TransferResumeStatus::Cancelled { reason: reason.to_owned() },
+        Some(Terminal::Cancelled(reason)) => TransferResumeStatus::Cancelled {
+            reason: reason.to_owned(),
+        },
         Some(Terminal::RolledBack(reason, sequence)) => TransferResumeStatus::RolledBack {
-            reason: reason.to_owned(), checkpoint_sequence: sequence,
+            reason: reason.to_owned(),
+            checkpoint_sequence: sequence,
         },
         None if entries.is_empty() => TransferResumeStatus::Unknown,
         None => TransferResumeStatus::Resumable,
     };
-    let (durable_chunks, durable_bytes, contiguous_prefix_bytes) = if matches!(status, TransferResumeStatus::Resumable) {
-        let mut verified = HashMap::new();
-        let mut written = HashSet::new();
-        for (offset, receipt) in receipts {
-            if receipt.verified && receipt.written {
-                let key = ResumeChunkKey { chunk_offset: offset, chunk_size: receipt.size };
-                if let Some(hash) = receipt.verified_hash {
-                    verified.insert(key, hash);
-                    written.insert(key);
+    let (durable_chunks, durable_bytes, contiguous_prefix_bytes) =
+        if matches!(status, TransferResumeStatus::Resumable) {
+            let mut verified = HashMap::new();
+            let mut written = HashSet::new();
+            for (offset, receipt) in receipts {
+                if receipt.verified && receipt.written {
+                    let key = ResumeChunkKey {
+                        chunk_offset: offset,
+                        chunk_size: receipt.size,
+                    };
+                    if let Some(hash) = receipt.verified_hash {
+                        verified.insert(key, hash);
+                        written.insert(key);
+                    }
                 }
             }
-        }
-        AppendJournal::durable_resume_chunks(&verified, &written, total_size)?
-    } else {
-        (Vec::new(), 0, 0)
-    };
+            AppendJournal::durable_resume_chunks(&verified, &written, total_size)?
+        } else {
+            (Vec::new(), 0, 0)
+        };
     Ok(TransferResumeSummary {
-        transfer_id: transfer_id.to_owned(), status, total_size, durable_chunks,
-        durable_bytes, contiguous_prefix_bytes, last_sequence,
+        transfer_id: transfer_id.to_owned(),
+        status,
+        total_size,
+        durable_chunks,
+        durable_bytes,
+        contiguous_prefix_bytes,
+        last_sequence,
     })
 }
 
@@ -323,21 +431,31 @@ mod bounded_tests {
     use crate::atp::object::ContentId;
     use crate::security::{AuthKey, AuthenticationTag};
 
-    fn key() -> AuthKey { AuthKey::from_seed(59) }
+    fn key() -> AuthKey {
+        AuthKey::from_seed(59)
+    }
 
     fn journal(path: &std::path::Path) -> AppendJournal {
-        AppendJournal::new(JournalConfig {
-            base_dir: path.to_owned(), force_sync: false,
-            max_journal_size: u64::MAX, ..JournalConfig::default()
-        }, key()).unwrap()
+        AppendJournal::new(
+            JournalConfig {
+                base_dir: path.to_owned(),
+                force_sync: false,
+                max_journal_size: u64::MAX,
+                ..JournalConfig::default()
+            },
+            key(),
+        )
+        .unwrap()
     }
 
     fn offer() -> JournalRecord {
         JournalRecord::Offer {
             transfer_id: "bounded".to_owned(),
             object_id: ObjectId::content(ContentId::from_bytes(b"abcdefgh")),
-            manifest_root: MerkleRoot::new([2; 32]), total_size: 8,
-            timestamp: 1, auth_tag: AuthenticationTag::zero(),
+            manifest_root: MerkleRoot::new([2; 32]),
+            total_size: 8,
+            timestamp: 1,
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 
@@ -346,25 +464,55 @@ mod bounded_tests {
         let timestamp = 2;
         let auth_tag = AuthenticationTag::zero();
         match kind {
-            0 => JournalRecord::ChunkReceived { transfer_id, chunk_offset: offset, chunk_size: 4,
-                chunk_hash: [7; 32], timestamp, auth_tag },
-            1 => JournalRecord::ChunkVerified { transfer_id, chunk_offset: offset, chunk_size: 4,
-                verified_hash: [7; 32], timestamp, auth_tag },
-            2 => JournalRecord::ChunkWritten { transfer_id, chunk_offset: offset, chunk_size: 4,
-                file_path: "not-opened".to_owned(), timestamp, auth_tag },
+            0 => JournalRecord::ChunkReceived {
+                transfer_id,
+                chunk_offset: offset,
+                chunk_size: 4,
+                chunk_hash: [7; 32],
+                timestamp,
+                auth_tag,
+            },
+            1 => JournalRecord::ChunkVerified {
+                transfer_id,
+                chunk_offset: offset,
+                chunk_size: 4,
+                verified_hash: [7; 32],
+                timestamp,
+                auth_tag,
+            },
+            2 => JournalRecord::ChunkWritten {
+                transfer_id,
+                chunk_offset: offset,
+                chunk_size: 4,
+                file_path: "not-opened".to_owned(),
+                timestamp,
+                auth_tag,
+            },
             _ => unreachable!(),
         }
     }
 
     fn history_bytes(journal: &AppendJournal) -> u64 {
-        journal.get_transfer_entries("bounded").unwrap().iter()
-            .map(|entry| 4 + entry.encode().len() as u64).sum()
+        journal
+            .get_transfer_entries("bounded")
+            .unwrap()
+            .iter()
+            .map(|entry| 4 + entry.encode().len() as u64)
+            .sum()
     }
 
-    fn limited(journal: &AppendJournal, records: usize, ranges: usize, bytes: u64, dimension: &str) {
-        assert!(matches!(journal.get_resume_summary_with_limits("bounded", records, ranges, bytes),
+    fn limited(
+        journal: &AppendJournal,
+        records: usize,
+        ranges: usize,
+        bytes: u64,
+        dimension: &str,
+    ) {
+        assert!(
+            matches!(journal.get_resume_summary_with_limits("bounded", records, ranges, bytes),
             Outcome::Err(JournalError::ReadFailure(message))
-                if message == format!("resume projection limit exceeded: {dimension}")));
+                if message == format!("resume projection limit exceeded: {dimension}"))
+        );
     }
 
     #[test]
@@ -376,15 +524,25 @@ mod bounded_tests {
         }
         let bytes = history_bytes(&journal);
         let expected = journal.get_resume_summary("bounded").unwrap();
-        assert_eq!(journal.get_resume_summary_with_limits("bounded", 4, 1, bytes).unwrap(), expected);
+        assert_eq!(
+            journal
+                .get_resume_summary_with_limits("bounded", 4, 1, bytes)
+                .unwrap(),
+            expected
+        );
         let before = journal.get_stats().sequence;
         limited(&journal, 3, 1, bytes, "records");
         limited(&journal, 4, 0, bytes, "ranges");
         limited(&journal, 4, 1, bytes - 1, "history bytes");
         assert_eq!(journal.get_stats().sequence, before);
         assert_eq!(journal.get_resume_summary("bounded").unwrap(), expected);
-        assert_eq!(journal.get_resume_summary_with_limits("absent", 0, 0, 0).unwrap().status,
-            TransferResumeStatus::Unknown);
+        assert_eq!(
+            journal
+                .get_resume_summary_with_limits("absent", 0, 0, 0)
+                .unwrap()
+                .status,
+            TransferResumeStatus::Unknown
+        );
     }
 
     #[test]
@@ -396,17 +554,23 @@ mod bounded_tests {
             for record in [record(0, 0), record(1, 0), record(2, 0)] {
                 journal.append(record).unwrap();
             }
-            let summary = journal.get_resume_summary_with_limits("bounded", 64, 1, 16384).unwrap();
+            let summary = journal
+                .get_resume_summary_with_limits("bounded", 64, 1, 16384)
+                .unwrap();
             assert_eq!(summary.durable_bytes, 4);
             assert_eq!(summary.durable_chunks.len(), 1);
         }
         journal.append(record(0, 4)).unwrap();
         limited(&journal, 64, 1, 16384, "ranges");
-        let summary = journal.get_resume_summary_with_limits("bounded", 64, 2, 16384).unwrap();
+        let summary = journal
+            .get_resume_summary_with_limits("bounded", 64, 2, 16384)
+            .unwrap();
         assert_eq!(summary.durable_bytes, 4);
         assert_eq!(summary.contiguous_prefix_bytes, 4);
         journal.append(record(0, 0)).unwrap();
-        let summary = journal.get_resume_summary_with_limits("bounded", 64, 2, 16384).unwrap();
+        let summary = journal
+            .get_resume_summary_with_limits("bounded", 64, 2, 16384)
+            .unwrap();
         assert_eq!(summary.durable_bytes, 0);
         limited(&journal, 64, 1, 16384, "ranges");
     }
@@ -416,33 +580,46 @@ mod bounded_tests {
         let root = tempfile::tempdir().unwrap();
         let mut journal = journal(root.path());
         journal.append(offer()).unwrap();
-        journal.append(JournalRecord::Cancellation {
-            transfer_id: "bounded".to_owned(), reason: "stopped".to_owned(),
-            timestamp: 3, auth_tag: AuthenticationTag::zero(),
-        }).unwrap();
+        journal
+            .append(JournalRecord::Cancellation {
+                transfer_id: "bounded".to_owned(),
+                reason: "stopped".to_owned(),
+                timestamp: 3,
+                auth_tag: AuthenticationTag::zero(),
+            })
+            .unwrap();
         let bytes = history_bytes(&journal);
-        assert!(matches!(journal.get_resume_summary_with_limits("bounded", 2, 0, bytes).unwrap().status,
-            TransferResumeStatus::Cancelled { reason } if reason == "stopped"));
+        assert!(
+            matches!(journal.get_resume_summary_with_limits("bounded", 2, 0, bytes).unwrap().status,
+            TransferResumeStatus::Cancelled { reason } if reason == "stopped")
+        );
         limited(&journal, 1, 0, bytes, "records");
         // Fault only the key supplied to the query, retaining the actual signed
         // records. Budget admission is not authentication and returns no state.
         journal.auth_key = AuthKey::from_seed(60);
         limited(&journal, 0, 0, 0, "records");
-        assert!(matches!(journal.get_resume_summary_with_limits("bounded", 2, 0, bytes),
+        assert!(
+            matches!(journal.get_resume_summary_with_limits("bounded", 2, 0, bytes),
             Outcome::Err(JournalError::Deserialization(message))
-                if message == "resume journal record authentication failed"));
+                if message == "resume journal record authentication failed")
+        );
         journal.auth_key = key();
         // Exercise the same existing uncertain-storage gate as the legacy API.
         journal.storage_failed = true;
-        assert!(matches!(journal.get_resume_summary_with_limits("bounded", 0, 0, 0),
-            Outcome::Err(JournalError::WriteFailure(_))));
+        assert!(matches!(
+            journal.get_resume_summary_with_limits("bounded", 0, 0, 0),
+            Outcome::Err(JournalError::WriteFailure(_))
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn bounded_projection_composes_with_native_physical_restore_and_suffix_receive() {
-        use crate::atp::journal::{CommitPolicy, FsyncPolicy, JournalRestoreLimits, ScopedReceiveOptions, SparseWriterConfig};
         use crate::atp::journal::sparse_writer::ScopedSparseWriter;
+        use crate::atp::journal::{
+            CommitPolicy, FsyncPolicy, JournalRestoreLimits, ScopedReceiveOptions,
+            SparseWriterConfig,
+        };
         use crate::atp::manifest::Manifest;
         use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
         use crate::cx::Cx;
@@ -453,8 +630,13 @@ mod bounded_tests {
 
         for workers in [1, 2] {
             let root = tempfile::tempdir().unwrap();
-            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new()
+                    .worker_threads(workers)
+                    .with_sharded_state(true)
+            };
             let runtime = builder.blocking_threads(1, 2).build().unwrap();
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
@@ -462,50 +644,111 @@ mod bounded_tests {
                 let id = object.id.clone();
                 let mut graph = ObjectGraph::new();
                 graph.add_root(object).unwrap();
-                let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+                let manifest =
+                    Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
                 let manifest_root = manifest.merkle_root.clone();
                 let base = root.path().join("journal");
-                let owner = cx.scoped_fs().run_io(move |_| {
-                    let mut journal = journal(&base);
-                    let tag = AuthenticationTag::zero();
-                    journal.append(JournalRecord::Offer {
-                        transfer_id: "bounded".to_owned(), object_id: id,
-                        manifest_root, total_size: 8, timestamp: 1, auth_tag: tag,
-                    }).unwrap();
-                    journal.append(JournalRecord::ChunkVerified {
-                        transfer_id: "bounded".to_owned(), chunk_offset: 0, chunk_size: 4,
-                        verified_hash: Sha256::digest(b"abcd").into(), timestamp: 2, auth_tag: tag,
-                    }).unwrap();
-                    journal.append(JournalRecord::ChunkWritten {
-                        transfer_id: "bounded".to_owned(), chunk_offset: 0, chunk_size: 4,
-                        file_path: "not-source-authority".to_owned(), timestamp: 3, auth_tag: tag,
-                    }).unwrap();
-                    journal.flush().unwrap();
-                    limited(&journal, 2, 1, 4096, "records");
-                    let summary = journal.get_resume_summary_with_limits("bounded", 3, 1, 4096).unwrap();
-                    assert_eq!(summary.contiguous_prefix_bytes, 4);
-                    Ok(Arc::new(journal))
-                }).await.unwrap();
+                let owner = cx
+                    .scoped_fs()
+                    .run_io(move |_| {
+                        let mut journal = journal(&base);
+                        let tag = AuthenticationTag::zero();
+                        journal
+                            .append(JournalRecord::Offer {
+                                transfer_id: "bounded".to_owned(),
+                                object_id: id,
+                                manifest_root,
+                                total_size: 8,
+                                timestamp: 1,
+                                auth_tag: tag,
+                            })
+                            .unwrap();
+                        journal
+                            .append(JournalRecord::ChunkVerified {
+                                transfer_id: "bounded".to_owned(),
+                                chunk_offset: 0,
+                                chunk_size: 4,
+                                verified_hash: Sha256::digest(b"abcd").into(),
+                                timestamp: 2,
+                                auth_tag: tag,
+                            })
+                            .unwrap();
+                        journal
+                            .append(JournalRecord::ChunkWritten {
+                                transfer_id: "bounded".to_owned(),
+                                chunk_offset: 0,
+                                chunk_size: 4,
+                                file_path: "not-source-authority".to_owned(),
+                                timestamp: 3,
+                                auth_tag: tag,
+                            })
+                            .unwrap();
+                        journal.flush().unwrap();
+                        limited(&journal, 2, 1, 4096, "records");
+                        let summary = journal
+                            .get_resume_summary_with_limits("bounded", 3, 1, 4096)
+                            .unwrap();
+                        assert_eq!(summary.contiguous_prefix_bytes, 4);
+                        Ok(Arc::new(journal))
+                    })
+                    .await
+                    .unwrap();
                 let source_path = root.path().join("retained");
-                cx.scoped_fs().write(source_path.clone(), b"abcd".to_vec()).await.unwrap();
-                let source = cx.scoped_fs().run_io(move |_| std::fs::File::open(source_path)).await.unwrap();
+                cx.scoped_fs()
+                    .write(source_path.clone(), b"abcd".to_vec())
+                    .await
+                    .unwrap();
+                let source = cx
+                    .scoped_fs()
+                    .run_io(move |_| std::fs::File::open(source_path))
+                    .await
+                    .unwrap();
                 let destination = root.path().join("destination");
                 let writer = ScopedSparseWriter::restore_from_journal(
-                    &cx, owner, "bounded".to_owned(), source, destination.clone(),
+                    &cx,
+                    owner,
+                    "bounded".to_owned(),
+                    source,
+                    destination.clone(),
                     SparseWriterConfig {
-                        enable_preallocation: false, fsync_policy: FsyncPolicy::BeforeCommit,
-                        commit_policy: CommitPolicy::AtomicRename, ..SparseWriterConfig::default()
-                    }, JournalRestoreLimits { max_bytes: 8, max_chunks: 2, max_chunk_bytes: 4 },
-                ).await.unwrap().unwrap();
-                assert_eq!(writer.checked_receive_offset(&cx).await.unwrap().unwrap(), 4);
-                let mut receiving = writer.resume_exact_at(
-                    &cx, b"efghNEXT".as_slice(), manifest,
-                    ScopedReceiveOptions { max_bytes: 8, max_chunks: 2, chunk_size: 4 }, 4,
-                ).unwrap();
+                        enable_preallocation: false,
+                        fsync_policy: FsyncPolicy::BeforeCommit,
+                        commit_policy: CommitPolicy::AtomicRename,
+                        ..SparseWriterConfig::default()
+                    },
+                    JournalRestoreLimits {
+                        max_bytes: 8,
+                        max_chunks: 2,
+                        max_chunk_bytes: 4,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    writer.checked_receive_offset(&cx).await.unwrap().unwrap(),
+                    4
+                );
+                let mut receiving = writer
+                    .resume_exact_at(
+                        &cx,
+                        b"efghNEXT".as_slice(),
+                        manifest,
+                        ScopedReceiveOptions {
+                            max_bytes: 8,
+                            max_chunks: 2,
+                            chunk_size: 4,
+                        },
+                        4,
+                    )
+                    .unwrap();
                 assert_eq!(receiving.wait().await.unwrap().unwrap(), destination);
                 assert_eq!(receiving.take_source().unwrap(), b"NEXT");
                 assert_eq!(std::fs::read(destination).unwrap(), b"abcdefgh");
-                assert_eq!(std::fs::read(root.path().join("retained")).unwrap(), b"abcd");
+                assert_eq!(
+                    std::fs::read(root.path().join("retained")).unwrap(),
+                    b"abcd"
+                );
             });
             let report = runtime.shutdown_drained(Duration::from_secs(5));
             assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");

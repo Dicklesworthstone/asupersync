@@ -1,7 +1,7 @@
 //! Behavioral regressions for the explicit authenticated full-object channel.
 
-use super::*;
 use super::super::{AtpFrameCodec, BytesMut, FrameTransport, FrameType, ProtocolVersion};
+use super::*;
 use crate::codec::Decoder;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
@@ -116,7 +116,13 @@ fn directional_and_session_keys_reject_reflection_and_cross_transfer_replay() {
     let context = SecurityContext::for_testing(138);
     for (bound_session, transfer) in [
         (session(7), "other-transfer"),
-        (RqDeltaSessionContext { destination_root: [92; 32], ..session(7) }, "transfer"),
+        (
+            RqDeltaSessionContext {
+                destination_root: [92; 32],
+                ..session(7)
+            },
+            "transfer",
+        ),
     ] {
         let mut other =
             AuthenticatedControl::new(&context, bound_session, transfer, ControlRole::Receiver)
@@ -185,7 +191,9 @@ impl AsyncWrite for TestIo {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let take = self.write_limit.map_or(buf.len(), |limit| limit.min(buf.len()));
+        let take = self
+            .write_limit
+            .map_or(buf.len(), |limit| limit.min(buf.len()));
         if take == 0 {
             return Poll::Pending;
         }
@@ -230,7 +238,10 @@ fn transport_ready_and_stashed_frames_are_verified_exactly_once() {
     let mut wire = seal(&mut sender, &first).to_wire_bytes().unwrap();
     wire.extend_from_slice(&seal(&mut sender, &second).to_wire_bytes().unwrap());
     let mut receiver = transport(
-        TestIo { input: wire, ..TestIo::default() },
+        TestIo {
+            input: wire,
+            ..TestIo::default()
+        },
         ControlRole::Receiver,
     );
     let ready = futures_lite::future::block_on(receiver.try_recv_ready())
@@ -238,10 +249,20 @@ fn transport_ready_and_stashed_frames_are_verified_exactly_once() {
         .unwrap();
     assert_eq!(ready, first);
     receiver.stashed = Some(ready);
-    assert_eq!(futures_lite::future::block_on(receiver.recv()).unwrap(), first);
-    assert_eq!(futures_lite::future::block_on(receiver.recv()).unwrap(), second);
     assert_eq!(
-        receiver.authenticated_control.as_ref().unwrap().receive_sequence,
+        futures_lite::future::block_on(receiver.recv()).unwrap(),
+        first
+    );
+    assert_eq!(
+        futures_lite::future::block_on(receiver.recv()).unwrap(),
+        second
+    );
+    assert_eq!(
+        receiver
+            .authenticated_control
+            .as_ref()
+            .unwrap()
+            .receive_sequence,
         2
     );
 }
@@ -293,7 +314,10 @@ fn udp_control_pump_fences_read_errors_and_eof() {
     runtime.block_on(runtime.handle().spawn(async {
         use super::super::{RqDatagramRoundStats, RqReceiverUdpFanout, pump_until_control};
         let cx = crate::cx::Cx::current().unwrap();
-        for kind in [std::io::ErrorKind::UnexpectedEof, std::io::ErrorKind::ConnectionReset] {
+        for kind in [
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
             let eof = kind == std::io::ErrorKind::UnexpectedEof;
             let mut control = transport(
                 TestIo {
@@ -303,10 +327,9 @@ fn udp_control_pump_fences_read_errors_and_eof() {
                 },
                 ControlRole::Receiver,
             );
-            let mut udp =
-                RqReceiverUdpFanout::bind("127.0.0.1".parse().unwrap(), 1, 64 * 1024)
-                    .await
-                    .unwrap();
+            let mut udp = RqReceiverUdpFanout::bind("127.0.0.1".parse().unwrap(), 1, 64 * 1024)
+                .await
+                .unwrap();
             let mut buffer = [0u8; 512];
             let mut accepted = 0;
             let mut stats = RqDatagramRoundStats::default();
@@ -327,7 +350,10 @@ fn udp_control_pump_fences_read_errors_and_eof() {
             .await
             .unwrap_err();
             assert!(matches!(failure, RqError::Io(ref error) if error.kind() == kind));
-            assert!(matches!(control.recv().await, Err(RqError::Authentication(_))));
+            assert!(matches!(
+                control.recv().await,
+                Err(RqError::Authentication(_))
+            ));
             assert!(matches!(
                 control.send(&frame(FrameType::Close)).await,
                 Err(RqError::Authentication(_))

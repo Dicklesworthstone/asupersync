@@ -9,8 +9,12 @@ use std::task::Wake;
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 impl Wake for Wakes {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 fn counter() -> (Arc<Wakes>, Waker) {
     crate::test_utils::init_test_logging();
@@ -31,13 +35,26 @@ fn cancellation_wakes_waiter_without_releasing_the_lock() {
     assert!(poll(waiting.as_mut(), &waker).is_pending());
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
     cx.cancel_fast(CancelKind::User);
-    assert!(count.0.load(Ordering::SeqCst) > 0, "cancellation is the only event");
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(
+        count.0.load(Ordering::SeqCst) > 0,
+        "cancellation is the only event"
+    );
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert_eq!(mutex.waiters(), 0);
     assert!(mutex.is_locked());
     assert_eq!(*held, 41);
-    assert_eq!(Arc::strong_count(&count), 2, "completed future retains no executor");
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::PolledAfterCompletion))));
+    assert_eq!(
+        Arc::strong_count(&count),
+        2,
+        "completed future retains no executor"
+    );
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::PolledAfterCompletion))
+    ));
 }
 
 #[test]
@@ -50,7 +67,10 @@ fn owned_acquisition_inherits_cancellation_wakeups() {
     assert!(poll(waiting.as_mut(), &waker).is_pending());
     cx.cancel_fast(CancelKind::User);
     assert!(count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert_eq!(mutex.waiters(), 0);
     assert_eq!(Arc::strong_count(&count), 2);
 }
@@ -69,7 +89,10 @@ fn dropping_one_same_waker_wait_does_not_unsubscribe_another() {
     assert_eq!(mutex.waiters(), 1);
     cx.cancel_fast(CancelKind::User);
     assert!(count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(poll(second.as_mut(), &waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(second.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert_eq!(mutex.waiters(), 0);
     assert_eq!(Arc::strong_count(&count), 2);
 }
@@ -104,7 +127,10 @@ fn moving_a_wait_updates_both_wake_targets() {
     cx.cancel_fast(CancelKind::User);
     assert_eq!(old.0.load(Ordering::SeqCst), 0);
     assert!(new.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(poll(waiting.as_mut(), &new_waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(waiting.as_mut(), &new_waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert_eq!(Arc::strong_count(&new), 2);
 }
 
@@ -123,10 +149,18 @@ fn cancelled_grantee_passes_ownership_to_the_next_waiter() {
     drop(held); // The FIFO turn now belongs to the first waiter.
     assert!(first_count.0.load(Ordering::SeqCst) > 0);
     first_cx.cancel_fast(CancelKind::User);
-    assert!(matches!(poll(first.as_mut(), &first_waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(first.as_mut(), &first_waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert!(next_count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(mutex.try_lock(), Err(TryLockError::Locked)), "no barging past the successor");
-    let Poll::Ready(Ok(guard)) = poll(next.as_mut(), &next_waker) else { panic!("successor must own the turn") };
+    assert!(
+        matches!(mutex.try_lock(), Err(TryLockError::Locked)),
+        "no barging past the successor"
+    );
+    let Poll::Ready(Ok(guard)) = poll(next.as_mut(), &next_waker) else {
+        panic!("successor must own the turn")
+    };
     assert_eq!(*guard, 9);
     drop(guard);
     assert!(mutex.try_lock().is_ok());
@@ -136,12 +170,17 @@ fn cancelled_grantee_passes_ownership_to_the_next_waiter() {
 fn ready_and_precancelled_locks_do_not_subscribe() {
     for cancelled in [false, true] {
         let cx = Cx::for_testing();
-        if cancelled { cx.cancel_fast(CancelKind::User); }
+        if cancelled {
+            cx.cancel_fast(CancelKind::User);
+        }
         let mutex = Mutex::new(());
         let (count, waker) = counter();
         let mut waiting = Box::pin(mutex.lock(&cx));
         match poll(waiting.as_mut(), &waker) {
-            Poll::Ready(Ok(guard)) => { assert!(!cancelled); drop(guard); }
+            Poll::Ready(Ok(guard)) => {
+                assert!(!cancelled);
+                drop(guard);
+            }
             Poll::Ready(Err(LockError::Cancelled)) => assert!(cancelled),
             _ => panic!("ready lock must not park"),
         }
@@ -161,7 +200,9 @@ fn successful_acquisition_clears_subscription_before_future_drop() {
     let mut waiting = Box::pin(mutex.lock(&cx));
     assert!(poll(waiting.as_mut(), &waker).is_pending());
     drop(held);
-    let Poll::Ready(Ok(guard)) = poll(waiting.as_mut(), &waker) else { panic!("ready guard") };
+    let Poll::Ready(Ok(guard)) = poll(waiting.as_mut(), &waker) else {
+        panic!("ready guard")
+    };
     assert_eq!(Arc::strong_count(&count), 2);
     let before = count.0.load(Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
@@ -183,7 +224,9 @@ fn masked_cancellation_does_not_forfeit_a_fifo_turn() {
         assert!(poll(waiting.as_mut(), &waker).is_pending());
         assert_eq!(mutex.waiters(), 1);
         drop(held);
-        let Poll::Ready(Ok(guard)) = poll(waiting.as_mut(), &waker) else { panic!("masked acquisition") };
+        let Poll::Ready(Ok(guard)) = poll(waiting.as_mut(), &waker) else {
+            panic!("masked acquisition")
+        };
         drop(guard);
     });
     assert!(cx.is_cancel_requested());
@@ -222,9 +265,19 @@ fn masked_waiters_retain_and_refresh_only_their_own_unmask_wake() {
         assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
     });
 
-    assert!(old_count.0.load(Ordering::SeqCst) > 0, "unmask wakes the live waiter");
-    assert_eq!(new_count.0.load(Ordering::SeqCst), 0, "the dropped waiter stays retired");
-    assert!(matches!(poll(second.as_mut(), &old_waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(
+        old_count.0.load(Ordering::SeqCst) > 0,
+        "unmask wakes the live waiter"
+    );
+    assert_eq!(
+        new_count.0.load(Ordering::SeqCst),
+        0,
+        "the dropped waiter stays retired"
+    );
+    assert!(matches!(
+        poll(second.as_mut(), &old_waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert_eq!(cx.cancel_reason(), Some(reason));
     assert_eq!(mutex.waiters(), 0);
     assert!(cx.inner.read().cancel_waker_registrations.is_empty());
@@ -244,7 +297,10 @@ fn terminal_cancellation_retires_deadline_state_without_waiting_for_deadline() {
     let mut waiting = Box::pin(mutex.lock_until(&cx, deadline));
     assert!(poll(waiting.as_mut(), &waker).is_pending());
     cx.cancel_fast(CancelKind::User);
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert!(waiting.deadline_sleep.is_none());
     assert!(waiting.cancelled.is_none());
     assert_eq!(mutex.waiters(), 0);
@@ -260,7 +316,10 @@ fn poisoned_completion_retires_the_cancellation_observer() {
     assert!(poll(waiting.as_mut(), &waker).is_pending());
     mutex.poison_for_testing();
     drop(held);
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::Poisoned))));
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Poisoned))
+    ));
     assert_eq!(Arc::strong_count(&count), 2);
     let before = count.0.load(Ordering::SeqCst);
     cx.cancel_fast(CancelKind::User);
@@ -270,9 +329,13 @@ fn poisoned_completion_retires_the_cancellation_observer() {
 struct CancelOnDrop(Cx);
 // The waker's Drop is the point: it cancels the context on retirement.
 #[allow(clippy::manual_noop_waker)]
-impl Wake for CancelOnDrop { fn wake(self: Arc<Self>) {} }
+impl Wake for CancelOnDrop {
+    fn wake(self: Arc<Self>) {}
+}
 impl Drop for CancelOnDrop {
-    fn drop(&mut self) { self.0.cancel_fast(CancelKind::User); }
+    fn drop(&mut self) {
+        self.0.cancel_fast(CancelKind::User);
+    }
 }
 
 #[test]
@@ -287,7 +350,10 @@ fn cancellation_from_waker_retirement_cannot_be_lost_during_migration() {
     }
     assert!(!cx.is_cancel_requested());
     let (count, waker) = counter();
-    assert!(matches!(poll(waiting.as_mut(), &waker), Poll::Ready(Err(LockError::Cancelled))));
+    assert!(matches!(
+        poll(waiting.as_mut(), &waker),
+        Poll::Ready(Err(LockError::Cancelled))
+    ));
     assert!(cx.is_cancel_requested());
     assert_eq!(mutex.waiters(), 0);
     assert_eq!(Arc::strong_count(&count), 2);
@@ -302,28 +368,38 @@ async fn independent_authority(cx: Cx) {
     let (started, mut parked) = crate::channel::oneshot::channel();
     let completed = Arc::new(AtomicBool::new(false));
     let child_completed = Arc::clone(&completed);
-    let mut task = cx.spawn(move |_child| async move {
-        let mut waiting = Box::pin(OwnedMutexGuard::lock(target, &observed));
-        let mut started = Some(started);
-        let result = std::future::poll_fn(|task| {
-            let result = waiting.as_mut().poll(task);
-            if result.is_pending() && let Some(started) = started.take() {
-                started.send_blocking(()).unwrap();
-            }
-            result
-        }).await;
-        assert!(matches!(result, Err(LockError::Cancelled)));
-        child_completed.store(true, Ordering::SeqCst);
-    }).unwrap();
+    let mut task = cx
+        .spawn(move |_child| async move {
+            let mut waiting = Box::pin(OwnedMutexGuard::lock(target, &observed));
+            let mut started = Some(started);
+            let result = std::future::poll_fn(|task| {
+                let result = waiting.as_mut().poll(task);
+                if result.is_pending()
+                    && let Some(started) = started.take()
+                {
+                    started.send_blocking(()).unwrap();
+                }
+                result
+            })
+            .await;
+            assert!(matches!(result, Err(LockError::Cancelled)));
+            child_completed.store(true, Ordering::SeqCst);
+        })
+        .unwrap();
     parked.recv(&cx).await.unwrap();
     authority.cancel_fast(CancelKind::User);
-    for _ in 0..64 { crate::runtime::yield_now().await; }
+    for _ in 0..64 {
+        crate::runtime::yield_now().await;
+    }
     let completed_without_unlock = completed.load(Ordering::SeqCst);
     // Freeze the assertion before unlock, but release afterward so the old
     // implementation also terminates instead of hanging the test harness.
     drop(held);
     task.join(&cx).await.unwrap();
-    assert!(completed_without_unlock, "no runtime task cancellation or unlock rescued this wait");
+    assert!(
+        completed_without_unlock,
+        "no runtime task cancellation or unlock rescued this wait"
+    );
     assert!(!cx.is_cancel_requested());
     assert!(mutex.try_lock().is_ok());
 }
@@ -339,7 +415,9 @@ fn explicit_independent_context_wakes_lock_waits_under_lab() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn explicit_independent_context_wakes_lock_waits_on_native_runtime() {
-    let runtime = crate::runtime::RuntimeBuilder::current_thread().build().unwrap();
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
     runtime.block_on(runtime.handle().spawn(async {
         independent_authority(Cx::current().unwrap()).await;
     }));
@@ -355,15 +433,25 @@ fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
     use std::time::Duration;
 
     #[derive(Clone, Copy, Debug)]
-    enum LockKind { Borrowed, Owned, Deadline }
+    enum LockKind {
+        Borrowed,
+        Owned,
+        Deadline,
+    }
 
     for kind in [LockKind::Borrowed, LockKind::Owned, LockKind::Deadline] {
         for current_thread in [true, false] {
             for request_before_first_poll in [false, true] {
                 let driver = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
                 let cx: Cx = Cx::new_with_drivers(
-                    RegionId::new_for_test(0, 1), TaskId::new_for_test(0, 0),
-                    Budget::INFINITE, None, None, None, Some(driver.clone()), None,
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(0, 0),
+                    Budget::INFINITE,
+                    None,
+                    None,
+                    None,
+                    Some(driver.clone()),
+                    None,
                 );
                 let reason = CancelReason::timeout()
                     .with_cause(CancelReason::user("native masked mutex owner"));
@@ -390,53 +478,71 @@ fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
                                     .worker_threads(2)
                                     .with_sharded_state(true)
                             };
-                            let runtime = builder.with_timer_driver(driver.clone()).build().unwrap();
+                            let runtime =
+                                builder.with_timer_driver(driver.clone()).build().unwrap();
                             let joined = runtime.block_on(runtime.handle().spawn(async move {
                                 let root = Cx::current().expect("native mutex root");
-                                let mut child = root.spawn(move |_child_cx| async move {
-                                    let mut waiting = std::pin::pin!(async {
-                                        match kind {
-                                            LockKind::Borrowed => mutex.lock(&cx).await.map(drop),
-                                            LockKind::Owned => {
-                                                OwnedMutexGuard::lock(Arc::clone(&mutex), &cx)
-                                                    .await.map(drop)
+                                let mut child = root
+                                    .spawn(move |_child_cx| async move {
+                                        let mut waiting = std::pin::pin!(async {
+                                            match kind {
+                                                LockKind::Borrowed => {
+                                                    mutex.lock(&cx).await.map(drop)
+                                                }
+                                                LockKind::Owned => {
+                                                    OwnedMutexGuard::lock(Arc::clone(&mutex), &cx)
+                                                        .await
+                                                        .map(drop)
+                                                }
+                                                LockKind::Deadline => mutex
+                                                    .lock_until(&cx, Time::from_secs(3600))
+                                                    .await
+                                                    .map(drop),
                                             }
-                                            LockKind::Deadline => {
-                                                mutex.lock_until(&cx, Time::from_secs(3600))
-                                                    .await.map(drop)
+                                        });
+                                        let mut reported_initial = false;
+                                        let mut reported_requested = false;
+                                        let result = std::future::poll_fn(|task| {
+                                            let result = waiting.as_mut().poll(task);
+                                            if result.is_pending() {
+                                                *saved_waker.lock() = Some(task.waker().clone());
+                                                let requested = cx.is_cancel_requested();
+                                                if !reported_initial
+                                                    || (requested && !reported_requested)
+                                                {
+                                                    reported_initial = true;
+                                                    reported_requested |= requested;
+                                                    parked_tx
+                                                        .send((
+                                                            requested,
+                                                            mutex.waiters(),
+                                                            cx.inner
+                                                                .read()
+                                                                .cancel_waker_registrations
+                                                                .len(),
+                                                            driver.pending_count(),
+                                                        ))
+                                                        .unwrap();
+                                                }
                                             }
-                                        }
-                                    });
-                                    let mut reported_initial = false;
-                                    let mut reported_requested = false;
-                                    let result = std::future::poll_fn(|task| {
-                                        let result = waiting.as_mut().poll(task);
-                                        if result.is_pending() {
-                                            *saved_waker.lock() = Some(task.waker().clone());
-                                            let requested = cx.is_cancel_requested();
-                                            if !reported_initial || (requested && !reported_requested) {
-                                                reported_initial = true;
-                                                reported_requested |= requested;
-                                                parked_tx.send((
-                                                    requested,
-                                                    mutex.waiters(),
-                                                    cx.inner.read().cancel_waker_registrations.len(),
-                                                    driver.pending_count(),
-                                                )).unwrap();
-                                            }
-                                        }
-                                        result
-                                    }).await;
-                                    assert_eq!(mutex.waiters(), 0);
-                                    assert!(mutex.is_locked(), "holder still owns the mutex");
-                                    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
-                                    assert!(driver.is_empty());
-                                    (result, cx.cancel_reason())
-                                }).expect("spawn masked mutex waiter");
+                                            result
+                                        })
+                                        .await;
+                                        assert_eq!(mutex.waiters(), 0);
+                                        assert!(mutex.is_locked(), "holder still owns the mutex");
+                                        assert!(
+                                            cx.inner.read().cancel_waker_registrations.is_empty()
+                                        );
+                                        assert!(driver.is_empty());
+                                        (result, cx.cancel_reason())
+                                    })
+                                    .expect("spawn masked mutex waiter");
                                 child.join(&root).await
                             }));
                             let drain = runtime.shutdown_drained(Duration::from_secs(3));
-                            done_tx.send((joined, drain, runtime.is_quiescent())).unwrap();
+                            done_tx
+                                .send((joined, drain, runtime.is_quiescent()))
+                                .unwrap();
                         }
                     });
                     let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
@@ -453,22 +559,30 @@ fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
                 let woke_without_rescue = completed.is_ok();
                 if !woke_without_rescue {
                     let wake = saved_waker.lock().take();
-                    if let Some(wake) = wake { wake.wake(); }
+                    if let Some(wake) = wake {
+                        wake.wake();
+                    }
                 }
                 let (joined, drain, quiescent) = completed
                     .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
                     .expect("masked lock must finish after rescue wake");
                 worker.join().unwrap();
                 let timers = usize::from(matches!(kind, LockKind::Deadline));
-                assert_eq!(first_park.unwrap(), (request_before_first_poll, 1, 1, timers));
+                assert_eq!(
+                    first_park.unwrap(),
+                    (request_before_first_poll, 1, 1, timers)
+                );
                 if let Some(parked) = requested_park {
                     assert_eq!(parked.unwrap(), (true, 1, 1, timers));
                 }
                 assert!(woke_without_rescue, "{kind:?} missed its unmask wake");
-                assert!(matches!(
-                    &joined,
-                    Ok((Err(LockError::Cancelled), Some(actual))) if actual == &reason
-                ), "native join preserves the lock cancellation: {joined:?}");
+                assert!(
+                    matches!(
+                        &joined,
+                        Ok((Err(LockError::Cancelled), Some(actual))) if actual == &reason
+                    ),
+                    "native join preserves the lock cancellation: {joined:?}"
+                );
                 assert_eq!(*held, 29);
                 assert!(mutex.is_locked());
                 assert_eq!(mutex.waiters(), 0);
@@ -640,7 +754,10 @@ fn cancellation_during_waker_clone_aborts_without_enqueuing_waiter() {
 
     let mut waiting = Box::pin(mutex.lock(&cx));
     let outcome = poll(waiting.as_mut(), &waker);
-    assert!(cloned.load(Ordering::SeqCst), "waker was cloned on contended path");
+    assert!(
+        cloned.load(Ordering::SeqCst),
+        "waker was cloned on contended path"
+    );
     assert!(
         matches!(outcome, Poll::Ready(Err(LockError::Cancelled))),
         "aborts immediately on the same poll where clone triggered cancellation"
@@ -701,5 +818,3 @@ fn cancellation_during_waker_clone_does_not_acquire_newly_unlocked_mutex() {
     );
     assert_eq!(*mutex.try_lock().unwrap(), 20);
 }
-
-

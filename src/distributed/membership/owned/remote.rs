@@ -6,14 +6,16 @@
 //! `RemoteCap`/`RemoteRuntime` policy. No route, TLS credential, discovery source,
 //! authority decision, or replacement remote capability is created here.
 
-use super::{MembershipWorkError, MembershipWorkReport, OwnedMembershipController};
-use crate::cx::Cx;
-use crate::distributed::remote_owned::{RemoteRunConfig, RemoteRunError, RemoteRunReport, run_remote};
-use crate::remote::{ComputationName, NodeId, RemoteInput};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::distributed::membership::driver::SwimContact;
 #[cfg(not(target_arch = "wasm32"))]
 use super::work::MembershipWorkGuard;
+use super::{MembershipWorkError, MembershipWorkReport, OwnedMembershipController};
+use crate::cx::Cx;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::distributed::membership::driver::SwimContact;
+use crate::distributed::remote_owned::{
+    RemoteRunConfig, RemoteRunError, RemoteRunReport, run_remote,
+};
+use crate::remote::{ComputationName, NodeId, RemoteInput};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
@@ -55,8 +57,7 @@ impl MembershipRemoteReport {
     /// work. The caller still interprets opaque application success bytes.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.work.is_success()
-            && matches!(&self.work.task, Ok(Ok(remote)) if remote.is_success())
+        self.work.is_success() && matches!(&self.work.task, Ok(Ok(remote)) if remote.is_success())
     }
 }
 
@@ -111,7 +112,8 @@ impl OwnedMembershipController {
                 config.timeout,
                 config.child.clone(),
                 move |body_cx| async move {
-                    let report = run_remote(&body_cx, destination, computation, input, config).await;
+                    let report =
+                        run_remote(&body_cx, destination, computation, input, config).await;
                     // The body must acknowledge its own cancellation after drain.
                     // Otherwise ordinary Cx::spawn may replace this useful nested
                     // terminal/cleanup report with task-level cancellation.
@@ -175,14 +177,22 @@ impl OwnedMembershipController {
             ended: Box::pin(async move { contact.ended().await }),
         };
         let destination = node.clone();
-        let work = self.run_scoped_guarded(
-            cx, &node, incarnation, config.timeout, config.child.clone(), Some(guard),
-            move |body_cx| async move {
-                let report = run_remote(&body_cx, destination, computation, input, config).await;
-                let _ = body_cx.checkpoint();
-                report
-            },
-        ).await?;
+        let work = self
+            .run_scoped_guarded(
+                cx,
+                &node,
+                incarnation,
+                config.timeout,
+                config.child.clone(),
+                Some(guard),
+                move |body_cx| async move {
+                    let report =
+                        run_remote(&body_cx, destination, computation, input, config).await;
+                    let _ = body_cx.checkpoint();
+                    report
+                },
+            )
+            .await?;
         Ok(MembershipRemoteReport { work })
     }
 }

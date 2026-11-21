@@ -436,7 +436,11 @@ fn public_subchunk_diff_bounds_a_crafted_signatures_weak_fan_out() {
 fn public_reconstruct_manifest_bytes_fails_closed_before_allocating() {
     let mut store = ContentAddressedChunkStore::new();
     let data = pattern_bytes(64 * 1024, 7);
-    let sender = manifest(&mut store, "unverified-reconstruct", fixed_chunks(&data, 64 * 1024));
+    let sender = manifest(
+        &mut store,
+        "unverified-reconstruct",
+        fixed_chunks(&data, 64 * 1024),
+    );
 
     let empty_store = ContentAddressedChunkStore::new();
     let err = reconstruct_manifest_bytes(&sender, &empty_store).unwrap_err();
@@ -449,7 +453,11 @@ fn public_reconstruct_manifest_bytes_fails_closed_before_allocating() {
 fn public_apply_send_plan_rejects_whole_chunk_payload_mismatch_without_polluting_store() {
     let mut sender_store = ContentAddressedChunkStore::new();
     let data = pattern_bytes(16 * 1024, 9);
-    let sender = manifest(&mut sender_store, "whole-chunk-verify", fixed_chunks(&data, 16 * 1024));
+    let sender = manifest(
+        &mut sender_store,
+        "whole-chunk-verify",
+        fixed_chunks(&data, 16 * 1024),
+    );
     let receiver_store = ContentAddressedChunkStore::new();
 
     let base_plan = plan_incremental_resync(&sender, None, &receiver_store);
@@ -466,7 +474,10 @@ fn public_apply_send_plan_rejects_whole_chunk_payload_mismatch_without_polluting
         whole_chunk_bytes: 8 * 1024,
     };
     let err = apply_delta_resync_send_plan(&sender, &receiver_store, &mismatched_plan).unwrap_err();
-    assert!(matches!(err, DeltaError::ChunkPayloadSizeMismatch { index: 0, .. }));
+    assert!(matches!(
+        err,
+        DeltaError::ChunkPayloadSizeMismatch { index: 0, .. }
+    ));
 
     // 2. Mismatched hash
     let wrong_payload = vec![0x42; 16 * 1024];
@@ -480,8 +491,12 @@ fn public_apply_send_plan_rejects_whole_chunk_payload_mismatch_without_polluting
         payload_bytes: 16 * 1024,
         whole_chunk_bytes: 16 * 1024,
     };
-    let err = apply_delta_resync_send_plan(&sender, &receiver_store, &hash_mismatch_plan).unwrap_err();
-    assert!(matches!(err, DeltaError::ChunkPayloadHashMismatch { index: 0, .. }));
+    let err =
+        apply_delta_resync_send_plan(&sender, &receiver_store, &hash_mismatch_plan).unwrap_err();
+    assert!(matches!(
+        err,
+        DeltaError::ChunkPayloadHashMismatch { index: 0, .. }
+    ));
     assert!(!receiver_store.contains(&wrong_id));
 }
 

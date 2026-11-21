@@ -3,8 +3,8 @@
 use super::*;
 use crate::error::{Error, ErrorKind};
 use crate::lab::{LabConfig, LabRuntime};
-use crate::types::policy::{CollectAll, FailFast};
 use crate::types::Budget;
+use crate::types::policy::{CollectAll, FailFast};
 use std::cell::Cell;
 use std::marker::PhantomPinned;
 use std::sync::atomic::AtomicUsize;
@@ -18,7 +18,10 @@ struct CellValue {
 
 impl CellValue {
     fn new(value: u8) -> Self {
-        Self { value: Cell::new(value), _pinned: PhantomPinned }
+        Self {
+            value: Cell::new(value),
+            _pinned: PhantomPinned,
+        }
     }
 }
 
@@ -68,7 +71,9 @@ impl Policy for RecordedPolicy {
     type Error = Error;
 
     fn on_child_outcome<T>(&self, child: TaskId, outcome: &Outcome<T, Error>) -> PolicyAction {
-        self.observed.lock().push((child, outcome.severity().as_u8()));
+        self.observed
+            .lock()
+            .push((child, outcome.severity().as_u8()));
         if self.fail_fast {
             FailFast.on_child_outcome(child, outcome)
         } else {
@@ -131,60 +136,93 @@ fn lab_policy_failure_cancels_parked_sibling_before_owner_join_but_collect_all_d
             let callbacks = Arc::clone(&observed);
             let gate = Arc::new(ParkedMember::new());
             let gate_in_owner = Arc::clone(&gate);
-            let (owner, _join) = lab.state.create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::current().expect("Lab owner context");
-                let mut region = cx.open_policy_region::<u8, _>(
-                    ChildRegionSpec::inherit(),
-                    RecordedPolicy { fail_fast, observed: callbacks },
-                    NonZeroUsize::new(2).unwrap(),
-                ).await.expect("policy region opens");
-                let member_gate = Arc::clone(&gate_in_owner);
-                assert_eq!(region.spawn(move |child| async move {
-                    *member_gate.context.lock() = Some(child.clone());
-                    let mut cancelled = pin!(child.cancelled());
-                    let was_cancelled = poll_fn(|task| {
-                        if cancelled.as_mut().poll(task).is_ready() {
-                            return Poll::Ready(true);
-                        }
-                        *member_gate.waker.lock() = Some(task.waker().clone());
-                        if member_gate.released.load(Ordering::Acquire) {
-                            return Poll::Ready(false);
-                        }
-                        // This witness is published only after the cancellation
-                        // registration exists and this poll is returning Pending.
-                        member_gate.parked.store(true, Ordering::Release);
-                        Poll::Pending
-                    }).await;
-                    let outcome = if was_cancelled {
-                        assert!(child.checkpoint().is_err());
-                        let reason = child.cancel_reason().expect("attributed cancellation");
-                        crate::runtime::yield_now().await;
-                        Outcome::Cancelled(reason)
+            let (owner, _join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("Lab owner context");
+                    let mut region = cx
+                        .open_policy_region::<u8, _>(
+                            ChildRegionSpec::inherit(),
+                            RecordedPolicy {
+                                fail_fast,
+                                observed: callbacks,
+                            },
+                            NonZeroUsize::new(2).unwrap(),
+                        )
+                        .await
+                        .expect("policy region opens");
+                    let member_gate = Arc::clone(&gate_in_owner);
+                    assert_eq!(
+                        region
+                            .spawn(move |child| async move {
+                                *member_gate.context.lock() = Some(child.clone());
+                                let mut cancelled = pin!(child.cancelled());
+                                let was_cancelled = poll_fn(|task| {
+                                    if cancelled.as_mut().poll(task).is_ready() {
+                                        return Poll::Ready(true);
+                                    }
+                                    *member_gate.waker.lock() = Some(task.waker().clone());
+                                    if member_gate.released.load(Ordering::Acquire) {
+                                        return Poll::Ready(false);
+                                    }
+                                    // This witness is published only after the cancellation
+                                    // registration exists and this poll is returning Pending.
+                                    member_gate.parked.store(true, Ordering::Release);
+                                    Poll::Pending
+                                })
+                                .await;
+                                let outcome = if was_cancelled {
+                                    assert!(child.checkpoint().is_err());
+                                    let reason =
+                                        child.cancel_reason().expect("attributed cancellation");
+                                    crate::runtime::yield_now().await;
+                                    Outcome::Cancelled(reason)
+                                } else {
+                                    Outcome::Ok(41)
+                                };
+                                member_gate.cleaned.store(true, Ordering::Release);
+                                outcome
+                            })
+                            .unwrap(),
+                        0
+                    );
+                    wait_for(|| gate_in_owner.parked.load(Ordering::Acquire)).await;
+                    assert_eq!(
+                        region
+                            .spawn(|_| async {
+                                Outcome::Err(
+                                    Error::new(ErrorKind::InvalidInput)
+                                        .with_message("later member"),
+                                )
+                            })
+                            .unwrap(),
+                        1
+                    );
+                    // Deliberately do other work instead of joining: a later
+                    // failure must activate the policy at the member's boundary.
+                    wait_for(|| !observed.lock().is_empty()).await;
+                    if fail_fast {
+                        wait_for(|| gate_in_owner.cleaned.load(Ordering::Acquire)).await;
                     } else {
-                        Outcome::Ok(41)
-                    };
-                    member_gate.cleaned.store(true, Ordering::Release);
-                    outcome
-                }).unwrap(), 0);
-                wait_for(|| gate_in_owner.parked.load(Ordering::Acquire)).await;
-                assert_eq!(region.spawn(|_| async {
-                    Outcome::Err(Error::new(ErrorKind::InvalidInput).with_message("later member"))
-                }).unwrap(), 1);
-                // Deliberately do other work instead of joining: a later
-                // failure must activate the policy at the member's boundary.
-                wait_for(|| !observed.lock().is_empty()).await;
-                if fail_fast {
-                    wait_for(|| gate_in_owner.cleaned.load(Ordering::Acquire)).await;
-                } else {
-                    assert!(!gate_in_owner.context.lock().as_ref().unwrap().is_cancel_requested());
-                    assert!(!gate_in_owner.cleaned.load(Ordering::Acquire));
-                    gate_in_owner.release();
-                }
-                *slot.lock() = Some(region.join().await);
-            }).expect("create Lab owner");
+                        assert!(
+                            !gate_in_owner
+                                .context
+                                .lock()
+                                .as_ref()
+                                .unwrap()
+                                .is_cancel_requested()
+                        );
+                        assert!(!gate_in_owner.cleaned.load(Ordering::Acquire));
+                        gate_in_owner.release();
+                    }
+                    *slot.lock() = Some(region.join().await);
+                })
+                .expect("create Lab owner");
             lab.scheduler.lock().schedule(owner, 0);
             let run = lab.run_with_auto_advance();
-            let report = result.lock().take()
+            let report = result
+                .lock()
+                .take()
                 .unwrap_or_else(|| panic!("seed={seed:#x} fail_fast={fail_fast}: {run:?}"));
             assert_eq!(report.outcomes.len(), 2);
             assert!(matches!(&report.outcomes[1], Outcome::Err(error)
@@ -192,12 +230,17 @@ fn lab_policy_failure_cancels_parked_sibling_before_owner_join_but_collect_all_d
             if fail_fast {
                 assert!(matches!(&report.outcomes[0], Outcome::Cancelled(reason)
                     if reason.kind == CancelReason::sibling_failed().kind));
-                assert!(matches!(&report.first_action, Some((_, PolicyAction::CancelSiblings(_)))));
+                assert!(matches!(
+                    &report.first_action,
+                    Some((_, PolicyAction::CancelSiblings(_)))
+                ));
             } else {
                 assert!(matches!(&report.outcomes[0], Outcome::Ok(41)));
                 assert!(report.first_action.is_none());
-                assert!(matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
-                    if error.message() == Some("later member")));
+                assert!(
+                    matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
+                    if error.message() == Some("later member"))
+                );
             }
             assert!(gate.cleaned.load(Ordering::Acquire));
             assert!(report.close.is_ok());
@@ -205,7 +248,10 @@ fn lab_policy_failure_cancels_parked_sibling_before_owner_join_but_collect_all_d
             assert!(!report.escalated);
             assert_eq!(lab.state.live_task_count(), 0);
             assert_eq!(lab.state.pending_obligation_count(), 0);
-            assert!(lab.state.region(report.region).is_none(), "closed region reclaimed");
+            assert!(
+                lab.state.region(report.region).is_none(),
+                "closed region reclaimed"
+            );
         }
     }
 }
@@ -218,19 +264,32 @@ struct CellPolicy {
 impl Policy for CellPolicy {
     type Error = CellValue;
 
-    fn on_child_outcome<T>(&self, _child: TaskId, _outcome: &Outcome<T, CellValue>) -> PolicyAction {
+    fn on_child_outcome<T>(
+        &self,
+        _child: TaskId,
+        _outcome: &Outcome<T, CellValue>,
+    ) -> PolicyAction {
         self.calls.fetch_add(1, Ordering::Relaxed);
         PolicyAction::Continue
     }
 
-    fn aggregate_outcomes<T>(&self, outcomes: &[Outcome<T, CellValue>]) -> AggregateDecision<CellValue> {
-        match outcomes.iter().enumerate().max_by_key(|(_, outcome)| outcome.severity()) {
+    fn aggregate_outcomes<T>(
+        &self,
+        outcomes: &[Outcome<T, CellValue>],
+    ) -> AggregateDecision<CellValue> {
+        match outcomes
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, outcome)| outcome.severity())
+        {
             Some((index, Outcome::Panicked(payload))) => AggregateDecision::Panicked {
                 payload: payload.clone(),
                 first_panic_index: index,
             },
             Some((_, Outcome::Cancelled(reason))) => AggregateDecision::Cancelled(reason.clone()),
-            Some((_, Outcome::Err(error))) => AggregateDecision::FirstError(CellValue::new(error.value.get())),
+            Some((_, Outcome::Err(error))) => {
+                AggregateDecision::FirstError(CellValue::new(error.value.get()))
+            }
             Some((_, Outcome::Ok(_))) | None => AggregateDecision::AllOk,
         }
     }
@@ -250,24 +309,39 @@ fn lab_retained_cap_and_send_future_allow_non_sync_non_clone_non_unpin_results()
     let observed = Arc::clone(&calls);
     let refused_factory_ran = Arc::new(AtomicBool::new(false));
     let refused = Arc::clone(&refused_factory_ran);
-    let (owner, _join) = lab.state.create_task(root, Budget::INFINITE, async move {
-        let cx = Cx::current().expect("Lab owner context");
-        let mut region = cx.open_policy_region::<CellValue, _>(
-            ChildRegionSpec::inherit(),
-            CellPolicy { calls: Arc::clone(&observed) },
-            NonZeroUsize::new(2).unwrap(),
-        ).await.unwrap();
-        region.spawn(|_| async { Outcome::Ok(CellValue::new(3)) }).unwrap();
-        region.spawn(|_| async { Outcome::Err(CellValue::new(7)) }).unwrap();
-        wait_for(|| observed.load(Ordering::Relaxed) == 2).await;
-        // Completed values still occupy both retained slots.
-        assert_eq!(region.len(), 2);
-        assert!(matches!(region.spawn(move |_| {
-            refused.store(true, Ordering::Release);
-            async { Outcome::Ok(CellValue::new(9)) }
-        }), Err(PolicyRegionSpawnError::AtCapacity { limit: 2 })));
-        *result.lock() = Some(require_send(region.join()).await);
-    }).unwrap();
+    let (owner, _join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("Lab owner context");
+            let mut region = cx
+                .open_policy_region::<CellValue, _>(
+                    ChildRegionSpec::inherit(),
+                    CellPolicy {
+                        calls: Arc::clone(&observed),
+                    },
+                    NonZeroUsize::new(2).unwrap(),
+                )
+                .await
+                .unwrap();
+            region
+                .spawn(|_| async { Outcome::Ok(CellValue::new(3)) })
+                .unwrap();
+            region
+                .spawn(|_| async { Outcome::Err(CellValue::new(7)) })
+                .unwrap();
+            wait_for(|| observed.load(Ordering::Relaxed) == 2).await;
+            // Completed values still occupy both retained slots.
+            assert_eq!(region.len(), 2);
+            assert!(matches!(
+                region.spawn(move |_| {
+                    refused.store(true, Ordering::Release);
+                    async { Outcome::Ok(CellValue::new(9)) }
+                }),
+                Err(PolicyRegionSpawnError::AtCapacity { limit: 2 })
+            ));
+            *result.lock() = Some(require_send(region.join()).await);
+        })
+        .unwrap();
     lab.scheduler.lock().schedule(owner, 0);
     lab.run_until_quiescent();
     let report = slot.lock().take().expect("owner finishes");
@@ -275,13 +349,14 @@ fn lab_retained_cap_and_send_future_allow_non_sync_non_clone_non_unpin_results()
     assert!(!refused_factory_ran.load(Ordering::Acquire));
     assert!(matches!(&report.outcomes[0], Outcome::Ok(value) if value.value.get() == 3));
     assert!(matches!(&report.outcomes[1], Outcome::Err(error) if error.value.get() == 7));
-    assert!(matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
-        if error.value.get() == 7));
+    assert!(
+        matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
+        if error.value.get() == 7)
+    );
     assert!(report.close.is_ok());
     assert_eq!(lab.state.live_task_count(), 0);
     assert_eq!(lab.state.pending_obligation_count(), 0);
 }
-
 
 #[test]
 fn lab_suppressed_value_drop_panic_is_one_typed_policy_completion() {
@@ -305,40 +380,57 @@ fn lab_suppressed_value_drop_panic_is_one_typed_policy_completion() {
     let value_drops = Arc::clone(&drops);
     let panicking_id = Arc::new(Mutex::new(None));
     let identity = Arc::clone(&panicking_id);
-    let (owner, _join) = lab.state.create_task(root, Budget::INFINITE, async move {
-        let cx = Cx::current().expect("Lab owner context");
-        let mut region = cx.open_policy_region::<SuppressedValue, _>(
-            ChildRegionSpec::inherit(),
-            RecordedPolicy { fail_fast: true, observed: callbacks },
-            NonZeroUsize::new(2).unwrap(),
-        ).await.unwrap();
-        let sibling_gate = Arc::clone(&member_gate);
-        region.spawn(move |child| async move {
-            let mut cancelled = pin!(child.cancelled());
-            poll_fn(|task| match cancelled.as_mut().poll(task) {
-                Poll::Ready(()) => Poll::Ready(()),
-                Poll::Pending => {
-                    sibling_gate.parked.store(true, Ordering::Release);
-                    Poll::Pending
-                }
-            }).await;
-            assert!(child.checkpoint().is_err());
-            let reason = child.cancel_reason().expect("sibling cancellation");
-            crate::runtime::yield_now().await;
-            sibling_gate.cleaned.store(true, Ordering::Release);
-            Outcome::Cancelled(reason)
-        }).unwrap();
-        wait_for(|| member_gate.parked.load(Ordering::Acquire)).await;
-        region.spawn(move |child| async move {
-            *identity.lock() = Some(child.task_id());
-            // The terminal poll returns a value without acknowledging this
-            // request. Ordinary spawn classification must suppress that value;
-            // this adapter catches its destructor panic before typed observation.
-            child.cancel_with(crate::types::CancelKind::User, Some("terminal fixture cancel"));
-            Outcome::Ok(SuppressedValue(value_drops))
-        }).unwrap();
-        *slot.lock() = Some(region.join().await);
-    }).unwrap();
+    let (owner, _join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("Lab owner context");
+            let mut region = cx
+                .open_policy_region::<SuppressedValue, _>(
+                    ChildRegionSpec::inherit(),
+                    RecordedPolicy {
+                        fail_fast: true,
+                        observed: callbacks,
+                    },
+                    NonZeroUsize::new(2).unwrap(),
+                )
+                .await
+                .unwrap();
+            let sibling_gate = Arc::clone(&member_gate);
+            region
+                .spawn(move |child| async move {
+                    let mut cancelled = pin!(child.cancelled());
+                    poll_fn(|task| match cancelled.as_mut().poll(task) {
+                        Poll::Ready(()) => Poll::Ready(()),
+                        Poll::Pending => {
+                            sibling_gate.parked.store(true, Ordering::Release);
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    assert!(child.checkpoint().is_err());
+                    let reason = child.cancel_reason().expect("sibling cancellation");
+                    crate::runtime::yield_now().await;
+                    sibling_gate.cleaned.store(true, Ordering::Release);
+                    Outcome::Cancelled(reason)
+                })
+                .unwrap();
+            wait_for(|| member_gate.parked.load(Ordering::Acquire)).await;
+            region
+                .spawn(move |child| async move {
+                    *identity.lock() = Some(child.task_id());
+                    // The terminal poll returns a value without acknowledging this
+                    // request. Ordinary spawn classification must suppress that value;
+                    // this adapter catches its destructor panic before typed observation.
+                    child.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("terminal fixture cancel"),
+                    );
+                    Outcome::Ok(SuppressedValue(value_drops))
+                })
+                .unwrap();
+            *slot.lock() = Some(region.join().await);
+        })
+        .unwrap();
     lab.scheduler.lock().schedule(owner, 0);
     lab.run_until_quiescent();
     let report = result.lock().take().expect("owner finishes");
@@ -353,7 +445,10 @@ fn lab_suppressed_value_drop_panic_is_one_typed_policy_completion() {
     let callbacks = observed.lock();
     assert_eq!(callbacks.len(), 2, "one callback for each admitted member");
     assert_eq!(
-        callbacks.iter().filter(|(task, severity)| *task == panicking && *severity == 3).count(),
+        callbacks
+            .iter()
+            .filter(|(task, severity)| *task == panicking && *severity == 3)
+            .count(),
         1,
         "classification panic is observed once with the admitted identity",
     );

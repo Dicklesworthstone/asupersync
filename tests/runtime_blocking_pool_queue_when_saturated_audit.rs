@@ -101,21 +101,22 @@ fn blocking_pool_uses_unbounded_segqueue_for_task_storage() {
     // priority scheduling is opt-in; FIFO constructors must still select the
     // unbounded SegQueue and keep its direct, infallible push operation.
     let source = read_blocking_pool_source();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/blocking_pool/priority.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/blocking_pool/priority.rs");
     let queues = std::fs::read_to_string(path).expect("read blocking queue implementation");
 
     assert!(
         source.contains("queue: BlockingTaskQueue,"),
         "the pool must use the audited queue-selection wrapper",
     );
-    let constructor = source.find("pub fn with_config(").expect("FIFO constructor");
+    let constructor = source
+        .find("pub fn with_config(")
+        .expect("FIFO constructor");
     let policy_constructor = source[constructor..]
         .find("pub fn with_config_and_queue_policy(")
         .expect("explicit-policy constructor");
     assert!(
-        source[constructor..constructor + policy_constructor]
-            .contains("BlockingQueuePolicy::Fifo"),
+        source[constructor..constructor + policy_constructor].contains("BlockingQueuePolicy::Fifo"),
         "existing constructors must retain FIFO queue selection",
     );
     for required in [

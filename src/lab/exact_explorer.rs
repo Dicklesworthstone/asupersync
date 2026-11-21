@@ -25,15 +25,17 @@
 //! arbitrary Rust code. External concurrency is outside this model.
 
 use super::config::LabConfig;
-use super::runtime::{ForcedDispatch, ForcedSchedule, ForcedScheduleError, LabRunReport, LabRuntime};
+use super::runtime::{
+    ForcedDispatch, ForcedSchedule, ForcedScheduleError, LabRunReport, LabRuntime,
+};
 use std::collections::VecDeque;
 
 mod checkpoint;
+pub use super::schedule_minimizer::reproducer::WorkloadKey as ExactScheduleWorkloadKey;
 pub use checkpoint::{
     ExactScheduleCheckpoint, ExactScheduleCheckpointError, ExactScheduleCheckpointLimits,
     ExactScheduleProgress,
 };
-pub use super::schedule_minimizer::reproducer::WorkloadKey as ExactScheduleWorkloadKey;
 
 /// Explicit resource bounds for exact-prefix exploration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,7 +389,9 @@ impl ExactScheduleExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
-        self.resume_until(checkpoint, workload, factory, |run| !run.lab.lab_test_passed())
+        self.resume_until(checkpoint, workload, factory, |run| {
+            !run.lab.lab_test_passed()
+        })
     }
 
     /// Continues until a caller predicate requests a stop after an execution.
@@ -416,7 +420,8 @@ impl ExactScheduleExplorer {
         F: Fn(&mut LabRuntime),
         P: FnMut(&ExactScheduleRun) -> bool,
     {
-        self.validate().map_err(ExactScheduleResumeError::Configuration)?;
+        self.validate()
+            .map_err(ExactScheduleResumeError::Configuration)?;
         if checkpoint.workload != workload {
             return Err(ExactScheduleResumeError::WorkloadMismatch);
         }
@@ -435,9 +440,11 @@ impl ExactScheduleExplorer {
             if prefix.decisions.len() > self.limits.max_dispatches_per_run {
                 return Err(ExactScheduleResumeError::PrefixLimit);
             }
-            if prefix.decisions.iter().any(|decision| {
-                decision.enabled.len() > self.limits.max_inventory_entries
-            }) {
+            if prefix
+                .decisions
+                .iter()
+                .any(|decision| decision.enabled.len() > self.limits.max_inventory_entries)
+            {
                 return Err(ExactScheduleResumeError::InventoryLimit);
             }
         }
@@ -446,15 +453,12 @@ impl ExactScheduleExplorer {
         // conservative admission keeps even hostile decoded historical counts
         // exact, without saturating into a false exhaustion claim.
         if !checkpoint.pending.is_empty() {
-            let count = |value| {
-                u64::try_from(value).map_err(|_| ExactScheduleResumeError::CounterOverflow)
-            };
+            let count =
+                |value| u64::try_from(value).map_err(|_| ExactScheduleResumeError::CounterOverflow);
             let runs = count(self.limits.max_runs)?;
             let omitted = runs
                 .checked_mul(count(self.limits.max_dispatches_per_run)?)
-                .and_then(|n| {
-                    n.checked_mul(count(self.limits.max_inventory_entries - 1).ok()?)
-                })
+                .and_then(|n| n.checked_mul(count(self.limits.max_inventory_entries - 1).ok()?))
                 .ok_or(ExactScheduleResumeError::CounterOverflow)?;
             if checkpoint.progress.runs.checked_add(runs).is_none()
                 || checkpoint.progress.omitted.checked_add(omitted).is_none()
@@ -470,9 +474,9 @@ impl ExactScheduleExplorer {
             let Some(prefix) = checkpoint.pending.front().cloned() else {
                 break;
             };
-            let mut runtime = first_runtime.take().unwrap_or_else(|| {
-                LabRuntime::new_with_task_causality(self.config.clone())
-            });
+            let mut runtime = first_runtime
+                .take()
+                .unwrap_or_else(|| LabRuntime::new_with_task_causality(self.config.clone()));
             factory(&mut runtime);
             let run = runtime.run_exact_schedule_prefix(&prefix, self.limits);
             checkpoint.pending.pop_front();

@@ -35,20 +35,31 @@ impl WallWatchdog {
         let expired = signal.clone();
         let (stop, stopping) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if matches!(stopping.recv_timeout(WATCHDOG), Err(mpsc::RecvTimeoutError::Timeout)) {
+            if matches!(
+                stopping.recv_timeout(WATCHDOG),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
                 expired.expired.store(true, Ordering::Release);
                 let waiter = expired.waiter.lock().unwrap().take();
-                if let Some(waiter) = waiter { waiter.wake(); }
+                if let Some(waiter) = waiter {
+                    waiter.wake();
+                }
             }
         });
-        Self { signal, stop, thread: Some(thread) }
+        Self {
+            signal,
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
 impl Drop for WallWatchdog {
     fn drop(&mut self) {
         let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -61,14 +72,21 @@ where
     let owner = runtime.request_cx_with_budget(Budget::INFINITE);
     let driver = runtime.request_cx_with_budget(Budget::INFINITE);
     let watchdog = WallWatchdog::new();
-    runtime.block_on_with_cx(driver, Box::pin(async {
-        let mut future = Box::pin(test(owner));
-        poll_fn(|task| {
-            *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
-            assert!(!watchdog.signal.expired.load(Ordering::Acquire), "symbol transport wall watchdog elapsed");
-            future.as_mut().poll(task)
-        }).await;
-    }));
+    runtime.block_on_with_cx(
+        driver,
+        Box::pin(async {
+            let mut future = Box::pin(test(owner));
+            poll_fn(|task| {
+                *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
+                assert!(
+                    !watchdog.signal.expired.load(Ordering::Acquire),
+                    "symbol transport wall watchdog elapsed"
+                );
+                future.as_mut().poll(task)
+            })
+            .await;
+        }),
+    );
     drop(watchdog);
     assert!(runtime.shutdown_timeout(WATCHDOG));
 }
@@ -91,7 +109,10 @@ fn accept(listener: &TcpListener) -> std::net::TcpStream {
                 return socket;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < until, "native symbol peer was not contacted");
+                assert!(
+                    Instant::now() < until,
+                    "native symbol peer was not contacted"
+                );
                 std::thread::park_timeout(Duration::from_millis(1));
             }
             Err(error) => panic!("native symbol accept failed: {error}"),
@@ -101,7 +122,10 @@ fn accept(listener: &TcpListener) -> std::net::TcpStream {
 
 fn peer_exchange(io: &mut (impl Read + Write)) {
     let limits = SymbolFrameLimits::new(128).unwrap();
-    for expected in [symbol(0, b"first native symbol"), symbol(1, b"second native symbol")] {
+    for expected in [
+        symbol(0, b"first native symbol"),
+        symbol(1, b"second native symbol"),
+    ] {
         let mut prefix = [0u8; 4];
         io.read_exact(&mut prefix).unwrap();
         let length = u32::from_be_bytes(prefix) as usize;
@@ -114,7 +138,11 @@ fn peer_exchange(io: &mut (impl Read + Write)) {
         assert!(decoded[0].is_verified());
     }
     let mut probe = [0u8; 1];
-    assert_eq!(io.read(&mut probe).unwrap(), 0, "sender close completed after its last complete frame");
+    assert_eq!(
+        io.read(&mut probe).unwrap(),
+        0,
+        "sender close completed after its last complete frame"
+    );
     // A peer can continue its response direction after the writer half closes.
     for fragment in wire(&[symbol(2, b"reply after half-close")]).chunks(3) {
         io.write_all(fragment).unwrap();
@@ -131,7 +159,10 @@ async fn client_exchange<T: AsyncRead + AsyncWrite + Send + Unpin>(io: T) {
     sink.send(symbol(1, b"second native symbol")).await.unwrap();
     sink.close().await.unwrap();
     let received = stream.next().await.unwrap().unwrap();
-    assert_eq!(received.symbol(), symbol(2, b"reply after half-close").symbol());
+    assert_eq!(
+        received.symbol(),
+        symbol(2, b"reply after half-close").symbol()
+    );
     assert!(received.is_verified());
     assert!(stream.next().await.is_none());
 }
@@ -172,9 +203,12 @@ fn asynchronous_raptorq_sdk_transfers_an_authenticated_object_over_tcp() {
                 .config(sender_config)
                 .security(SecurityContext::new(AuthKey::from_seed(42)))
                 .transport(FramedSymbolSink::new(io, limits))
-                .build().unwrap();
+                .build()
+                .unwrap();
             let outcome = {
-                let mut session = sender.start_send_object(&sender_cx, object, &sent_data).unwrap();
+                let mut session = sender
+                    .start_send_object(&sender_cx, object, &sent_data)
+                    .unwrap();
                 session.run().await.unwrap()
             };
             assert_eq!(outcome.source_symbols, 9);
@@ -187,9 +221,12 @@ fn asynchronous_raptorq_sdk_transfers_an_authenticated_object_over_tcp() {
                 .config(config)
                 .security(SecurityContext::new(AuthKey::from_seed(42)))
                 .source(FramedSymbolStream::new(io, AuthKey::from_seed(42), limits))
-                .build().unwrap();
+                .build()
+                .unwrap();
             let outcome = {
-                let mut session = receiver.start_receive_object(&receiver_cx, &params).unwrap();
+                let mut session = receiver
+                    .start_receive_object(&receiver_cx, &params)
+                    .unwrap();
                 session.run().await.unwrap()
             };
             assert_eq!(outcome.data, data);
@@ -213,24 +250,40 @@ fn asynchronous_raptorq_sdk_transfers_an_authenticated_object_over_tcp() {
 #[test]
 fn authenticated_symbol_frames_work_over_verified_tls_and_owned_stream_halves() {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    const CERT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.crt"));
-    const KEY: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.key"));
+    const CERT: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tls/server.crt"
+    ));
+    const KEY: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tls/server.key"
+    ));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions().unwrap()
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![CertificateDer::from_pem_slice(CERT).unwrap()], PrivateKeyDer::from_pem_slice(KEY).unwrap())
+        .with_single_cert(
+            vec![CertificateDer::from_pem_slice(CERT).unwrap()],
+            PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+        )
         .unwrap();
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from_pem_slice(CERT).unwrap()).unwrap();
+    roots
+        .add(CertificateDer::from_pem_slice(CERT).unwrap())
+        .unwrap();
     let client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions().unwrap()
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
     let (listener, address) = listener();
     let peer = std::thread::spawn(move || {
         let socket = accept(&listener);
-        let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(Arc::new(server)).unwrap(), socket);
+        let mut tls = rustls::StreamOwned::new(
+            rustls::ServerConnection::new(Arc::new(server)).unwrap(),
+            socket,
+        );
         peer_exchange(&mut tls);
         assert_eq!(tls.conn.server_name(), Some("localhost"));
         tls.conn.send_close_notify();
@@ -238,7 +291,10 @@ fn authenticated_symbol_frames_work_over_verified_tls_and_owned_stream_halves() 
     });
     run_native(|_| async move {
         let tcp = TcpStream::connect(address).await.unwrap();
-        let tls = crate::tls::TlsConnector::new(client).connect("localhost", tcp).await.unwrap();
+        let tls = crate::tls::TlsConnector::new(client)
+            .connect("localhost", tcp)
+            .await
+            .unwrap();
         client_exchange(tls).await;
     });
     peer.join().unwrap();

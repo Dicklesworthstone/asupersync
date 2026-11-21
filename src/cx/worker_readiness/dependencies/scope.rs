@@ -1,7 +1,7 @@
 //! A dependent operation owns a subtree, not the prerequisite workers.
 
-use super::{DependencyError, DependencyLoss, ReadyDependencies, WorkerDependencies};
 use super::super::Cancellation;
+use super::{DependencyError, DependencyLoss, ReadyDependencies, WorkerDependencies};
 use crate::cx::{ChildRegionError, ChildRegionSpec, Cx};
 use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
@@ -24,7 +24,10 @@ impl DependencyScopeConfig {
     /// Inherit the caller's region envelope and select the drain budget explicitly.
     #[must_use]
     pub const fn new(shutdown_budget: Budget) -> Self {
-        Self { region: ChildRegionSpec::inherit(), shutdown_budget }
+        Self {
+            region: ChildRegionSpec::inherit(),
+            shutdown_budget,
+        }
     }
 }
 
@@ -101,9 +104,11 @@ impl<T, E> DependencyScopeReport<T, E> {
     /// Conservative aggregate success, not merely a successful work-task join.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.invoked && self.spawn_error.is_none()
+        self.invoked
+            && self.spawn_error.is_none()
             && matches!(&self.work, Some(Ok(Outcome::Ok(_))))
-            && self.stop.is_none() && self.cancellation.is_none()
+            && self.stop.is_none()
+            && self.cancellation.is_none()
             && self.cancellation_error.is_none()
             && matches!(&self.close, Ok(close)
                 if matches!(&close.outcome, Outcome::Ok(()) | Outcome::Cancelled(_))
@@ -118,7 +123,9 @@ struct WorkOwner<T> {
 
 impl<T> Drop for WorkOwner<T> {
     fn drop(&mut self) {
-        if !self.joined { self.task.abort(); }
+        if !self.joined {
+            self.task.abort();
+        }
     }
 }
 
@@ -188,7 +195,11 @@ impl WorkerDependencies {
             let marker = Arc::clone(&invoked);
             let task = region.cx().spawn(move |child_cx| async move {
                 if child_cx.checkpoint().is_err() {
-                    return Outcome::Cancelled(child_cx.cancel_reason().unwrap_or_else(CancelReason::shutdown));
+                    return Outcome::Cancelled(
+                        child_cx
+                            .cancel_reason()
+                            .unwrap_or_else(CancelReason::shutdown),
+                    );
                 }
                 if snapshot.first_lost().is_some() {
                     return Outcome::Cancelled(CancelReason::user("worker dependency changed"));
@@ -199,40 +210,60 @@ impl WorkerDependencies {
             match task {
                 Err(error) => spawn_error = Some(error),
                 Ok(task) => {
-                    let mut owner = WorkOwner { task, joined: false };
+                    let mut owner = WorkOwner {
+                        task,
+                        joined: false,
+                    };
                     let mut lost = Some(Box::pin(selected.wait_lost(cx)));
-                    result = Some(poll_fn(|task_cx| {
-                        registration.token = Some(cx.refresh_cancel_waker(registration.token, task_cx.waker()));
-                        let new_cancel = observe_cancel(cx, &mut cancellation);
-                        let mut request = new_cancel.then(|| cancellation.as_ref().expect("observed cancellation").clone());
-                        if stop.is_none() {
-                            if new_cancel {
-                                stop = cancellation.clone().map(DependencyStop::Cancelled);
-                            } else if let Some(wait) = lost.as_mut() {
-                                if let Poll::Ready(observed) = wait.as_mut().poll(task_cx) {
-                                    let cause = match observed {
-                                        Ok(loss) => DependencyStop::Lost(loss),
-                                        Err(DependencyError::Cancelled) => {
-                                            let reason = cx.cancel_reason().unwrap_or_else(CancelReason::shutdown);
-                                            cancellation = Some(reason.clone());
-                                            DependencyStop::Cancelled(reason)
-                                        }
-                                        Err(error) => DependencyStop::Observation(error),
-                                    };
-                                    request = Some(cause.reason());
-                                    stop = Some(cause);
+                    result = Some(
+                        poll_fn(|task_cx| {
+                            registration.token =
+                                Some(cx.refresh_cancel_waker(registration.token, task_cx.waker()));
+                            let new_cancel = observe_cancel(cx, &mut cancellation);
+                            let mut request = new_cancel.then(|| {
+                                cancellation
+                                    .as_ref()
+                                    .expect("observed cancellation")
+                                    .clone()
+                            });
+                            if stop.is_none() {
+                                if new_cancel {
+                                    stop = cancellation.clone().map(DependencyStop::Cancelled);
+                                } else if let Some(wait) = lost.as_mut() {
+                                    if let Poll::Ready(observed) = wait.as_mut().poll(task_cx) {
+                                        let cause = match observed {
+                                            Ok(loss) => DependencyStop::Lost(loss),
+                                            Err(DependencyError::Cancelled) => {
+                                                let reason = cx
+                                                    .cancel_reason()
+                                                    .unwrap_or_else(CancelReason::shutdown);
+                                                cancellation = Some(reason.clone());
+                                                DependencyStop::Cancelled(reason)
+                                            }
+                                            Err(error) => DependencyStop::Observation(error),
+                                        };
+                                        request = Some(cause.reason());
+                                        stop = Some(cause);
+                                    }
                                 }
                             }
-                        }
-                        if stop.is_some() { lost = None; }
-                        if let Some(reason) = request {
-                            if let Err(error) = region.cancel_with_budget(reason, config.shutdown_budget) {
-                                if cancellation_error.is_none() { cancellation_error = Some(error); }
-                                owner.task.abort();
+                            if stop.is_some() {
+                                lost = None;
                             }
-                        }
-                        owner.task.poll_join(task_cx)
-                    }).await);
+                            if let Some(reason) = request {
+                                if let Err(error) =
+                                    region.cancel_with_budget(reason, config.shutdown_budget)
+                                {
+                                    if cancellation_error.is_none() {
+                                        cancellation_error = Some(error);
+                                    }
+                                    owner.task.abort();
+                                }
+                            }
+                            owner.task.poll_join(task_cx)
+                        })
+                        .await,
+                    );
                     owner.joined = true;
                     drop(lost);
                 }
@@ -249,12 +280,22 @@ impl WorkerDependencies {
                 stop = cancellation.clone().map(DependencyStop::Cancelled);
             }
             closing.as_mut().poll(task_cx)
-        }).await.map(|close| DependencyRegionOutcome {
-            outcome: close.outcome, cleanup_outcome: close.cleanup_outcome,
+        })
+        .await
+        .map(|close| DependencyRegionOutcome {
+            outcome: close.outcome,
+            cleanup_outcome: close.cleanup_outcome,
         });
         Ok(DependencyScopeReport {
-            region: region_id, readiness: selected, invoked: invoked.load(Ordering::Acquire),
-            spawn_error, work: result, stop, cancellation, cancellation_error, close,
+            region: region_id,
+            readiness: selected,
+            invoked: invoked.load(Ordering::Acquire),
+            spawn_error,
+            work: result,
+            stop,
+            cancellation,
+            cancellation_error,
+            close,
         })
     }
 }

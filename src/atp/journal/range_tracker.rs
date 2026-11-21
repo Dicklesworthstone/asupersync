@@ -223,7 +223,10 @@ impl RangeTracker {
 
         // Coalesced ranges are disjoint: at most one predecessor can touch
         // the new start. Copy its endpoints before mutating the tree.
-        if let Some(previous) = self.ranges.range(..=range.start).next_back()
+        if let Some(previous) = self
+            .ranges
+            .range(..=range.start)
+            .next_back()
             .map(|(_, previous)| *previous)
             .filter(|previous| previous.end >= range.start)
         {
@@ -235,7 +238,10 @@ impl RangeTracker {
 
         // Include a successor starting exactly at the end (adjacency), without
         // computing end + 1, which would overflow for the last u64 interval.
-        while let Some(next) = self.ranges.range(range.start..=range.end).next()
+        while let Some(next) = self
+            .ranges
+            .range(range.start..=range.end)
+            .next()
             .map(|(_, next)| *next)
         {
             self.ranges.remove(&next.start);
@@ -252,7 +258,9 @@ impl RangeTracker {
         if range.is_empty() {
             return false;
         }
-        self.ranges.range(..range.end).next_back()
+        self.ranges
+            .range(..range.end)
+            .next_back()
             .is_some_and(|(_, previous)| previous.end > range.start)
     }
 
@@ -327,7 +335,9 @@ impl RangeTracker {
 
     /// Get the range that covers the given offset, if any
     pub fn get_covering_range(&self, offset: u64) -> Option<SparseRange> {
-        self.ranges.range(..=offset).next_back()
+        self.ranges
+            .range(..=offset)
+            .next_back()
             .map(|(_, range)| *range)
             .filter(|range| range.contains(offset))
     }
@@ -427,13 +437,20 @@ impl RangeTracker {
         }
         // Only the predecessor can begin before the query and still overlap.
         // Excluding range.start here prevents duplicating the first range below.
-        if let Some(previous) = self.ranges.range(..range.start).next_back()
+        if let Some(previous) = self
+            .ranges
+            .range(..range.start)
+            .next_back()
             .map(|(_, previous)| *previous)
             .filter(|previous| previous.end > range.start)
         {
             overlaps.push(previous);
         }
-        overlaps.extend(self.ranges.range(range.start..range.end).map(|(_, value)| *value));
+        overlaps.extend(
+            self.ranges
+                .range(range.start..range.end)
+                .map(|(_, value)| *value),
+        );
         overlaps
     }
 

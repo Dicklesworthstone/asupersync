@@ -1,13 +1,13 @@
-    use super::TerminationTally;
-    use crate::Cx;
-    use crate::runtime::{JoinError, RuntimeBuilder, SpawnError};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+use super::TerminationTally;
+use crate::Cx;
+use crate::runtime::{JoinError, RuntimeBuilder, SpawnError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn termination_tally_rejected_spawn_preserves_native_child_accounting() {
-        let runtime = RuntimeBuilder::current_thread().build().unwrap();
-        runtime.block_on(runtime.handle().spawn(async {
+#[test]
+fn termination_tally_rejected_spawn_preserves_native_child_accounting() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    runtime.block_on(runtime.handle().spawn(async {
             let cx = Cx::current().expect("native parent context");
             let terminated = Arc::new(AtomicUsize::new(0));
             let mut completed = TerminationTally::track_spawn(&terminated, |tally| {
@@ -101,17 +101,17 @@
             assert_eq!(terminated.load(Ordering::Acquire), 2);
             assert_eq!(pending.count(), before);
         }));
-    }
+}
 
-    #[test]
-    fn termination_tally_accepted_drop_before_spawn_returns_still_counts() {
-        let terminated = Arc::new(AtomicUsize::new(0));
-        let result: Result<(), ()> = TerminationTally::track_spawn(&terminated, |tally| {
-            // A native child can terminate before its producer gets the
-            // accepted handle. That termination must not be compensated.
-            drop(tally);
-            Ok(())
-        });
-        assert_eq!(result, Ok(()));
-        assert_eq!(terminated.load(Ordering::Acquire), 1);
-    }
+#[test]
+fn termination_tally_accepted_drop_before_spawn_returns_still_counts() {
+    let terminated = Arc::new(AtomicUsize::new(0));
+    let result: Result<(), ()> = TerminationTally::track_spawn(&terminated, |tally| {
+        // A native child can terminate before its producer gets the
+        // accepted handle. That termination must not be compensated.
+        drop(tally);
+        Ok(())
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(terminated.load(Ordering::Acquire), 1);
+}

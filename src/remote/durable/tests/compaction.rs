@@ -26,7 +26,10 @@ fn compaction_recovers_exhausted_capacity_and_persists_an_empty_clock_floor() {
         }
     }
     assert!(completed >= 2, "fixture must exhaust a used journal");
-    assert!(log.entries.is_empty(), "all completed keys expired before refusal");
+    assert!(
+        log.entries.is_empty(),
+        "all completed keys expired before refusal"
+    );
     assert!(matches!(
         log.admit(&peer, key(999), b"input", now),
         Err(DurableRemoteError::Limit)
@@ -43,7 +46,10 @@ fn compaction_recovers_exhausted_capacity_and_persists_an_empty_clock_floor() {
     assert_eq!(report.previous_bytes, original_bytes);
     assert!(report.committed_bytes < original_bytes, "{report:?}");
     assert_eq!(report.retained_entries, 0);
-    assert_eq!(log.sequence, 1, "the empty journal must retain its clock floor");
+    assert_eq!(
+        log.sequence, 1,
+        "the empty journal must retain its clock floor"
+    );
 
     let mut restored = reopen(log.file.bytes.into_inner(), bounds).unwrap();
     assert!(matches!(
@@ -79,8 +85,14 @@ fn compaction_preserves_same_timestamp_completion_order_and_capacity() {
     assert_eq!(log.retained_bytes, bounds.max_retained_bytes);
     log.compact(FaultFile::default(), 20, || Ok(())).unwrap();
     let mut restored = reopen(log.file.bytes.into_inner(), bounds).unwrap();
-    assert_eq!(replay(restored.admit(&peer, key(9), b"small", 20)), small.into());
-    assert_eq!(replay(restored.admit(&peer, key(1), b"large", 20)), large.into());
+    assert_eq!(
+        replay(restored.admit(&peer, key(9), b"small", 20)),
+        small.into()
+    );
+    assert_eq!(
+        replay(restored.admit(&peer, key(1), b"large", 20)),
+        large.into()
+    );
     assert_eq!(restored.retained_bytes, bounds.max_retained_bytes);
 }
 
@@ -90,7 +102,8 @@ fn compaction_keeps_pending_fences_and_their_reserved_capacity_at_maximum_clock(
     let mut log = journal(limits());
     drop(execute(log.admit(&peer, key(7), b"uncertain", 1)));
     let reserved = log.reserved_terminal_bytes;
-    log.compact(FaultFile::default(), u64::MAX, || Ok(())).unwrap();
+    log.compact(FaultFile::default(), u64::MAX, || Ok(()))
+        .unwrap();
     assert_eq!(log.reserved_terminal_bytes, reserved);
     assert_eq!(log.retained_bytes, limits().max_outcome_bytes);
     let mut restored = reopen(log.file.bytes.into_inner(), limits()).unwrap();
@@ -111,7 +124,11 @@ fn compaction_refuses_live_permits_and_cannot_spend_pending_completion_reserve()
     let mut bounds = limits();
     bounds.max_journal_bytes = config(bounds).header().unwrap().len() as u64
         + record_size(peer.as_str().len(), RESERVATION_BYTES).unwrap()
-        + record_size(peer.as_str().len(), TERMINAL_BYTES + bounds.max_outcome_bytes).unwrap();
+        + record_size(
+            peer.as_str().len(),
+            TERMINAL_BYTES + bounds.max_outcome_bytes,
+        )
+        .unwrap();
     let mut log = journal(bounds);
     let reservation = execute(log.admit(&peer, key(1), b"input", 1));
     let original = log.file.bytes.get_ref().clone();
@@ -159,7 +176,10 @@ fn compaction_preparation_failures_leave_the_original_writable_and_unpublished()
             published.set(true);
             Ok(())
         });
-        assert!(matches!(result, Err(DurableRemoteError::Io(_) | DurableRemoteError::NotEmpty)));
+        assert!(matches!(
+            result,
+            Err(DurableRemoteError::Io(_) | DurableRemoteError::NotEmpty)
+        ));
         assert!(!published.get());
         assert_eq!(log.file.bytes.get_ref(), &original);
         assert_eq!(log.status, DurableRemoteJournalStatus::Writable);
@@ -201,7 +221,9 @@ fn compaction_publication_error_or_panic_poison_the_original_without_clearing_fe
         assert_eq!(log.file.bytes.get_ref(), &original);
         assert!(matches!(
             log.admit(&peer, key(1), b"input", 2),
-            Err(DurableRemoteError::NotWritable(DurableRemoteJournalStatus::Poisoned))
+            Err(DurableRemoteError::NotWritable(
+                DurableRemoteJournalStatus::Poisoned
+            ))
         ));
         let mut restored = reopen(log.file.bytes.into_inner(), limits()).unwrap();
         assert!(matches!(
@@ -214,20 +236,27 @@ fn compaction_publication_error_or_panic_poison_the_original_without_clearing_fe
 #[test]
 fn compaction_clock_records_reject_noncanonical_identity_payload_and_regression() {
     for (peer, id, payload) in [
-        (NodeId::new("identity-is-forbidden-on-a-clock-record"), key(0), Vec::new()),
+        (
+            NodeId::new("identity-is-forbidden-on-a-clock-record"),
+            key(0),
+            Vec::new(),
+        ),
         (NodeId::new(""), key(1), Vec::new()),
         (NodeId::new(""), key(0), vec![0; TERMINAL_BYTES + 1]),
     ] {
         let mut log = journal(limits());
-        log.append_record(CLOCK_FLOOR, &peer, id, &payload, 10).unwrap();
+        log.append_record(CLOCK_FLOOR, &peer, id, &payload, 10)
+            .unwrap();
         assert!(matches!(
             reopen(log.file.bytes.into_inner(), limits()),
             Err(DurableRemoteError::Format)
         ));
     }
     let mut log = journal(limits());
-    log.append_record(CLOCK_FLOOR, &NodeId::new(""), key(0), &[], 10).unwrap();
-    log.append_record(CLOCK_FLOOR, &NodeId::new(""), key(0), &[], 9).unwrap();
+    log.append_record(CLOCK_FLOOR, &NodeId::new(""), key(0), &[], 10)
+        .unwrap();
+    log.append_record(CLOCK_FLOOR, &NodeId::new(""), key(0), &[], 9)
+        .unwrap();
     assert!(matches!(
         reopen(log.file.bytes.into_inner(), limits()),
         Err(DurableRemoteError::ClockRegression)
@@ -240,7 +269,11 @@ fn real_compaction_atomic_publication_reopens_exact_results_expiry_and_pending_i
     for fail_after_rename in [false, true] {
         let (path, file) = linked_file();
         let mut journal = DurableRemoteJournal::create::<Vec<u8>, Vec<u8>>(
-            file, COMPUTATION, APPLICATION_VERSION, AuthKey::from_seed(99), limits(),
+            file,
+            COMPUTATION,
+            APPLICATION_VERSION,
+            AuthKey::from_seed(99),
+            limits(),
         )
         .unwrap();
         let peer = NodeId::new("peer");
@@ -255,7 +288,9 @@ fn real_compaction_atomic_publication_reopens_exact_results_expiry_and_pending_i
             std::fs::rename(&replacement_path, &path)?;
             File::open(path.parent().unwrap())?.sync_all()?;
             if fail_after_rename {
-                Err(io::Error::other("rename completed before publication failed"))
+                Err(io::Error::other(
+                    "rename completed before publication failed",
+                ))
             } else {
                 Ok(())
             }
@@ -271,14 +306,21 @@ fn real_compaction_atomic_publication_reopens_exact_results_expiry_and_pending_i
         }
         drop(journal);
         let mut restored = DurableRemoteJournal::open::<Vec<u8>, Vec<u8>>(
-            open_file(&path), COMPUTATION, APPLICATION_VERSION, AuthKey::from_seed(99), limits(),
+            open_file(&path),
+            COMPUTATION,
+            APPLICATION_VERSION,
+            AuthKey::from_seed(99),
+            limits(),
         )
         .unwrap();
         assert!(matches!(
             restored.admit(&peer, key(3), b"retained", 119),
             Err(DurableRemoteError::ClockRegression)
         ));
-        assert_eq!(replay(restored.admit(&peer, key(3), b"retained", 120)), success().into());
+        assert_eq!(
+            replay(restored.admit(&peer, key(3), b"retained", 120)),
+            success().into()
+        );
         assert!(matches!(
             restored.admit(&peer, key(3), b"different", 120),
             Err(DurableRemoteError::Conflict)
@@ -287,10 +329,19 @@ fn real_compaction_atomic_publication_reopens_exact_results_expiry_and_pending_i
             restored.admit(&peer, key(2), b"uncertain", 120),
             Err(DurableRemoteError::InDoubt)
         ));
-        let permit = reconciliation(restored.prepare_reconciliation(&peer, key(2), b"uncertain", 121));
-        restored.complete_reconciliation(permit, success(), 121).unwrap();
-        assert_eq!(replay(restored.admit(&peer, key(3), b"retained", 179)), success().into());
+        let permit =
+            reconciliation(restored.prepare_reconciliation(&peer, key(2), b"uncertain", 121));
+        restored
+            .complete_reconciliation(permit, success(), 121)
+            .unwrap();
+        assert_eq!(
+            replay(restored.admit(&peer, key(3), b"retained", 179)),
+            success().into()
+        );
         drop(execute(restored.admit(&peer, key(3), b"retained", 180)));
-        assert_eq!(replay(restored.admit(&peer, key(2), b"uncertain", 180)), success().into());
+        assert_eq!(
+            replay(restored.admit(&peer, key(2), b"uncertain", 180)),
+            success().into()
+        );
     }
 }

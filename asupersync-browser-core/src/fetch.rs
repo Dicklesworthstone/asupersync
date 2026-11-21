@@ -24,8 +24,8 @@ use std::fmt;
 
 pub mod client;
 pub mod stream;
-pub use stream::{FetchStream, FetchStreamLimits, fetch_stream};
 pub use client::{ClientFetch, FetchBytesClient};
+pub use stream::{FetchStream, FetchStreamLimits, fetch_stream};
 
 #[cfg(target_arch = "wasm32")]
 mod browser;

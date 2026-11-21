@@ -301,11 +301,8 @@ mod tests {
         assert_eq!(*rx.borrow(), 7);
     }
 
-    fn check_stream_items<S>(
-        mut stream: S,
-        mut publish: impl FnMut(u8),
-        expected: [S::Item; 2],
-    ) where
+    fn check_stream_items<S>(mut stream: S, mut publish: impl FnMut(u8), expected: [S::Item; 2])
+    where
         S: Stream + Unpin,
         S::Item: PartialEq + std::fmt::Debug,
     {

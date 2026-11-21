@@ -22,8 +22,7 @@ use std::time::Duration;
 /// Factories and their futures are owned, `Send`, and `'static`. A factory is
 /// invoked at most once, after admission. Captured values are dropped without
 /// invocation if the race is dropped or refused before that branch starts.
-pub type RaceFactory<T> =
-    Box<dyn FnOnce(Cx) -> Pin<Box<dyn Future<Output = T> + Send>> + Send>;
+pub type RaceFactory<T> = Box<dyn FnOnce(Cx) -> Pin<Box<dyn Future<Output = T> + Send>> + Send>;
 
 struct Admitted<T> {
     handles: Vec<TaskHandle<T>>,
@@ -42,7 +41,8 @@ impl<T> Admitted<T> {
         for handle in &mut self.handles {
             // Do not let the already-cancelled parent short-circuit cleanup.
             // poll_join waits for actual terminal publication and retirement.
-            if let Err(JoinError::Panicked(payload)) = poll_fn(|task| handle.poll_join(task)).await {
+            if let Err(JoinError::Panicked(payload)) = poll_fn(|task| handle.poll_join(task)).await
+            {
                 if !matches!(refusal, JoinError::Panicked(_)) {
                     refusal = JoinError::Panicked(payload);
                 }
@@ -300,13 +300,15 @@ impl Cx<cap::All> {
         if timeout.is_some_and(|duration| duration.is_zero()) {
             return Err(JoinError::Cancelled(CancelReason::timeout()));
         }
-        let limit = schedule.as_ref().and_then(|(timer, now)| {
-            timeout.map(|duration| (timer.clone(), *now + duration))
-        });
+        let limit = schedule
+            .as_ref()
+            .and_then(|(timer, now)| timeout.map(|duration| (timer.clone(), *now + duration)));
         let delayed = schedule.as_ref().and_then(|(timer, now)| {
             (!delay.is_zero()).then(|| {
                 let deadline = *now + delay;
-                let deadline = limit.as_ref().map_or(deadline, |(_, end)| deadline.min(*end));
+                let deadline = limit
+                    .as_ref()
+                    .map_or(deadline, |(_, end)| deadline.min(*end));
                 (timer.clone(), deadline)
             })
         });
@@ -355,7 +357,10 @@ impl Cx<cap::All> {
                     child.cancelled().await;
                     return Err(hedge_cancelled(&child));
                 }
-                if backup_limit.as_ref().is_some_and(|(timer, end)| timer.now() >= *end) {
+                if backup_limit
+                    .as_ref()
+                    .is_some_and(|(timer, end)| timer.now() >= *end)
+                {
                     // Delay completion is not permission to start user code
                     // after the overall deadline. The common timed engine
                     // classifies this completion as expiry, then drains.
@@ -368,7 +373,8 @@ impl Cx<cap::All> {
         let factories = vec![primary, backup];
         match limit {
             Some((timer, deadline)) => {
-                self.race_factories_until(timer, deadline, factories).await?
+                self.race_factories_until(timer, deadline, factories)
+                    .await?
             }
             None => self.race_drained_with(factories).await?,
         }
@@ -409,10 +415,7 @@ impl Cx<cap::All> {
     /// Empty input or synchronous admission refusal returns `JoinError::Cancelled` with a
     /// resource-unavailable reason. Parent cancellation retains its cause.
     /// A panic observed while draining takes precedence over admission failure.
-    pub async fn race_drained_with<T>(
-        &self,
-        factories: Vec<RaceFactory<T>>,
-    ) -> Result<T, JoinError>
+    pub async fn race_drained_with<T>(&self, factories: Vec<RaceFactory<T>>) -> Result<T, JoinError>
     where
         T: Send + 'static,
     {
@@ -436,11 +439,15 @@ impl Cx<cap::All> {
             ));
         }
         let scope = self.scope();
-        let mut admitted = Admitted { handles: Vec::with_capacity(factories.len()) };
+        let mut admitted = Admitted {
+            handles: Vec::with_capacity(factories.len()),
+        };
         let mut regions = BranchRegions::new(self.spawn_gateway_handle(), factories.len());
         for factory in factories {
             if self.checkpoint().is_err() {
-                let reason = self.cancel_reason().unwrap_or_else(|| CancelReason::user("race cancelled"));
+                let reason = self
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("race cancelled"));
                 let refusal = admitted.refuse(reason.clone()).await;
                 regions.settle(None, reason, true).await;
                 return Err(refusal);
@@ -480,7 +487,8 @@ impl Cx<cap::All> {
     where
         T: Send + 'static,
     {
-        self.race_drained_with(factories.into_iter().map(|(_, factory)| factory).collect()).await
+        self.race_drained_with(factories.into_iter().map(|(_, factory)| factory).collect())
+            .await
     }
 
     /// Race factories with one deadline, including cancellation and loser drain.
@@ -513,12 +521,16 @@ impl Cx<cap::All> {
     {
         if self.checkpoint().is_err() {
             return Err(JoinError::Cancelled(
-                self.cancel_reason().unwrap_or_else(|| CancelReason::user("race cancelled")),
+                self.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("race cancelled")),
             ));
         }
-        let timer = self.timer_driver().ok_or_else(|| JoinError::Cancelled(
-            CancelReason::resource_unavailable().with_message("factory race timeout requires a timer"),
-        ))?;
+        let timer = self.timer_driver().ok_or_else(|| {
+            JoinError::Cancelled(
+                CancelReason::resource_unavailable()
+                    .with_message("factory race timeout requires a timer"),
+            )
+        })?;
         if factories.is_empty() {
             return Err(JoinError::Cancelled(
                 CancelReason::resource_unavailable().with_message("factory race requires a branch"),
@@ -545,33 +557,39 @@ impl Cx<cap::All> {
         let mut timed: Vec<RaceFactory<Timed<T>>> = Vec::new();
         for factory in factories {
             let clock = timer.clone();
-            timed.push(Box::new(move |child| Box::pin(async move {
-                if clock.now() >= deadline {
-                    return Timed::Late;
-                }
-                let value = factory(child).await;
-                if clock.now() >= deadline { Timed::Late } else { Timed::Value(value) }
-            })));
+            timed.push(Box::new(move |child| {
+                Box::pin(async move {
+                    if clock.now() >= deadline {
+                        return Timed::Late;
+                    }
+                    let value = factory(child).await;
+                    if clock.now() >= deadline {
+                        Timed::Late
+                    } else {
+                        Timed::Value(value)
+                    }
+                })
+            }));
         }
-        timed.push(Box::new(move |child| Box::pin(async move {
-            // The timer is a loser too: do not wait out its deadline after a
-            // user branch wins, or depend on Sleep's ambient cancellation.
-            let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, timer));
-            let mut cancelled = std::pin::pin!(child.cancelled());
-            poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() {
-                    let reason = child
-                        .cancel_reason()
-                        .unwrap_or_else(CancelReason::shutdown);
-                    Poll::Ready(Timed::Cancelled(reason))
-                } else if sleep.as_mut().poll(task).is_ready() {
-                    Poll::Ready(Timed::Expired)
-                } else {
-                    Poll::Pending
-                }
+        timed.push(Box::new(move |child| {
+            Box::pin(async move {
+                // The timer is a loser too: do not wait out its deadline after a
+                // user branch wins, or depend on Sleep's ambient cancellation.
+                let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, timer));
+                let mut cancelled = std::pin::pin!(child.cancelled());
+                poll_fn(|task| {
+                    if cancelled.as_mut().poll(task).is_ready() {
+                        let reason = child.cancel_reason().unwrap_or_else(CancelReason::shutdown);
+                        Poll::Ready(Timed::Cancelled(reason))
+                    } else if sleep.as_mut().poll(task).is_ready() {
+                        Poll::Ready(Timed::Expired)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await
             })
-            .await
-        })));
+        }));
         let keeps_region = |timed: &Timed<T>| !matches!(timed, Timed::Late);
         match self.race_drained_settled(timed, keeps_region).await? {
             Timed::Value(value) => Ok(value),
@@ -591,8 +609,10 @@ impl Cx<cap::All> {
         T: Send + 'static,
     {
         self.race_drained_with_timeout(
-            duration, factories.into_iter().map(|(_, factory)| factory).collect(),
-        ).await
+            duration,
+            factories.into_iter().map(|(_, factory)| factory).collect(),
+        )
+        .await
     }
 }
 

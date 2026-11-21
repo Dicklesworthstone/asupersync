@@ -150,9 +150,14 @@ fn websocket_over_a_unix_socket_listener() {
         assert!(head.starts_with("HTTP/1.1 500"), "{head}");
         assert!(!head.contains(" 101"), "{head}");
         let mut body = Vec::new();
-        AsyncReadExt::read_to_end(&mut stream, &mut body).await.expect("read 500 body");
+        AsyncReadExt::read_to_end(&mut stream, &mut body)
+            .await
+            .expect("read 500 body");
         let body_str = String::from_utf8_lossy(&body);
-        assert!(body_str.contains("WebSocketUpgrade::on_upgrade_any"), "{body_str}");
+        assert!(
+            body_str.contains("WebSocketUpgrade::on_upgrade_any"),
+            "{body_str}"
+        );
 
         assert!(shutdown.begin_drain(Duration::from_secs(2)));
         let _ = run.await.expect("listener run");
@@ -215,9 +220,14 @@ fn websocket_through_the_auto_listener_next_to_http2() {
         assert!(head.starts_with("HTTP/1.1 500"), "{head}");
         assert!(!head.contains(" 101"), "{head}");
         let mut body = Vec::new();
-        AsyncReadExt::read_to_end(&mut stream, &mut body).await.expect("read 500 body");
+        AsyncReadExt::read_to_end(&mut stream, &mut body)
+            .await
+            .expect("read 500 body");
         let body_str = String::from_utf8_lossy(&body);
-        assert!(body_str.contains("WebSocketUpgrade::on_upgrade_any"), "{body_str}");
+        assert!(
+            body_str.contains("WebSocketUpgrade::on_upgrade_any"),
+            "{body_str}"
+        );
 
         assert!(shutdown.begin_drain(Duration::from_secs(2)));
         let _ = run.await.expect("listener run");

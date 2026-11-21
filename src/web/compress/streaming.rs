@@ -30,7 +30,12 @@ impl StreamingCompressionConfig {
     pub fn new(limits: ContentEncodeLimits) -> Self {
         Self {
             limits,
-            supported: vec![ContentCoding::Brotli, ContentCoding::Gzip, ContentCoding::Deflate, ContentCoding::Identity],
+            supported: vec![
+                ContentCoding::Brotli,
+                ContentCoding::Gzip,
+                ContentCoding::Deflate,
+                ContentCoding::Identity,
+            ],
             min_body_size: 256,
             compress_sensitive: false,
         }
@@ -61,7 +66,9 @@ impl StreamingCompressionConfig {
 
     /// The source, encoded, and frame ceilings supplied at construction.
     #[must_use]
-    pub const fn limits(&self) -> ContentEncodeLimits { self.limits }
+    pub const fn limits(&self) -> ContentEncodeLimits {
+        self.limits
+    }
 }
 
 /// Request-parts extractor preparing explicitly compressed streaming responses.
@@ -139,7 +146,10 @@ impl StreamingCompression {
         config: StreamingCompressionConfig,
     ) -> Result<(Response, ContentEncodedBody<B>), Response> {
         if !head.body.is_empty() || head.has_header("transfer-encoding") {
-            return Err(refusal(StatusCode::INTERNAL_SERVER_ERROR, "streamed response requires a body-free head without transfer framing"));
+            return Err(refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "streamed response requires a body-free head without transfer framing",
+            ));
         }
         let length = declared_length(&head)?;
         let exact = source.size_hint().exact();
@@ -150,44 +160,76 @@ impl StreamingCompression {
             && let (Some(length), Some(exact)) = (length, exact)
             && length != exact
         {
-            return Err(refusal(StatusCode::INTERNAL_SERVER_ERROR, "streamed source size conflicts with Content-Length"));
+            return Err(refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "streamed source size conflicts with Content-Length",
+            ));
         }
         let known = length.or(exact);
-        if !bodyless && source.size_hint().lower() > u64::try_from(config.limits.max_source_bytes()).unwrap_or(u64::MAX) {
-            return Err(refusal(StatusCode::INTERNAL_SERVER_ERROR, "streamed source exceeds configured response limit"));
+        if !bodyless
+            && source.size_hint().lower()
+                > u64::try_from(config.limits.max_source_bytes()).unwrap_or(u64::MAX)
+        {
+            return Err(refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "streamed source exceeds configured response limit",
+            ));
         }
         let already_encoded = head.has_header("content-encoding");
-        let identity = negotiate_coding(self.accept_encoding.as_deref(), &[ContentCoding::Identity]).is_some();
-        let sensitive = !config.compress_sensitive && compression_oracle_sensitive(self.sensitivity, &head);
-        let must_preserve = self.range || self.no_transform || is_partial_content(&head)
+        let identity =
+            negotiate_coding(self.accept_encoding.as_deref(), &[ContentCoding::Identity]).is_some();
+        let sensitive =
+            !config.compress_sensitive && compression_oracle_sensitive(self.sensitivity, &head);
+        let must_preserve = self.range
+            || self.no_transform
+            || is_partial_content(&head)
             || head.header_value("cache-control").is_some_and(no_transform)
-            || head.header_value("content-type").is_some_and(specialized_content_type)
+            || head
+                .header_value("content-type")
+                .is_some_and(specialized_content_type)
             || sensitive;
 
         let coding = if bodyless || known == Some(0) || already_encoded {
             ContentCoding::Identity
         } else if must_preserve {
-            if !identity { return Err(refusal(StatusCode::from_u16(406), "No acceptable response encoding")); }
+            if !identity {
+                return Err(refusal(
+                    StatusCode::from_u16(406),
+                    "No acceptable response encoding",
+                ));
+            }
             vary(&mut head);
-            if sensitive && !wildcard_vary(&head) { self.sensitivity.append_vary_tokens(&mut head); }
+            if sensitive && !wildcard_vary(&head) {
+                self.sensitivity.append_vary_tokens(&mut head);
+            }
             ContentCoding::Identity
         } else {
             let below_minimum = known.is_some_and(|size| size < config.min_body_size as u64);
             let coding = if below_minimum && identity {
                 ContentCoding::Identity
             } else {
-                let available = config.supported.iter().copied()
-                    .filter(|coding| content_coding_available(*coding)).collect::<Vec<_>>();
-                negotiate_coding(self.accept_encoding.as_deref(), &available)
-                    .ok_or_else(|| refusal(StatusCode::from_u16(406), "No acceptable response encoding"))?
+                let available = config
+                    .supported
+                    .iter()
+                    .copied()
+                    .filter(|coding| content_coding_available(*coding))
+                    .collect::<Vec<_>>();
+                negotiate_coding(self.accept_encoding.as_deref(), &available).ok_or_else(|| {
+                    refusal(StatusCode::from_u16(406), "No acceptable response encoding")
+                })?
             };
             vary(&mut head);
             coding
         };
-        let encoded = ContentEncodedBody::new(source, coding, config.limits)
-            .map_err(|_| refusal(StatusCode::INTERNAL_SERVER_ERROR, "failed to initialize streamed response encoding"))?;
+        let encoded = ContentEncodedBody::new(source, coding, config.limits).map_err(|_| {
+            refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to initialize streamed response encoding",
+            )
+        })?;
         if coding != ContentCoding::Identity {
-            head.headers.retain(|name, _| !crate::http::decode::invalidated_field(name));
+            head.headers
+                .retain(|name, _| !crate::http::decode::invalidated_field(name));
             head.set_header("content-encoding", coding.as_token());
             weaken_etag(&mut head);
         } else if head.status == StatusCode::NOT_MODIFIED {
@@ -199,36 +241,71 @@ impl StreamingCompression {
 
 fn declared_length(head: &Response) -> Result<Option<u64>, Response> {
     let mut length = None;
-    for (_, value) in head.headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
-        let parsed = parse_content_length(value)
-            .map_err(|_| refusal(StatusCode::INTERNAL_SERVER_ERROR, "invalid streamed response Content-Length"))? as u64;
-        if length.replace(parsed).is_some_and(|previous| previous != parsed) {
-            return Err(refusal(StatusCode::INTERNAL_SERVER_ERROR, "conflicting streamed response Content-Length"));
+    for (_, value) in head
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        let parsed = parse_content_length(value).map_err(|_| {
+            refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid streamed response Content-Length",
+            )
+        })? as u64;
+        if length
+            .replace(parsed)
+            .is_some_and(|previous| previous != parsed)
+        {
+            return Err(refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "conflicting streamed response Content-Length",
+            ));
         }
     }
     Ok(length)
 }
 
 fn no_transform(value: &str) -> bool {
-    value.split(',').any(|part| part.split('=').next().is_some_and(|name| name.trim().eq_ignore_ascii_case("no-transform")))
+    value.split(',').any(|part| {
+        part.split('=')
+            .next()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("no-transform"))
+    })
 }
 
 fn specialized_content_type(value: &str) -> bool {
-    let mime = value.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     (mime.starts_with("image/") && mime != "image/svg+xml")
-        || mime.starts_with("audio/") || mime.starts_with("video/")
+        || mime.starts_with("audio/")
+        || mime.starts_with("video/")
         || mime.starts_with("application/grpc")
-        || matches!(mime.as_str(), "text/event-stream" | "multipart/byteranges"
-            | "application/zip" | "application/gzip" | "application/x-gzip"
-            | "application/zstd" | "application/x-7z-compressed" | "application/pdf")
+        || matches!(
+            mime.as_str(),
+            "text/event-stream"
+                | "multipart/byteranges"
+                | "application/zip"
+                | "application/gzip"
+                | "application/x-gzip"
+                | "application/zstd"
+                | "application/x-7z-compressed"
+                | "application/pdf"
+        )
 }
 
 fn wildcard_vary(head: &Response) -> bool {
-    head.header_value("vary").is_some_and(|value| value.split(',').any(|token| token.trim() == "*"))
+    head.header_value("vary")
+        .is_some_and(|value| value.split(',').any(|token| token.trim() == "*"))
 }
 
 fn vary(head: &mut Response) {
-    if !wildcard_vary(head) { append_vary_token(head, "accept-encoding"); }
+    if !wildcard_vary(head) {
+        append_vary_token(head, "accept-encoding");
+    }
 }
 
 fn refusal(status: StatusCode, message: &'static str) -> Response {

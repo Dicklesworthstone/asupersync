@@ -618,7 +618,9 @@ impl TcpStream {
     #[must_use]
     pub fn split(&self) -> (ReadHalf<'_>, WriteHalf<'_>) {
         #[cfg(target_arch = "wasm32")]
-        { (ReadHalf::unsupported(), WriteHalf::unsupported()) }
+        {
+            (ReadHalf::unsupported(), WriteHalf::unsupported())
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         {

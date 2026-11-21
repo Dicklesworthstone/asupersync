@@ -14,6 +14,7 @@
 
 use crate::cx::{CancelWakerToken, Cx, cap::HasTime};
 use crate::stream::Stream;
+use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crate::time::{Sleep, wall_now};
 use crate::types::{CancelReason, Time};
 use std::cmp::Reverse;
@@ -21,7 +22,6 @@ use std::collections::BinaryHeap;
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -544,4 +544,3 @@ impl<Caps> Drop for ExpiryCancellation<'_, Caps> {
         }
     }
 }
-

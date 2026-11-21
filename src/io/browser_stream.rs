@@ -54,14 +54,14 @@
 //! - `poll_flush`/`poll_shutdown` are cancel-safe (can retry)
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
@@ -467,7 +467,9 @@ impl AsyncRead for WasmReadableStreamSource {
                 self.pending_read = None;
 
                 let done = Reflect::get(&result, &JsValue::from_str("done"))
-                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.done"))?.as_bool().unwrap_or(false);
+                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.done"))?
+                    .as_bool()
+                    .unwrap_or(false);
                 if done {
                     self.done = true;
                     return Poll::Ready(Ok(()));
@@ -536,7 +538,9 @@ impl WasmWritableStreamSink {
     /// Construct from a browser `WritableStream`.
     pub fn new(stream: &WritableStream) -> Result<Self, BrowserStreamError> {
         let writer = stream.get_writer().map_err(|err| {
-            BrowserStreamError::HostError(js_host_io_error(&err, "WritableStream.getWriter").to_string())
+            BrowserStreamError::HostError(
+                js_host_io_error(&err, "WritableStream.getWriter").to_string(),
+            )
         })?;
         Ok(Self {
             writer,

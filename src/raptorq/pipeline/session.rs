@@ -86,7 +86,9 @@ impl<O: SessionOperation> Future for SessionWait<'_, O> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.completed {
-            return Poll::Ready(Err(invalid_state("RaptorQ session wait polled after completion")));
+            return Poll::Ready(Err(invalid_state(
+                "RaptorQ session wait polled after completion",
+            )));
         }
         if let Some(error) = this.operation.state().previous_error() {
             this.completed = true;

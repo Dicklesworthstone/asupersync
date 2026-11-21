@@ -14,7 +14,9 @@ use wasm_bindgen_futures::JsFuture;
 pub(super) fn ensure_driver(executor: &Rc<RefCell<Executor>>) {
     let epoch = {
         let mut state = executor.borrow_mut();
-        if state.driver_running { return; }
+        if state.driver_running {
+            return;
+        }
         let Some(epoch) = state.driver_epoch.checked_add(1) else {
             drop(state);
             fail_all(executor, "local executor driver identity exhausted");
@@ -25,7 +27,9 @@ pub(super) fn ensure_driver(executor: &Rc<RefCell<Executor>>) {
         epoch
     };
     wasm_bindgen_futures::spawn_local(Driver {
-        executor: Rc::downgrade(executor), epoch, yielding: None,
+        executor: Rc::downgrade(executor),
+        epoch,
+        yielding: None,
     });
 }
 
@@ -54,7 +58,9 @@ fn next_host_turn() -> JsFuture {
 fn stop(executor: &Rc<RefCell<Executor>>, epoch: u64) {
     let signal = {
         let mut state = executor.borrow_mut();
-        if state.driver_epoch != epoch { return; }
+        if state.driver_epoch != epoch {
+            return;
+        }
         state.driver_running = false;
         Arc::clone(&state.signal)
     };
@@ -66,7 +72,9 @@ fn stop(executor: &Rc<RefCell<Executor>>, epoch: u64) {
 impl Driver {
     fn poll_driver(&mut self, executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self;
-        if executor.borrow().driver_epoch != this.epoch { return Poll::Ready(()); }
+        if executor.borrow().driver_epoch != this.epoch {
+            return Poll::Ready(());
+        }
         if executor.borrow().tasks.is_empty() {
             stop(executor, this.epoch);
             return Poll::Ready(());

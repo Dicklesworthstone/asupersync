@@ -5,13 +5,13 @@
 
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::poll_fn;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// br-asupersync-368gxk: default idle-connection timeout (60 seconds).

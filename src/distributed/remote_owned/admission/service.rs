@@ -6,11 +6,16 @@
 //! the handler and drains its descendants. Dropping the dispatch waiter requests
 //! coordinator cancellation rather than making its admission immediately reusable.
 
-use super::{RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemotePeerLimits, RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage, RemoteReserveError};
+use super::{
+    RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
+    RemotePeerLimits, RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage,
+    RemoteReserveError,
+};
 use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema};
-use crate::remote::{NodeId, RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome};
+use crate::remote::{
+    NodeId, RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome,
+};
 use crate::runtime::{JoinError, TaskHandle};
 use crate::types::{CancelReason, Outcome};
 use std::fmt;
@@ -57,32 +62,48 @@ impl RemoteServiceAdmission {
     where
         I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
     {
-        Ok(Self { budget: RemoteExecutor::new(limits, peers)? })
+        Ok(Self {
+            budget: RemoteExecutor::new(limits, peers)?,
+        })
     }
 
     /// Explicitly enable bounded waiting. All immediate and waiting registrations
     /// share active counters; only register_waiting uses the bounded wait queue.
-    pub fn new_queued<I>(limits: RemoteAdmissionLimits, peers: I, queue: RemoteQueueLimits)
-        -> Result<Self, RemoteAdmissionError>
-    where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
+    pub fn new_queued<I>(
+        limits: RemoteAdmissionLimits,
+        peers: I,
+        queue: RemoteQueueLimits,
+    ) -> Result<Self, RemoteAdmissionError>
+    where
+        I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
     {
-        Ok(Self { budget: RemoteExecutor::new_queued(limits, peers, queue)? })
+        Ok(Self {
+            budget: RemoteExecutor::new_queued(limits, peers, queue)?,
+        })
     }
 
     /// Enable locally assigned application priorities with bounded-bypass promotion.
     /// Every registered class shares the same global/per-peer active and waiting
     /// ceilings. This changes no TLS grants, wire schemas or lifecycle-control lane.
-    pub fn new_prioritized<I>(limits: RemoteAdmissionLimits, peers: I,
-        queue: RemoteQueueLimits, priority: RemotePriorityPolicy,
+    pub fn new_prioritized<I>(
+        limits: RemoteAdmissionLimits,
+        peers: I,
+        queue: RemoteQueueLimits,
+        priority: RemotePriorityPolicy,
     ) -> Result<Self, RemoteAdmissionError>
-    where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
+    where
+        I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
     {
-        Ok(Self { budget: RemoteExecutor::new_prioritized(limits, peers, queue, priority)? })
+        Ok(Self {
+            budget: RemoteExecutor::new_prioritized(limits, peers, queue, priority)?,
+        })
     }
 
     /// Current waiting charges, separate from active execution usage.
     #[must_use]
-    pub fn queue_usage(&self) -> RemoteQueueUsage { self.budget.queue_usage() }
+    pub fn queue_usage(&self) -> RemoteQueueUsage {
+        self.budget.queue_usage()
+    }
 
     /// Waiting charges selected by the authenticated peer, never request origin.
     #[must_use]
@@ -92,7 +113,9 @@ impl RemoteServiceAdmission {
 
     /// Execution charges, including admitted work whose network waiter disappeared.
     #[must_use]
-    pub fn usage(&self) -> RemoteAdmissionUsage { self.budget.usage() }
+    pub fn usage(&self) -> RemoteAdmissionUsage {
+        self.budget.usage()
+    }
 
     /// Current charges for an authenticated logical peer, not request origin_node.
     #[must_use]
@@ -102,7 +125,9 @@ impl RemoteServiceAdmission {
 
     /// Permanently refuse new executions through all registrations and clones.
     /// Existing tasks still drain and control/terminal traffic takes no new credit.
-    pub fn close_admission(&self) -> bool { self.budget.close_admission() }
+    pub fn close_admission(&self) -> bool {
+        self.budget.close_admission()
+    }
 
     /// Register a bounded handler with its original name and input/output schemas.
     ///
@@ -129,8 +154,11 @@ impl RemoteServiceAdmission {
     /// the runtime still owns the cleanup. Cancellation cannot preempt synchronous
     /// user polls or stuck blocking work. No bounded wall-clock drain is promised.
     pub fn register<I, O, F, Fut>(
-        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
-        child: ChildRegionSpec, handler: F,
+        &self,
+        registry: &mut RemoteComputationRegistry,
+        name: impl Into<String>,
+        child: ChildRegionSpec,
+        handler: F,
     ) -> Result<(), ComputationSchemaRegistryError>
     where
         I: HasSchema,
@@ -156,8 +184,12 @@ impl RemoteServiceAdmission {
     /// and may be retained by V2/V3 idempotency; no retry policy changes. Queue wait
     /// is separate from, and cannot extend, the service's original lease/deadlines.
     pub fn register_waiting<I, O, F, Fut>(
-        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
-        child: ChildRegionSpec, wait_timeout: Duration, handler: F,
+        &self,
+        registry: &mut RemoteComputationRegistry,
+        name: impl Into<String>,
+        child: ChildRegionSpec,
+        wait_timeout: Duration,
+        handler: F,
     ) -> Result<(), ComputationSchemaRegistryError>
     where
         I: HasSchema,
@@ -165,8 +197,13 @@ impl RemoteServiceAdmission {
         F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
     {
-        self.register_policy::<I, O, F, Fut>(registry, name, child,
-            Some((wait_timeout, RemotePriority::Normal)), handler)
+        self.register_policy::<I, O, F, Fut>(
+            registry,
+            name,
+            child,
+            Some((wait_timeout, RemotePriority::Normal)),
+            handler,
+        )
     }
 
     /// Register a computation with an operator-selected application priority.
@@ -183,8 +220,13 @@ impl RemoteServiceAdmission {
     /// ordinary classes. Cancellation and the original lease/queue deadline remain
     /// dominant. Existing V2/V3 idempotency may retain admission refusals as before.
     pub fn register_waiting_with_priority<I, O, F, Fut>(
-        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
-        child: ChildRegionSpec, wait_timeout: Duration, priority: RemotePriority, handler: F,
+        &self,
+        registry: &mut RemoteComputationRegistry,
+        name: impl Into<String>,
+        child: ChildRegionSpec,
+        wait_timeout: Duration,
+        priority: RemotePriority,
+        handler: F,
     ) -> Result<(), ComputationSchemaRegistryError>
     where
         I: HasSchema,
@@ -192,12 +234,22 @@ impl RemoteServiceAdmission {
         F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
     {
-        self.register_policy::<I, O, F, Fut>(registry, name, child, Some((wait_timeout, priority)), handler)
+        self.register_policy::<I, O, F, Fut>(
+            registry,
+            name,
+            child,
+            Some((wait_timeout, priority)),
+            handler,
+        )
     }
 
     fn register_policy<I, O, F, Fut>(
-        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
-        child: ChildRegionSpec, wait: Option<(Duration, RemotePriority)>, handler: F,
+        &self,
+        registry: &mut RemoteComputationRegistry,
+        name: impl Into<String>,
+        child: ChildRegionSpec,
+        wait: Option<(Duration, RemotePriority)>,
+        handler: F,
     ) -> Result<(), ComputationSchemaRegistryError>
     where
         I: HasSchema,
@@ -212,36 +264,61 @@ impl RemoteServiceAdmission {
             let handler = Arc::clone(&handler);
             let spec = child.clone();
             async move {
-                if cx.checkpoint().is_err() { return Ok(cancelled(&cx)); }
+                if cx.checkpoint().is_err() {
+                    return Ok(cancelled(&cx));
+                }
                 let permit = if let Some((timeout, priority)) = wait {
-                    match budget.reserve_with_priority(&cx, invocation.peer_node(),
-                        invocation.request().input.len(), timeout, priority).await {
+                    match budget
+                        .reserve_with_priority(
+                            &cx,
+                            invocation.peer_node(),
+                            invocation.request().input.len(),
+                            timeout,
+                            priority,
+                        )
+                        .await
+                    {
                         Ok(reservation) => reservation.permit,
                         Err(RemoteReserveError::Cancelled) => return Ok(cancelled(&cx)),
-                        Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
+                        Err(error) => {
+                            return Ok(RemoteOutcome::Failed(format!(
+                                "remote service admission refused: {error}"
+                            )));
+                        }
                     }
                 } else {
                     match budget.acquire(invocation.peer_node(), invocation.request().input.len()) {
                         Ok(permit) => permit,
-                        Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
+                        Err(error) => {
+                            return Ok(RemoteOutcome::Failed(format!(
+                                "remote service admission refused: {error}"
+                            )));
+                        }
                     }
                 };
                 // The complete coordinator future is destroyed before its charge.
                 // Dropping the waiter aborts the coordinator, whose own
                 // cancellation path awaits the actual child-region close.
-                let task = cx.spawn(move |owner| crate::distributed::remote_owned::AdmittedProxy {
-                    future: execute(owner, invocation, spec, handler),
-                    _admission: Some(permit),
-                    // Inbound service admission is charged by its permit alone;
-                    // no outbound native credit travels with the result.
-                    _retention: None,
-                }).map_err(|_| setup_error("remote service coordinator admission refused"))?;
+                let task = cx
+                    .spawn(
+                        move |owner| crate::distributed::remote_owned::AdmittedProxy {
+                            future: execute(owner, invocation, spec, handler),
+                            _admission: Some(permit),
+                            // Inbound service admission is charged by its permit alone;
+                            // no outbound native credit travels with the result.
+                            _retention: None,
+                        },
+                    )
+                    .map_err(|_| setup_error("remote service coordinator admission refused"))?;
                 let mut coordinator = Coordinator { task, cx: &cx };
                 let mut cancel = std::pin::pin!(cx.cancelled());
                 let first = poll_fn(|context| {
-                    if cancel.as_mut().poll(context).is_ready() { return Poll::Ready(None); }
+                    if cancel.as_mut().poll(context).is_ready() {
+                        return Poll::Ready(None);
+                    }
                     coordinator.task.poll_join(context).map(Some)
-                }).await;
+                })
+                .await;
                 let result = match first {
                     Some(result) => result,
                     None => {
@@ -263,74 +340,117 @@ impl RemoteServiceAdmission {
 
 // poll_join preserves wake registration but has no cancellation-on-drop future.
 // This owner supplies that backstop even before the first parked join poll.
-struct Coordinator<'a, T> { task: TaskHandle<T>, cx: &'a Cx }
+struct Coordinator<'a, T> {
+    task: TaskHandle<T>,
+    cx: &'a Cx,
+}
 impl<T> Coordinator<'_, T> {
     fn cancel(&self) {
         if !self.task.is_finished() {
-            self.task.abort_with_reason(self.cx.cancel_reason()
-                .unwrap_or_else(|| CancelReason::user("remote service dispatch dropped")));
+            self.task.abort_with_reason(
+                self.cx
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("remote service dispatch dropped")),
+            );
         }
     }
 }
-impl<T> Drop for Coordinator<'_, T> { fn drop(&mut self) { self.cancel(); } }
+impl<T> Drop for Coordinator<'_, T> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
 
-fn setup_error(message: &str) -> RemoteError { RemoteError::TransportError(message.to_owned()) }
+fn setup_error(message: &str) -> RemoteError {
+    RemoteError::TransportError(message.to_owned())
+}
 fn cancelled(cx: &Cx) -> RemoteOutcome {
-    RemoteOutcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled))
+    RemoteOutcome::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(CancelReason::parent_cancelled),
+    )
 }
 fn join_outcome(error: JoinError) -> RemoteOutcome {
     match error {
         JoinError::Cancelled(reason) => RemoteOutcome::Cancelled(reason),
-        JoinError::Panicked(_) => RemoteOutcome::Panicked("remote admitted task panicked".to_owned()),
-        JoinError::PolledAfterCompletion => RemoteOutcome::Failed("remote admitted task result was already consumed".to_owned()),
+        JoinError::Panicked(_) => {
+            RemoteOutcome::Panicked("remote admitted task panicked".to_owned())
+        }
+        JoinError::PolledAfterCompletion => {
+            RemoteOutcome::Failed("remote admitted task result was already consumed".to_owned())
+        }
     }
 }
 
 async fn execute<F, Fut>(
-    cx: Cx, invocation: RemoteComputationInvocation, spec: ChildRegionSpec, handler: Arc<F>,
+    cx: Cx,
+    invocation: RemoteComputationInvocation,
+    spec: ChildRegionSpec,
+    handler: Arc<F>,
 ) -> Result<RemoteOutcome, RemoteError>
 where
     F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
 {
-    if cx.checkpoint().is_err() { return Ok(cancelled(&cx)); }
-    let child = cx.open_child_region(spec).await
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(&cx));
+    }
+    let child = cx
+        .open_child_region(spec)
+        .await
         .map_err(|_| setup_error("remote service child-region admission refused"))?;
     let mut task = None;
     let mut result = if cx.checkpoint().is_err() {
         Some(Ok(cancelled(&cx)))
     } else {
         match child.cx().spawn(move |body| async move {
-            if body.checkpoint().is_err() { return Ok(cancelled(&body)); }
+            if body.checkpoint().is_err() {
+                return Ok(cancelled(&body));
+            }
             handler(body, invocation).await
         }) {
-            Ok(handle) => { task = Some(handle); None }
+            Ok(handle) => {
+                task = Some(handle);
+                None
+            }
             Err(_) => Some(Err(setup_error("remote service handler admission refused"))),
         }
     };
     if let Some(task) = task.as_mut() {
         let mut stop = std::pin::pin!(cx.cancelled());
         poll_fn(|context| {
-            if stop.as_mut().poll(context).is_ready() { return Poll::Ready(()); }
+            if stop.as_mut().poll(context).is_ready() {
+                return Poll::Ready(());
+            }
             if let Poll::Ready(value) = task.poll_join(context) {
                 result = Some(value.unwrap_or_else(|error| Ok(join_outcome(error))));
                 return Poll::Ready(());
             }
             Poll::Pending
-        }).await;
+        })
+        .await;
     }
     // Cancellation is independent of the parent; close also cancels remaining
     // descendants after ordinary body completion. Neither path detaches cleanup.
     let cancel_error = if cx.is_cancel_requested() {
         let _ = cx.checkpoint(); // Cleanup may legitimately cross further Pending polls.
-        child.cancel(cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)).err()
-    } else { None };
+        child
+            .cancel(
+                cx.cancel_reason()
+                    .unwrap_or_else(CancelReason::parent_cancelled),
+            )
+            .err()
+    } else {
+        None
+    };
     let close = child.close_with_outcome().await;
     if result.is_none() {
         result = Some(match task.as_mut().expect("started handler").try_join() {
             Ok(Some(value)) => value,
             Err(error) => Ok(join_outcome(error)),
-            Ok(None) => Err(setup_error("remote service handler has no terminal result after close")),
+            Ok(None) => Err(setup_error(
+                "remote service handler has no terminal result after close",
+            )),
         });
     }
     drop(task);
@@ -338,18 +458,40 @@ where
     let _ = cx.checkpoint();
     let result = result.expect("handler result or setup refusal");
     let close = close.map_err(|_| setup_error("remote service child-region close failed"))?;
-    if matches!(&result, Ok(RemoteOutcome::Panicked(_))) { return result; }
+    if matches!(&result, Ok(RemoteOutcome::Panicked(_))) {
+        return result;
+    }
     let outcomes = [Some(&close.outcome), close.cleanup_outcome.as_ref()];
-    if outcomes.iter().flatten().any(|outcome| matches!(outcome, Outcome::Panicked(_))) {
-        return Ok(RemoteOutcome::Panicked("remote admitted subtree or cleanup panicked".to_owned()));
+    if outcomes
+        .iter()
+        .flatten()
+        .any(|outcome| matches!(outcome, Outcome::Panicked(_)))
+    {
+        return Ok(RemoteOutcome::Panicked(
+            "remote admitted subtree or cleanup panicked".to_owned(),
+        ));
     }
-    if cancel_error.is_some() { return Err(setup_error("remote service child cancellation enqueue failed")); }
-    if cx.is_cancel_requested() { return Ok(cancelled(&cx)); }
+    if cancel_error.is_some() {
+        return Err(setup_error(
+            "remote service child cancellation enqueue failed",
+        ));
+    }
+    if cx.is_cancel_requested() {
+        return Ok(cancelled(&cx));
+    }
     for outcome in outcomes.iter().flatten() {
-        if let Outcome::Cancelled(reason) = outcome { return Ok(RemoteOutcome::Cancelled(reason.clone())); }
+        if let Outcome::Cancelled(reason) = outcome {
+            return Ok(RemoteOutcome::Cancelled(reason.clone()));
+        }
     }
-    if outcomes.iter().flatten().any(|outcome| matches!(outcome, Outcome::Err(_))) {
-        return Ok(RemoteOutcome::Failed("remote admitted subtree or cleanup failed".to_owned()));
+    if outcomes
+        .iter()
+        .flatten()
+        .any(|outcome| matches!(outcome, Outcome::Err(_)))
+    {
+        return Ok(RemoteOutcome::Failed(
+            "remote admitted subtree or cleanup failed".to_owned(),
+        ));
     }
     result
 }

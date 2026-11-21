@@ -22,6 +22,7 @@ use asupersync::atp::supervision::{AtpdChildRole, AtpdRegionId};
 use asupersync::net::atp::protocol::PeerId;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::{IdentityKeyStore, KeyStoreError};
+use asupersync::sync::atomic::{AtomicBool, Ordering};
 use asupersync::types::Time;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,6 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use asupersync::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1376,7 +1376,9 @@ fn directory_stats(path: &Path) -> Result<DirectoryStats> {
     Ok(stats)
 }
 
-fn install_signal_listener(shutdown: Arc<ListenerShutdown>) -> Result<mpsc::Receiver<DaemonSignal>> {
+fn install_signal_listener(
+    shutdown: Arc<ListenerShutdown>,
+) -> Result<mpsc::Receiver<DaemonSignal>> {
     let (sender, receiver) = mpsc::channel();
 
     #[cfg(unix)]

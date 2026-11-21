@@ -12,8 +12,8 @@ use crate::distributed::consensus::pbft::{
     PbftConfig, PbftExecution, PbftMessage, PbftStateMachine, PbftTransport,
 };
 use crate::distributed::consensus::types::{
-    ConsensusBatch, ConsensusRequest, ConsensusResponse, MessageDigest, ReplicaId,
-    SequenceNumber, ViewNumber,
+    ConsensusBatch, ConsensusRequest, ConsensusResponse, MessageDigest, ReplicaId, SequenceNumber,
+    ViewNumber,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::types::Time;
@@ -85,7 +85,10 @@ impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
         if let Some(cache) = &self.2 {
             let frame = retry::Frame::signed(&self.0.auth, Some(recipient), &message)?;
             let frames = cache.lock().remember(vec![frame])?;
-            self.0.packets.send_packet(recipient, frames[0].bytes.clone()).await
+            self.0
+                .packets
+                .send_packet(recipient, frames[0].bytes.clone())
+                .await
         } else {
             self.0.send_to_replica(recipient, message).await
         }
@@ -95,17 +98,24 @@ impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
         if let Some(inbox) = &self.1 {
             // The engine has installed the entry before emitting a proposal or
             // prepare. Publish that fact before a send can yield or be dropped.
-            inbox.lock().observe_outbound(&message).map_err(inbox_error)?;
+            inbox
+                .lock()
+                .observe_outbound(&message)
+                .map_err(inbox_error)?;
         }
         let prepare = match &message {
-            PbftMessage::PrePrepare { view, sequence, digest, replica_id, .. } => {
-                Some(PbftMessage::Prepare {
-                    view: *view,
-                    sequence: *sequence,
-                    digest: digest.clone(),
-                    replica_id: replica_id.clone(),
-                })
-            }
+            PbftMessage::PrePrepare {
+                view,
+                sequence,
+                digest,
+                replica_id,
+                ..
+            } => Some(PbftMessage::Prepare {
+                view: *view,
+                sequence: *sequence,
+                digest: digest.clone(),
+                replica_id: replica_id.clone(),
+            }),
             _ => None,
         };
         if let Some(cache) = &self.2 {
@@ -204,7 +214,14 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         auth: Arc<PbftAuthenticator>,
         machine: S,
     ) -> Result<Self> {
-        Self::build(config, packets, auth, machine, Some(Arc::new(InboxMutex::new(ReorderBuffer::default()))), None)
+        Self::build(
+            config,
+            packets,
+            auth,
+            machine,
+            Some(Arc::new(InboxMutex::new(ReorderBuffer::default()))),
+            None,
+        )
     }
 
     fn build(
@@ -225,10 +242,15 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             reorder.clone(),
             outbox.clone(),
         );
-        let driver = PbftExecution::new(
-            auth.local_replica().clone(), config, transport, machine,
-        )?;
-        Ok(Self { driver, packets, auth, max_batch_size, reorder, outbox })
+        let driver = PbftExecution::new(auth.local_replica().clone(), config, transport, machine)?;
+        Ok(Self {
+            driver,
+            packets,
+            auth,
+            max_batch_size,
+            reorder,
+            outbox,
+        })
     }
 
     /// Highest contiguous sequence applied to the application, not just admitted.
@@ -237,7 +259,10 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     }
 
     /// Actual retained response for this exact request; never a fabricated success.
-    pub fn committed_response(&self, request: &ConsensusRequest) -> Result<Option<ConsensusResponse>> {
+    pub fn committed_response(
+        &self,
+        request: &ConsensusRequest,
+    ) -> Result<Option<ConsensusResponse>> {
         self.driver.committed_response(request)
     }
 
@@ -253,7 +278,8 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             self.driver.submit_request(cx, request).await?;
             self.drain_reordered(cx).await?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Verify and process one externally supplied packet, without unsigned bypass.
@@ -278,9 +304,13 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             if self.drain_reordered(cx).await? {
                 return Ok(PbftIngressOutcome::Processed);
             }
-            let packet = self.packets.receive_packet(self.auth.max_packet_bytes()).await?;
+            let packet = self
+                .packets
+                .receive_packet(self.auth.max_packet_bytes())
+                .await?;
             self.admit_packet(cx, &packet).await
-        }).await
+        })
+        .await
     }
 
     /// Run the authenticated pump until cancellation or an admitted/I/O error.
@@ -302,7 +332,11 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     /// requests continue to be processed. It can wait indefinitely without a
     /// quorum; use `submit_with_timeout` for a bounded whole-call wait. Exact
     /// retries recover retained results/proposals without applying twice.
-    pub async fn submit_and_wait(&mut self, cx: &Cx, request: ConsensusRequest) -> Result<ConsensusResponse> {
+    pub async fn submit_and_wait(
+        &mut self,
+        cx: &Cx,
+        request: ConsensusRequest,
+    ) -> Result<ConsensusResponse> {
         // Check cancellation and the size budget before retaining a second
         // copy for receipt lookup. Neither an oversized request nor a stopped
         // caller should cause an unbounded clone before admission.
@@ -311,7 +345,8 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             self.driver.submit_request(cx, request.clone()).await?;
             self.drain_reordered(cx).await?;
             Ok(())
-        }).await?;
+        })
+        .await?;
         loop {
             if let Some(response) = self.committed_response(&request)? {
                 return Ok(response);
@@ -373,16 +408,26 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         if let Some(inbox) = &self.reorder {
             inbox.lock().prune(applied);
             match &message {
-                PbftMessage::PrePrepare { view, sequence, digest, batch, .. } => {
+                PbftMessage::PrePrepare {
+                    view,
+                    sequence,
+                    digest,
+                    batch,
+                    ..
+                } => {
                     if MessageDigest::of(batch)? != *digest {
                         return Ok(PbftIngressOutcome::Rejected(PbftAuthError::Encoding));
                     }
                     let result = inbox.lock().proposal(*view, *sequence, digest, false, None);
-                    if let Err(outcome) = result { return Ok(outcome); }
+                    if let Err(outcome) = result {
+                        return Ok(outcome);
+                    }
                 }
                 PbftMessage::Prepare { .. } | PbftMessage::Commit { .. } => {
                     let result = inbox.lock().vote(&message);
-                    if let Err(outcome) = result { return Ok(outcome); }
+                    if let Err(outcome) = result {
+                        return Ok(outcome);
+                    }
                     self.drain_reordered(cx).await?;
                     return Ok(PbftIngressOutcome::Processed);
                 }
@@ -398,7 +443,9 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     }
 
     async fn drain_reordered(&self, cx: &Cx) -> Result<bool> {
-        let Some(inbox) = &self.reorder else { return Ok(false) };
+        let Some(inbox) = &self.reorder else {
+            return Ok(false);
+        };
         let mut delivered = 0_usize;
         loop {
             self.sync_outbox()?;
@@ -408,11 +455,15 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 inbox.prune(applied);
                 inbox.next()
             };
-            let Some(next) = next else { return Ok(delivered != 0) };
+            let Some(next) = next else {
+                return Ok(delivered != 0);
+            };
             self.driver.process_message(cx, next.message()).await?;
             inbox.lock().acknowledge(&next);
             delivered += 1;
-            if delivered % 64 == 0 { crate::runtime::yield_now().await; }
+            if delivered % 64 == 0 {
+                crate::runtime::yield_now().await;
+            }
         }
     }
 
@@ -446,9 +497,15 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         Ok(())
     }
 
-    fn preflight_request(&self, request: &ConsensusRequest) -> std::result::Result<(), PbftAuthError> {
+    fn preflight_request(
+        &self,
+        request: &ConsensusRequest,
+    ) -> std::result::Result<(), PbftAuthError> {
         let limit = self.auth.max_payload_bytes;
-        if request.operation.len().checked_add(request.client_id.len())
+        if request
+            .operation
+            .len()
+            .checked_add(request.client_id.len())
             .is_none_or(|length| length > limit)
         {
             return Err(PbftAuthError::PayloadTooLarge);
@@ -465,7 +522,10 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             batch,
             replica_id: ReplicaId::new((self.auth.membership().replica_count() - 1).to_string()),
         };
-        let mut sink = LimitedPayload { bytes: Vec::new(), limit };
+        let mut sink = LimitedPayload {
+            bytes: Vec::new(),
+            limit,
+        };
         serde_json::to_writer(&mut sink, &proposal).map_err(|_| PbftAuthError::PayloadTooLarge)
     }
 }
@@ -475,16 +535,17 @@ async fn until_stopped<T>(cx: &Cx, operation: impl Future<Output = Result<T>>) -
     let mut operation = pin!(operation);
     poll_fn(|task| {
         if cancelled.as_mut().poll(task).is_ready() {
-            let error = cx.cancel_reason().as_ref().map_or_else(
-                || Error::new(ErrorKind::Cancelled),
-                Error::cancelled,
-            );
+            let error = cx
+                .cancel_reason()
+                .as_ref()
+                .map_or_else(|| Error::new(ErrorKind::Cancelled), Error::cancelled);
             return Poll::Ready(Err(error));
         }
         // A ready operation wins over a cancellation published during that
         // poll: its synchronous application effects may already have occurred.
         operation.as_mut().poll(task)
-    }).await
+    })
+    .await
 }
 
 #[cfg(test)]

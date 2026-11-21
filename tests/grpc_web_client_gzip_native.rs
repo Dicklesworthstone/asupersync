@@ -6,9 +6,7 @@
 // (rust-lang #159228) will turn into a hard error.
 #![recursion_limit = "256"]
 
-use asupersync::grpc::{
-    Code, GrpcWebClient, GrpcWebClientConfig, GrpcWebCompressionConfig,
-};
+use asupersync::grpc::{Code, GrpcWebClient, GrpcWebClientConfig, GrpcWebCompressionConfig};
 
 #[cfg(not(feature = "compression"))]
 #[test]
@@ -120,21 +118,15 @@ mod gzip {
             "{head}"
         );
         assert!(
-            lower.contains(&format!(
-                "content-type: {}\r\n",
-                mode.as_header_value()
-            )),
+            lower.contains(&format!("content-type: {}\r\n", mode.as_header_value())),
             "{head}"
         );
         let wire = decode_request_body(mode, body);
         assert_eq!(wire[0], 1, "request must set compressed-flag");
         let length = u32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
         assert_eq!(wire.len(), 5 + length);
-        let decoded = gzip_frame_decompress(
-            Bytes::copy_from_slice(&wire[5..]),
-            1024 * 1024,
-        )
-        .unwrap();
+        let decoded =
+            gzip_frame_decompress(Bytes::copy_from_slice(&wire[5..]), 1024 * 1024).unwrap();
         assert_eq!(decoded.as_ref(), b"compress this request");
     }
 
@@ -160,8 +152,8 @@ mod gzip {
                 let (head, body) = read_request(&mut socket);
                 assert_gzip_request(mode, &head, &body);
 
-                let compressed = gzip_frame_compress(Bytes::from_static(b"compressed response"))
-                    .unwrap();
+                let compressed =
+                    gzip_frame_compress(Bytes::from_static(b"compressed response")).unwrap();
                 let mut wire = frame(0, b"plain response");
                 wire.extend(frame(1, compressed.as_ref()));
                 wire.extend(trailers());
@@ -181,44 +173,44 @@ mod gzip {
             });
 
             run_with_runtime(move |cx| async move {
-                    let client = GrpcWebClient::with_config_and_compression(
-                        GrpcWebClientConfig {
-                            content_type: mode,
-                            timeout: Duration::from_secs(4),
-                            ..GrpcWebClientConfig::default()
-                        },
-                        GrpcWebCompressionConfig::gzip(),
+                let client = GrpcWebClient::with_config_and_compression(
+                    GrpcWebClientConfig {
+                        content_type: mode,
+                        timeout: Duration::from_secs(4),
+                        ..GrpcWebClientConfig::default()
+                    },
+                    GrpcWebCompressionConfig::gzip(),
+                )
+                .unwrap();
+                let mut stream = client
+                    .server_streaming(
+                        &cx,
+                        &url,
+                        Request::new(Bytes::from_static(b"compress this request")),
+                        IdentityCodec,
                     )
+                    .await
                     .unwrap();
-                    let mut stream = client
-                        .server_streaming(
-                            &cx,
-                            &url,
-                            Request::new(Bytes::from_static(b"compress this request")),
-                            IdentityCodec,
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(
-                        stream.message().await.unwrap().unwrap().as_ref(),
-                        b"plain response"
-                    );
-                    assert_eq!(
-                        stream.message().await.unwrap().unwrap().as_ref(),
-                        b"compressed response"
-                    );
-                    assert!(stream.message().await.unwrap().is_none());
-                    assert_eq!(
-                        stream
-                            .trailing_metadata()
-                            .unwrap()
-                            .get("x-compression-proof")
-                            .and_then(|value| match value {
-                                asupersync::grpc::MetadataValue::Ascii(value) => Some(value.as_str()),
-                                asupersync::grpc::MetadataValue::Binary(_) => None,
-                            }),
-                        Some("gzip")
-                    );
+                assert_eq!(
+                    stream.message().await.unwrap().unwrap().as_ref(),
+                    b"plain response"
+                );
+                assert_eq!(
+                    stream.message().await.unwrap().unwrap().as_ref(),
+                    b"compressed response"
+                );
+                assert!(stream.message().await.unwrap().is_none());
+                assert_eq!(
+                    stream
+                        .trailing_metadata()
+                        .unwrap()
+                        .get("x-compression-proof")
+                        .and_then(|value| match value {
+                            asupersync::grpc::MetadataValue::Ascii(value) => Some(value.as_str()),
+                            asupersync::grpc::MetadataValue::Binary(_) => None,
+                        }),
+                    Some("gzip")
+                );
             });
             peer.join().unwrap();
         }
@@ -241,16 +233,16 @@ mod gzip {
             );
         });
         run_with_runtime(move |cx| async move {
-                let client = GrpcWebClient::with_config(GrpcWebClientConfig {
-                    timeout: Duration::from_secs(4),
-                    ..GrpcWebClientConfig::default()
-                })
-                .unwrap();
-                let error = client
-                    .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
-                    .await
-                    .unwrap_err();
-                assert_eq!(error.code(), Code::Unimplemented);
+            let client = GrpcWebClient::with_config(GrpcWebClientConfig {
+                timeout: Duration::from_secs(4),
+                ..GrpcWebClientConfig::default()
+            })
+            .unwrap();
+            let error = client
+                .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::Unimplemented);
         });
         peer.join().unwrap();
     }
@@ -272,19 +264,19 @@ mod gzip {
             );
         });
         run_with_runtime(move |cx| async move {
-                let client = GrpcWebClient::with_config_and_compression(
-                    GrpcWebClientConfig {
-                        timeout: Duration::from_secs(4),
-                        ..GrpcWebClientConfig::default()
-                    },
-                    GrpcWebCompressionConfig::identity().with_accept_gzip(true),
-                )
-                .unwrap();
-                let error = client
-                    .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
-                    .await
-                    .unwrap_err();
-                assert_eq!(error.code(), Code::Unimplemented);
+            let client = GrpcWebClient::with_config_and_compression(
+                GrpcWebClientConfig {
+                    timeout: Duration::from_secs(4),
+                    ..GrpcWebClientConfig::default()
+                },
+                GrpcWebCompressionConfig::identity().with_accept_gzip(true),
+            )
+            .unwrap();
+            let error = client
+                .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::Unimplemented);
         });
         peer.join().unwrap();
     }
@@ -296,7 +288,10 @@ mod gzip {
             let (mut socket, _) = listener.accept().unwrap();
             let _ = read_request(&mut socket);
             let compressed = gzip_frame_compress(Bytes::from(vec![0_u8; 4096])).unwrap();
-            assert!(compressed.len() < 64, "fixture must pass the wire-size precheck");
+            assert!(
+                compressed.len() < 64,
+                "fixture must pass the wire-size precheck"
+            );
             let mut body = frame(1, compressed.as_ref());
             body.extend(trailers());
             fixed_response(
@@ -307,20 +302,20 @@ mod gzip {
             );
         });
         run_with_runtime(move |cx| async move {
-                let client = GrpcWebClient::with_config_and_compression(
-                    GrpcWebClientConfig {
-                        max_recv_message_size: 64,
-                        timeout: Duration::from_secs(4),
-                        ..GrpcWebClientConfig::default()
-                    },
-                    GrpcWebCompressionConfig::identity().with_accept_gzip(true),
-                )
-                .unwrap();
-                let error = client
-                    .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
-                    .await
-                    .unwrap_err();
-                assert_eq!(error.code(), Code::ResourceExhausted);
+            let client = GrpcWebClient::with_config_and_compression(
+                GrpcWebClientConfig {
+                    max_recv_message_size: 64,
+                    timeout: Duration::from_secs(4),
+                    ..GrpcWebClientConfig::default()
+                },
+                GrpcWebCompressionConfig::identity().with_accept_gzip(true),
+            )
+            .unwrap();
+            let error = client
+                .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::ResourceExhausted);
         });
         peer.join().unwrap();
     }
@@ -349,19 +344,19 @@ mod gzip {
                 );
             });
             run_with_runtime(move |cx| async move {
-                    let client = GrpcWebClient::with_config_and_compression(
-                        GrpcWebClientConfig {
-                            timeout: Duration::from_secs(4),
-                            ..GrpcWebClientConfig::default()
-                        },
-                        GrpcWebCompressionConfig::identity().with_accept_gzip(true),
-                    )
-                    .unwrap();
-                    let error = client
-                        .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
-                        .await
-                        .unwrap_err();
-                    assert_eq!(error.code(), expected, "headers={headers:?}: {error}");
+                let client = GrpcWebClient::with_config_and_compression(
+                    GrpcWebClientConfig {
+                        timeout: Duration::from_secs(4),
+                        ..GrpcWebClientConfig::default()
+                    },
+                    GrpcWebCompressionConfig::identity().with_accept_gzip(true),
+                )
+                .unwrap();
+                let error = client
+                    .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code(), expected, "headers={headers:?}: {error}");
             });
             peer.join().unwrap();
         }

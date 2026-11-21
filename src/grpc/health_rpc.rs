@@ -19,12 +19,11 @@
 //! consumers of the service hook own polling and dropping the returned stream.
 
 use super::health::{
-    HealthCheckRequest, HealthCheckResponse, HealthService, HealthWatchStream,
-    MAX_SERVICE_NAME_LEN,
+    HealthCheckRequest, HealthCheckResponse, HealthService, HealthWatchStream, MAX_SERVICE_NAME_LEN,
 };
 use super::service::{
-    NamedService, RegisteredServerStream, ServiceDescriptor, ServiceHandler,
-    ServiceHandlerFuture, ServiceStreamingFuture,
+    NamedService, RegisteredServerStream, ServiceDescriptor, ServiceHandler, ServiceHandlerFuture,
+    ServiceStreamingFuture,
 };
 use super::status::Status;
 use super::streaming::{Metadata, Request, Streaming};
@@ -74,7 +73,9 @@ impl WatchAdmission {
         let mut active = self.active.load(Ordering::Relaxed);
         loop {
             if active >= self.capacity {
-                return Err(Status::resource_exhausted("health watch capacity exhausted"));
+                return Err(Status::resource_exhausted(
+                    "health watch capacity exhausted",
+                ));
             }
             match self.active.compare_exchange_weak(
                 active,
@@ -168,25 +169,30 @@ impl HealthRpcService {
 }
 
 fn checkpoint(cx: &Cx) -> Result<(), Status> {
-    cx.checkpoint().map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
-        Some(CancelKind::Timeout | CancelKind::Deadline) => {
-            Status::deadline_exceeded("health RPC deadline exceeded")
-        }
-        Some(CancelKind::PollQuota | CancelKind::CostBudget) => {
-            Status::resource_exhausted("health RPC budget exhausted")
-        }
-        _ => Status::cancelled("health RPC cancelled"),
-    })
+    cx.checkpoint()
+        .map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
+            Some(CancelKind::Timeout | CancelKind::Deadline) => {
+                Status::deadline_exceeded("health RPC deadline exceeded")
+            }
+            Some(CancelKind::PollQuota | CancelKind::CostBudget) => {
+                Status::resource_exhausted("health RPC budget exhausted")
+            }
+            _ => Status::cancelled("health RPC cancelled"),
+        })
 }
 
 fn decode_request(request: Request<Bytes>) -> Result<Request<HealthCheckRequest>, Status> {
     if request.get_ref().len() > MAX_HEALTH_RPC_REQUEST_BYTES {
-        return Err(Status::resource_exhausted("health request exceeds its byte limit"));
+        return Err(Status::resource_exhausted(
+            "health request exceeds its byte limit",
+        ));
     }
     let decoded = WireRequest::decode(request.get_ref().as_ref())
         .map_err(|_| Status::invalid_argument("invalid health request protobuf"))?;
     if decoded.service.len() > MAX_SERVICE_NAME_LEN {
-        return Err(Status::invalid_argument("health service name exceeds its byte limit"));
+        return Err(Status::invalid_argument(
+            "health service name exceeds its byte limit",
+        ));
     }
     Ok(request.map(|_| HealthCheckRequest::new(decoded.service)))
 }
@@ -268,7 +274,10 @@ struct EncodedWatch {
 impl Streaming for EncodedWatch {
     type Message = Bytes;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, Status>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         Pin::new(&mut self.get_mut().source)
             .poll_next(cx)
             .map(|item| item.map(|result| result.map(encode_response)))

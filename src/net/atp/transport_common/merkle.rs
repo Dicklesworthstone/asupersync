@@ -79,10 +79,7 @@ pub fn accepted_v2(ack: &Frame) -> Result<bool, MerkleNegotiationError> {
 }
 
 /// Attach a v2 root to an object manifest or a verified successful proof.
-pub fn attach_root_v2(
-    manifest: &mut Frame,
-    root: &str,
-) -> Result<(), MerkleNegotiationError> {
+pub fn attach_root_v2(manifest: &mut Frame, root: &str) -> Result<(), MerkleNegotiationError> {
     let mut record = vec![0; V2_RECORD.len() + 32];
     record[..V2_RECORD.len()].copy_from_slice(&V2_RECORD);
     hex::decode_to_slice(root, &mut record[V2_RECORD.len()..])
@@ -107,8 +104,7 @@ pub fn expected_root_v2(
         (false, Some(_)) => Err(MerkleNegotiationError::UnexpectedCommitment),
         (true, None) => Err(MerkleNegotiationError::MissingCommitment),
         (true, Some(record))
-            if record.len() == V2_RECORD.len() + 32
-                && record[..V2_RECORD.len()] == V2_RECORD =>
+            if record.len() == V2_RECORD.len() + 32 && record[..V2_RECORD.len()] == V2_RECORD =>
         {
             Ok(Some(hex_encode(&record[V2_RECORD.len()..])))
         }
@@ -160,11 +156,14 @@ mod tests {
     #[test]
     fn merkle_and_codec_extension_ids_are_disjoint() {
         let mut seen = std::collections::BTreeSet::new();
-        for id in super::super::codec::ASSIGNED_EXTENSION_IDS.into_iter().chain([
-            MERKLE_V2_OFFER_EXTENSION,
-            MERKLE_V2_ACCEPT_EXTENSION,
-            MERKLE_V2_ROOT_EXTENSION,
-        ]) {
+        for id in super::super::codec::ASSIGNED_EXTENSION_IDS
+            .into_iter()
+            .chain([
+                MERKLE_V2_OFFER_EXTENSION,
+                MERKLE_V2_ACCEPT_EXTENSION,
+                MERKLE_V2_ROOT_EXTENSION,
+            ])
+        {
             assert!(seen.insert(id), "duplicate ATP extension id: {id}");
         }
     }

@@ -199,7 +199,9 @@ fn attenuated_commit_refuses_before_native_registration_and_releases_credit() {
                 &[7],
                 Duration::from_secs(1),
             ),
-            Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability))
+            Err(NativeRemoteAdmissionError::Remote(
+                RemoteError::NoCapability
+            ))
         ));
         assert_eq!(admitted.usage(), NativeRemoteAdmissionUsage::default());
         assert_eq!(

@@ -53,8 +53,10 @@ impl StorageHistory {
 }
 
 fn same_entry(a: &JournalEntry, b: &JournalEntry) -> bool {
-    a.sequence == b.sequence && a.record == b.record
-        && a.checksum == b.checksum && a.entry_size == b.entry_size
+    a.sequence == b.sequence
+        && a.record == b.record
+        && a.checksum == b.checksum
+        && a.entry_size == b.entry_size
 }
 
 pub(super) fn write_entry(file: &mut File, entry: &JournalEntry) -> Result<(), JournalError> {
@@ -62,7 +64,10 @@ pub(super) fn write_entry(file: &mut File, entry: &JournalEntry) -> Result<(), J
 }
 
 impl AppendJournal {
-    pub(super) fn read_storage_history(&self, frontier: Option<u64>) -> Outcome<StorageHistory, JournalError> {
+    pub(super) fn read_storage_history(
+        &self,
+        frontier: Option<u64>,
+    ) -> Outcome<StorageHistory, JournalError> {
         let generations = match self.discover_storage_generations(frontier) {
             Ok(generations) => generations,
             Err(error) => return Outcome::Err(error),
@@ -73,7 +78,10 @@ impl AppendJournal {
     // Keep actual directory entries attached to discovery until their canonical
     // spelling and regular-file kind are checked. Parsing only a number and
     // reconstructing a different path can silently omit a terminal generation.
-    fn discover_storage_generations(&self, frontier: Option<u64>) -> Result<Vec<u64>, JournalError> {
+    fn discover_storage_generations(
+        &self,
+        frontier: Option<u64>,
+    ) -> Result<Vec<u64>, JournalError> {
         let entries = std::fs::read_dir(&self.config.base_dir)
             .map_err(|error| JournalError::DirectoryRead(error.to_string()))?;
         let mut generations = Vec::new();
@@ -91,7 +99,8 @@ impl AppendJournal {
                     "noncanonical journal filename for generation {generation}",
                 )));
             }
-            let kind = entry.file_type()
+            let kind = entry
+                .file_type()
                 .map_err(|error| JournalError::ReadFailure(error.to_string()))?;
             // Do not follow links (including dangling links), block opening a
             // FIFO, or interpret a directory/device/socket as empty history.
@@ -111,10 +120,16 @@ impl AppendJournal {
     // The production caller supplies the just-discovered ordered generations.
     // Keeping the read boundary separate makes disappearance-after-listing
     // testable without deleting files or depending on a scheduling race.
-    fn read_generation_history(&self, generations: Vec<u64>) -> Outcome<StorageHistory, JournalError> {
+    fn read_generation_history(
+        &self,
+        generations: Vec<u64>,
+    ) -> Outcome<StorageHistory, JournalError> {
         let latest = generations.last().copied().unwrap_or(0);
         let mut history = StorageHistory {
-            entries: BTreeMap::new(), generations, damaged: HashSet::new(), base_bytes: 0,
+            entries: BTreeMap::new(),
+            generations,
+            damaged: HashSet::new(),
+            base_bytes: 0,
         };
         for generation in &history.generations {
             let path = journal_file_path(&self.config.base_dir, *generation);
@@ -126,7 +141,9 @@ impl AppendJournal {
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             };
-            if damaged { history.damaged.insert(*generation); }
+            if damaged {
+                history.damaged.insert(*generation);
+            }
             let mut file_bytes = 0_u64;
             let mut previous_sequence: Option<u64> = None;
             for entry in entries {
@@ -143,9 +160,11 @@ impl AppendJournal {
                 previous_sequence = Some(entry.sequence);
                 file_bytes = match file_bytes.checked_add(20 + u64::from(entry.entry_size)) {
                     Some(bytes) => bytes,
-                    None => return Outcome::Err(JournalError::Deserialization(
-                        "journal generation length overflow".to_owned(),
-                    )),
+                    None => {
+                        return Outcome::Err(JournalError::Deserialization(
+                            "journal generation length overflow".to_owned(),
+                        ));
+                    }
                 };
                 // This marker is only growth accounting, never permission to
                 // ignore earlier generations or declare the log complete. Old
@@ -159,11 +178,16 @@ impl AppendJournal {
                     history.base_bytes = file_bytes;
                 }
                 match history.entries.entry(entry.sequence) {
-                    Entry::Vacant(slot) => { slot.insert(entry); }
+                    Entry::Vacant(slot) => {
+                        slot.insert(entry);
+                    }
                     Entry::Occupied(slot) if same_entry(slot.get(), &entry) => {}
-                    Entry::Occupied(_) => return Outcome::Err(JournalError::Deserialization(
-                        format!("conflicting journal copies at sequence {}", entry.sequence),
-                    )),
+                    Entry::Occupied(_) => {
+                        return Outcome::Err(JournalError::Deserialization(format!(
+                            "conflicting journal copies at sequence {}",
+                            entry.sequence
+                        )));
+                    }
                 }
             }
         }
@@ -205,17 +229,23 @@ impl AppendJournal {
         Outcome::Ok(())
     }
 
-    fn index_history(&self, entries: BTreeMap<u64, JournalEntry>)
-        -> (VecDeque<JournalEntry>, HashMap<String, Vec<JournalEntry>>)
-    {
+    fn index_history(
+        &self,
+        entries: BTreeMap<u64, JournalEntry>,
+    ) -> (VecDeque<JournalEntry>, HashMap<String, Vec<JournalEntry>>) {
         let mut recent = VecDeque::new();
         let mut transfers: HashMap<String, Vec<JournalEntry>> = HashMap::new();
         for entry in entries.into_values() {
             if let Some(id) = entry.record.transfer_id() {
-                transfers.entry(id.to_owned()).or_default().push(entry.clone());
+                transfers
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push(entry.clone());
             }
             recent.push_back(entry);
-            if recent.len() > self.cache_limit { recent.pop_front(); }
+            if recent.len() > self.cache_limit {
+                recent.pop_front();
+            }
         }
         (recent, transfers)
     }
@@ -229,7 +259,9 @@ impl AppendJournal {
         sync: impl FnOnce(&File) -> io::Result<()>,
         sync_directory: impl FnOnce(&Path) -> Result<(), JournalError>,
     ) -> Outcome<(), JournalError> {
-        if let Err(error) = self.require_storage_ready() { return Outcome::Err(error); }
+        if let Err(error) = self.require_storage_ready() {
+            return Outcome::Err(error);
+        }
         match self.flush() {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
@@ -254,17 +286,27 @@ impl AppendJournal {
         sync_directory: impl FnOnce(&Path) -> Result<(), JournalError>,
     ) -> Result<(), JournalError> {
         let failed = |message: &str| JournalError::CompactionFailed(message.to_owned());
-        let next_generation = self.generation.checked_add(1)
+        let next_generation = self
+            .generation
+            .checked_add(1)
             .ok_or_else(|| failed("journal generation overflow"))?;
-        let next_sequence = self.sequence.checked_add(1)
+        let next_sequence = self
+            .sequence
+            .checked_add(1)
             .ok_or_else(|| failed("journal sequence exhausted"))?;
         let mut history = match self.read_storage_history(None) {
             Outcome::Ok(history) => history,
             Outcome::Err(error) => return Err(error),
-            Outcome::Cancelled(_) | Outcome::Panicked(_) => return Err(failed("journal scan did not complete")),
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                return Err(failed("journal scan did not complete"));
+            }
         };
-        if history.latest_generation() > self.generation || history.next_sequence()? != self.sequence {
-            return Err(failed("journal disk frontier changed; reopen before compaction"));
+        if history.latest_generation() > self.generation
+            || history.next_sequence()? != self.sequence
+        {
+            return Err(failed(
+                "journal disk frontier changed; reopen before compaction",
+            ));
         }
         // Do not copy an unauthenticated record and then delete its original.
         // Reopening still permits diagnostic reads with a different key, but
@@ -274,39 +316,63 @@ impl AppendJournal {
                 return Err(failed("journal history authentication failed"));
             }
             if entry.record.encode_payload().len() != entry.entry_size as usize {
-                return Err(failed("journal entry length differs from its canonical payload"));
+                return Err(failed(
+                    "journal entry length differs from its canonical payload",
+                ));
             }
         }
         for entry in self.transfer_entries.values().flatten() {
-            if !history.entries.get(&entry.sequence).is_some_and(|disk| same_entry(disk, entry)) {
-                return Err(failed("journal history is missing indexed transfer evidence"));
+            if !history
+                .entries
+                .get(&entry.sequence)
+                .is_some_and(|disk| same_entry(disk, entry))
+            {
+                return Err(failed(
+                    "journal history is missing indexed transfer evidence",
+                ));
             }
         }
-        let boundary = JournalEntry::try_new(self.sequence, JournalRecord::signed_compaction_boundary(
-            next_generation, self.sequence,
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            &self.auth_key,
-        ))?;
+        let boundary = JournalEntry::try_new(
+            self.sequence,
+            JournalRecord::signed_compaction_boundary(
+                next_generation,
+                self.sequence,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                &self.auth_key,
+            ),
+        )?;
         history.entries.insert(boundary.sequence, boundary);
         let path = journal_file_path(&self.config.base_dir, next_generation);
         // No existing generation is opened for append or truncated. An empty or
         // partially copied candidate can be discovered after a crash, but the
         // original generations remain intact until both barriers below settle.
         self.storage_failed = true;
-        if let Some(writer) = self.writer.take() { drop(writer.into_parts()); }
-        let mut file = OpenOptions::new().create_new(true).append(true).open(&path)
+        if let Some(writer) = self.writer.take() {
+            drop(writer.into_parts());
+        }
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
             .map_err(|error| JournalError::FileOpen(error.to_string()))?;
         let mut snapshot_bytes = 0_u64;
         for entry in history.entries.values() {
             write(&mut file, entry)?;
-            snapshot_bytes = snapshot_bytes.checked_add(20 + u64::from(entry.entry_size))
+            snapshot_bytes = snapshot_bytes
+                .checked_add(20 + u64::from(entry.entry_size))
                 .ok_or_else(|| failed("compacted generation length overflow"))?;
         }
         sync(&file).map_err(|error| JournalError::SyncFailure(error.to_string()))?;
         sync_directory(&self.config.base_dir)?;
         let damaged = history.damaged;
         let (recent, transfers) = self.index_history(history.entries);
-        self.writer = Some(BufWriter::with_capacity(self.config.write_buffer_size, file));
+        self.writer = Some(BufWriter::with_capacity(
+            self.config.write_buffer_size,
+            file,
+        ));
         self.current_file = Some(path);
         self.generation = next_generation;
         self.generation_base_bytes = snapshot_bytes;
@@ -321,9 +387,17 @@ impl AppendJournal {
     }
 
     fn cleanup_snapshotted_generations(&self, damaged: &HashSet<u64>) -> Result<(), JournalError> {
-        let cutoff = self.generation.saturating_sub(u64::from(self.config.max_generations));
-        for generation in self.discover_generations()?.into_iter().take_while(|generation| *generation < cutoff) {
-            if damaged.contains(&generation) { continue; } // Retain torn-frame evidence.
+        let cutoff = self
+            .generation
+            .saturating_sub(u64::from(self.config.max_generations));
+        for generation in self
+            .discover_generations()?
+            .into_iter()
+            .take_while(|generation| *generation < cutoff)
+        {
+            if damaged.contains(&generation) {
+                continue;
+            } // Retain torn-frame evidence.
             let path = journal_file_path(&self.config.base_dir, generation);
             match std::fs::remove_file(&path) {
                 Ok(()) => {}

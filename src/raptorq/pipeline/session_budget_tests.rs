@@ -73,9 +73,19 @@ fn completed_send_retires_its_timer_while_the_ready_wait_is_still_alive() {
     assert!(waiting.as_mut().poll(&mut task).is_pending());
     assert_eq!(timer.pending_count(), 1);
     sink.release(usize::MAX, true);
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(1))));
-    assert_eq!(timer.pending_count(), 0, "Ready retires the timer before Future drop");
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Err(_))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Ok(1))
+    ));
+    assert_eq!(
+        timer.pending_count(),
+        0,
+        "Ready retires the timer before Future drop"
+    );
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Err(_))
+    ));
     assert_eq!(sink.accepted().len(), 1);
 }
 
@@ -98,7 +108,10 @@ fn masked_elapsed_deadline_is_not_repolled_while_source_remains_pending() {
         // permits a pending provider, so this is a necessary third poll.
         assert!(waiting.as_mut().poll(&mut task).is_pending());
     });
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Err(_))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Err(_))
+    ));
 }
 
 #[test]
@@ -116,8 +129,15 @@ fn dropping_wait_removes_its_cancel_registration_without_abandoning_session() {
     }
     sink.0.lock().unwrap().waiter = None;
     owner.set_cancel_requested(true);
-    assert_eq!(counter.0.load(Ordering::SeqCst), 0, "abandoned poller is no longer registered");
-    assert_eq!(finish(session.run(), &mut task).unwrap_err().kind(), ErrorKind::Cancelled);
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        0,
+        "abandoned poller is no longer registered"
+    );
+    assert_eq!(
+        finish(session.run(), &mut task).unwrap_err().kind(),
+        ErrorKind::Cancelled
+    );
     assert!(session.is_finished());
     assert!(sink.accepted().is_empty());
 }
@@ -127,7 +147,9 @@ fn always_ready_send_yields_after_thirty_two_acceptances() {
     let owner = Cx::for_testing();
     let sink = GatedSink::new(usize::MAX, true);
     let mut sender = sender(sink.clone());
-    let mut session = sender.start_send_symbols(&owner, (0..40).map(signed)).unwrap();
+    let mut session = sender
+        .start_send_symbols(&owner, (0..40).map(signed))
+        .unwrap();
     let counter = Arc::new(WakeCount::default());
     let waker = Waker::from(counter.clone());
     let mut task = Context::from_waker(&waker);
@@ -171,7 +193,10 @@ fn duplicates_and_other_objects_consume_the_same_receive_poll_budget() {
             assert!(waiting.as_mut().poll(&mut task).is_pending());
         }
         assert_eq!(source.0.lock().unwrap().calls, 32);
-        assert_eq!(session.symbols_received(), if other_objects { 0 } else { 1 });
+        assert_eq!(
+            session.symbols_received(),
+            if other_objects { 0 } else { 1 }
+        );
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
         let result = finish(session.run(), &mut task).unwrap();
         assert_eq!(result.symbols_received, 2);
@@ -196,7 +221,10 @@ fn empty_objects_require_flush_but_do_not_poll_the_receive_source() {
     assert!(sink.accepted().is_empty());
     sink.release(0, true);
     let sent = finish(session.run(), &mut task).unwrap();
-    assert_eq!((sent.source_symbols, sent.repair_symbols, sent.symbols_sent), (0, 0, 0));
+    assert_eq!(
+        (sent.source_symbols, sent.repair_symbols, sent.symbols_sent),
+        (0, 0, 0)
+    );
 
     let source = GatedSource::new(Vec::new(), 0, false);
     let mut receiver = receiver(source.clone());
@@ -205,7 +233,10 @@ fn empty_objects_require_flush_but_do_not_poll_the_receive_source() {
     let received = finish(session.run(), &mut task).unwrap();
     assert!(received.data.is_empty());
     assert_eq!(received.symbols_received, 0);
-    assert_eq!(received.authentication, ReceiveAuthenticationSummary::default());
+    assert_eq!(
+        received.authentication,
+        ReceiveAuthenticationSummary::default()
+    );
     assert!(received.all_symbols_verified());
     assert_eq!(source.0.lock().unwrap().calls, 0);
 }
@@ -222,7 +253,10 @@ fn eof_and_foreign_object_authentication_failures_are_terminal() {
     assert_eq!(error.kind(), ErrorKind::InsufficientSymbols);
     assert_eq!(session.symbols_received(), 1);
     let calls = source.0.lock().unwrap().calls;
-    assert_eq!(finish(session.run(), &mut task).unwrap_err().kind(), error.kind());
+    assert_eq!(
+        finish(session.run(), &mut task).unwrap_err().kind(),
+        error.kind()
+    );
     assert_eq!(source.0.lock().unwrap().calls, calls);
 
     let foreign = Symbol::new(
@@ -234,7 +268,10 @@ fn eof_and_foreign_object_authentication_failures_are_terminal() {
     let source = GatedSource::new(vec![forged], usize::MAX, true);
     let mut receiver = super::receiver(source);
     let mut session = receiver.start_receive_object(&owner, &params).unwrap();
-    assert_eq!(finish(session.run(), &mut task).unwrap_err().kind(), ErrorKind::CorruptedSymbol);
+    assert_eq!(
+        finish(session.run(), &mut task).unwrap_err().kind(),
+        ErrorKind::CorruptedSymbol
+    );
     assert_eq!(session.symbols_received(), 0);
 }
 
@@ -253,7 +290,9 @@ fn send_metrics_count_acceptance_once_and_object_completion_only_after_flush() {
         .build()
         .unwrap();
     let data = vec![19; 257];
-    let mut session = sender.start_send_object(&owner, ObjectId::new(5, 12), &data).unwrap();
+    let mut session = sender
+        .start_send_object(&owner, ObjectId::new(5, 12), &data)
+        .unwrap();
     let mut task = Context::from_waker(Waker::noop());
     {
         let mut waiting = Box::pin(session.run());
@@ -270,7 +309,10 @@ fn send_metrics_count_acceptance_once_and_object_completion_only_after_flush() {
     assert_eq!(symbols.get(), accepted as u64);
     assert_eq!(objects.get(), 0);
     sink.release(usize::MAX, true);
-    assert_eq!(finish(session.run(), &mut task).unwrap().symbols_sent, accepted);
+    assert_eq!(
+        finish(session.run(), &mut task).unwrap().symbols_sent,
+        accepted
+    );
     assert_eq!(symbols.get(), accepted as u64);
     assert_eq!(objects.get(), 1);
     assert!(finish(session.run(), &mut task).is_err());

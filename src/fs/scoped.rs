@@ -18,8 +18,8 @@
 //! runtime gateway, and a blocking pool (a `RuntimeBuilder` default) are required.
 //! No path confinement, atomic replacement, rollback, or fsync is implied.
 
-use crate::cx::cap::{All, CapSetRuntimeMask, HasIo, HasSpawn};
 use crate::cx::Cx;
+use crate::cx::cap::{All, CapSetRuntimeMask, HasIo, HasSpawn};
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::CancelReason;
 use std::fmt;
@@ -83,7 +83,9 @@ pub struct ScopedFs<Caps = All> {
 
 impl<Caps> Clone for ScopedFs<Caps> {
     fn clone(&self) -> Self {
-        Self { cx: self.cx.clone() }
+        Self {
+            cx: self.cx.clone(),
+        }
     }
 }
 
@@ -153,9 +155,9 @@ where
                 // Recheck at the execution boundary, after queueing and any
                 // admission-time attenuation of the child's capabilities.
                 crate::cx::io_gate::require_ambient_io("scoped_fs")?;
-                child.checkpoint().map_err(|error| {
-                    io::Error::new(io::ErrorKind::Interrupted, error)
-                })?;
+                child
+                    .checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))?;
                 operation(child)
             })
             .map_err(ScopedFsError::Admission)?;
@@ -177,19 +179,22 @@ where
             })
             .await
         };
-        let result = match completed {
-            Some(result) => result,
-            None => {
-                handle.abort_with_reason(self.cx.cancel_reason().unwrap_or_else(|| {
-                    CancelReason::user("scoped filesystem caller cancelled")
-                }));
-                // Acknowledge where masking permits it. Retirement itself is
-                // uninterruptible and a running operation keeps its result.
-                let _ = self.cx.checkpoint();
-                handle.join().await
-            }
-        };
-        result.map_err(ScopedFsError::Join)?.map_err(ScopedFsError::Io)
+        let result =
+            match completed {
+                Some(result) => result,
+                None => {
+                    handle.abort_with_reason(self.cx.cancel_reason().unwrap_or_else(|| {
+                        CancelReason::user("scoped filesystem caller cancelled")
+                    }));
+                    // Acknowledge where masking permits it. Retirement itself is
+                    // uninterruptible and a running operation keeps its result.
+                    let _ = self.cx.checkpoint();
+                    handle.join().await
+                }
+            };
+        result
+            .map_err(ScopedFsError::Join)?
+            .map_err(ScopedFsError::Io)
     }
 
     /// Read a whole file, waiting for the worker and file handle to retire.
@@ -264,7 +269,6 @@ where
         self.run_io(move |_| std::fs::metadata(path)).await
     }
 }
-
 
 #[cfg(test)]
 #[path = "scoped_inline_tests.rs"]

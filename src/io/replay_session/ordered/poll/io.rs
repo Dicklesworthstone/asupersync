@@ -1,6 +1,6 @@
-use super::{PollMismatch, PollReplayError};
-use super::trace::{RecordTrace, ReplayTrace, Request};
 use super::super::gate::{RecordOrder, ReplayOrder};
+use super::trace::{RecordTrace, ReplayTrace, Request};
+use super::{PollMismatch, PollReplayError};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::fmt;
 use std::io::{self, IoSlice};
@@ -29,21 +29,33 @@ impl<T> fmt::Debug for PolledIo<T> {
 }
 impl<T> PolledIo<T> {
     pub(super) fn record(inner: T, trace: Arc<RecordTrace>, order: Arc<RecordOrder>) -> Self {
-        Self { inner, mode: Mode::Record(trace, order) }
+        Self {
+            inner,
+            mode: Mode::Record(trace, order),
+        }
     }
     pub(super) fn replay(inner: T, trace: Arc<ReplayTrace>, order: Arc<ReplayOrder>) -> Self {
-        Self { inner, mode: Mode::Replay(trace, order) }
+        Self {
+            inner,
+            mode: Mode::Replay(trace, order),
+        }
     }
-    pub(super) fn into_inner(self) -> T { self.inner }
+    pub(super) fn into_inner(self) -> T {
+        self.inner
+    }
     fn poll_with<R>(
-        &mut self, cx: &mut Context<'_>, request: Request<'_, '_>,
+        &mut self,
+        cx: &mut Context<'_>,
+        request: Request<'_, '_>,
         poll: impl FnOnce(&mut T, &mut Context<'_>) -> Poll<io::Result<R>>,
     ) -> Poll<io::Result<R>> {
         match &self.mode {
             Mode::Record(trace, order) => {
                 let guard = trace.begin(&request, order.effect_position());
                 let result = poll(&mut self.inner, cx);
-                if let Some(guard) = guard { guard.finish(result.is_pending()); }
+                if let Some(guard) = guard {
+                    guard.finish(result.is_pending());
+                }
                 result
             }
             Mode::Replay(trace, order) => {
@@ -59,7 +71,9 @@ impl<T> PolledIo<T> {
                         return Poll::Ready(Err(as_io_error(error)));
                     }
                 };
-                if pending { return Poll::Pending; }
+                if pending {
+                    return Poll::Pending;
+                }
                 let result = poll(&mut self.inner, cx);
                 if result.is_pending() {
                     let error = trace.refuse(PollMismatch::Outcome);
@@ -75,22 +89,48 @@ fn as_io_error(error: PollReplayError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 impl<T: AsyncRead + Unpin> AsyncRead for PolledIo<T> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, Request::Read(buf.remaining()), |io, cx| Pin::new(io).poll_read(cx, buf))
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.get_mut()
+            .poll_with(cx, Request::Read(buf.remaining()), |io, cx| {
+                Pin::new(io).poll_read(cx, buf)
+            })
     }
 }
 impl<T: AsyncWrite + Unpin> AsyncWrite for PolledIo<T> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, Request::Write(bytes), |io, cx| Pin::new(io).poll_write(cx, bytes))
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .poll_with(cx, Request::Write(bytes), |io, cx| {
+                Pin::new(io).poll_write(cx, bytes)
+            })
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, Request::Vectored(bufs), |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .poll_with(cx, Request::Vectored(bufs), |io, cx| {
+                Pin::new(io).poll_write_vectored(cx, bufs)
+            })
     }
-    fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, Request::Flush, |io, cx| Pin::new(io).poll_flush(cx))
+        self.get_mut()
+            .poll_with(cx, Request::Flush, |io, cx| Pin::new(io).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, Request::Shutdown, |io, cx| Pin::new(io).poll_shutdown(cx))
+        self.get_mut().poll_with(cx, Request::Shutdown, |io, cx| {
+            Pin::new(io).poll_shutdown(cx)
+        })
     }
 }

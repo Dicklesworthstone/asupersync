@@ -1510,10 +1510,9 @@ impl ConnectionRouter {
         {
             return;
         }
-        let interval = Duration::from_micros(
-            handle.connection.transport().idle_timeout_floor_micros() / 3,
-        )
-        .max(Duration::from_millis(1));
+        let interval =
+            Duration::from_micros(handle.connection.transport().idle_timeout_floor_micros() / 3)
+                .max(Duration::from_millis(1));
         if handle
             .retained_local_close
             .as_ref()

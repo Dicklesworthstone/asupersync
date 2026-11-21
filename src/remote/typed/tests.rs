@@ -16,7 +16,10 @@ impl TypedRemoteComputation for Add {
 
 fn ready<T>(future: impl Future<Output = T>) -> T {
     let mut future = Box::pin(future);
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("this codec/ready-handler fixture must not park"),
     }
@@ -63,9 +66,10 @@ fn typed_dispatch_decodes_and_executes_the_declared_signature() {
             async move { TypedRemoteOutcome::Success(left + right) }
         })
         .unwrap();
-    let call = PreparedTypedRemoteCall::<Add>::encode(&(20, 22), TypedRemoteLimits::default())
-        .unwrap();
-    let RemoteOutcome::Success(bytes) = dispatch(&registry, Add::NAME, call.input.into_data()).unwrap()
+    let call =
+        PreparedTypedRemoteCall::<Add>::encode(&(20, 22), TypedRemoteLimits::default()).unwrap();
+    let RemoteOutcome::Success(bytes) =
+        dispatch(&registry, Add::NAME, call.input.into_data()).unwrap()
     else {
         panic!("typed success must use the existing successful terminal");
     };
@@ -114,35 +118,61 @@ fn metadata_refusal_precedes_custom_deserialization_and_handler_execution() {
             async move { TypedRemoteOutcome::Success(value.0) }
         })
         .unwrap();
-    let call = PreparedTypedRemoteCall::<Probe>::encode(&DecodeProbe(7), TypedRemoteLimits::default())
-        .unwrap();
+    let call =
+        PreparedTypedRemoteCall::<Probe>::encode(&DecodeProbe(7), TypedRemoteLimits::default())
+            .unwrap();
     let original: serde_json::Value = serde_json::from_slice(call.input.data()).unwrap();
     for (field, replacement, expected) in [
         ("version", serde_json::json!(2), "codec version"),
-        ("computation", serde_json::json!("other"), "computation mismatch"),
-        ("direction", serde_json::json!("response"), "direction mismatch"),
-        ("input_schema", serde_json::json!(0), "request schema mismatch"),
-        ("output_schema", serde_json::json!(0), "response schema mismatch"),
+        (
+            "computation",
+            serde_json::json!("other"),
+            "computation mismatch",
+        ),
+        (
+            "direction",
+            serde_json::json!("response"),
+            "direction mismatch",
+        ),
+        (
+            "input_schema",
+            serde_json::json!(0),
+            "request schema mismatch",
+        ),
+        (
+            "output_schema",
+            serde_json::json!(0),
+            "response schema mismatch",
+        ),
         ("unrecognized", serde_json::json!(1), "unknown field"),
     ] {
         let mut value = original.clone();
         value[field] = replacement;
         let result = dispatch(&registry, Probe::NAME, serde_json::to_vec(&value).unwrap());
-        assert!(matches!(result,
+        assert!(
+            matches!(result,
             Err(RemoteComputationDispatchError::Execution(RemoteError::SerializationError(message)))
-                if message.contains(expected)), "{field} must be refused by the typed adapter");
+                if message.contains(expected)),
+            "{field} must be refused by the typed adapter"
+        );
     }
     let duplicate = format!(
         "{{\"version\":1,{}",
-        std::str::from_utf8(call.input.data()).unwrap().trim_start_matches('{')
+        std::str::from_utf8(call.input.data())
+            .unwrap()
+            .trim_start_matches('{')
     );
-    assert!(matches!(dispatch(&registry, Probe::NAME, duplicate.into_bytes()),
+    assert!(
+        matches!(dispatch(&registry, Probe::NAME, duplicate.into_bytes()),
         Err(RemoteComputationDispatchError::Execution(RemoteError::SerializationError(message)))
-            if message.contains("duplicate field")));
+            if message.contains("duplicate field"))
+    );
     assert_eq!(DECODE_CALLS.load(Ordering::SeqCst), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(dispatch(&registry, Probe::NAME, call.input.into_data()),
-        Ok(RemoteOutcome::Success(_))));
+    assert!(matches!(
+        dispatch(&registry, Probe::NAME, call.input.into_data()),
+        Ok(RemoteOutcome::Success(_))
+    ));
     assert_eq!(DECODE_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -195,8 +225,12 @@ fn invalid_duplicate_and_unknown_payload_fields_never_invoke_the_handler() {
             1024,
         )
         .unwrap();
-        assert!(matches!(dispatch(&registry, Strict::NAME, bytes),
-            Err(RemoteComputationDispatchError::Execution(RemoteError::SerializationError(_)))));
+        assert!(matches!(
+            dispatch(&registry, Strict::NAME, bytes),
+            Err(RemoteComputationDispatchError::Execution(
+                RemoteError::SerializationError(_)
+            ))
+        ));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -209,15 +243,22 @@ fn input_and_output_limits_include_json_expansion_and_metadata() {
         let bytes = encode_value(signature, stage, &value, TypedRemoteLimits::default()).unwrap();
         let limit = bytes.len();
         let exact = TypedRemoteLimits::new(limit, limit);
-        assert_eq!(encode_value(signature, stage, &value, exact).unwrap(), bytes);
+        assert_eq!(
+            encode_value(signature, stage, &value, exact).unwrap(),
+            bytes
+        );
         let narrow = TypedRemoteLimits::new(limit - 1, limit - 1);
         assert!(matches!(encode_value(signature, stage, &value, narrow),
             Err(TypedRemoteError::LimitExceeded { stage: actual, limit: cap })
                 if actual == stage && cap == limit - 1));
-        assert!(matches!(decode_value::<String>(signature, stage, &bytes, narrow),
-            Err(TypedRemoteError::LimitExceeded { .. })));
-        assert!(matches!(encode_value(signature, stage, &value, TypedRemoteLimits::new(0, 0)),
-            Err(TypedRemoteError::LimitExceeded { .. })));
+        assert!(matches!(
+            decode_value::<String>(signature, stage, &bytes, narrow),
+            Err(TypedRemoteError::LimitExceeded { .. })
+        ));
+        assert!(matches!(
+            encode_value(signature, stage, &value, TypedRemoteLimits::new(0, 0)),
+            Err(TypedRemoteError::LimitExceeded { .. })
+        ));
     }
 }
 
@@ -251,9 +292,12 @@ fn typed_registration_is_atomic_and_distinct_from_raw_schema_advertisement() {
         })
         .unwrap();
     let fingerprint = typed.schema_registry().fingerprint();
-    assert!(matches!(typed.register_typed_json::<Add, _, _>(
-        TypedRemoteLimits::default(), |_, _| async { TypedRemoteOutcome::Success(0) }),
-        Err(TypedRemoteError::Registration(_))));
+    assert!(matches!(
+        typed.register_typed_json::<Add, _, _>(TypedRemoteLimits::default(), |_, _| async {
+            TypedRemoteOutcome::Success(0)
+        }),
+        Err(TypedRemoteError::Registration(_))
+    ));
     assert_eq!(typed.len(), 1);
     assert_eq!(typed.schema_registry().fingerprint(), fingerprint);
     let mut raw = RemoteComputationRegistry::new();
@@ -311,13 +355,20 @@ fn cancelled_observation_retains_handle_and_output_refusal_consumes_only_once() 
         TypedRemoteLimits::default(),
     )
     .unwrap();
-    sender.send_blocking(Ok(RemoteOutcome::Success(wrong))).unwrap();
-    assert!(matches!(ready(handle.join(&Cx::for_testing())),
+    sender
+        .send_blocking(Ok(RemoteOutcome::Success(wrong)))
+        .unwrap();
+    assert!(matches!(
+        ready(handle.join(&Cx::for_testing())),
         Outcome::Err(TypedRemoteError::Direction {
-            expected: TypedRemoteStage::Response, actual: TypedRemoteStage::Request
-        })));
-    assert!(matches!(handle.try_join(),
-        Err(TypedRemoteError::Remote(RemoteError::PolledAfterCompletion))));
+            expected: TypedRemoteStage::Response,
+            actual: TypedRemoteStage::Request
+        })
+    ));
+    assert!(matches!(
+        handle.try_join(),
+        Err(TypedRemoteError::Remote(RemoteError::PolledAfterCompletion))
+    ));
 }
 
 #[test]
@@ -333,10 +384,16 @@ fn failure_cancel_and_panic_remain_distinct_remote_terminals() {
         let observed = ready(handle.close(&Cx::for_testing()));
         match (terminal, observed) {
             (RemoteOutcome::Failed(expected), Outcome::Ok(TypedRemoteOutcome::Failed(actual)))
-            | (RemoteOutcome::Panicked(expected), Outcome::Ok(TypedRemoteOutcome::Panicked(actual))) => {
+            | (
+                RemoteOutcome::Panicked(expected),
+                Outcome::Ok(TypedRemoteOutcome::Panicked(actual)),
+            ) => {
                 assert_eq!(actual, expected);
             }
-            (RemoteOutcome::Cancelled(expected), Outcome::Ok(TypedRemoteOutcome::Cancelled(actual))) => {
+            (
+                RemoteOutcome::Cancelled(expected),
+                Outcome::Ok(TypedRemoteOutcome::Cancelled(actual)),
+            ) => {
                 assert_eq!(actual, expected);
             }
             other => panic!("typed adapter changed terminal shape: {other:?}"),
@@ -368,9 +425,15 @@ impl TypedRemoteComputation for Encoding {
 #[test]
 fn missing_capability_or_cancellation_refuses_before_application_serialization() {
     ENCODE_CALLS.store(0, Ordering::SeqCst);
-    assert!(matches!(spawn_remote_typed::<Encoding>(
-        &Cx::for_testing(), NodeId::new("remote"), &EncodeProbe, TypedRemoteLimits::default()),
-        Err(TypedRemoteError::Remote(RemoteError::NoCapability))));
+    assert!(matches!(
+        spawn_remote_typed::<Encoding>(
+            &Cx::for_testing(),
+            NodeId::new("remote"),
+            &EncodeProbe,
+            TypedRemoteLimits::default()
+        ),
+        Err(TypedRemoteError::Remote(RemoteError::NoCapability))
+    ));
     let cx = Cx::for_testing_with_remote(RemoteCap::new());
     let reason = CancelReason::user("cancel before typed encoding");
     cx.set_cancel_reason(reason.clone());

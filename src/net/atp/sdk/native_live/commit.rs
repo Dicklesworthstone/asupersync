@@ -1928,6 +1928,7 @@ mod manifest_sink {
     }
 
     #[cfg(test)]
+    #[rustfmt::skip]
     mod restore_tests;
 
     #[cfg(test)]

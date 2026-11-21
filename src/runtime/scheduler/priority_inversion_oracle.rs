@@ -22,11 +22,11 @@
 
 use crate::runtime::scheduler::priority::DispatchLane;
 use crate::runtime::scheduler::worker::WorkerId;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::TaskId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;

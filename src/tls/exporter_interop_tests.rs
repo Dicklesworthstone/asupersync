@@ -21,8 +21,14 @@ const CERT: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
 const KEY: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
 const ALPN: &[u8] = b"asupersync-exporter-test";
 const TLS13_SUITES: [(CipherSuite, &str); 3] = [
-    (CipherSuite::TLS13_AES_128_GCM_SHA256, "TLS_AES_128_GCM_SHA256"),
-    (CipherSuite::TLS13_AES_256_GCM_SHA384, "TLS_AES_256_GCM_SHA384"),
+    (
+        CipherSuite::TLS13_AES_128_GCM_SHA256,
+        "TLS_AES_128_GCM_SHA256",
+    ),
+    (
+        CipherSuite::TLS13_AES_256_GCM_SHA384,
+        "TLS_AES_256_GCM_SHA384",
+    ),
     (
         CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
         "TLS_CHACHA20_POLY1305_SHA256",
@@ -183,18 +189,13 @@ fn exchange(rust_client: bool, version: u8, suite: CipherSuite, cipher: &str) ->
                     .await
                     .expect("client TLS")
             } else {
-                acceptor
-                    .accept_with_cx(&cx, tcp)
-                    .await
-                    .expect("server TLS")
+                acceptor.accept_with_cx(&cx, tcp).await.expect("server TLS")
             };
             assert_eq!(tls.protocol_version(), Some(protocol.version));
             assert_eq!(tls.negotiated_cipher_suite(), Some(suite));
             assert_eq!(tls.alpn_protocol(), Some(ALPN));
             let binding = if version == 13 {
-                let binding = tls
-                    .tls_exporter_channel_binding()
-                    .expect("public exporter");
+                let binding = tls.tls_exporter_channel_binding().expect("public exporter");
                 assert_eq!(tls.tls_exporter_channel_binding().unwrap(), binding);
                 Some(binding)
             } else {
@@ -217,7 +218,11 @@ fn exchange(rust_client: bool, version: u8, suite: CipherSuite, cipher: &str) ->
                     "OpenSSL exporter disagreement"
                 );
                 assert_ne!(binding.as_slice(), &frame[41..73], "wrong-label control");
-                assert_ne!(binding.as_slice(), &frame[73..105], "nonempty-context control");
+                assert_ne!(
+                    binding.as_slice(),
+                    &frame[73..105],
+                    "nonempty-context control"
+                );
                 assert_eq!(tls.tls_exporter_channel_binding().unwrap(), binding);
                 let mut ack = [0; 36];
                 ack[..4].copy_from_slice(b"BIND");
@@ -229,9 +234,7 @@ fn exchange(rust_client: bool, version: u8, suite: CipherSuite, cipher: &str) ->
                     .await
                     .expect("send TLS 1.2 rejection");
             }
-            tls.flush_with_cx(&cx)
-                .await
-                .expect("flush acknowledgement");
+            tls.flush_with_cx(&cx).await.expect("flush acknowledgement");
             let mut done = [0; 4];
             tls.read_exact(&mut done)
                 .await

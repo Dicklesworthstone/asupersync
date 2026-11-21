@@ -97,7 +97,8 @@ impl Revocations {
     ) -> Result<Prepared, ResumeRevokeError> {
         // Bound even a caller-supplied batch full of duplicate entries. The
         // caller retains its input storage; no unbounded temporary set is built.
-        if clients.len() > MAX_REVOKED_RESUME_CLIENTS || sessions.len() > MAX_REVOKED_RESUME_SESSIONS
+        if clients.len() > MAX_REVOKED_RESUME_CLIENTS
+            || sessions.len() > MAX_REVOKED_RESUME_SESSIONS
         {
             return Err(ResumeRevokeError::Capacity);
         }
@@ -174,7 +175,8 @@ impl<W> ResumableService<W> {
             .iter()
             .filter(|(key, entry)| {
                 entry.status != ResumeSessionStatus::Retired
-                    && (requested_clients.contains(&key.client) || requested_sessions.contains(*key))
+                    && (requested_clients.contains(&key.client)
+                        || requested_sessions.contains(*key))
             })
             .count();
         let newly_revoked_clients = prepared.clients.len();

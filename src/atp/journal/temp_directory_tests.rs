@@ -18,21 +18,26 @@ fn set_mode(path: &Path, permissions: u32) {
 #[test]
 fn collisions_are_never_tracked_or_deleted_and_do_not_consume_capacity() {
     let directory = tempfile::tempdir().unwrap();
-    let mut manager = TempPathManager::with_config(directory.path(), TempManagementConfig {
-        max_active_temps: 1,
-        auto_create_quarantine: false,
-        ..TempManagementConfig::default()
-    });
+    let mut manager = TempPathManager::with_config(
+        directory.path(),
+        TempManagementConfig {
+            max_active_temps: 1,
+            auto_create_quarantine: false,
+            ..TempManagementConfig::default()
+        },
+    );
     let mut collisions = Vec::new();
     let mut attempts = 0;
-    let (owned, mut file) = manager.create_temp_file_with("collision", |path| {
-        attempts += 1;
-        if attempts <= 2 {
-            fs::write(path, b"pre-existing sentinel").unwrap();
-            collisions.push(path.to_path_buf());
-        }
-        TempPathManager::open_new_file(path, Some(0o600))
-    }).unwrap();
+    let (owned, mut file) = manager
+        .create_temp_file_with("collision", |path| {
+            attempts += 1;
+            if attempts <= 2 {
+                fs::write(path, b"pre-existing sentinel").unwrap();
+                collisions.push(path.to_path_buf());
+            }
+            TempPathManager::open_new_file(path, Some(0o600))
+        })
+        .unwrap();
     assert_eq!(attempts, 3);
     file.write_all(b"owned payload").unwrap();
     drop(file);
@@ -55,11 +60,14 @@ fn collisions_are_never_tracked_or_deleted_and_do_not_consume_capacity() {
 #[test]
 fn exhaustion_limits_and_open_errors_leave_no_false_ownership() {
     let directory = tempfile::tempdir().unwrap();
-    let mut manager = TempPathManager::with_config(directory.path(), TempManagementConfig {
-        max_active_temps: 1,
-        auto_create_quarantine: false,
-        ..TempManagementConfig::default()
-    });
+    let mut manager = TempPathManager::with_config(
+        directory.path(),
+        TempManagementConfig {
+            max_active_temps: 1,
+            auto_create_quarantine: false,
+            ..TempManagementConfig::default()
+        },
+    );
     let mut collisions = Vec::new();
     let result = manager.create_temp_file_with("exhaust", |path| {
         fs::write(path, b"foreign").unwrap();
@@ -71,16 +79,27 @@ fn exhaustion_limits_and_open_errors_leave_no_false_ownership() {
     assert_eq!(collisions.len(), 8);
     assert_eq!(manager.get_stats().active_count, 0);
     assert!(manager.cleanup_stale_files().unwrap().is_empty());
-    for path in collisions { assert_eq!(fs::read(path).unwrap(), b"foreign"); }
+    for path in collisions {
+        assert_eq!(fs::read(path).unwrap(), b"foreign");
+    }
     let result = manager.create_temp_file_with("denied", |_| {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected denial"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "injected denial",
+        ))
     });
     assert!(matches!(result, Err(TempFileCreationError::Open(error))
         if error.kind() == io::ErrorKind::PermissionDenied));
     assert_eq!(manager.get_stats().active_count, 0);
     manager.config.max_active_temps = 0;
-    let result = manager.create_temp_file_with("capacity", |_| panic!("opener ran without capacity"));
-    assert!(matches!(result, Err(TempFileCreationError::Path(TempManagementError::TooManyTempFiles))));
+    let result =
+        manager.create_temp_file_with("capacity", |_| panic!("opener ran without capacity"));
+    assert!(matches!(
+        result,
+        Err(TempFileCreationError::Path(
+            TempManagementError::TooManyTempFiles
+        ))
+    ));
 }
 
 #[cfg(unix)]
@@ -92,21 +111,34 @@ fn existing_and_dangling_symlink_collisions_never_open_their_targets() {
     fs::write(&victim, b"keep victim").unwrap();
     let mut manager = TempPathManager::new(directory.path());
     let mut links = Vec::new();
-    let (owned, mut file) = manager.create_temp_file_with("links", |path| {
-        match links.len() {
-            0 => { std::os::unix::fs::symlink(&victim, path).unwrap(); links.push(path.to_path_buf()); }
-            1 => { std::os::unix::fs::symlink(&missing, path).unwrap(); links.push(path.to_path_buf()); }
-            _ => {}
-        }
-        TempPathManager::open_new_file(path, Some(0o600))
-    }).unwrap();
+    let (owned, mut file) = manager
+        .create_temp_file_with("links", |path| {
+            match links.len() {
+                0 => {
+                    std::os::unix::fs::symlink(&victim, path).unwrap();
+                    links.push(path.to_path_buf());
+                }
+                1 => {
+                    std::os::unix::fs::symlink(&missing, path).unwrap();
+                    links.push(path.to_path_buf());
+                }
+                _ => {}
+            }
+            TempPathManager::open_new_file(path, Some(0o600))
+        })
+        .unwrap();
     file.write_all(b"new owner").unwrap();
     drop(file);
     assert_eq!(fs::read(victim).unwrap(), b"keep victim");
     assert!(!missing.exists());
     assert_eq!(links.len(), 2);
     for link in links {
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(manager.get_temp_info(&link).is_none());
     }
     assert_eq!(fs::read(owned).unwrap(), b"new owner");
@@ -121,7 +153,11 @@ fn staging_is_private_at_creation_without_chmoding_the_destination() {
     let mut manager = TempPathManager::new(directory.path());
     let (path, mut file) = manager.create_temp_file("private").unwrap();
     assert_eq!(mode(directory.path()), 0o755);
-    assert_eq!(mode(&path) & 0o177, 0, "no execute, group, or other permissions before payload");
+    assert_eq!(
+        mode(&path) & 0o177,
+        0,
+        "no execute, group, or other permissions before payload"
+    );
     file.write_all(b"private bytes").unwrap();
     assert_eq!(mode(&path) & 0o177, 0);
     assert_eq!(mode(&directory.path().join(".quarantine")) & 0o077, 0);
@@ -136,10 +172,13 @@ fn existing_modes_and_ancestors_survive_all_creation_configurations() {
         let quarantine = directory.path().join(".quarantine");
         fs::create_dir(&quarantine).unwrap();
         set_mode(&quarantine, 0o755);
-        let manager = TempPathManager::with_config(directory.path(), TempManagementConfig {
-            temp_dir_permissions: requested,
-            ..TempManagementConfig::default()
-        });
+        let manager = TempPathManager::with_config(
+            directory.path(),
+            TempManagementConfig {
+                temp_dir_permissions: requested,
+                ..TempManagementConfig::default()
+            },
+        );
         manager.ensure_directories().unwrap();
         assert_eq!(mode(directory.path()), 0o751);
         assert_eq!(mode(&quarantine), 0o755);
@@ -183,7 +222,10 @@ fn non_directory_paths_fail_without_changing_the_existing_object() {
     #[cfg(unix)]
     set_mode(&base_file, 0o640);
     let manager = TempPathManager::new(&base_file);
-    assert!(matches!(manager.ensure_directories(), Err(TempManagementError::DirectoryCreation(_))));
+    assert!(matches!(
+        manager.ensure_directories(),
+        Err(TempManagementError::DirectoryCreation(_))
+    ));
     assert_eq!(fs::read(&base_file).unwrap(), b"not a directory");
     #[cfg(unix)]
     assert_eq!(mode(&base_file), 0o640);
@@ -192,7 +234,10 @@ fn non_directory_paths_fail_without_changing_the_existing_object() {
     let quarantine_file = base.join(".quarantine");
     fs::write(&quarantine_file, b"not quarantine").unwrap();
     let manager = TempPathManager::new(&base);
-    assert!(matches!(manager.ensure_directories(), Err(TempManagementError::QuarantineDirectoryCreation(_))));
+    assert!(matches!(
+        manager.ensure_directories(),
+        Err(TempManagementError::QuarantineDirectoryCreation(_))
+    ));
     assert_eq!(fs::read(quarantine_file).unwrap(), b"not quarantine");
 }
 
@@ -211,14 +256,19 @@ fn concurrent_managers_do_not_reconfigure_shared_directories() {
         let start = std::sync::Arc::clone(&start);
         workers.push(std::thread::spawn(move || {
             start.wait();
-            let manager = TempPathManager::with_config(path, TempManagementConfig {
-                temp_dir_permissions: Some(if i % 2 == 0 { 0o700 } else { 0o750 }),
-                ..TempManagementConfig::default()
-            });
+            let manager = TempPathManager::with_config(
+                path,
+                TempManagementConfig {
+                    temp_dir_permissions: Some(if i % 2 == 0 { 0o700 } else { 0o750 }),
+                    ..TempManagementConfig::default()
+                },
+            );
             manager.ensure_directories().unwrap();
         }));
     }
-    for worker in workers { worker.join().unwrap(); }
+    for worker in workers {
+        worker.join().unwrap();
+    }
     assert_eq!(mode(directory.path()), 0o771);
     assert_eq!(mode(&quarantine), 0o711);
 }
@@ -238,8 +288,11 @@ fn scoped_receive_to_publication_preserves_destination_access_and_private_files(
     for workers in [1, 2] {
         let directory = tempfile::tempdir().unwrap();
         set_mode(directory.path(), 0o755);
-        let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-            else { RuntimeBuilder::new().worker_threads(workers) };
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        };
         let runtime = builder.blocking_threads(1, 2).build().unwrap();
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
@@ -247,17 +300,34 @@ fn scoped_receive_to_publication_preserves_destination_access_and_private_files(
             let id = object.id.clone();
             let mut graph = ObjectGraph::new();
             graph.add_root(object).unwrap();
-            let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+            let manifest =
+                Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
             let destination = directory.path().join("file");
-            let writer = ScopedSparseWriter::new(&cx, id, destination.clone(), SparseWriterConfig {
-                enable_preallocation: false,
-                ..SparseWriterConfig::default()
-            }).await.unwrap().unwrap();
+            let writer = ScopedSparseWriter::new(
+                &cx,
+                id,
+                destination.clone(),
+                SparseWriterConfig {
+                    enable_preallocation: false,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(mode(directory.path()), 0o755);
-            let mut session = writer.receive_exact(
-                &cx, b"private payload".as_slice(), manifest,
-                ScopedReceiveOptions { max_bytes: 64, max_chunks: 16, chunk_size: 4 },
-            ).unwrap();
+            let mut session = writer
+                .receive_exact(
+                    &cx,
+                    b"private payload".as_slice(),
+                    manifest,
+                    ScopedReceiveOptions {
+                        max_bytes: 64,
+                        max_chunks: 16,
+                        chunk_size: 4,
+                    },
+                )
+                .unwrap();
             assert_eq!(session.wait().await.unwrap().unwrap(), destination);
             assert_eq!(fs::read(&destination).unwrap(), b"private payload");
             assert_eq!(mode(&destination) & 0o177, 0);

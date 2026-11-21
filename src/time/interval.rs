@@ -375,7 +375,8 @@ impl Interval {
                 .deadline
                 .filter(|deadline| *deadline > now)
                 .map_or(self.deadline, |deadline| self.deadline.min(deadline));
-            let mut timer = std::pin::pin!(super::Sleep::with_timer_driver(wake_at, driver.clone()));
+            let mut timer =
+                std::pin::pin!(super::Sleep::with_timer_driver(wake_at, driver.clone()));
             poll_fn(|task| {
                 cancellation.token =
                     Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
@@ -612,4 +613,3 @@ impl<Caps> Drop for TickCancellation<'_, Caps> {
 #[cfg(test)]
 #[path = "interval_inline_tests.rs"]
 mod tests;
-

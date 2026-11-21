@@ -10,11 +10,11 @@ use super::{
 };
 use crate::cx::Cx;
 use crate::supervision::ManagedGeneration;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// A real managed work invocation's lifecycle boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,7 +205,9 @@ impl ObservationCatalog {
         for binding in bindings {
             let name = binding.name.clone();
             if supplied.insert(name.clone(), binding).is_some() {
-                return Err(ManagedAppBindError::Duplicate(format!("observability:{name}")));
+                return Err(ManagedAppBindError::Duplicate(format!(
+                    "observability:{name}"
+                )));
             }
         }
         let mut observers = Vec::with_capacity(declarations.len());
@@ -260,7 +262,9 @@ impl ObservationCatalog {
             });
         }
         if let Some((name, _)) = supplied.into_iter().next() {
-            return Err(ManagedAppBindError::Unexpected(format!("observability:{name}")));
+            return Err(ManagedAppBindError::Unexpected(format!(
+                "observability:{name}"
+            )));
         }
         Ok(Self { observers })
     }

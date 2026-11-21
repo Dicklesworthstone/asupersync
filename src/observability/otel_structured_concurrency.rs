@@ -59,6 +59,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "metrics")]
+use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "metrics")]
 use opentelemetry::{
     KeyValue, Value,
     global::{BoxedSpan, BoxedTracer},
@@ -66,8 +68,6 @@ use opentelemetry::{
 };
 #[cfg(feature = "metrics")]
 use parking_lot::RwLock;
-#[cfg(feature = "metrics")]
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Detected span obligation leak for debugging.
 #[derive(Debug, Clone)]

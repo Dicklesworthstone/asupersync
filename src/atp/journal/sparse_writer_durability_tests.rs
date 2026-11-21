@@ -3,9 +3,9 @@
 use super::*;
 use crate::atp::journal::FsyncPolicy;
 use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use futures_lite::future::block_on;
 use std::cell::Cell;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 fn prepared_writer(
     content: &[u8],
@@ -65,7 +65,10 @@ fn empty_objects_verify_and_commit_across_publication_and_sync_policies() {
                 let state = writer.lock_state();
                 assert!(state.temp_file.is_some());
                 assert!(state.written_chunks.is_empty());
-                assert_eq!(state.temp_file.as_ref().unwrap().metadata().unwrap().len(), 0);
+                assert_eq!(
+                    state.temp_file.as_ref().unwrap().metadata().unwrap().len(),
+                    0
+                );
                 drop(state);
 
                 assert_eq!(block_on(writer.commit(&cx)).unwrap(), destination);
@@ -103,7 +106,10 @@ fn every_durable_policy_runs_a_final_barrier_even_for_synced_chunks() {
             Err(std::io::Error::other("injected terminal sync failure"))
         });
         assert!(called.get());
-        assert!(matches!(result, Outcome::Err(SparseWriterError::SyncFailed(_))));
+        assert!(matches!(
+            result,
+            Outcome::Err(SparseWriterError::SyncFailed(_))
+        ));
         assert!(!destination.exists());
         assert_eq!(writer.lock_state().lifecycle, WriterLifecycle::Committing);
         assert!(writer.lock_state().temp_file.is_some());
@@ -122,14 +128,32 @@ fn failed_barrier_does_not_mark_unsynced_chunks_as_durable() {
         },
     );
     block_on(writer.verify(&cx, &manifest)).unwrap();
-    assert!(writer.lock_state().written_chunks.values().all(|chunk| !chunk.synced));
+    assert!(
+        writer
+            .lock_state()
+            .written_chunks
+            .values()
+            .all(|chunk| !chunk.synced)
+    );
     assert!(matches!(
         writer.apply_fsync_policy_with(|_| Err(std::io::Error::other("injected sync failure"))),
         Outcome::Err(SparseWriterError::SyncFailed(_))
     ));
-    assert!(writer.lock_state().written_chunks.values().all(|chunk| !chunk.synced));
+    assert!(
+        writer
+            .lock_state()
+            .written_chunks
+            .values()
+            .all(|chunk| !chunk.synced)
+    );
     writer.apply_fsync_policy_with(File::sync_all).unwrap();
-    assert!(writer.lock_state().written_chunks.values().all(|chunk| chunk.synced));
+    assert!(
+        writer
+            .lock_state()
+            .written_chunks
+            .values()
+            .all(|chunk| chunk.synced)
+    );
 }
 
 #[test]
@@ -146,7 +170,13 @@ fn never_policy_does_not_run_a_barrier_or_upgrade_chunk_evidence() {
     writer
         .apply_fsync_policy_with(|_| panic!("Never must not request a sync"))
         .unwrap();
-    assert!(writer.lock_state().written_chunks.values().all(|chunk| !chunk.synced));
+    assert!(
+        writer
+            .lock_state()
+            .written_chunks
+            .values()
+            .all(|chunk| !chunk.synced)
+    );
 }
 
 #[test]
@@ -238,6 +268,9 @@ fn empty_objects_cannot_publish_after_a_failed_final_barrier() {
         let state = writer.lock_state();
         assert_eq!(state.lifecycle, WriterLifecycle::Committing);
         assert!(state.temp_path.as_ref().unwrap().is_file());
-        assert_eq!(state.temp_file.as_ref().unwrap().metadata().unwrap().len(), 0);
+        assert_eq!(
+            state.temp_file.as_ref().unwrap().metadata().unwrap().len(),
+            0
+        );
     }
 }

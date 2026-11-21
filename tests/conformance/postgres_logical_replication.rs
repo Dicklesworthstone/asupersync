@@ -1890,7 +1890,10 @@ mod tests {
             harness.create_begin_message(100, 200, 300),
             harness.create_type_message(50_000, "custom", "opaque"),
             harness.create_relation_message(
-                42, "public", "items", ReplicaIdentity::Full,
+                42,
+                "public",
+                "items",
+                ReplicaIdentity::Full,
                 &[("id", 23, u32::MAX), ("value", 50_000, u32::MAX)],
             ),
             harness.create_insert_message(42, &new),
@@ -1908,9 +1911,14 @@ mod tests {
         assert!(matches!(&decoded[0], PgOutputMessage::Begin {
             final_lsn, commit_time_micros: 200, xid: 300,
         } if final_lsn.as_u64() == 100));
-        assert!(matches!(&decoded[1], PgOutputMessage::Type {
-            id: 50_000, namespace: "custom", name: "opaque",
-        }));
+        assert!(matches!(
+            &decoded[1],
+            PgOutputMessage::Type {
+                id: 50_000,
+                namespace: "custom",
+                name: "opaque",
+            }
+        ));
         let PgOutputMessage::Relation(relation) = &decoded[2] else {
             panic!("expected the relation schema");
         };
@@ -1920,11 +1928,18 @@ mod tests {
         assert_eq!(relation.replica_identity, PgReplicaIdentity::Full);
         assert_eq!(relation.columns[1].type_oid, 50_000);
         assert_eq!(relation.columns[1].type_modifier, -1);
-        let PgOutputMessage::Insert { relation_id, new_tuple } = &decoded[3] else {
+        let PgOutputMessage::Insert {
+            relation_id,
+            new_tuple,
+        } = &decoded[3]
+        else {
             panic!("expected the inserted row");
         };
         assert_eq!(*relation_id, 42);
-        assert_eq!(new_tuple, &vec![PgTupleValue::Text(b"1"), PgTupleValue::Binary(&[0, 255])]);
+        assert_eq!(
+            new_tuple,
+            &vec![PgTupleValue::Text(b"1"), PgTupleValue::Binary(&[0, 255])]
+        );
         assert!(matches!(&decoded[4], PgOutputMessage::Update {
             relation_id: 42, old_tuple: Some(PgOldTuple::Full(old)), new_tuple: new,
         } if old == &vec![PgTupleValue::Text(b"1"), PgTupleValue::Text(b"old")]
@@ -1951,14 +1966,20 @@ mod tests {
         // The legacy reference harness accepted this reserved COMMIT flag.
         // Keep the production expectation tied to the negotiated wire format.
         let invalid = harness.create_commit_message(1, 10, 20, 30);
-        assert!(matches!(decode_pgoutput(&invalid), Err(PgOutputError::Invalid { .. })));
+        assert!(matches!(
+            decode_pgoutput(&invalid),
+            Err(PgOutputError::Invalid { .. })
+        ));
         let mut wire = harness.create_begin_message(10, 30, 42);
         wire.extend_from_slice(b"I\0\0\0\x01N\0\x01x");
         wire.extend_from_slice(&harness.create_commit_message(0, 10, 20, 30));
         let mut messages = PgOutputMessages::new(&wire);
         assert!(messages.next().unwrap().is_ok());
         assert!(messages.next().unwrap().is_err());
-        assert!(messages.next().is_none(), "a malformed row cannot expose a later commit");
+        assert!(
+            messages.next().is_none(),
+            "a malformed row cannot expose a later commit"
+        );
     }
 
     // Encode these fixtures independently of the production codec. The four
@@ -2002,8 +2023,8 @@ mod tests {
     #[test]
     fn production_pgoutput_v2_preserves_ownership_for_every_streamed_payload() {
         use asupersync::database::postgres::pgoutput::{
-            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion,
-            PgTupleValue, decode_pgoutput,
+            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion, PgTupleValue,
+            decode_pgoutput,
         };
 
         let harness = PgLogicalReplicationHarness::new();
@@ -2016,7 +2037,10 @@ mod tests {
         application_message.extend_from_slice(&[0, 255, 128]);
         let messages = [
             harness.create_relation_message(
-                42, "public", "items", ReplicaIdentity::Full,
+                42,
+                "public",
+                "items",
+                ReplicaIdentity::Full,
                 &[("id", 23, u32::MAX), ("value", 50_000, u32::MAX)],
             ),
             harness.create_type_message(50_000, "custom", "opaque"),
@@ -2030,7 +2054,10 @@ mod tests {
         let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
         assert_eq!(
             decoder.decode(&stream_start_fixture(500, true)).unwrap(),
-            PgOutputEvent::StreamStart { xid: 500, first_segment: true },
+            PgOutputEvent::StreamStart {
+                xid: 500,
+                first_segment: true
+            },
         );
 
         // PostgreSQL can emit Origin just after Stream Start. Unlike each of
@@ -2038,20 +2065,30 @@ mod tests {
         let mut origin = vec![b'O'];
         origin.extend_from_slice(&0x1122_3344_5566_7788_u64.to_be_bytes());
         origin.extend_from_slice(b"upstream\0");
-        assert!(matches!(decoder.decode(&origin).unwrap(), PgOutputEvent::Message {
+        assert!(
+            matches!(decoder.decode(&origin).unwrap(), PgOutputEvent::Message {
             stream_xid: Some(500), xid: None,
             message: PgOutputMessage::Origin { origin_lsn, name: "upstream" },
-        } if origin_lsn.as_u64() == 0x1122_3344_5566_7788));
+        } if origin_lsn.as_u64() == 0x1122_3344_5566_7788)
+        );
 
         for message in &messages {
             let wire = streamed_payload_fixture(501, message);
             for cut in 0..wire.len() {
-                assert!(decoder.decode(&wire[..cut]).is_err(),
-                    "truncated streamed payload for tag {} at byte {cut}", message[0]);
+                assert!(
+                    decoder.decode(&wire[..cut]).is_err(),
+                    "truncated streamed payload for tag {} at byte {cut}",
+                    message[0]
+                );
                 assert_eq!(decoder.active_stream_xid(), Some(500));
             }
             let event = decoder.decode(&wire).unwrap();
-            let PgOutputEvent::Message { stream_xid, xid, message: decoded } = event else {
+            let PgOutputEvent::Message {
+                stream_xid,
+                xid,
+                message: decoded,
+            } = event
+            else {
                 panic!("expected a streamed payload for tag {}", message[0]);
             };
             assert_eq!(stream_xid, Some(500));
@@ -2066,47 +2103,73 @@ mod tests {
             }
         }
 
-        assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: 500 });
+        assert_eq!(
+            decoder.decode(b"E").unwrap(),
+            PgOutputEvent::StreamStop { xid: 500 }
+        );
         assert_eq!(decoder.active_stream_xid(), None);
-        decoder.decode(&harness.create_begin_message(100, 200, 600)).unwrap();
+        decoder
+            .decode(&harness.create_begin_message(100, 200, 600))
+            .unwrap();
         // The same connection returns to v1-shaped payloads between segments.
         // A stale contextual-XID mode would corrupt all seven of these.
         for message in &messages {
-            assert_eq!(decoder.decode(message).unwrap(), PgOutputEvent::Message {
-                stream_xid: None,
-                xid: None,
-                message: decode_pgoutput(message).unwrap(),
-            });
+            assert_eq!(
+                decoder.decode(message).unwrap(),
+                PgOutputEvent::Message {
+                    stream_xid: None,
+                    xid: None,
+                    message: decode_pgoutput(message).unwrap(),
+                }
+            );
         }
-        decoder.decode(&harness.create_commit_message(0, 110, 120, 201)).unwrap();
+        decoder
+            .decode(&harness.create_commit_message(0, 110, 120, 201))
+            .unwrap();
     }
 
     #[cfg(feature = "postgres")]
     #[test]
     fn production_pgoutput_v2_keeps_interleaved_transactions_and_aborts_distinct() {
         use asupersync::database::postgres::pgoutput::{
-            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion,
-            PgTupleValue,
+            PgOutputDecoder, PgOutputEvent, PgOutputMessage, PgOutputProtocolVersion, PgTupleValue,
         };
 
         let harness = PgLogicalReplicationHarness::new();
         let row = harness.create_insert_message(42, &[TupleData::Text("pending".into())]);
         let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V2);
         for (top_xid, change_xid) in [(500, 501), (600, 600)] {
-            assert_eq!(decoder.decode(&stream_start_fixture(top_xid, true)).unwrap(),
-                PgOutputEvent::StreamStart { xid: top_xid, first_segment: true });
+            assert_eq!(
+                decoder
+                    .decode(&stream_start_fixture(top_xid, true))
+                    .unwrap(),
+                PgOutputEvent::StreamStart {
+                    xid: top_xid,
+                    first_segment: true
+                }
+            );
             let wire = streamed_payload_fixture(change_xid, &row);
-            assert!(matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
+            assert!(
+                matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
                 stream_xid: Some(stream_xid), xid: Some(xid),
                 message: PgOutputMessage::Insert { relation_id: 42, .. },
-            } if stream_xid == top_xid && xid == change_xid));
-            assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: top_xid });
+            } if stream_xid == top_xid && xid == change_xid)
+            );
+            assert_eq!(
+                decoder.decode(b"E").unwrap(),
+                PgOutputEvent::StreamStop { xid: top_xid }
+            );
         }
 
         // A savepoint rollback discards only xid 501, not its parent 500 or
         // the interleaved transaction 600. Stop alone commits none of them.
-        assert_eq!(decoder.decode(&stream_abort_fixture(500, 501)).unwrap(),
-            PgOutputEvent::StreamAbort { xid: 500, subxid: 501 });
+        assert_eq!(
+            decoder.decode(&stream_abort_fixture(500, 501)).unwrap(),
+            PgOutputEvent::StreamAbort {
+                xid: 500,
+                subxid: 501
+            }
+        );
         assert_eq!(decoder.active_stream_xid(), None);
 
         // A small committed transaction may arrive while both streams remain
@@ -2116,32 +2179,55 @@ mod tests {
             row.clone(),
             harness.create_commit_message(0, 110, 120, 201),
         ] {
-            assert!(matches!(decoder.decode(&ordinary).unwrap(), PgOutputEvent::Message {
-                stream_xid: None, xid: None, ..
-            }));
+            assert!(matches!(
+                decoder.decode(&ordinary).unwrap(),
+                PgOutputEvent::Message {
+                    stream_xid: None,
+                    xid: None,
+                    ..
+                }
+            ));
         }
 
-        assert_eq!(decoder.decode(&stream_start_fixture(500, false)).unwrap(),
-            PgOutputEvent::StreamStart { xid: 500, first_segment: false });
-        let surviving_row = harness.create_insert_message(42, &[TupleData::Text("survives".into())]);
+        assert_eq!(
+            decoder.decode(&stream_start_fixture(500, false)).unwrap(),
+            PgOutputEvent::StreamStart {
+                xid: 500,
+                first_segment: false
+            }
+        );
+        let surviving_row =
+            harness.create_insert_message(42, &[TupleData::Text("survives".into())]);
         let wire = streamed_payload_fixture(500, &surviving_row);
-        assert!(matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
+        assert!(
+            matches!(decoder.decode(&wire).unwrap(), PgOutputEvent::Message {
             stream_xid: Some(500), xid: Some(500),
             message: PgOutputMessage::Insert { relation_id: 42, new_tuple },
-        } if new_tuple == vec![PgTupleValue::Text(b"survives")]));
-        assert_eq!(decoder.decode(b"E").unwrap(), PgOutputEvent::StreamStop { xid: 500 });
+        } if new_tuple == vec![PgTupleValue::Text(b"survives")])
+        );
+        assert_eq!(
+            decoder.decode(b"E").unwrap(),
+            PgOutputEvent::StreamStop { xid: 500 }
+        );
 
         for xid in [600, 500] {
-            assert!(matches!(decoder.decode(&stream_commit_fixture(xid, 200, 220, -10)).unwrap(),
+            assert!(
+                matches!(decoder.decode(&stream_commit_fixture(xid, 200, 220, -10)).unwrap(),
                 PgOutputEvent::StreamCommit {
                     xid: committed, commit_lsn, end_lsn, commit_time_micros: -10,
-                } if committed == xid && commit_lsn.as_u64() == 200 && end_lsn.as_u64() == 220));
+                } if committed == xid && commit_lsn.as_u64() == 200 && end_lsn.as_u64() == 220)
+            );
         }
 
         decoder.decode(&stream_start_fixture(800, true)).unwrap();
         decoder.decode(b"E").unwrap();
-        assert_eq!(decoder.decode(&stream_abort_fixture(800, 800)).unwrap(),
-            PgOutputEvent::StreamAbort { xid: 800, subxid: 800 });
+        assert_eq!(
+            decoder.decode(&stream_abort_fixture(800, 800)).unwrap(),
+            PgOutputEvent::StreamAbort {
+                xid: 800,
+                subxid: 800
+            }
+        );
     }
 
     #[test]

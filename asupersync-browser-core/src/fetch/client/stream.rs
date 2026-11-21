@@ -24,8 +24,12 @@ impl FetchBytesClient {
         consumer_version: Option<WasmAbiVersion>,
     ) -> ClientStream {
         ClientStream {
-            state: Rc::clone(&self.state), request: Some(request),
-            max_chunk_bytes, consumer_version, active: None, finished: false,
+            state: Rc::clone(&self.state),
+            request: Some(request),
+            max_chunk_bytes,
+            consumer_version,
+            active: None,
+            finished: false,
         }
     }
 }
@@ -62,7 +66,10 @@ impl Future for ClientStream {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        assert!(!this.finished, "client stream opening polled after completion");
+        assert!(
+            !this.finished,
+            "client stream opening polled after completion"
+        );
         if this.active.is_none() {
             let credit = match Credit::acquire(&this.state) {
                 Ok(credit) => credit,
@@ -72,14 +79,27 @@ impl Future for ClientStream {
                     return Poll::Ready(Err(error));
                 }
             };
-            let request = this.request.take().expect("unpolled stream owns its request");
+            let request = this
+                .request
+                .take()
+                .expect("unpolled stream owns its request");
             this.active = Some(Opening {
-                future: Box::pin(fetch_stream(request,
-                    FetchStreamLimits::new(this.state.limits, this.max_chunk_bytes), this.consumer_version)),
+                future: Box::pin(fetch_stream(
+                    request,
+                    FetchStreamLimits::new(this.state.limits, this.max_chunk_bytes),
+                    this.consumer_version,
+                )),
                 credit: Some(credit),
             });
         }
-        let result = ready!(this.active.as_mut().expect("admission owns opening").future.as_mut().poll(cx));
+        let result = ready!(
+            this.active
+                .as_mut()
+                .expect("admission owns opening")
+                .future
+                .as_mut()
+                .poll(cx)
+        );
         this.finished = true;
         let mut opening = this.active.take().expect("terminal opening remains owned");
         match result {
@@ -87,9 +107,12 @@ impl Future for ClientStream {
                 // The new body owns the credit before the completed opening is
                 // destroyed. There is no gap allowing reentrant over-admission.
                 let response = ClientBody {
-                    status: body.status(), received: body.received_bytes(), terminal: None,
+                    status: body.status(),
+                    received: body.received_bytes(),
+                    terminal: None,
                     active: Some(AdmittedBody {
-                        body, _credit: opening.credit.take().expect("one opening credit"),
+                        body,
+                        _credit: opening.credit.take().expect("one opening credit"),
                     }),
                 };
                 drop(opening);
@@ -133,20 +156,30 @@ impl fmt::Debug for ClientBody {
 impl ClientBody {
     /// HTTP status, not proof that the body transfer has completed.
     #[must_use]
-    pub const fn status(&self) -> u16 { self.status }
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
 
     /// Bytes delivered before EOF/error, excluding a refused chunk.
     #[must_use]
-    pub const fn received_bytes(&self) -> usize { self.received }
+    pub const fn received_bytes(&self) -> usize {
+        self.received
+    }
 
     /// Poll one chunk, returning capacity only at actual EOF or error.
     /// Terminal results are sticky, including while the completed body is kept.
-    pub fn poll_chunk(self: Pin<&mut Self>, cx: &mut Context<'_>)
-        -> Poll<Result<Option<Vec<u8>>, FetchBytesError>>
-    {
+    pub fn poll_chunk(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Vec<u8>>, FetchBytesError>> {
         let this = self.get_mut();
-        if let Some(result) = this.terminal { return Poll::Ready(result.map(|()| None)); }
-        let active = this.active.as_mut().expect("nonterminal body owns admission");
+        if let Some(result) = this.terminal {
+            return Poll::Ready(result.map(|()| None));
+        }
+        let active = this
+            .active
+            .as_mut()
+            .expect("nonterminal body owns admission");
         let result = ready!(Pin::new(&mut active.body).poll_chunk(cx));
         this.received = active.body.received_bytes();
         match &result {

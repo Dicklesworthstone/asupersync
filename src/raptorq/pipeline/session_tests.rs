@@ -15,8 +15,12 @@ use std::task::{Wake, Waker};
 struct WakeCount(AtomicUsize);
 
 impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 struct SinkState {
@@ -36,8 +40,14 @@ struct GatedSink(Arc<Mutex<SinkState>>);
 impl GatedSink {
     fn new(allowance: usize, flush_ready: bool) -> Self {
         Self(Arc::new(Mutex::new(SinkState {
-            accepted: Vec::new(), allowance, flush_ready, calls: 0, flushes: 0,
-            panic_after_accept: false, waiter: None, ambient_cancelled: Vec::new(),
+            accepted: Vec::new(),
+            allowance,
+            flush_ready,
+            calls: 0,
+            flushes: 0,
+            panic_after_accept: false,
+            waiter: None,
+            ambient_cancelled: Vec::new(),
         })))
     }
 
@@ -48,17 +58,23 @@ impl GatedSink {
             state.flush_ready = flush_ready;
             state.waiter.take()
         };
-        if let Some(waiter) = waiter { waiter.wake(); }
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
     }
 
-    fn accepted(&self) -> Vec<AuthenticatedSymbol> { self.0.lock().unwrap().accepted.clone() }
+    fn accepted(&self) -> Vec<AuthenticatedSymbol> {
+        self.0.lock().unwrap().accepted.clone()
+    }
 }
 
 impl SymbolSink for GatedSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let mut state = self.0.lock().unwrap();
         state.calls += 1;
-        state.ambient_cancelled.push(Cx::with_current(Cx::is_cancel_requested));
+        state
+            .ambient_cancelled
+            .push(Cx::with_current(Cx::is_cancel_requested));
         if state.allowance == 0 {
             state.waiter = Some(cx.waker().clone());
             Poll::Pending
@@ -67,7 +83,11 @@ impl SymbolSink for GatedSink {
         }
     }
 
-    fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>, symbol: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+    fn poll_send(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
         let mut state = self.0.lock().unwrap();
         state.calls += 1;
         if state.allowance == 0 {
@@ -78,7 +98,10 @@ impl SymbolSink for GatedSink {
         state.accepted.push(symbol);
         let panic_after_accept = state.panic_after_accept;
         drop(state);
-        assert!(!panic_after_accept, "fixture accepted a symbol before panicking");
+        assert!(
+            !panic_after_accept,
+            "fixture accepted a symbol before panicking"
+        );
         Poll::Ready(Ok(()))
     }
 
@@ -115,8 +138,13 @@ struct GatedSource(Arc<Mutex<SourceState>>);
 impl GatedSource {
     fn new(symbols: Vec<AuthenticatedSymbol>, allowance: usize, eof: bool) -> Self {
         Self(Arc::new(Mutex::new(SourceState {
-            symbols: symbols.into(), allowance, eof, calls: 0,
-            panic_after_take: false, waiter: None, ambient_cancelled: Vec::new(),
+            symbols: symbols.into(),
+            allowance,
+            eof,
+            calls: 0,
+            panic_after_take: false,
+            waiter: None,
+            ambient_cancelled: Vec::new(),
         })))
     }
 
@@ -126,16 +154,25 @@ impl GatedSource {
             state.allowance = allowance;
             state.waiter.take()
         };
-        if let Some(waiter) = waiter { waiter.wake(); }
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
     }
 }
 
 impl SymbolStream for GatedSource {
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let mut state = self.0.lock().unwrap();
         state.calls += 1;
-        state.ambient_cancelled.push(Cx::with_current(Cx::is_cancel_requested));
-        if state.symbols.is_empty() && state.eof { return Poll::Ready(None); }
+        state
+            .ambient_cancelled
+            .push(Cx::with_current(Cx::is_cancel_requested));
+        if state.symbols.is_empty() && state.eof {
+            return Poll::Ready(None);
+        }
         if state.allowance == 0 || state.symbols.is_empty() {
             state.waiter = Some(cx.waker().clone());
             return Poll::Pending;
@@ -144,7 +181,10 @@ impl SymbolStream for GatedSource {
         let symbol = state.symbols.pop_front().unwrap();
         let panic_after_take = state.panic_after_take;
         drop(state);
-        assert!(!panic_after_take, "fixture consumed a symbol before panicking");
+        assert!(
+            !panic_after_take,
+            "fixture consumed a symbol before panicking"
+        );
         Poll::Ready(Some(Ok(symbol)))
     }
 }
@@ -159,25 +199,37 @@ fn config() -> RaptorQConfig {
 
 fn signed(esi: u32) -> AuthenticatedSymbol {
     let symbol = Symbol::new(
-        SymbolId::new(ObjectId::new(5, 12), 0, esi), vec![esi as u8; 64], SymbolKind::Source,
+        SymbolId::new(ObjectId::new(5, 12), 0, esi),
+        vec![esi as u8; 64],
+        SymbolKind::Source,
     );
     SecurityContext::new(AuthKey::from_seed(42)).sign_symbol(&symbol)
 }
 
 fn sender(sink: GatedSink) -> RaptorQSender<GatedSink> {
-    RaptorQSenderBuilder::new().config(config()).transport(sink)
-        .security(SecurityContext::new(AuthKey::from_seed(42))).build().unwrap()
+    RaptorQSenderBuilder::new()
+        .config(config())
+        .transport(sink)
+        .security(SecurityContext::new(AuthKey::from_seed(42)))
+        .build()
+        .unwrap()
 }
 
 fn receiver(source: GatedSource) -> RaptorQReceiver<GatedSource> {
-    RaptorQReceiverBuilder::new().config(config()).source(source)
-        .security(SecurityContext::new(AuthKey::from_seed(42))).build().unwrap()
+    RaptorQReceiverBuilder::new()
+        .config(config())
+        .source(source)
+        .security(SecurityContext::new(AuthKey::from_seed(42)))
+        .build()
+        .unwrap()
 }
 
 fn finish<F: Future>(future: F, cx: &mut Context<'_>) -> F::Output {
     let mut future = Box::pin(future);
     for _ in 0..1024 {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) { return output; }
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return output;
+        }
     }
     panic!("released scripted transport did not finish within the bounded poll count");
 }
@@ -200,17 +252,27 @@ fn encoded_send_pauses_through_backpressure_and_dropped_flush_without_duplicate_
     assert_eq!(session.symbols_sent(), 2);
     assert_eq!(sink.accepted().len(), 2);
     assert!(!session.is_finished());
-    assert_eq!(counter.0.load(Ordering::SeqCst), 0, "backpressure must not spin");
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        0,
+        "backpressure must not spin"
+    );
     sink.release(usize::MAX, false);
     {
         let mut waiting = Box::pin(session.run());
         assert!(waiting.as_mut().poll(&mut task).is_pending());
     }
     let count = sink.accepted().len();
-    assert!(count > 5, "source and repair symbols were sent before blocked flush");
+    assert!(
+        count > 5,
+        "source and repair symbols were sent before blocked flush"
+    );
     assert_eq!(session.symbols_sent(), count);
     assert!(sink.0.lock().unwrap().flushes > 0);
-    assert!(!session.is_finished(), "buffered acceptance alone is not send completion");
+    assert!(
+        !session.is_finished(),
+        "buffered acceptance alone is not send completion"
+    );
     sink.release(usize::MAX, true);
     let outcome = finish(session.run(), &mut task).unwrap();
     assert_eq!(outcome.symbols_sent, count);
@@ -219,9 +281,20 @@ fn encoded_send_pauses_through_backpressure_and_dropped_flush_without_duplicate_
     assert_eq!(sink.accepted().len(), count);
     let symbols = sink.accepted();
     let identities: HashSet<_> = symbols.iter().map(|symbol| symbol.symbol().id()).collect();
-    assert_eq!(identities.len(), count, "resumption cannot repeat accepted encoding symbols");
-    assert!(symbols.iter().all(|symbol| symbol.tag().verify(&AuthKey::from_seed(42), symbol.symbol())));
-    assert!(finish(session.run(), &mut task).is_err(), "terminal session does not replay");
+    assert_eq!(
+        identities.len(),
+        count,
+        "resumption cannot repeat accepted encoding symbols"
+    );
+    assert!(symbols.iter().all(|symbol| {
+        symbol
+            .tag()
+            .verify(&AuthKey::from_seed(42), symbol.symbol())
+    }));
+    assert!(
+        finish(session.run(), &mut task).is_err(),
+        "terminal session does not replay"
+    );
 }
 
 #[test]
@@ -239,8 +312,15 @@ fn supplied_symbol_send_preserves_the_pending_argument_and_finishes_local_flush(
     assert_eq!(session.symbols_sent(), 1);
     sink.release(usize::MAX, true);
     assert_eq!(finish(session.run(), &mut task).unwrap(), values.len());
-    let accepted: Vec<_> = sink.accepted().into_iter().map(AuthenticatedSymbol::into_symbol).collect();
-    let expected: Vec<_> = values.into_iter().map(AuthenticatedSymbol::into_symbol).collect();
+    let accepted: Vec<_> = sink
+        .accepted()
+        .into_iter()
+        .map(AuthenticatedSymbol::into_symbol)
+        .collect();
+    let expected: Vec<_> = values
+        .into_iter()
+        .map(AuthenticatedSymbol::into_symbol)
+        .collect();
     assert_eq!(accepted, expected);
     assert!(session.is_finished());
     assert_eq!(sink.0.lock().unwrap().flushes, 1);
@@ -252,7 +332,9 @@ fn receive_session_retains_partial_decode_across_dropped_waits() {
     let data: Vec<u8> = (0..257).map(|n| (n % 251) as u8).collect();
     let object = ObjectId::new(5, 12);
     let fixture = GatedSink::new(usize::MAX, true);
-    sender(fixture.clone()).send_object(&owner, object, &data).unwrap();
+    sender(fixture.clone())
+        .send_object(&owner, object, &data)
+        .unwrap();
     let source = GatedSource::new(fixture.accepted(), 2, true);
     let mut receiver = receiver(source.clone());
     let params = ObjectParams::new(object, data.len() as u64, 64, 1, 5);
@@ -289,11 +371,17 @@ fn original_owner_cancellation_wakes_blocked_send_under_a_cancelled_foreign_cont
     let mut task = Context::from_waker(&waker);
     let _ambient = Cx::set_current(Some(foreign));
     let mut waiting = Box::pin(session.run());
-    assert!(waiting.as_mut().poll(&mut task).is_pending(), "foreign cancellation cannot cancel the owner");
+    assert!(
+        waiting.as_mut().poll(&mut task).is_pending(),
+        "foreign cancellation cannot cancel the owner"
+    );
     assert_eq!(counter.0.load(Ordering::SeqCst), 0);
     assert_eq!(sink.0.lock().unwrap().ambient_cancelled, [Some(false)]);
     owner.set_cancel_requested(true);
-    assert!(counter.0.load(Ordering::SeqCst) > 0, "owner cancellation must wake parked I/O");
+    assert!(
+        counter.0.load(Ordering::SeqCst) > 0,
+        "owner cancellation must wake parked I/O"
+    );
     let error = match waiting.as_mut().poll(&mut task) {
         Poll::Ready(Err(error)) => error,
         other => panic!("cancelled send did not finish: {other:?}"),
@@ -338,37 +426,75 @@ fn original_owner_cancellation_wakes_blocked_receive_and_stops_provider_polls() 
 fn new_sessions_require_keys_and_reverify_supplied_tags_even_with_permissive_policy() {
     let owner = Cx::for_testing();
     let sink = GatedSink::new(usize::MAX, true);
-    let mut unsigned = RaptorQSenderBuilder::new().config(config()).transport(sink.clone()).build().unwrap();
-    assert!(unsigned.start_send_object(&owner, ObjectId::new(5, 12), &[0; 64]).is_err());
-    assert!(unsigned.start_send_symbols(&owner, vec![signed(0)]).is_err());
+    let mut unsigned = RaptorQSenderBuilder::new()
+        .config(config())
+        .transport(sink.clone())
+        .build()
+        .unwrap();
+    assert!(
+        unsigned
+            .start_send_object(&owner, ObjectId::new(5, 12), &[0; 64])
+            .is_err()
+    );
+    assert!(
+        unsigned
+            .start_send_symbols(&owner, vec![signed(0)])
+            .is_err()
+    );
     assert_eq!(sink.0.lock().unwrap().calls, 0);
     let empty = GatedSource::new(Vec::new(), 0, false);
-    let mut unkeyed = RaptorQReceiverBuilder::new().config(config()).source(empty.clone()).build().unwrap();
+    let mut unkeyed = RaptorQReceiverBuilder::new()
+        .config(config())
+        .source(empty.clone())
+        .build()
+        .unwrap();
     let params = ObjectParams::new(ObjectId::new(5, 12), 64, 64, 1, 1);
     assert!(unkeyed.start_receive_object(&owner, &params).is_err());
     assert_eq!(empty.0.lock().unwrap().calls, 0);
 
     let wrong_key = SecurityContext::new(AuthKey::from_seed(7)).sign_symbol(signed(0).symbol());
-    assert!(wrong_key.is_verified(), "the foreign producer's flag is not receiver authority");
-    let sentinel = AuthenticatedSymbol::from_parts(signed(0).into_symbol(), AuthenticationTag::zero());
+    assert!(
+        wrong_key.is_verified(),
+        "the foreign producer's flag is not receiver authority"
+    );
+    let sentinel =
+        AuthenticatedSymbol::from_parts(signed(0).into_symbol(), AuthenticationTag::zero());
     for mode in [AuthMode::Permissive, AuthMode::Disabled] {
         for invalid in [wrong_key.clone(), sentinel.clone()] {
             let source = GatedSource::new(vec![invalid.clone()], usize::MAX, true);
-            let mut receiver = RaptorQReceiverBuilder::new().config(config()).source(source.clone())
-                .security(SecurityContext::for_testing_with_mode(42, mode)).build().unwrap();
+            let mut receiver = RaptorQReceiverBuilder::new()
+                .config(config())
+                .source(source.clone())
+                .security(SecurityContext::for_testing_with_mode(42, mode))
+                .build()
+                .unwrap();
             let mut session = receiver.start_receive_object(&owner, &params).unwrap();
             let mut task = Context::from_waker(Waker::noop());
-            assert_eq!(finish(session.run(), &mut task).unwrap_err().kind(), ErrorKind::CorruptedSymbol);
+            assert_eq!(
+                finish(session.run(), &mut task).unwrap_err().kind(),
+                ErrorKind::CorruptedSymbol
+            );
             assert_eq!(session.symbols_received(), 0);
             assert!(session.is_finished());
 
             let sink = GatedSink::new(usize::MAX, true);
-            let mut sender = RaptorQSenderBuilder::new().config(config()).transport(sink.clone())
-                .security(SecurityContext::for_testing_with_mode(42, mode)).build().unwrap();
+            let mut sender = RaptorQSenderBuilder::new()
+                .config(config())
+                .transport(sink.clone())
+                .security(SecurityContext::for_testing_with_mode(42, mode))
+                .build()
+                .unwrap();
             let mut session = sender.start_send_symbols(&owner, vec![invalid]).unwrap();
-            assert_eq!(finish(session.run(), &mut task).unwrap_err().kind(), ErrorKind::CorruptedSymbol);
+            assert_eq!(
+                finish(session.run(), &mut task).unwrap_err().kind(),
+                ErrorKind::CorruptedSymbol
+            );
             assert!(sink.accepted().is_empty());
-            assert_eq!(sink.0.lock().unwrap().calls, 0, "bad supplied tags refuse before transport readiness");
+            assert_eq!(
+                sink.0.lock().unwrap().calls,
+                0,
+                "bad supplied tags refuse before transport readiness"
+            );
         }
     }
 }
@@ -380,11 +506,16 @@ fn caught_provider_panics_poison_send_and_receive_sessions_before_any_retry() {
     let sink = GatedSink::new(usize::MAX, true);
     sink.0.lock().unwrap().panic_after_accept = true;
     let mut sender = sender(sink.clone());
-    let mut session = sender.start_send_symbols(&owner, vec![signed(0), signed(1)]).unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut run = Box::pin(session.run());
-        let _ = run.as_mut().poll(&mut task);
-    })).is_err());
+    let mut session = sender
+        .start_send_symbols(&owner, vec![signed(0), signed(1)])
+        .unwrap();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut run = Box::pin(session.run());
+            let _ = run.as_mut().poll(&mut task);
+        }))
+        .is_err()
+    );
     assert_eq!(sink.accepted().len(), 1);
     assert!(session.is_finished());
     sink.0.lock().unwrap().panic_after_accept = false;
@@ -396,10 +527,13 @@ fn caught_provider_panics_poison_send_and_receive_sessions_before_any_retry() {
     let mut receiver = receiver(source.clone());
     let params = ObjectParams::new(ObjectId::new(5, 12), 64, 64, 1, 1);
     let mut session = receiver.start_receive_object(&owner, &params).unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut run = Box::pin(session.run());
-        let _ = run.as_mut().poll(&mut task);
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut run = Box::pin(session.run());
+            let _ = run.as_mut().poll(&mut task);
+        }))
+        .is_err()
+    );
     assert!(session.is_finished());
     source.0.lock().unwrap().panic_after_take = false;
     let polls = source.0.lock().unwrap().calls;
@@ -426,12 +560,22 @@ fn caught_iterator_panic_cannot_restart_a_partially_sent_sequence() {
     let sink = GatedSink::new(usize::MAX, true);
     let calls = Arc::new(AtomicUsize::new(0));
     let mut sender = sender(sink.clone());
-    let mut session = sender.start_send_symbols(&owner, PanickingIterator { calls: calls.clone() }).unwrap();
+    let mut session = sender
+        .start_send_symbols(
+            &owner,
+            PanickingIterator {
+                calls: calls.clone(),
+            },
+        )
+        .unwrap();
     let mut task = Context::from_waker(Waker::noop());
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut run = Box::pin(session.run());
-        let _ = run.as_mut().poll(&mut task);
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut run = Box::pin(session.run());
+            let _ = run.as_mut().poll(&mut task);
+        }))
+        .is_err()
+    );
     assert_eq!(sink.accepted().len(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(session.is_finished());
@@ -447,7 +591,11 @@ impl SymbolSink for ReadyButBlockedSink {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_send(self: Pin<&mut Self>, cx: &mut Context<'_>, symbol: AuthenticatedSymbol) -> Poll<Result<(), SinkError>> {
+    fn poll_send(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
         Pin::new(&mut self.get_mut().0).poll_send(cx, symbol)
     }
 
@@ -470,9 +618,12 @@ fn readiness_change_retains_the_same_pending_candidate_without_advancing_the_ite
     let input = values.clone().into_iter().inspect(move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
     });
-    let mut sender = RaptorQSenderBuilder::new().config(config())
+    let mut sender = RaptorQSenderBuilder::new()
+        .config(config())
         .transport(ReadyButBlockedSink(sink.clone()))
-        .security(SecurityContext::new(AuthKey::from_seed(42))).build().unwrap();
+        .security(SecurityContext::new(AuthKey::from_seed(42)))
+        .build()
+        .unwrap();
     let mut session = sender.start_send_symbols(&owner, input).unwrap();
     let counter = Arc::new(WakeCount::default());
     let waker = Waker::from(counter.clone());
@@ -482,16 +633,31 @@ fn readiness_change_retains_the_same_pending_candidate_without_advancing_the_ite
             let mut waiting = Box::pin(session.run());
             assert!(waiting.as_mut().poll(&mut task).is_pending());
         }
-        assert_eq!(advances.load(Ordering::SeqCst), 1, "Pending did not accept or replace the first argument");
+        assert_eq!(
+            advances.load(Ordering::SeqCst),
+            1,
+            "Pending did not accept or replace the first argument"
+        );
         assert_eq!(session.symbols_sent(), 0);
         assert!(sink.accepted().is_empty());
     }
-    assert_eq!(counter.0.load(Ordering::SeqCst), 0, "a blocked send waits for its transport wake");
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        0,
+        "a blocked send waits for its transport wake"
+    );
     sink.release(usize::MAX, true);
     assert_eq!(finish(session.run(), &mut task).unwrap(), values.len());
     assert_eq!(advances.load(Ordering::SeqCst), values.len());
-    let accepted: Vec<_> = sink.accepted().into_iter().map(AuthenticatedSymbol::into_symbol).collect();
-    let expected: Vec<_> = values.into_iter().map(AuthenticatedSymbol::into_symbol).collect();
+    let accepted: Vec<_> = sink
+        .accepted()
+        .into_iter()
+        .map(AuthenticatedSymbol::into_symbol)
+        .collect();
+    let expected: Vec<_> = values
+        .into_iter()
+        .map(AuthenticatedSymbol::into_symbol)
+        .collect();
     assert_eq!(accepted, expected);
 }
 
@@ -502,9 +668,7 @@ mod budget_tests;
 mod offloaded_send {
     use super::*;
     use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
-    use crate::runtime::{
-        BlockingAdmissionPolicy, RootDrainOutcome, Runtime, RuntimeBuilder,
-    };
+    use crate::runtime::{BlockingAdmissionPolicy, RootDrainOutcome, Runtime, RuntimeBuilder};
     use crate::types::Budget;
     use std::future::poll_fn;
     use std::sync::mpsc;
@@ -851,11 +1015,7 @@ mod offloaded_send {
                 let owner = runtime.request_cx_with_budget(Budget::INFINITE);
                 assert!(
                     sending
-                        .start_send_object_offloaded(
-                            &owner,
-                            ObjectId::new(5, 12),
-                            vec![7; 64],
-                        )
+                        .start_send_object_offloaded(&owner, ObjectId::new(5, 12), vec![7; 64],)
                         .is_err()
                 );
                 assert_eq!(sink.0.lock().unwrap().calls, 0);
@@ -871,11 +1031,7 @@ mod offloaded_send {
                 .unwrap();
             assert!(
                 unsigned
-                    .start_send_object_offloaded(
-                        &owner,
-                        ObjectId::new(5, 12),
-                        vec![7; 64],
-                    )
+                    .start_send_object_offloaded(&owner, ObjectId::new(5, 12), vec![7; 64],)
                     .is_err()
             );
             assert_eq!(runtime.blocking_handle().unwrap().pending_count(), 0);
@@ -897,11 +1053,7 @@ mod offloaded_send {
             let sink = GatedSink::new(usize::MAX, true);
             let mut sending = sender(sink.clone());
             let mut session = sending
-                .start_send_object_offloaded(
-                    &owner,
-                    ObjectId::new(5, 12),
-                    vec![7; 513],
-                )
+                .start_send_object_offloaded(&owner, ObjectId::new(5, 12), vec![7; 513])
                 .unwrap();
             let error = runtime.block_on(session.run()).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DispatchFailed);
@@ -932,11 +1084,7 @@ mod offloaded_send {
                 let mut sending = sender(sink.clone());
                 let mut session = Some(
                     sending
-                        .start_send_object_offloaded(
-                            &owner,
-                            ObjectId::new(5, 12),
-                            vec![3; 513],
-                        )
+                        .start_send_object_offloaded(&owner, ObjectId::new(5, 12), vec![3; 513])
                         .unwrap(),
                 );
                 runtime.block_on(pending_once(session.as_mut().unwrap().run()));
@@ -973,19 +1121,14 @@ mod offloaded_send {
     fn owner_mask_does_not_widen_an_encode_workers_inherited_deadline() {
         bounded(|| {
             let runtime = runtime();
-            let owner = runtime.request_cx_with_budget(
-                Budget::INFINITE.with_deadline(crate::types::Time::ZERO),
-            );
+            let owner = runtime
+                .request_cx_with_budget(Budget::INFINITE.with_deadline(crate::types::Time::ZERO));
             let sink = GatedSink::new(usize::MAX, true);
             let mut sending = sender(sink.clone());
             owner.masked(|| {
                 assert!(owner.checkpoint().is_ok());
                 let mut session = sending
-                    .start_send_object_offloaded(
-                        &owner,
-                        ObjectId::new(5, 12),
-                        vec![7; 64],
-                    )
+                    .start_send_object_offloaded(&owner, ObjectId::new(5, 12), vec![7; 64])
                     .unwrap();
 
                 // The masked owner can initiate work. The independently
@@ -1012,5 +1155,4 @@ mod offloaded_send {
             quiescent(&runtime);
         });
     }
-
 }

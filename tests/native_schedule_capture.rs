@@ -502,9 +502,8 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
             // Retain the sender: only region cancellation can release recv.
             // The external drain keeps progressing while cleanup is parked.
             let drain_handle = runtime.handle();
-            let drain_thread = std::thread::spawn(move || {
-                drain_handle.shutdown_drained(WATCHDOG).unwrap()
-            });
+            let drain_thread =
+                std::thread::spawn(move || drain_handle.shutdown_drained(WATCHDOG).unwrap());
             let deadline = Instant::now() + WATCHDOG;
             loop {
                 let snapshot = runtime.schedule_capture_snapshot().unwrap();
@@ -515,7 +514,10 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
                 }) {
                     break;
                 }
-                assert!(Instant::now() < deadline, "native cleanup never acknowledged");
+                assert!(
+                    Instant::now() < deadline,
+                    "native cleanup never acknowledged"
+                );
                 std::thread::yield_now();
             }
             // Pending bookkeeping can publish ACK after restoring the future.
@@ -575,8 +577,14 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
             let events = schedule.cancellation_events().unwrap();
             assert_eq!(events.len(), 3);
             assert_eq!(events[0].phase(), ProductionCancellationPhase::Request);
-            assert_eq!(events[1].phase(), ProductionCancellationPhase::Acknowledgement);
-            assert_eq!(events[2].phase(), ProductionCancellationPhase::Acknowledgement);
+            assert_eq!(
+                events[1].phase(),
+                ProductionCancellationPhase::Acknowledgement
+            );
+            assert_eq!(
+                events[2].phase(),
+                ProductionCancellationPhase::Acknowledgement
+            );
             assert_eq!(events[0].after_dispatches(), 1);
             assert_eq!(events[0].task_poll_ordinal(), 1);
             assert_eq!(events[1].task_poll_ordinal(), 2);

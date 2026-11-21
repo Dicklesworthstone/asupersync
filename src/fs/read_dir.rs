@@ -33,9 +33,8 @@ impl std::fmt::Debug for ReadDir {
     }
 }
 
-type ReadDirFuture = dyn std::future::Future<
-        Output = io::Result<(EntryBuffer, Option<std::fs::ReadDir>)>,
-    > + Send;
+type ReadDirFuture =
+    dyn std::future::Future<Output = io::Result<(EntryBuffer, Option<std::fs::ReadDir>)>> + Send;
 
 enum ReadDirState {
     Idle(std::fs::ReadDir),

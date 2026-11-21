@@ -50,14 +50,21 @@ impl ConnectionAttempt {
 
     /// Identity reserved for the two logical connection observations.
     #[must_use]
-    pub const fn journal_stream(self) -> u64 { self.journal }
+    pub const fn journal_stream(self) -> u64 {
+        self.journal
+    }
 
     /// Identity used only when the source connector succeeds.
     #[must_use]
-    pub const fn data_stream(self) -> u64 { self.stream }
+    pub const fn data_stream(self) -> u64 {
+        self.stream
+    }
 
     fn effect(self, operation: IoOperation) -> GroupEffect {
-        GroupEffect::Io { stream: self.journal, operation }
+        GroupEffect::Io {
+            stream: self.journal,
+            operation,
+        }
     }
 }
 
@@ -80,7 +87,8 @@ pub struct RecordingConnection<T> {
 
 impl<T> fmt::Debug for RecordingConnection<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RecordingConnection").finish_non_exhaustive()
+        f.debug_struct("RecordingConnection")
+            .finish_non_exhaustive()
     }
 }
 
@@ -96,7 +104,11 @@ impl<T> RecordingConnection<T> {
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for RecordingConnection<T> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             ConnectionInner::Recording(io) => Pin::new(io).poll_read(cx, buf),
             ConnectionInner::Unrecorded(io) => Pin::new(io).poll_read(cx, buf),
@@ -104,13 +116,21 @@ impl<T: AsyncRead + Unpin> AsyncRead for RecordingConnection<T> {
     }
 }
 impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingConnection<T> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match &mut self.get_mut().inner {
             ConnectionInner::Recording(io) => Pin::new(io).poll_write(cx, buf),
             ConnectionInner::Unrecorded(io) => Pin::new(io).poll_write(cx, buf),
         }
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         match &mut self.get_mut().inner {
             ConnectionInner::Recording(io) => Pin::new(io).poll_write_vectored(cx, bufs),
             ConnectionInner::Unrecorded(io) => Pin::new(io).poll_write_vectored(cx, bufs),
@@ -140,12 +160,21 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingConnection<T> {
 #[derive(Clone, Copy)]
 enum Completion {
     Connected,
-    Failed { kind: io::ErrorKind, raw: Option<i32> },
+    Failed {
+        kind: io::ErrorKind,
+        raw: Option<i32>,
+    },
 }
 struct Journal(Arc<Mutex<Option<Completion>>>);
 impl AsyncRead for Journal {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        if buf.remaining() == 0 { return Poll::Ready(Ok(())); }
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         let result = self.0.lock().take();
         match result {
             None => Poll::Pending,
@@ -153,23 +182,40 @@ impl AsyncRead for Journal {
                 buf.put_slice(&[CONNECTED]);
                 Poll::Ready(Ok(()))
             }
-            Some(Completion::Failed { kind, raw }) => {
-                Poll::Ready(Err(raw.map_or_else(|| io::Error::from(kind), io::Error::from_raw_os_error)))
-            }
+            Some(Completion::Failed { kind, raw }) => Poll::Ready(Err(
+                raw.map_or_else(|| io::Error::from(kind), io::Error::from_raw_os_error)
+            )),
         }
     }
 }
 impl AsyncWrite for Journal {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Poll::Ready(Ok(buf.len()))
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
-        Poll::Ready(bufs.iter().try_fold(0usize, |total, buf| total.checked_add(buf.len()))
-            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput)))
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(
+            bufs.iter()
+                .try_fold(0usize, |total, buf| total.checked_add(buf.len()))
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput)),
+        )
     }
-    fn is_write_vectored(&self) -> bool { true }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 // The connector is an opaque, caller-authorized effect provider. Its internals
@@ -186,8 +232,15 @@ impl<F: Future> Future for OpaqueConnect<F> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let guard = this.timeline.begin();
-        let result = this.future.as_mut().expect("owned connector future").as_mut().poll(cx);
-        if let Some(guard) = guard { guard.finish(this.effect, false); }
+        let result = this
+            .future
+            .as_mut()
+            .expect("owned connector future")
+            .as_mut()
+            .poll(cx);
+        if let Some(guard) = guard {
+            guard.finish(this.effect, false);
+        }
         result
     }
 }
@@ -195,7 +248,9 @@ impl<F> Drop for OpaqueConnect<F> {
     fn drop(&mut self) {
         let guard = self.timeline.begin();
         drop(self.future.take());
-        if let Some(guard) = guard { guard.finish(self.effect, false); }
+        if let Some(guard) = guard {
+            guard.finish(self.effect, false);
+        }
     }
 }
 
@@ -211,24 +266,35 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
         max_request_bytes: usize,
         completion: Arc<Mutex<Option<Completion>>>,
     ) -> Option<GroupRecordingIo<Journal>> {
-        let offered = REQUEST_DOMAIN.len().checked_add(8).and_then(|n| n.checked_add(request.len()));
+        let offered = REQUEST_DOMAIN
+            .len()
+            .checked_add(8)
+            .and_then(|n| n.checked_add(request.len()));
         if request.len() > max_request_bytes || offered.is_none() {
-            self.connection_capture_failure(GroupSessionCaptureError::Limit("connection request bytes"));
+            self.connection_capture_failure(GroupSessionCaptureError::Limit(
+                "connection request bytes",
+            ));
             return None;
         }
         // A journal has precisely two operations. Data limits remain unchanged;
         // the group's global stream/effect limits include these logical records.
         let limits = IoCaptureLimits::new(2, 1, offered.expect("checked request extent"), 3);
-        let mut journal = match self.register_with_limits(attempt.journal, Journal(completion), limits) {
-            Ok(journal) => journal,
-            Err(refusal) => {
-                self.connection_capture_failure(refusal.error);
-                return None;
-            }
-        };
+        let mut journal =
+            match self.register_with_limits(attempt.journal, Journal(completion), limits) {
+                Ok(journal) => journal,
+                Err(refusal) => {
+                    self.connection_capture_failure(refusal.error);
+                    return None;
+                }
+            };
         let target = attempt.stream.to_le_bytes();
-        let request = [IoSlice::new(REQUEST_DOMAIN), IoSlice::new(&target), IoSlice::new(request)];
-        let result = Pin::new(&mut journal).poll_write_vectored(&mut Context::from_waker(Waker::noop()), &request);
+        let request = [
+            IoSlice::new(REQUEST_DOMAIN),
+            IoSlice::new(&target),
+            IoSlice::new(request),
+        ];
+        let result = Pin::new(&mut journal)
+            .poll_write_vectored(&mut Context::from_waker(Waker::noop()), &request);
         if !matches!(result, Poll::Ready(Ok(n)) if Some(n) == offered) {
             self.connection_capture_failure(GroupSessionCaptureError::Coverage);
         }
@@ -276,15 +342,22 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
         Fut: Future<Output = io::Result<T>>,
     {
         let completion = Arc::new(Mutex::new(None));
-        let journal = self.begin_connection(attempt, request, max_request_bytes, Arc::clone(&completion));
+        let journal =
+            self.begin_connection(attempt, request, max_request_bytes, Arc::clone(&completion));
         let effect = attempt.effect(IoOperation::Read);
         let future = {
             let guard = self.timeline.begin();
             let future = connect();
-            if let Some(guard) = guard { guard.finish(effect, false); }
+            if let Some(guard) = guard {
+                guard.finish(effect, false);
+            }
             future
         };
-        let mut source = OpaqueConnect { future: Some(Box::pin(future)), timeline: Arc::clone(&self.timeline), effect };
+        let mut source = OpaqueConnect {
+            future: Some(Box::pin(future)),
+            timeline: Arc::clone(&self.timeline),
+            effect,
+        };
         let result = (&mut source).await;
         // The source future must really be destroyed before completion is
         // recorded. Destructor effects/panics cannot escape that boundary.
@@ -294,7 +367,9 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
                 let inner = if journal.is_some() {
                     let guard = self.timeline.begin();
                     let registered = self.register(attempt.stream, io);
-                    if let Some(guard) = guard { guard.finish(effect, false); }
+                    if let Some(guard) = guard {
+                        guard.finish(effect, false);
+                    }
                     match registered {
                         Ok(io) => ConnectionInner::Recording(io),
                         Err(refusal) => {
@@ -309,21 +384,29 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
                 Ok(RecordingConnection { inner })
             }
             Err(error) => {
-                *completion.lock() = Some(Completion::Failed { kind: error.kind(), raw: error.raw_os_error() });
+                *completion.lock() = Some(Completion::Failed {
+                    kind: error.kind(),
+                    raw: error.raw_os_error(),
+                });
                 Err(error)
             }
         };
         if let Some(mut journal) = journal {
             let mut byte = [0];
             let mut buf = ReadBuf::new(&mut byte);
-            let observed = Pin::new(&mut journal).poll_read(&mut Context::from_waker(Waker::noop()), &mut buf);
+            let observed =
+                Pin::new(&mut journal).poll_read(&mut Context::from_waker(Waker::noop()), &mut buf);
             let valid = match (&result, observed) {
                 (Ok(_), Poll::Ready(Ok(()))) => buf.filled() == [CONNECTED],
-                (Err(original), Poll::Ready(Err(recorded))) => original.kind() == recorded.kind()
-                    && original.raw_os_error() == recorded.raw_os_error(),
+                (Err(original), Poll::Ready(Err(recorded))) => {
+                    original.kind() == recorded.kind()
+                        && original.raw_os_error() == recorded.raw_os_error()
+                }
                 _ => false,
             };
-            if !valid { self.connection_capture_failure(GroupSessionCaptureError::Coverage); }
+            if !valid {
+                self.connection_capture_failure(GroupSessionCaptureError::Coverage);
+            }
             journal.into_inner();
         }
         result
@@ -331,12 +414,18 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
 }
 
 impl ReplayGroupSession {
-    fn connection_replay_failure(&self, attempt: ConnectionAttempt, operation: IoOperation) -> io::Error {
+    fn connection_replay_failure(
+        &self,
+        attempt: ConnectionAttempt,
+        operation: IoOperation,
+    ) -> io::Error {
         // Use the existing failure/fanout path. Even when the next effect's
         // category happens to match, finish(false) cannot consume that turn.
         let error = match self.timeline.enter(attempt.effect(operation)) {
             Err(error) => error,
-            Ok(guard) => guard.finish(false).expect_err("invalid connection evidence cannot commit"),
+            Ok(guard) => guard
+                .finish(false)
+                .expect_err("invalid connection evidence cannot commit"),
         };
         io::Error::new(io::ErrorKind::InvalidData, error)
     }
@@ -354,22 +443,38 @@ impl ReplayGroupSession {
     /// ignored. Dropping an attempted connection with unconsumed evidence also
     /// invalidates replay. As with `open`, all users must drain before requiring
     /// `verify_complete`, `run` or `run_send` to accept the consumer's result.
-    pub async fn connect(&self, attempt: ConnectionAttempt, request: &[u8]) -> io::Result<GroupReplayIo> {
-        let mut journal = self.open(attempt.journal)
+    pub async fn connect(
+        &self,
+        attempt: ConnectionAttempt,
+        request: &[u8],
+    ) -> io::Result<GroupReplayIo> {
+        let mut journal = self
+            .open(attempt.journal)
             .map_err(|_| self.connection_replay_failure(attempt, IoOperation::WriteVectored))?;
         let target = attempt.stream.to_le_bytes();
-        let offered = REQUEST_DOMAIN.len().checked_add(target.len()).and_then(|n| n.checked_add(request.len()))
+        let offered = REQUEST_DOMAIN
+            .len()
+            .checked_add(target.len())
+            .and_then(|n| n.checked_add(request.len()))
             .ok_or_else(|| self.connection_replay_failure(attempt, IoOperation::WriteVectored))?;
-        let request = [IoSlice::new(REQUEST_DOMAIN), IoSlice::new(&target), IoSlice::new(request)];
-        let written = poll_fn(|cx| Pin::new(&mut journal).poll_write_vectored(cx, &request)).await?;
+        let request = [
+            IoSlice::new(REQUEST_DOMAIN),
+            IoSlice::new(&target),
+            IoSlice::new(request),
+        ];
+        let written =
+            poll_fn(|cx| Pin::new(&mut journal).poll_write_vectored(cx, &request)).await?;
         if written != offered {
             return Err(self.connection_replay_failure(attempt, IoOperation::WriteVectored));
         }
         let mut byte = [0];
         let count = poll_fn(|cx| {
             let mut buf = ReadBuf::new(&mut byte);
-            Pin::new(&mut journal).poll_read(cx, &mut buf).map(|result| result.map(|()| buf.filled().len()))
-        }).await?;
+            Pin::new(&mut journal)
+                .poll_read(cx, &mut buf)
+                .map(|result| result.map(|()| buf.filled().len()))
+        })
+        .await?;
         let remaining = self.timeline.state.lock().slots[journal.index].remaining;
         if count != 1 || byte[0] != CONNECTED || remaining != 0 {
             return Err(self.connection_replay_failure(attempt, IoOperation::Read));

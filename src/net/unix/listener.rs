@@ -32,6 +32,7 @@ use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::stream::UnixStream;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::io;
@@ -40,7 +41,6 @@ use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 

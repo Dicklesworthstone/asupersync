@@ -1,7 +1,9 @@
 //! Native production transport using the existing bounded mTLS computation client.
 
-use super::{SymbolBatchKey, SymbolBatchLimits, SymbolStoreError, decode_symbol_batch, encode_symbol_batch};
 use super::service::{SYMBOL_SERVICE_COMPUTATION, fetch_request, put_request, validate_receipt};
+use super::{
+    SymbolBatchKey, SymbolBatchLimits, SymbolStoreError, decode_symbol_batch, encode_symbol_batch,
+};
 use crate::cx::Cx;
 use crate::distributed::distribution::{DistributorTransport, ReplicaAck, ReplicaFailure};
 use crate::error::ErrorKind;
@@ -85,9 +87,11 @@ pub struct RemoteSymbolTransport {
 
 impl fmt::Debug for RemoteSymbolTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RemoteSymbolTransport").field("routes", &self.routes.len())
+        f.debug_struct("RemoteSymbolTransport")
+            .field("routes", &self.routes.len())
             .field("in_flight", &self.in_flight())
-            .field("max_in_flight", &self.max_in_flight()).finish_non_exhaustive()
+            .field("max_in_flight", &self.max_in_flight())
+            .finish_non_exhaustive()
     }
 }
 
@@ -102,11 +106,15 @@ impl RemoteSymbolTransport {
     /// Bind explicitly authorized replica clients and a V1 registry hello to an owner.
     /// Route labels must be unique, nonempty, and at most 255 bytes; no I/O occurs.
     pub fn new(
-        cx: Cx, hello: RemotePeerHello,
+        cx: Cx,
+        hello: RemotePeerHello,
         routes: impl IntoIterator<Item = (String, RemoteComputationClient)>,
-        auth_key: Arc<AuthKey>, limits: SymbolBatchLimits,
+        auth_key: Arc<AuthKey>,
+        limits: SymbolBatchLimits,
     ) -> Result<Self, RemoteSymbolError> {
-        if hello.protocol_version() != RemoteProtocolVersion::V1 || !super::valid_identity(hello.peer_node().as_str()) {
+        if hello.protocol_version() != RemoteProtocolVersion::V1
+            || !super::valid_identity(hello.peer_node().as_str())
+        {
             return Err(RemoteSymbolError::Configuration);
         }
         let mut map = BTreeMap::new();
@@ -116,9 +124,18 @@ impl RemoteSymbolTransport {
             }
             map.insert(replica, client);
         }
-        if map.is_empty() { return Err(RemoteSymbolError::Configuration); }
-        Ok(Self { cx, hello, routes: Arc::new(map), auth_key, limits,
-            admission: Arc::new(Admission::new(usize::MAX)), chunk_bytes: None })
+        if map.is_empty() {
+            return Err(RemoteSymbolError::Configuration);
+        }
+        Ok(Self {
+            cx,
+            hello,
+            routes: Arc::new(map),
+            auth_key,
+            limits,
+            admission: Arc::new(Admission::new(usize::MAX)),
+            chunk_bytes: None,
+        })
     }
 
     /// Bind routes with one explicit send/fetch ceiling shared by every clone.
@@ -131,9 +148,12 @@ impl RemoteSymbolTransport {
     /// are outside this in-flight bound. Per-frame/decode/client limits still apply.
     /// `new` retains its existing effectively-unbounded admission behavior.
     pub fn new_bounded(
-        cx: Cx, hello: RemotePeerHello,
+        cx: Cx,
+        hello: RemotePeerHello,
         routes: impl IntoIterator<Item = (String, RemoteComputationClient)>,
-        auth_key: Arc<AuthKey>, limits: SymbolBatchLimits, max_in_flight: usize,
+        auth_key: Arc<AuthKey>,
+        limits: SymbolBatchLimits,
+        max_in_flight: usize,
     ) -> Result<Self, RemoteSymbolError> {
         let mut transport = Self::new(cx, hello, routes, auth_key, limits)?;
         transport.admission = Arc::new(Admission::new(max_in_flight));
@@ -170,35 +190,55 @@ impl RemoteSymbolTransport {
 
     /// Admitted send, fetch and explicit abort operations across this transport and its clones.
     #[must_use]
-    pub fn in_flight(&self) -> usize { self.admission.active() }
+    pub fn in_flight(&self) -> usize {
+        self.admission.active()
+    }
 
     /// Shared admission ceiling (`usize::MAX` for the compatibility constructor).
     #[must_use]
-    pub fn max_in_flight(&self) -> usize { self.admission.limit() }
+    pub fn max_in_flight(&self) -> usize {
+        self.admission.limit()
+    }
 
     /// Reserved waiter slots, including registration and retirement in progress.
     #[must_use]
-    pub fn waiting(&self) -> usize { self.admission.waiting() }
+    pub fn waiting(&self) -> usize {
+        self.admission.waiting()
+    }
 
     /// Clone-shared waiter ceiling, or zero for immediate-refusal constructors.
     #[must_use]
-    pub fn max_waiters(&self) -> usize { self.admission.max_waiters() }
+    pub fn max_waiters(&self) -> usize {
+        self.admission.max_waiters()
+    }
 
-    fn check_queued_symbols(&self, symbols: &[AuthenticatedSymbol]) -> Result<(), RemoteSymbolError> {
-        if !self.admission.is_queued() { return Ok(()); }
-        if symbols.is_empty() { return Err(SymbolStoreError::Empty.into()); }
+    fn check_queued_symbols(
+        &self,
+        symbols: &[AuthenticatedSymbol],
+    ) -> Result<(), RemoteSymbolError> {
+        if !self.admission.is_queued() {
+            return Ok(());
+        }
+        if symbols.is_empty() {
+            return Err(SymbolStoreError::Empty.into());
+        }
         if symbols.len() > self.limits.max_symbols {
             return Err(SymbolStoreError::Limit("symbols").into());
         }
         let mut payload = 0usize;
         for symbol in symbols {
-            payload = payload.checked_add(symbol.symbol().data().len()).ok_or(SymbolStoreError::Overflow)?;
+            payload = payload
+                .checked_add(symbol.symbol().data().len())
+                .ok_or(SymbolStoreError::Overflow)?;
             if payload > self.limits.max_payload_bytes {
                 return Err(SymbolStoreError::Limit("payload bytes").into());
             }
         }
-        let storage = symbols.len().checked_mul(std::mem::size_of::<AuthenticatedSymbol>())
-            .and_then(|metadata| metadata.checked_add(payload)).ok_or(SymbolStoreError::Overflow)?;
+        let storage = symbols
+            .len()
+            .checked_mul(std::mem::size_of::<AuthenticatedSymbol>())
+            .and_then(|metadata| metadata.checked_add(payload))
+            .ok_or(SymbolStoreError::Overflow)?;
         if storage > self.limits.max_decoded_bytes {
             return Err(SymbolStoreError::Limit("decoded bytes").into());
         }
@@ -207,11 +247,16 @@ impl RemoteSymbolTransport {
 
     // Reconciliation must use the same authenticated origin for metadata and
     // ordinary symbol reads, with a configured source and bounded batch codec.
-    pub(crate) fn repair_binding(&self, origin: &crate::remote::NodeId, replica: &str, maximum: usize)
-        -> Option<SymbolBatchLimits>
-    {
-        (self.hello.peer_node() == origin && self.routes.contains_key(replica)
-            && self.limits.max_encoded_bytes <= maximum && self.max_in_flight() > 0)
+    pub(crate) fn repair_binding(
+        &self,
+        origin: &crate::remote::NodeId,
+        replica: &str,
+        maximum: usize,
+    ) -> Option<SymbolBatchLimits> {
+        (self.hello.peer_node() == origin
+            && self.routes.contains_key(replica)
+            && self.limits.max_encoded_bytes <= maximum
+            && self.max_in_flight() > 0)
             .then_some(self.limits)
     }
 
@@ -219,17 +264,23 @@ impl RemoteSymbolTransport {
     // transfer or revive that transport's original cancellation authority. Both
     // owners govern this one read; its ordinary clone-shared credit remains held
     // until the complete inner fetch future is retired.
-    pub(crate) async fn fetch_symbols_for_repair(&self, cx: &Cx, replica: &str, key: SymbolBatchKey)
-        -> Result<Vec<AuthenticatedSymbol>, RemoteSymbolError>
-    {
+    pub(crate) async fn fetch_symbols_for_repair(
+        &self,
+        cx: &Cx,
+        replica: &str,
+        key: SymbolBatchKey,
+    ) -> Result<Vec<AuthenticatedSymbol>, RemoteSymbolError> {
         let timer = if let Some(deadline) = cx.budget().deadline {
             let clock = cx.timer_driver().ok_or(RemoteSymbolError::Configuration)?;
             Some(crate::time::Sleep::with_timer_driver(deadline, clock))
-        } else { None };
+        } else {
+            None
+        };
         let mut timer = std::pin::pin!(timer);
         let mut cancelled = std::pin::pin!(cx.cancelled());
         let mut transport_cancelled = std::pin::pin!(self.cx.cancelled());
-        let mut operation = std::pin::pin!(self.with_owner_deadline(self.fetch_symbols(replica, key)));
+        let mut operation =
+            std::pin::pin!(self.with_owner_deadline(self.fetch_symbols(replica, key)));
         let mut refusal = |task: &mut std::task::Context<'_>| {
             if cancelled.as_mut().poll(task).is_ready() {
                 let _ = cx.checkpoint();
@@ -239,28 +290,48 @@ impl RemoteSymbolTransport {
                 let _ = self.cx.checkpoint();
                 return Some(RemoteSymbolError::Cancelled);
             }
-            if timer.as_mut().as_pin_mut().is_some_and(|timer| timer.poll_deadline(task).is_ready()) {
+            if timer
+                .as_mut()
+                .as_pin_mut()
+                .is_some_and(|timer| timer.poll_deadline(task).is_ready())
+            {
                 return Some(RemoteSymbolError::Deadline);
             }
             None
         };
         poll_fn(|task| {
-            if let Some(error) = refusal(task) { return Poll::Ready(Err(error)); }
+            if let Some(error) = refusal(task) {
+                return Poll::Ready(Err(error));
+            }
             let result = operation.as_mut().poll(task);
             if result.is_ready() {
-                if let Some(error) = refusal(task) { return Poll::Ready(Err(error)); }
+                if let Some(error) = refusal(task) {
+                    return Poll::Ready(Err(error));
+                }
             }
             result
-        }).await
+        })
+        .await
     }
 
     async fn call(&self, replica: &str, input: Vec<u8>) -> Result<Vec<u8>, RemoteSymbolError> {
-        self.call_named(replica, SYMBOL_SERVICE_COMPUTATION, input).await
+        self.call_named(replica, SYMBOL_SERVICE_COMPUTATION, input)
+            .await
     }
 
-    async fn call_named(&self, replica: &str, computation: &str, input: Vec<u8>) -> Result<Vec<u8>, RemoteSymbolError> {
-        if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
-        let client = self.routes.get(replica).ok_or(RemoteSymbolError::UnknownReplica)?;
+    async fn call_named(
+        &self,
+        replica: &str,
+        computation: &str,
+        input: Vec<u8>,
+    ) -> Result<Vec<u8>, RemoteSymbolError> {
+        if self.cx.is_cancel_requested() {
+            return Err(RemoteSymbolError::Cancelled);
+        }
+        let client = self
+            .routes
+            .get(replica)
+            .ok_or(RemoteSymbolError::UnknownReplica)?;
         let task = RemoteTaskId::next();
         let request = SpawnRequest {
             remote_task_id: task,
@@ -276,8 +347,15 @@ impl RemoteSymbolTransport {
         let wire = RemoteServiceWireRequest::from_spawn_request(self.hello.clone(), &request)
             .map_err(|_| RemoteSymbolError::Configuration)?;
         drop(request);
-        match client.call(&self.cx, &wire).await.map_err(RemoteSymbolError::Client)? {
-            RemoteServiceWireResponse::Outcome { outcome: RemoteServiceWireOutcome::Success(bytes), .. } => Ok(bytes),
+        match client
+            .call(&self.cx, &wire)
+            .await
+            .map_err(RemoteSymbolError::Client)?
+        {
+            RemoteServiceWireResponse::Outcome {
+                outcome: RemoteServiceWireOutcome::Success(bytes),
+                ..
+            } => Ok(bytes),
             _ => Err(RemoteSymbolError::Refused),
         }
     }
@@ -285,42 +363,75 @@ impl RemoteSymbolTransport {
     /// Retrieve only the requested origin/object/digest and reverify all symbol tags.
     /// No different version of an object, partial result, or live fallback is accepted.
     pub async fn fetch_symbols(
-        &self, replica: &str, key: SymbolBatchKey,
+        &self,
+        replica: &str,
+        key: SymbolBatchKey,
     ) -> Result<Vec<AuthenticatedSymbol>, RemoteSymbolError> {
-        if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
-        if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
-        self.admission.run_with(&self.cx, || async {
-            if let Some(maximum) = self.chunk_bytes {
-                return self.with_owner_deadline(self.fetch_chunked(replica, key, maximum)).await;
-            }
-            let bytes = self.call(replica, fetch_request(replica, key)?).await?;
-            let symbols = decode_symbol_batch(&bytes, &self.auth_key, self.limits)?;
-            let actual = super::batch::key(symbols[0].symbol().id().object_id(), &bytes);
-            if actual != key { return Err(SymbolStoreError::Identity.into()); }
-            Ok(symbols)
-        }).await
+        if self.cx.is_cancel_requested() {
+            return Err(RemoteSymbolError::Cancelled);
+        }
+        if !self.routes.contains_key(replica) {
+            return Err(RemoteSymbolError::UnknownReplica);
+        }
+        self.admission
+            .run_with(&self.cx, || async {
+                if let Some(maximum) = self.chunk_bytes {
+                    return self
+                        .with_owner_deadline(self.fetch_chunked(replica, key, maximum))
+                        .await;
+                }
+                let bytes = self.call(replica, fetch_request(replica, key)?).await?;
+                let symbols = decode_symbol_batch(&bytes, &self.auth_key, self.limits)?;
+                let actual = super::batch::key(symbols[0].symbol().id().object_id(), &bytes);
+                if actual != key {
+                    return Err(SymbolStoreError::Identity.into());
+                }
+                Ok(symbols)
+            })
+            .await
     }
 
-    pub(crate) async fn send(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>) -> Result<ReplicaAck, RemoteSymbolError> {
+    pub(crate) async fn send(
+        &self,
+        replica: &str,
+        symbols: Vec<AuthenticatedSymbol>,
+    ) -> Result<ReplicaAck, RemoteSymbolError> {
         // Check authority/cancellation before sorting, hashing, or making an input copy.
-        if self.cx.is_cancel_requested() { return Err(RemoteSymbolError::Cancelled); }
-        if !self.routes.contains_key(replica) { return Err(RemoteSymbolError::UnknownReplica); }
+        if self.cx.is_cancel_requested() {
+            return Err(RemoteSymbolError::Cancelled);
+        }
+        if !self.routes.contains_key(replica) {
+            return Err(RemoteSymbolError::UnknownReplica);
+        }
         self.check_queued_symbols(&symbols)?;
-        self.admission.run_with(&self.cx, || async move {
-            if let Some(maximum) = self.chunk_bytes {
-                return self.with_owner_deadline(self.send_chunked(replica, symbols, maximum)).await;
-            }
-            let encoded = encode_symbol_batch(&symbols, self.limits)?;
-            drop(symbols);
-            let response = self.call(replica, put_request(replica, encoded.as_ref())?).await?;
-            Ok(validate_receipt(&response, replica, encoded.key(), encoded.symbol_count())?)
-        }).await
+        self.admission
+            .run_with(&self.cx, || async move {
+                if let Some(maximum) = self.chunk_bytes {
+                    return self
+                        .with_owner_deadline(self.send_chunked(replica, symbols, maximum))
+                        .await;
+                }
+                let encoded = encode_symbol_batch(&symbols, self.limits)?;
+                drop(symbols);
+                let response = self
+                    .call(replica, put_request(replica, encoded.as_ref())?)
+                    .await?;
+                Ok(validate_receipt(
+                    &response,
+                    replica,
+                    encoded.key(),
+                    encoded.symbol_count(),
+                )?)
+            })
+            .await
     }
 }
 
 impl DistributorTransport for RemoteSymbolTransport {
     async fn send_symbols(
-        &self, replica_id: &str, symbols: Vec<AuthenticatedSymbol>,
+        &self,
+        replica_id: &str,
+        symbols: Vec<AuthenticatedSymbol>,
     ) -> Result<ReplicaAck, ReplicaFailure> {
         self.send(replica_id, symbols).await.map_err(|error| {
             let error_kind = match &error {
@@ -330,9 +441,15 @@ impl DistributorTransport for RemoteSymbolTransport {
                 RemoteSymbolError::Deadline => ErrorKind::DeadlineExceeded,
                 RemoteSymbolError::Batch(_) => ErrorKind::ProtocolError,
                 RemoteSymbolError::Client(_) => ErrorKind::ConnectionLost,
-                RemoteSymbolError::Refused | RemoteSymbolError::Admission => ErrorKind::AdmissionDenied,
+                RemoteSymbolError::Refused | RemoteSymbolError::Admission => {
+                    ErrorKind::AdmissionDenied
+                }
             };
-            ReplicaFailure { replica_id: replica_id.to_owned(), error: error.to_string(), error_kind }
+            ReplicaFailure {
+                replica_id: replica_id.to_owned(),
+                error: error.to_string(),
+                error_kind,
+            }
         })
     }
 }

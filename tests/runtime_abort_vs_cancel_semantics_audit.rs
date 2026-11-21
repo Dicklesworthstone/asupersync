@@ -190,8 +190,12 @@ fn task_context_publishes_with_release(task_context: &str) -> bool {
 /// The Acquire half: the single observation path reads the fast flag with Acquire, and the producer path is still the one
 /// publisher.
 fn task_context_observes_with_acquire(task_context: &str) -> bool {
-    task_context.contains(
-        "self.cancel_requested || self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)",
+    let compact: String = task_context
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    compact.contains(
+        "self.cancel_requested||self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)",
     ) && task_context.contains("self.publish_cancel_requested(value);")
 }
 
@@ -327,16 +331,12 @@ fn cancellable_join_blocking_scenario(cross_thread: bool) {
                 })
                 .expect("spawn the caller inside the child region");
 
-            let owner = asupersync::time::timeout(
-                root.now(),
-                Duration::from_secs(5),
-                async {
-                    start.recv(&root).await.expect("pool closure has started");
-                    park.recv(&root)
-                        .await
-                        .expect("caller join is actually pending")
-                },
-            )
+            let owner = asupersync::time::timeout(root.now(), Duration::from_secs(5), async {
+                start.recv(&root).await.expect("pool closure has started");
+                park.recv(&root)
+                    .await
+                    .expect("caller join is actually pending")
+            })
             .await
             .expect("both readiness witnesses arrive before cancellation");
             assert!(occupied.load(Ordering::Acquire));
@@ -351,14 +351,13 @@ fn cancellable_join_blocking_scenario(cross_thread: bool) {
                     .cancel(reason.clone())
                     .expect("cancel the caller's real region");
             }
-            let (result, mut blocking, observed) = asupersync::time::timeout(
-                root.now(),
-                Duration::from_secs(2),
-                caller.join(&root),
-            )
-            .await
-            .expect("cancellable wait releases the caller while the closure is still blocked")
-            .expect("ordinary spawn preserves the acknowledged cancellation result");
+            let (result, mut blocking, observed) =
+                asupersync::time::timeout(root.now(), Duration::from_secs(2), caller.join(&root))
+                    .await
+                    .expect(
+                        "cancellable wait releases the caller while the closure is still blocked",
+                    )
+                    .expect("ordinary spawn preserves the acknowledged cancellation result");
             assert_eq!(observed, Some(reason.clone()));
             assert_eq!(result, Err(JoinError::Cancelled(reason.clone())));
             assert!(
@@ -383,13 +382,10 @@ fn cancellable_join_blocking_scenario(cross_thread: bool) {
             })
             .await;
             release.send(()).expect("release the occupied worker");
-            let terminal = asupersync::time::timeout(
-                root.now(),
-                Duration::from_secs(5),
-                retirement,
-            )
-            .await
-            .expect("actual pool retirement completes the resumed join");
+            let terminal =
+                asupersync::time::timeout(root.now(), Duration::from_secs(5), retirement)
+                    .await
+                    .expect("actual pool retirement completes the resumed join");
             assert_eq!(terminal, Err(JoinError::Cancelled(reason)));
             assert!(!occupied.load(Ordering::Acquire));
             assert!(blocking.is_finished());
@@ -2299,7 +2295,7 @@ fn stable_publication_pins_reject_relaxed_orderings() {
     let task_context = read("src/types/task_context.rs");
     let atomic = read("src/sync/atomic.rs");
     let release_statement = ".store(value, crate::sync::atomic::Ordering::Release);";
-    let acquire_load = "self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)";
+    let acquire_load = ".load(crate::sync::atomic::Ordering::Acquire)";
 
     // Permitted original source.
     assert!(
@@ -3449,7 +3445,11 @@ fn native_nested_masks_preserve_checkpoint_deferral_and_unwind_restoration() {
                         assert!(task_cx.checkpoint_with("outer native mask").is_ok());
                     });
                     assert!(task_cx.checkpoint().is_err());
-                    assert!(task_cx.checkpoint_with("unmasked native checkpoint").is_err());
+                    assert!(
+                        task_cx
+                            .checkpoint_with("unmasked native checkpoint")
+                            .is_err()
+                    );
                     42_u32
                 })
                 .expect("native masked child admitted");

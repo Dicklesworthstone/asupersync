@@ -1,11 +1,11 @@
 //! Native task-group success selection; no self-waking stand-ins for parked work.
 //! Run with the repository-authorized RCH lane and default features.
 #![cfg(not(target_arch = "wasm32"))]
-use asupersync::combinator::{JoinSet, QuorumError};
+use asupersync::Cx;
 use asupersync::channel::oneshot;
+use asupersync::combinator::{JoinSet, QuorumError};
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
 use asupersync::types::{CancelKind, CancelReason};
-use asupersync::Cx;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -81,9 +81,11 @@ fn first_success_tolerates_error_and_retires_parked_sibling() {
                     parked(&child, ready).await;
                     count.fetch_add(1, Ordering::SeqCst);
                     Ok(99)
-                }).unwrap();
+                })
+                .unwrap();
                 witness.recv(&cx).await.unwrap();
-                set.spawn(&cx, |_| async { Err("one backend failed") }).unwrap();
+                set.spawn(&cx, |_| async { Err("one backend failed") })
+                    .unwrap();
                 set.spawn(&cx, |_| async { Ok(7) }).unwrap();
                 assert_eq!(set.join_first_ok(&cx).await.unwrap(), 7);
                 assert_eq!(cleaned.load(Ordering::SeqCst), 1);
@@ -106,7 +108,8 @@ fn quorum_retires_parked_prefix_and_returns_exact_number_of_values() {
                         parked(&child, ready).await;
                         count.fetch_add(1, Ordering::SeqCst);
                         Ok(99)
-                    }).unwrap();
+                    })
+                    .unwrap();
                     witness.recv(&cx).await.unwrap();
                 }
                 set.spawn(&cx, |_| async { Ok(3) }).unwrap();
@@ -133,7 +136,8 @@ fn impossible_quorum_preserves_errors_instead_of_cleanup_cancellation() {
                     parked(&child, ready).await;
                     count.fetch_add(1, Ordering::SeqCst);
                     Ok(9)
-                }).unwrap();
+                })
+                .unwrap();
                 witness.recv(&cx).await.unwrap();
                 set.spawn(&cx, |_| async { Err("unavailable") }).unwrap();
                 let result = set.join_quorum(&cx, 2).await;
@@ -161,7 +165,8 @@ fn invalid_quorums_drain_already_admitted_work() {
                         parked(&child, ready).await;
                         count.fetch_add(1, Ordering::SeqCst);
                         Ok(9)
-                    }).unwrap();
+                    })
+                    .unwrap();
                     witness.recv(&cx).await.unwrap();
                     assert!(matches!(set.join_quorum(&cx, required).await,
                         Err(QuorumError::InvalidQuorum { required: actual, total: 1 })
@@ -169,8 +174,13 @@ fn invalid_quorums_drain_already_admitted_work() {
                     assert_eq!(cleaned.load(Ordering::SeqCst), 1);
                 }
                 let empty = JoinSet::<u8, (), _>::in_cx(&cx);
-                assert!(matches!(empty.join_first_ok(&cx).await,
-                    Err(QuorumError::InvalidQuorum { required: 1, total: 0 })));
+                assert!(matches!(
+                    empty.join_first_ok(&cx).await,
+                    Err(QuorumError::InvalidQuorum {
+                        required: 1,
+                        total: 0
+                    })
+                ));
             });
         }
     });
@@ -199,16 +209,19 @@ fn owner_abort_reaches_every_parked_member() {
                 let cleaned = Arc::new(AtomicUsize::new(0));
                 let count = Arc::clone(&cleaned);
                 let (ready, mut witness) = oneshot::channel();
-                let mut owner = cx.spawn(move |owner| async move {
-                    let mut set = JoinSet::<u8, (), _>::in_cx(&owner);
-                    set.spawn(&owner, move |child| async move {
-                        parked(&child, ready).await;
-                        assert_eq!(child.cancel_reason().unwrap().kind, CancelKind::Shutdown);
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Ok(9)
-                    }).unwrap();
-                    set.join_first_ok(&owner).await
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let mut set = JoinSet::<u8, (), _>::in_cx(&owner);
+                        set.spawn(&owner, move |child| async move {
+                            parked(&child, ready).await;
+                            assert_eq!(child.cancel_reason().unwrap().kind, CancelKind::Shutdown);
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Ok(9)
+                        })
+                        .unwrap();
+                        set.join_first_ok(&owner).await
+                    })
+                    .unwrap();
                 witness.recv(&cx).await.unwrap();
                 owner.abort_with_reason(CancelReason::shutdown());
                 assert!(matches!(owner.join(&cx).await.unwrap(),
@@ -229,10 +242,14 @@ fn cleanup_panic_defeats_an_already_selected_success() {
                 set.spawn(&cx, move |child| async move {
                     parked(&child, ready).await;
                     panic!("intentional quorum loser cleanup panic");
-                }).unwrap();
+                })
+                .unwrap();
                 witness.recv(&cx).await.unwrap();
                 set.spawn(&cx, |_| async { Ok(1) }).unwrap();
-                assert!(matches!(set.join_first_ok(&cx).await, Err(QuorumError::Panicked(_))));
+                assert!(matches!(
+                    set.join_first_ok(&cx).await,
+                    Err(QuorumError::Panicked(_))
+                ));
             });
         }
     });
@@ -246,8 +263,11 @@ struct DropAfterCleanup {
 
 impl Drop for DropAfterCleanup {
     fn drop(&mut self) {
-        assert_eq!(self.cleaned.load(Ordering::SeqCst), 1,
-            "selected value destroyed before sibling cleanup");
+        assert_eq!(
+            self.cleaned.load(Ordering::SeqCst),
+            1,
+            "selected value destroyed before sibling cleanup"
+        );
         self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -265,24 +285,29 @@ fn cancellation_during_slow_drain_keeps_selected_value_until_cleanup() {
                 let (release_winner, mut wait_winner) = oneshot::channel();
                 let count = Arc::clone(&cleaned);
                 let winning = DropAfterCleanup {
-                    cleaned: Arc::clone(&cleaned), dropped: Arc::clone(&dropped),
+                    cleaned: Arc::clone(&cleaned),
+                    dropped: Arc::clone(&dropped),
                 };
                 let cleanup_cx = cx.clone();
-                let mut owner = cx.spawn(move |owner| async move {
-                    let mut set = JoinSet::<DropAfterCleanup, &'static str, _>::in_cx(&owner);
-                    set.spawn(&owner, move |child| async move {
-                        parked(&child, parked_send).await;
-                        draining_send.send_blocking(()).unwrap();
-                        wait_release.recv(&cleanup_cx).await.unwrap();
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Err("cleanup finished")
-                    }).unwrap();
-                    set.spawn(&owner, move |child| async move {
-                        wait_winner.recv(&child).await.unwrap();
-                        Ok(winning)
-                    }).unwrap();
-                    set.join_first_ok(&owner).await
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let mut set = JoinSet::<DropAfterCleanup, &'static str, _>::in_cx(&owner);
+                        set.spawn(&owner, move |child| async move {
+                            parked(&child, parked_send).await;
+                            draining_send.send_blocking(()).unwrap();
+                            wait_release.recv(&cleanup_cx).await.unwrap();
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Err("cleanup finished")
+                        })
+                        .unwrap();
+                        set.spawn(&owner, move |child| async move {
+                            wait_winner.recv(&child).await.unwrap();
+                            Ok(winning)
+                        })
+                        .unwrap();
+                        set.join_first_ok(&owner).await
+                    })
+                    .unwrap();
                 parked_receive.recv(&cx).await.unwrap();
                 // The winner cannot trigger loser cancellation until the
                 // parent has observed the loser's real parked-state witness.
@@ -290,9 +315,15 @@ fn cancellation_during_slow_drain_keeps_selected_value_until_cleanup() {
                 draining_receive.recv(&cx).await.unwrap();
                 assert_eq!(cleaned.load(Ordering::SeqCst), 0);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
-                assert!(matches!(owner.try_join(), Ok(None)), "winner escaped before drain");
+                assert!(
+                    matches!(owner.try_join(), Ok(None)),
+                    "winner escaped before drain"
+                );
                 owner.abort_with_reason(CancelReason::shutdown());
-                assert!(matches!(owner.try_join(), Ok(None)), "abort abandoned cleanup");
+                assert!(
+                    matches!(owner.try_join(), Ok(None)),
+                    "abort abandoned cleanup"
+                );
                 release.send_blocking(()).unwrap();
                 assert!(matches!(owner.join(&cx).await.unwrap(),
                     Err(QuorumError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
@@ -315,7 +346,8 @@ fn dropping_an_unpolled_quorum_requests_cancellation_and_region_drains() {
                     parked(&child, ready).await;
                     cleaned.send_blocking(()).unwrap();
                     Ok(1)
-                }).unwrap();
+                })
+                .unwrap();
                 witness.recv(&cx).await.unwrap();
                 // Do not poll the consuming future at all: its captured set
                 // must already own the abort-on-drop obligation.
@@ -340,7 +372,8 @@ fn dropping_a_pending_quorum_does_not_abandon_its_parked_members() {
                         parked(&child, ready).await;
                         cleaned.send_blocking(()).unwrap();
                         Ok(1)
-                    }).unwrap();
+                    })
+                    .unwrap();
                     witness.recv(&cx).await.unwrap();
                     cleanups.push(cleanup);
                 }
@@ -348,7 +381,8 @@ fn dropping_a_pending_quorum_does_not_abandon_its_parked_members() {
                 poll_fn(|task| {
                     assert!(selection.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 drop(selection);
                 for cleanup in &mut cleanups {
                     cleanup.recv(&cx).await.unwrap();
@@ -367,7 +401,8 @@ fn a_large_quorum_crosses_collection_quanta_without_cloning_results() {
             run(workers, |cx| async move {
                 let mut set = JoinSet::<Value, (), _>::in_cx(&cx);
                 for index in 0..193 {
-                    set.spawn(&cx, move |_| async move { Ok(Value(index)) }).unwrap();
+                    set.spawn(&cx, move |_| async move { Ok(Value(index)) })
+                        .unwrap();
                 }
                 let values = set.join_quorum(&cx, 193).await.unwrap();
                 let mut indices: Vec<_> = values.into_iter().map(|value| value.0).collect();
@@ -389,7 +424,8 @@ fn worker_pinned_non_send_futures_participate_in_a_success_quorum() {
                         let local = std::rc::Rc::new(index);
                         asupersync::runtime::yield_now().await;
                         Ok(*local)
-                    }).unwrap();
+                    })
+                    .unwrap();
                 }
                 let mut values = set.join_quorum(&cx, 3).await.unwrap();
                 values.sort_unstable();

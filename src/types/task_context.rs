@@ -1125,7 +1125,10 @@ impl CxInner {
     #[inline]
     #[must_use]
     pub(crate) fn is_cancel_requested(&self) -> bool {
-        self.cancel_requested || self.fast_cancel.load(crate::sync::atomic::Ordering::Acquire)
+        self.cancel_requested
+            || self
+                .fast_cancel
+                .load(crate::sync::atomic::Ordering::Acquire)
     }
 
     /// Changes lock-backed cancellation state and publishes the matching

@@ -6,8 +6,7 @@
 use super::*;
 use crate::grpc::server::Interceptor;
 use crate::grpc::service::{
-    MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandlerFuture,
-    ServiceStreamingFuture,
+    MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandlerFuture, ServiceStreamingFuture,
 };
 use crate::grpc::streaming::Streaming;
 use crate::http::h2::{Header, HpackDecoder};
@@ -117,7 +116,10 @@ impl ServiceHandler for FixtureService {
         _trailers: Metadata,
     ) -> ServiceStreamingFuture<'a> {
         self.probe.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(!matches!(self.mode, Mode::FactoryPanic), "private factory panic");
+        assert!(
+            !matches!(self.mode, Mode::FactoryPanic),
+            "private factory panic"
+        );
         let stream = FixtureStream {
             probe: Arc::clone(&self.probe),
             cx: cx.clone(),
@@ -125,7 +127,10 @@ impl ServiceHandler for FixtureService {
             index: 0,
         };
         Box::pin(async move {
-            assert!(!matches!(stream.mode, Mode::FuturePanic), "private future panic");
+            assert!(
+                !matches!(stream.mode, Mode::FuturePanic),
+                "private future panic"
+            );
             if matches!(stream.mode, Mode::FactoryError) {
                 return Err(Status::permission_denied("factory refused"));
             }
@@ -142,7 +147,9 @@ impl ServiceHandler for FixtureService {
             let mut initial = Metadata::new();
             if matches!(
                 stream.mode,
-                Mode::InitialMetadata | Mode::InitialMetadataEmpty | Mode::UndeferredInitialMetadata
+                Mode::InitialMetadata
+                    | Mode::InitialMetadataEmpty
+                    | Mode::UndeferredInitialMetadata
             ) {
                 assert!(initial.insert("x-start", "first"));
                 assert!(initial.insert("x-start", "second"));
@@ -184,19 +191,23 @@ impl Streaming for FixtureStream {
         self.index += 1;
         match self.mode {
             Mode::CancelAtEof => {
-                self.cx.cancel_with(CancelKind::User, Some("source cancelled at EOF"));
+                self.cx
+                    .cancel_with(CancelKind::User, Some("source cancelled at EOF"));
                 Poll::Ready(None)
             }
             Mode::CancelWithMessage => {
-                self.cx.cancel_with(CancelKind::User, Some("source cancelled with a value"));
+                self.cx
+                    .cancel_with(CancelKind::User, Some("source cancelled with a value"));
                 Poll::Ready(Some(Ok(Bytes::from_static(b"must not be published"))))
             }
             Mode::CancelWithError => {
-                self.cx.cancel_with(CancelKind::User, Some("source cancelled with an error"));
+                self.cx
+                    .cancel_with(CancelKind::User, Some("source cancelled with an error"));
                 Poll::Ready(Some(Err(Status::invalid_argument("late source error"))))
             }
             Mode::CancelWhilePending => {
-                self.cx.cancel_with(CancelKind::User, Some("source cancelled while pending"));
+                self.cx
+                    .cancel_with(CancelKind::User, Some("source cancelled while pending"));
                 Poll::Pending
             }
             Mode::CancelOnDrop => Poll::Ready(None),
@@ -212,7 +223,11 @@ impl Streaming for FixtureStream {
             Mode::Error if index > 1 => panic!("stream polled after its terminal error"),
             _ if index >= 2 => Poll::Ready(None),
             _ => Poll::Ready(Some(Ok(Bytes::from(vec![
-                if index == 0 { 0x11 } else { 0x22 };
+                if index == 0 {
+                    0x11
+                } else {
+                    0x22
+                };
                 3000
             ])))),
         }
@@ -223,10 +238,14 @@ impl Drop for FixtureStream {
     fn drop(&mut self) {
         self.probe.drops.fetch_add(1, Ordering::SeqCst);
         if matches!(self.mode, Mode::CancelOnDrop) {
-            self.cx.cancel_with(CancelKind::User, Some("source cancelled during cleanup"));
+            self.cx
+                .cancel_with(CancelKind::User, Some("source cancelled during cleanup"));
         }
         let _ = self.probe.retired.send(());
-        assert!(!matches!(self.mode, Mode::DropPanic), "private source drop panic");
+        assert!(
+            !matches!(self.mode, Mode::DropPanic),
+            "private source drop panic"
+        );
     }
 }
 
@@ -290,15 +309,21 @@ impl Peer {
     fn new(addr: SocketAddr, window: u32, path: &str, timeout: Option<&str>) -> Self {
         let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
             .expect("connect native listener");
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut peer = Self {
             socket,
             decoder: HpackDecoder::new(),
             reply: WireReply::default(),
             stream: 0,
         };
-        peer.socket.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
+        peer.socket
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .unwrap();
         let mut settings = vec![0, 4]; // SETTINGS_INITIAL_WINDOW_SIZE
         settings.extend_from_slice(&window.to_be_bytes());
         peer.send(4, 0, 0, &settings);
@@ -355,10 +380,11 @@ impl Peer {
 
     fn frame(&mut self) -> (u8, u8, u32, Vec<u8>) {
         let mut header = [0u8; 9];
-        self.socket.read_exact(&mut header).expect("native H2 frame");
-        let len = (usize::from(header[0]) << 16)
-            | (usize::from(header[1]) << 8)
-            | usize::from(header[2]);
+        self.socket
+            .read_exact(&mut header)
+            .expect("native H2 frame");
+        let len =
+            (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
         assert!(len <= 1024 * 1024, "test peer frame budget");
         let mut payload = vec![0u8; len];
         self.socket.read_exact(&mut payload).unwrap();
@@ -378,7 +404,10 @@ impl Peer {
             6 if flags & 1 == 0 => self.send(6, 1, 0, &payload),
             6 => return (false, payload == b"credit!!"),
             0 if stream == self.stream => {
-                assert!(!self.reply.initial.is_empty(), "DATA must follow initial HEADERS");
+                assert!(
+                    !self.reply.initial.is_empty(),
+                    "DATA must follow initial HEADERS"
+                );
                 assert_eq!(flags & 8, 0, "fixture server emits unpadded DATA");
                 self.reply.body.extend_from_slice(&payload);
                 return (flags & 1 != 0, false);
@@ -495,13 +524,17 @@ where
     }
     server.config.max_send_message_size = 4096;
     let server = Arc::new(server);
-    let runtime = RuntimeBuilder::current_thread().build().expect("native test runtime");
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native test runtime");
     let handle = runtime.handle().clone();
     let peer_probe = Arc::clone(&probe);
     runtime.block_on(runtime.handle().spawn(async move {
         let listener = server
             .bind_registered_streaming_http2(
-                "127.0.0.1:0", HostPolicy::allow_all(), stream_config(),
+                "127.0.0.1:0",
+                HostPolicy::allow_all(),
+                stream_config(),
             )
             .await
             .expect("bind native streaming listener");
@@ -522,15 +555,23 @@ where
 #[test]
 fn native_registered_stream_sends_multiple_framed_messages_and_binary_trailers() {
     let probe = wire_case(
-        Mode::Values, 65_535, "/test.Watch/Values", None, false,
+        Mode::Values,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, _, retired, _| {
             peer.finish();
             assert_eq!(peer.reply.reset, None);
-            assert_eq!(peer.reply.messages(), vec![vec![0x11; 3000], vec![0x22; 3000]]);
+            assert_eq!(
+                peer.reply.messages(),
+                vec![vec![0x11; 3000], vec![0x22; 3000]]
+            );
             assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
             assert_eq!(peer.reply.trailer("x-end"), Some("finished"));
             assert_eq!(peer.reply.trailer("x-proof-bin"), Some("AP8"));
-            retired.recv_timeout(Duration::from_secs(2))
+            retired
+                .recv_timeout(Duration::from_secs(2))
                 .expect("stream destroyed before terminal receipt");
         },
     );
@@ -541,32 +582,50 @@ fn native_registered_stream_sends_multiple_framed_messages_and_binary_trailers()
 #[test]
 fn native_streaming_compression_refusal_advertises_a_usable_retry_encoding() {
     let probe = wire_case(
-        Mode::Values, 65_535, "/test.Watch/Values", None, false,
+        Mode::Values,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, _, retired, probe| {
             peer.finish();
             assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
             assert!(peer.reply.initial.iter().any(|header| {
                 header.name == "grpc-accept-encoding" && header.value == "identity"
             }));
-            retired.recv_timeout(Duration::from_secs(2)).expect("first stream retired");
+            retired
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first stream retired");
 
             peer.request_with_encoding(3, "/test.Watch/Values", None, Some("zstd"));
             peer.finish();
             assert_eq!(peer.reply.reset, None);
             assert_eq!(peer.reply.trailer("grpc-status"), Some("12"));
             assert!(peer.reply.body.is_empty());
-            let advertised: Vec<_> = peer.reply.initial.iter()
+            let advertised: Vec<_> = peer
+                .reply
+                .initial
+                .iter()
                 .filter(|header| header.name == "grpc-accept-encoding")
                 .map(|header| header.value.as_str())
                 .collect();
             assert_eq!(advertised, ["identity"]);
-            assert_eq!(probe.calls.load(Ordering::SeqCst), 1, "refusal precedes service entry");
+            assert_eq!(
+                probe.calls.load(Ordering::SeqCst),
+                1,
+                "refusal precedes service entry"
+            );
 
             peer.request_with_encoding(5, "/test.Watch/Values", None, Some("identity"));
             peer.finish();
             assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
-            assert_eq!(peer.reply.messages(), vec![vec![0x11; 3000], vec![0x22; 3000]]);
-            retired.recv_timeout(Duration::from_secs(2)).expect("retry stream retired");
+            assert_eq!(
+                peer.reply.messages(),
+                vec![vec![0x11; 3000], vec![0x22; 3000]]
+            );
+            retired
+                .recv_timeout(Duration::from_secs(2))
+                .expect("retry stream retired");
         },
     );
     assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
@@ -576,7 +635,11 @@ fn native_streaming_compression_refusal_advertises_a_usable_retry_encoding() {
 #[test]
 fn native_empty_stream_has_success_trailers_without_a_phantom_message() {
     wire_case(
-        Mode::Empty, 65_535, "/test.Watch/Values", None, false,
+        Mode::Empty,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, _, _, _| {
             peer.finish();
             assert!(peer.reply.body.is_empty());
@@ -595,12 +658,18 @@ fn native_same_poll_source_cancellation_never_publishes_success_or_partial_data(
         Mode::CancelOnDrop,
     ] {
         let probe = wire_case(
-            mode, 65_535, "/test.Watch/Values", None, false,
+            mode,
+            65_535,
+            "/test.Watch/Values",
+            None,
+            false,
             move |peer, starts, retired, probe| {
-                let call = starts.recv_timeout(Duration::from_secs(2))
+                let call = starts
+                    .recv_timeout(Duration::from_secs(2))
                     .expect("source poll witnessed before terminal status");
                 peer.finish();
-                retired.recv_timeout(Duration::from_secs(2))
+                retired
+                    .recv_timeout(Duration::from_secs(2))
                     .expect("cancelled source retired");
                 assert!(call.is_cancel_requested(), "{mode:?}");
                 assert_eq!(peer.reply.reset, None, "{mode:?}");
@@ -618,21 +687,39 @@ fn native_same_poll_source_cancellation_never_publishes_success_or_partial_data(
 fn native_initial_metadata_precedes_messages_even_without_data_credit() {
     for mode in [Mode::InitialMetadata, Mode::InitialMetadataEmpty] {
         let probe = wire_case(
-            mode, 0, "/test.Watch/Values", None, false,
+            mode,
+            0,
+            "/test.Watch/Values",
+            None,
+            false,
             move |peer, _, retired, _| {
                 while peer.reply.initial.is_empty() {
                     assert!(!peer.step().0);
                 }
-                let values: Vec<_> = peer.reply.initial.iter()
+                let values: Vec<_> = peer
+                    .reply
+                    .initial
+                    .iter()
                     .filter(|header| header.name == "x-start")
                     .map(|header| header.value.as_str())
                     .collect();
                 assert_eq!(values, ["first", "second"]);
-                assert!(peer.reply.initial.iter().any(|header| {
-                    header.name == "x-start-bin" && header.value == "AP8"
-                }));
-                assert!(peer.reply.initial.iter().all(|header| header.name != "x-end"));
-                assert!(peer.reply.body.is_empty(), "initial HEADERS need no DATA credit");
+                assert!(
+                    peer.reply
+                        .initial
+                        .iter()
+                        .any(|header| { header.name == "x-start-bin" && header.value == "AP8" })
+                );
+                assert!(
+                    peer.reply
+                        .initial
+                        .iter()
+                        .all(|header| header.name != "x-end")
+                );
+                assert!(
+                    peer.reply.body.is_empty(),
+                    "initial HEADERS need no DATA credit"
+                );
                 peer.send(8, 0, 1, &65_535u32.to_be_bytes());
                 peer.finish();
                 assert_eq!(peer.reply.reset, None);
@@ -645,7 +732,9 @@ fn native_initial_metadata_precedes_messages_even_without_data_credit() {
                     vec![vec![0x11; 3000], vec![0x22; 3000]]
                 };
                 assert_eq!(peer.reply.messages(), expected);
-                retired.recv_timeout(Duration::from_secs(2)).expect("source retired");
+                retired
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source retired");
             },
         );
         assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
@@ -661,7 +750,11 @@ fn native_initial_metadata_refusal_never_polls_source_or_leaks_headers() {
         (Mode::FactoryError, "7"),
     ] {
         let probe = wire_case(
-            mode, 65_535, "/test.Watch/Values", None, false,
+            mode,
+            65_535,
+            "/test.Watch/Values",
+            None,
+            false,
             move |peer, _, retired, probe| {
                 peer.finish();
                 assert_eq!(peer.reply.reset, None);
@@ -671,7 +764,9 @@ fn native_initial_metadata_refusal_never_polls_source_or_leaks_headers() {
                     !header.name.starts_with("x-start") && header.name != "grpc-status"
                 }));
                 assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
-                retired.recv_timeout(Duration::from_secs(2)).expect("unpolled source retired");
+                retired
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("unpolled source retired");
                 assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
                 peer.request(3, "/test.Watch/Echo", None);
                 peer.finish();
@@ -685,9 +780,14 @@ fn native_initial_metadata_refusal_never_polls_source_or_leaks_headers() {
 #[test]
 fn native_pending_factory_does_not_commit_headers_and_cancellation_releases_it() {
     wire_case(
-        Mode::PendingFactory, 65_535, "/test.Watch/Values", None, false,
+        Mode::PendingFactory,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, started, retired, probe| {
-            let cx = started.recv_timeout(Duration::from_secs(2))
+            let cx = started
+                .recv_timeout(Duration::from_secs(2))
                 .expect("factory is parked before yielding its metadata");
             // The connection keeps making protocol progress while the head
             // waits. A completed PING round trip is a witnessed read boundary.
@@ -695,14 +795,18 @@ fn native_pending_factory_does_not_commit_headers_and_cancellation_releases_it()
             loop {
                 let (done, ack) = peer.step();
                 assert!(!done);
-                if ack { break; }
+                if ack {
+                    break;
+                }
             }
             assert!(peer.reply.initial.is_empty());
             assert!(peer.reply.body.is_empty());
             cx.cancel_with(CancelKind::User, Some("cancel pending metadata factory"));
             peer.finish();
             assert_eq!(peer.reply.trailer("grpc-status"), Some("1"));
-            retired.recv_timeout(Duration::from_secs(2)).expect("factory state retired");
+            retired
+                .recv_timeout(Duration::from_secs(2))
+                .expect("factory state retired");
             assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
             assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
         },
@@ -713,39 +817,81 @@ fn native_pending_factory_does_not_commit_headers_and_cancellation_releases_it()
 fn initial_metadata_bounds_encoded_bytes_and_preserves_duplicates() {
     let mut metadata = Metadata::new();
     assert!(metadata.insert_bin("x-bin", Bytes::from(vec![0; 6])));
-    assert_eq!(bounded_initial_metadata(&metadata, 12).unwrap_err().code(), Code::ResourceExhausted);
+    assert_eq!(
+        bounded_initial_metadata(&metadata, 12).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
     let headers = bounded_initial_metadata(&metadata, 13).unwrap();
-    assert_eq!(headers.get(&HeaderName::from_static("x-bin")).unwrap().to_str().unwrap(), "AAAAAAAA");
+    assert_eq!(
+        headers
+            .get(&HeaderName::from_static("x-bin"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "AAAAAAAA"
+    );
     assert!(metadata.insert("x", ""));
-    assert_eq!(bounded_initial_metadata(&metadata, 13).unwrap_err().code(), Code::ResourceExhausted);
+    assert_eq!(
+        bounded_initial_metadata(&metadata, 13).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
 
     let mut duplicate = Metadata::new();
     assert!(duplicate.insert("set-cookie", "first=1"));
     assert!(duplicate.insert("set-cookie", "second=2"));
     let headers = bounded_initial_metadata(&duplicate, 35).unwrap();
     assert_eq!(headers.len(), 2);
-    assert_eq!(bounded_initial_metadata(&duplicate, 34).unwrap_err().code(), Code::ResourceExhausted);
+    assert_eq!(
+        bounded_initial_metadata(&duplicate, 34).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
 
     for limit in [0, usize::MAX] {
         let mut too_large = Metadata::new();
         assert!(too_large.insert("x", "a".repeat(MAX_INITIAL_METADATA_BYTES)));
-        assert_eq!(bounded_initial_metadata(&too_large, limit).unwrap_err().code(), Code::ResourceExhausted);
+        assert_eq!(
+            bounded_initial_metadata(&too_large, limit)
+                .unwrap_err()
+                .code(),
+            Code::ResourceExhausted
+        );
     }
-    for key in ["grpc-encoding", "grpc-status", "content-type", "transfer-encoding", "connection"] {
+    for key in [
+        "grpc-encoding",
+        "grpc-status",
+        "content-type",
+        "transfer-encoding",
+        "connection",
+    ] {
         let mut reserved = Metadata::new();
         assert!(reserved.insert(key, "ignored"));
-        assert_eq!(bounded_initial_metadata(&reserved, 1024).unwrap_err().code(), Code::Internal);
+        assert_eq!(
+            bounded_initial_metadata(&reserved, 1024)
+                .unwrap_err()
+                .code(),
+            Code::Internal
+        );
     }
-    let malformed = Metadata::from_raw_entries_for_tests(vec![
-        ("x-injected".to_owned(), MetadataValue::Ascii("safe\r\nforged: header".to_owned())),
-    ]);
-    assert_eq!(bounded_initial_metadata(&malformed, 1024).unwrap_err().code(), Code::Internal);
+    let malformed = Metadata::from_raw_entries_for_tests(vec![(
+        "x-injected".to_owned(),
+        MetadataValue::Ascii("safe\r\nforged: header".to_owned()),
+    )]);
+    assert_eq!(
+        bounded_initial_metadata(&malformed, 1024)
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
 }
 
 #[test]
 fn native_stream_error_preserves_prior_complete_message_and_non_ok_status() {
     let probe = wire_case(
-        Mode::Error, 65_535, "/test.Watch/Values", None, false,
+        Mode::Error,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, _, _, _| {
             peer.finish();
             assert_eq!(peer.reply.messages(), vec![vec![0x11; 3000]]);
@@ -761,12 +907,18 @@ fn native_stream_error_preserves_prior_complete_message_and_non_ok_status() {
 #[test]
 fn native_zero_credit_bounds_prefetch_then_window_update_resumes_production() {
     wire_case(
-        Mode::Infinite, 0, "/test.Watch/Values", None, false,
+        Mode::Infinite,
+        0,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, started, retired, probe| {
             while peer.reply.initial.is_empty() {
                 assert!(!peer.step().0);
             }
-            started.recv_timeout(Duration::from_secs(2)).expect("first stream poll reached");
+            started
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first stream poll reached");
             peer.send(6, 0, 0, b"credit!!");
             loop {
                 let (done, ack) = peer.step();
@@ -777,16 +929,22 @@ fn native_zero_credit_bounds_prefetch_then_window_update_resumes_production() {
             }
             assert!(peer.reply.body.is_empty(), "no DATA without peer credit");
             // A 4101-byte framed message cannot fit in the 2 * 1024-byte channel.
-            assert_eq!(probe.polls.load(Ordering::SeqCst), 1,
-                "source must stop behind the first message");
+            assert_eq!(
+                probe.polls.load(Ordering::SeqCst),
+                1,
+                "source must stop behind the first message"
+            );
             peer.send(8, 0, 1, &65_535u32.to_be_bytes());
             while peer.reply.body.len() < 3 * 4101 {
                 assert!(!peer.step().0);
             }
-            assert!(probe.polls.load(Ordering::SeqCst) >= 3,
-                "WINDOW_UPDATE resumes source polls");
+            assert!(
+                probe.polls.load(Ordering::SeqCst) >= 3,
+                "WINDOW_UPDATE resumes source polls"
+            );
             peer.reset();
-            retired.recv_timeout(Duration::from_secs(2))
+            retired
+                .recv_timeout(Duration::from_secs(2))
                 .expect("credit-blocked stream retired on RST");
             assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
         },
@@ -796,13 +954,19 @@ fn native_zero_credit_bounds_prefetch_then_window_update_resumes_production() {
 #[test]
 fn native_rst_wakes_and_retires_a_parked_service_stream() {
     wire_case(
-        Mode::Never, 65_535, "/test.Watch/Values", None, false,
+        Mode::Never,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        false,
         |peer, started, retired, probe| {
-            let cx = started.recv_timeout(Duration::from_secs(2))
+            let cx = started
+                .recv_timeout(Duration::from_secs(2))
                 .expect("stream reached Pending");
             assert!(!cx.is_cancel_requested());
             peer.reset();
-            retired.recv_timeout(Duration::from_secs(2))
+            retired
+                .recv_timeout(Duration::from_secs(2))
                 .expect("parked stream retired after RST");
             assert!(cx.is_cancel_requested());
             assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
@@ -813,14 +977,21 @@ fn native_rst_wakes_and_retires_a_parked_service_stream() {
 #[test]
 fn native_deadline_covers_the_stream_after_factory_returns() {
     wire_case(
-        Mode::Never, 65_535, "/test.Watch/Values", Some("300m"), false,
+        Mode::Never,
+        65_535,
+        "/test.Watch/Values",
+        Some("300m"),
+        false,
         |peer, started, retired, _| {
-            let cx = started.recv_timeout(Duration::from_secs(2))
+            let cx = started
+                .recv_timeout(Duration::from_secs(2))
                 .expect("stream reached Pending before deadline");
             peer.finish();
             assert!(peer.reply.body.is_empty());
             assert_eq!(peer.reply.trailer("grpc-status"), Some("4"));
-            retired.recv_timeout(Duration::from_secs(2)).expect("deadline drops stream");
+            retired
+                .recv_timeout(Duration::from_secs(2))
+                .expect("deadline drops stream");
             assert!(cx.is_cancel_requested());
         },
     );
@@ -829,14 +1000,25 @@ fn native_deadline_covers_the_stream_after_factory_returns() {
 #[test]
 fn native_deadline_mid_message_never_reports_clean_grpc_completion() {
     wire_case(
-        Mode::Infinite, 0, "/test.Watch/Values", Some("300m"), false,
+        Mode::Infinite,
+        0,
+        "/test.Watch/Values",
+        Some("300m"),
+        false,
         |peer, started, retired, _| {
-            started.recv_timeout(Duration::from_secs(2)).expect("message production started");
+            started
+                .recv_timeout(Duration::from_secs(2))
+                .expect("message production started");
             peer.finish();
-            assert!(peer.reply.reset.is_some(), "incomplete message requires H2 failure");
+            assert!(
+                peer.reply.reset.is_some(),
+                "incomplete message requires H2 failure"
+            );
             assert!(peer.reply.body.is_empty());
             assert_eq!(peer.reply.trailer("grpc-status"), None);
-            retired.recv_timeout(Duration::from_secs(2)).expect("timed-out source retired");
+            retired
+                .recv_timeout(Duration::from_secs(2))
+                .expect("timed-out source retired");
         },
     );
 }
@@ -845,10 +1027,18 @@ fn native_deadline_mid_message_never_reports_clean_grpc_completion() {
 fn native_message_limit_and_reserved_trailers_fail_closed() {
     for mode in [Mode::Oversized, Mode::ForgedTrailer] {
         wire_case(
-            mode, 65_535, "/test.Watch/Values", None, false,
+            mode,
+            65_535,
+            "/test.Watch/Values",
+            None,
+            false,
             move |peer, _, _, _| {
                 peer.finish();
-                let expected = if matches!(mode, Mode::Oversized) { "8" } else { "13" };
+                let expected = if matches!(mode, Mode::Oversized) {
+                    "8"
+                } else {
+                    "13"
+                };
                 assert_eq!(peer.reply.trailer("grpc-status"), Some(expected));
                 if matches!(mode, Mode::Oversized) {
                     assert!(peer.reply.body.is_empty());
@@ -861,7 +1051,11 @@ fn native_message_limit_and_reserved_trailers_fail_closed() {
 #[test]
 fn native_auth_short_circuits_stream_factory() {
     let probe = wire_case(
-        Mode::Values, 65_535, "/test.Watch/Values", None, true,
+        Mode::Values,
+        65_535,
+        "/test.Watch/Values",
+        None,
+        true,
         |peer, _, _, _| {
             peer.finish();
             assert_eq!(peer.reply.trailer("grpc-status"), Some("16"));
@@ -879,7 +1073,11 @@ fn native_mixed_listener_preserves_unary_and_refuses_bidi() {
         ("/test.Watch/Missing", "12"),
     ] {
         let probe = wire_case(
-            Mode::Values, 65_535, path, None, false,
+            Mode::Values,
+            65_535,
+            path,
+            None,
+            false,
             move |peer, _, _, _| {
                 peer.finish();
                 assert_eq!(peer.reply.trailer("grpc-status"), Some(status));
@@ -914,7 +1112,12 @@ fn native_service_panics_become_internal_and_the_same_connection_recovers() {
                 assert_eq!(peer.reply.reset, None, "panic mode: {mode:?}");
                 assert_eq!(peer.reply.trailer("grpc-status"), Some("13"));
                 assert_eq!(peer.reply.trailer("x-end"), None);
-                assert!(peer.reply.trailers.iter().all(|header| !header.value.contains("private")));
+                assert!(
+                    peer.reply
+                        .trailers
+                        .iter()
+                        .all(|header| !header.value.contains("private"))
+                );
                 let expected = match mode {
                     Mode::LatePollPanic => vec![vec![0x11; 3000]],
                     Mode::DropPanic => vec![vec![0x11; 3000], vec![0x22; 3000]],
@@ -922,7 +1125,9 @@ fn native_service_panics_become_internal_and_the_same_connection_recovers() {
                 };
                 assert_eq!(peer.reply.messages(), expected, "panic mode: {mode:?}");
                 if !matches!(mode, Mode::FactoryPanic) {
-                    retired.recv_timeout(Duration::from_secs(2)).expect("panicked source retired");
+                    retired
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("panicked source retired");
                     assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
                 }
 
@@ -954,9 +1159,12 @@ fn native_time_spent_before_handler_setup_cannot_renew_the_request_budget() {
             if self.first.swap(false, Ordering::SeqCst) {
                 // Test-only synchronous gate. Production interceptors must
                 // not block workers; the gate reproduces consumed setup time.
-                self.entered.send(Cx::current().expect("request context"))
+                self.entered
+                    .send(Cx::current().expect("request context"))
                     .expect("interceptor witness");
-                self.release.lock().recv_timeout(Duration::from_secs(5))
+                self.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(5))
                     .expect("bounded interceptor release");
             }
             Ok(())
@@ -981,9 +1189,12 @@ fn native_time_spent_before_handler_setup_cannot_renew_the_request_budget() {
         Some("300m"),
         Some(interceptor),
         move |peer, _, _, probe| {
-            let cx = entry.recv_timeout(Duration::from_secs(2))
+            let cx = entry
+                .recv_timeout(Duration::from_secs(2))
                 .expect("dispatch reached its pre-factory interceptor");
-            let deadline = cx.budget().deadline
+            let deadline = cx
+                .budget()
+                .deadline
                 .expect("original deadline installed before interceptors");
             let clock = cx.timer_driver().expect("native timer driver");
             let watchdog = Instant::now() + Duration::from_secs(2);
@@ -992,7 +1203,10 @@ fn native_time_spent_before_handler_setup_cannot_renew_the_request_budget() {
                 if now >= deadline {
                     break;
                 }
-                assert!(Instant::now() < watchdog, "native clock did not reach deadline");
+                assert!(
+                    Instant::now() < watchdog,
+                    "native clock did not reach deadline"
+                );
                 // Wait for the witnessed absolute deadline, not a guessed
                 // sleep used to assume that handler execution has started.
                 std::thread::park_timeout(Duration::from_nanos(deadline.duration_since(now)));
@@ -1003,7 +1217,11 @@ fn native_time_spent_before_handler_setup_cannot_renew_the_request_budget() {
             assert_eq!(peer.reply.reset, None);
             assert!(peer.reply.body.is_empty());
             assert_eq!(peer.reply.trailer("grpc-status"), Some("4"));
-            assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "expired service was not invoked");
+            assert_eq!(
+                probe.calls.load(Ordering::SeqCst),
+                0,
+                "expired service was not invoked"
+            );
 
             peer.request(3, "/test.Watch/Echo", None);
             peer.finish();
@@ -1052,10 +1270,18 @@ fn captured_deadline_preserves_parser_fallback_cap_and_parent_budget() {
             assert!(metadata.insert("grpc-timeout", header));
         }
         let captured = StreamDeadline::capture(&cx, &metadata, server.config());
-        assert_eq!(captured.at, Some(Time::from_secs(expected)), "header: {header:?}");
+        assert_eq!(
+            captured.at,
+            Some(Time::from_secs(expected)),
+            "header: {header:?}"
+        );
         clock.advance_to(Time::from_secs(50));
         assert!(captured.expired());
-        assert_eq!(captured.at, Some(Time::from_secs(expected)), "admission cannot renew deadline");
+        assert_eq!(
+            captured.at,
+            Some(Time::from_secs(expected)),
+            "admission cannot renew deadline"
+        );
     }
 }
 
@@ -1076,8 +1302,14 @@ fn expired_admission_deadline_never_invokes_service_setup() {
         execution.as_mut().poll(&mut task),
         Poll::Ready(Err(status)) if status.code() == Code::DeadlineExceeded
     ));
-    assert!(!invoked.get(), "an expired request must not call a ready factory");
-    assert!(!owner.is_cancel_requested(), "only the invocation context is cancelled");
+    assert!(
+        !invoked.get(),
+        "an expired request must not call a ready factory"
+    );
+    assert!(
+        !owner.is_cancel_requested(),
+        "only the invocation context is cancelled"
+    );
     assert_eq!(call.cancel_reason().unwrap().kind, CancelKind::Timeout);
 }
 
@@ -1100,7 +1332,10 @@ fn captured_deadline_does_not_restart_between_messages_or_change_clock_domains()
     let mut first = Box::pin(poll_cancellable(
         &owner,
         &call,
-        async { polls.set(polls.get() + 1); 7_u8 },
+        async {
+            polls.set(polls.get() + 1);
+            7_u8
+        },
         Some(&captured),
     ));
     assert!(matches!(first.as_mut().poll(&mut task), Poll::Ready(Ok(7))));
@@ -1111,7 +1346,10 @@ fn captured_deadline_does_not_restart_between_messages_or_change_clock_domains()
     let mut next = Box::pin(poll_cancellable(
         &owner,
         &call,
-        async { polls.set(polls.get() + 1); 8_u8 },
+        async {
+            polls.set(polls.get() + 1);
+            8_u8
+        },
         Some(&captured),
     ));
     assert!(matches!(
@@ -1145,10 +1383,13 @@ fn application_poll_rechecks_same_turn_cancellation_for_every_source_result() {
                     }
                 });
                 let mut execution = Box::pin(poll_application(&owner, &call, source, None));
-                assert!(matches!(
-                    execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-                    Poll::Ready(Err(status)) if status.code() == code
-                ), "owner={cancel_owner}, cause={kind:?}, result={result_kind}");
+                assert!(
+                    matches!(
+                        execution.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                        Poll::Ready(Err(status)) if status.code() == code
+                    ),
+                    "owner={cancel_owner}, cause={kind:?}, result={result_kind}"
+                );
                 assert_eq!(polls.get(), 1);
                 assert_eq!(call.cancel_reason().unwrap().kind, kind);
             }
@@ -1169,7 +1410,11 @@ fn application_poll_rechecks_frozen_deadline_after_ready_and_pending() {
         let source = poll_fn(|_| {
             polls.set(polls.get() + 1);
             clock.advance_to(Time::from_secs(12));
-            if ready { Poll::Ready(7_u8) } else { Poll::Pending }
+            if ready {
+                Poll::Ready(7_u8)
+            } else {
+                Poll::Pending
+            }
         });
         let mut execution = Box::pin(poll_application(&owner, &call, source, Some(&deadline)));
         assert!(matches!(
@@ -1220,11 +1465,19 @@ fn completed_transport_poll_keeps_its_receipt_before_next_application_gate() {
     };
     let mut execution = Box::pin(poll_cancellable(&owner, &call, write, None));
     let mut task = Context::from_waker(Waker::noop());
-    assert!(matches!(execution.as_mut().poll(&mut task), Poll::Ready(Ok(7))));
+    assert!(matches!(
+        execution.as_mut().poll(&mut task),
+        Poll::Ready(Ok(7))
+    ));
     assert_eq!(polls.get(), 1);
     drop(execution);
 
-    let mut next = Box::pin(poll_application(&owner, &call, std::future::ready(()), None));
+    let mut next = Box::pin(poll_application(
+        &owner,
+        &call,
+        std::future::ready(()),
+        None,
+    ));
     assert!(matches!(
         next.as_mut().poll(&mut task),
         Poll::Ready(Err(status)) if status.code() == Code::Cancelled
@@ -1237,7 +1490,9 @@ fn cancellation_during_complete_frame_write_preserves_message_boundary() {
     impl ServerStreamSink for CancelAfterWrite {
         const REGION_NAME: &'static str = "test-grpc-completed-write";
 
-        fn initial_headers_pending(&self) -> bool { false }
+        fn initial_headers_pending(&self) -> bool {
+            false
+        }
 
         fn send_initial_headers(&mut self, _: HeaderMap) -> Result<(), HttpError> {
             panic!("no deferred headers in this fixture")
@@ -1250,7 +1505,10 @@ fn cancellation_during_complete_frame_write_preserves_message_boundary() {
         ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a {
             async move {
                 self.0.extend_from_slice(data);
-                cx.cancel_with(CancelKind::User, Some("cancel after a complete message write"));
+                cx.cancel_with(
+                    CancelKind::User,
+                    Some("cancel after a complete message write"),
+                );
                 Ok(())
             }
         }
@@ -1292,7 +1550,10 @@ fn cancellation_during_complete_frame_write_preserves_message_boundary() {
         Poll::Ready(Err(status)) if status.code() == Code::Cancelled
     ));
     drop(execution);
-    assert!(!partial, "the successful write committed the complete message");
+    assert!(
+        !partial,
+        "the successful write committed the complete message"
+    );
     assert!(transport_error.is_none());
     assert_eq!(sink.0, [0, 0, 0, 0, 1, b'x']);
 }
@@ -1307,7 +1568,10 @@ fn captured_budget_only_tightens_the_live_producer_budget() {
         live.deadline = existing;
         live.priority = 7;
         let narrowed = captured.budget(live);
-        assert_eq!(narrowed.deadline, earlier_deadline(existing, Some(Time::from_secs(15))));
+        assert_eq!(
+            narrowed.deadline,
+            earlier_deadline(existing, Some(Time::from_secs(15)))
+        );
         assert_eq!(narrowed.priority, 7);
         assert_eq!(narrowed.poll_quota, live.poll_quota);
         assert_eq!(narrowed.cost_quota, live.cost_quota);
@@ -1334,19 +1598,34 @@ fn terminal_budget_counts_base64_expansion_and_rejects_payload_rewrites() {
     assert!(metadata.insert_bin("x-bin", Bytes::from(vec![0; 6])));
     let response = Response::with_metadata(Bytes::new(), metadata);
     let headers = bounded_terminal_trailers(Ok(response), 24); // 5 + 8 + 12 = 25, not 23.
-    assert_eq!(headers.get(&HeaderName::from_static("grpc-status"))
-        .unwrap().to_str().unwrap(), "8");
-    let headers = bounded_terminal_trailers(
-        Ok(Response::new(Bytes::from_static(b"injected"))), 1024,
+    assert_eq!(
+        headers
+            .get(&HeaderName::from_static("grpc-status"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "8"
     );
-    assert_eq!(headers.get(&HeaderName::from_static("grpc-status"))
-        .unwrap().to_str().unwrap(), "13");
-    let headers = bounded_terminal_trailers(
-        Err(Status::invalid_argument("%".repeat(100))), 13,
+    let headers =
+        bounded_terminal_trailers(Ok(Response::new(Bytes::from_static(b"injected"))), 1024);
+    assert_eq!(
+        headers
+            .get(&HeaderName::from_static("grpc-status"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "13"
     );
+    let headers = bounded_terminal_trailers(Err(Status::invalid_argument("%".repeat(100))), 13);
     assert_eq!(headers.len(), 1);
-    assert_eq!(headers.get(&HeaderName::from_static("grpc-status"))
-        .unwrap().to_str().unwrap(), "8");
+    assert_eq!(
+        headers
+            .get(&HeaderName::from_static("grpc-status"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "8"
+    );
 }
 
 #[test]
@@ -1361,12 +1640,14 @@ fn registered_server_stream_accepts_pinned_non_unpin_sources() {
             Poll::Ready(None)
         }
     }
-    let (mut stream, _) = RegisteredServerStream::new(
-        Pinned(std::marker::PhantomPinned),
-    ).into_parts();
-    assert!(matches!(stream.as_mut().poll_next(
-        &mut Context::from_waker(Waker::noop()),
-    ), Poll::Ready(None)));
+    let (mut stream, _) =
+        RegisteredServerStream::new(Pinned(std::marker::PhantomPinned)).into_parts();
+    assert!(matches!(
+        stream
+            .as_mut()
+            .poll_next(&mut Context::from_waker(Waker::noop()),),
+        Poll::Ready(None)
+    ));
 }
 
 #[test]
@@ -1383,7 +1664,10 @@ fn owner_cancellation_wakes_pending_source_without_an_io_event() {
     let waker = Waker::from(Arc::clone(&count));
     let mut task = Context::from_waker(&waker);
     let mut future = Box::pin(poll_cancellable(
-        &owner, &call, std::future::pending::<()>(), None,
+        &owner,
+        &call,
+        std::future::pending::<()>(),
+        None,
     ));
     assert!(future.as_mut().poll(&mut task).is_pending());
     owner.cancel_with(CancelKind::User, Some("owner test cancellation"));
@@ -1439,7 +1723,10 @@ fn legacy_metadata_only_service_keeps_compiling_and_refuses_stream_execution() {
         Request::new(Bytes::new()),
         Metadata::new(),
     );
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(Err(status)) => assert_eq!(status.code(), Code::Unimplemented),
         other => panic!("expected legacy UNIMPLEMENTED result, got {other:?}"),
     }

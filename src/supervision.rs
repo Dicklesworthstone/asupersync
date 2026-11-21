@@ -1932,9 +1932,8 @@ mod managed {
         }
     }
 
-    type ManagedCleanupObserver = Arc<
-        dyn Fn(ManagedGeneration) -> Option<crate::record::task::TaskOutcome> + Send + Sync,
-    >;
+    type ManagedCleanupObserver =
+        Arc<dyn Fn(ManagedGeneration) -> Option<crate::record::task::TaskOutcome> + Send + Sync>;
 
     /// Binds a compiled child name to the additive managed factory contract.
     pub struct ManagedChildBinding<E> {
@@ -1972,10 +1971,7 @@ mod managed {
         // Composed runtime adapters can close inner regions inside their own
         // factory. Preserve those real cleanup receipts at the outer generation
         // barrier instead of treating failed cleanup as a restartable domain error.
-        pub(crate) fn with_cleanup_observer(
-            mut self,
-            observer: ManagedCleanupObserver,
-        ) -> Self {
+        pub(crate) fn with_cleanup_observer(mut self, observer: ManagedCleanupObserver) -> Self {
             self.cleanup_observer = Some(observer);
             self
         }
@@ -2192,7 +2188,9 @@ mod managed {
         }
 
         fn take(&mut self) -> ManagedSupervisor<E> {
-            self.supervisor.take().expect("unstarted supervisor is owned")
+            self.supervisor
+                .take()
+                .expect("unstarted supervisor is owned")
         }
 
         pub(crate) fn set_shared_restarts(
@@ -2330,8 +2328,7 @@ mod managed {
                 let child = children[index]
                     .take()
                     .expect("validated unique start order");
-                if registry.is_none()
-                    && !matches!(child.registration, NameRegistrationPolicy::None)
+                if registry.is_none() && !matches!(child.registration, NameRegistrationPolicy::None)
                 {
                     return Err(ManagedSupervisorBindError::UnsupportedRegistration(
                         child.name,
@@ -2381,13 +2378,10 @@ mod managed {
             return false;
         }
         let now = cx.now();
-        let reason = CancelReason::with_origin(
-            crate::types::CancelKind::FailFast,
-            cx.region_id(),
-            now,
-        )
-        .with_task(cx.task_id())
-        .with_message("dynamic supervisor shared restart allowance exhausted");
+        let reason =
+            CancelReason::with_origin(crate::types::CancelKind::FailFast, cx.region_id(), now)
+                .with_task(cx.task_id())
+                .with_message("dynamic supervisor shared restart allowance exhausted");
         let waiter = {
             let mut publication = publication.lock();
             publication.terminal = Some((
@@ -2956,7 +2950,8 @@ mod managed {
                             }
                             return;
                         }
-                        if refuse_shared_start(shared_restarts.as_deref(), &child_publication, &cx) {
+                        if refuse_shared_start(shared_restarts.as_deref(), &child_publication, &cx)
+                        {
                             return;
                         }
                     }
@@ -3635,18 +3630,22 @@ mod managed {
                 };
                 if let Some(domain) = &self.supervisor.shared_restarts {
                     match domain.admit() {
-                        RestartVerdict::Allowed { delay: shared_delay, .. } => {
+                        RestartVerdict::Allowed {
+                            delay: shared_delay,
+                            ..
+                        } => {
                             delay = delay.max(shared_delay);
                         }
                         RestartVerdict::Denied { refusal } => {
                             let identity = self.latest[failed]
-                                .as_ref().expect("joined terminal").generation;
-                            self.report.outcome = Outcome::Err(
-                                ManagedSupervisorError::SharedRestartLimit {
+                                .as_ref()
+                                .expect("joined terminal")
+                                .generation;
+                            self.report.outcome =
+                                Outcome::Err(ManagedSupervisorError::SharedRestartLimit {
                                     child: self.supervisor.children[failed].name.clone(),
                                     refusal,
-                                },
-                            );
+                                });
                             let reason = CancelReason::with_origin(
                                 crate::types::CancelKind::FailFast,
                                 identity.region,
@@ -3657,9 +3656,9 @@ mod managed {
                             match domain.cancel_root(reason) {
                                 Ok(true) => self.report.escalations = 1,
                                 Ok(false) => {}
-                                Err(error) => self.record_error(
-                                    ManagedSupervisorError::Escalation(error),
-                                ),
+                                Err(error) => {
+                                    self.record_error(ManagedSupervisorError::Escalation(error))
+                                }
                             }
                             self.trace("shared_restart_limit", failed, identity);
                             return;
@@ -4205,13 +4204,21 @@ mod managed {
             let report = run_case(move |cx| async move {
                 let managed = topology(&["child"], RestartPolicy::OneForOne)
                     .bind_managed(
-                        vec![ManagedChildBinding::new("child", ManagedRestartMode::Permanent, probe)],
+                        vec![ManagedChildBinding::new(
+                            "child",
+                            ManagedRestartMode::Permanent,
+                            probe,
+                        )],
                         config(RestartPolicy::OneForOne, 1),
-                    ).unwrap();
+                    )
+                    .unwrap();
                 managed.run(&cx).await
             });
             assert!(report.outcome.is_ok());
-            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 1));
+            assert_eq!(
+                (report.started, report.joined, report.restart_batches),
+                (2, 2, 1)
+            );
             assert_eq!(started.load(Ordering::SeqCst), 2);
             assert_eq!(retired.load(Ordering::SeqCst), 1);
         }
@@ -4222,20 +4229,29 @@ mod managed {
             let first = Arc::new(AtomicUsize::new(0));
             let second = Arc::new(AtomicUsize::new(0));
             let bindings = vec![
-                ManagedChildBinding::new("first", ManagedRestartMode::Temporary, RetirementProbe {
-                    started: Arc::clone(&started),
-                    retired: Arc::clone(&first),
-                    panic_on_retirement: true,
-                }),
-                ManagedChildBinding::new("second", ManagedRestartMode::Temporary, RetirementProbe {
-                    started: Arc::clone(&started),
-                    retired: Arc::clone(&second),
-                    panic_on_retirement: true,
-                }),
+                ManagedChildBinding::new(
+                    "first",
+                    ManagedRestartMode::Temporary,
+                    RetirementProbe {
+                        started: Arc::clone(&started),
+                        retired: Arc::clone(&first),
+                        panic_on_retirement: true,
+                    },
+                ),
+                ManagedChildBinding::new(
+                    "second",
+                    ManagedRestartMode::Temporary,
+                    RetirementProbe {
+                        started: Arc::clone(&started),
+                        retired: Arc::clone(&second),
+                        panic_on_retirement: true,
+                    },
+                ),
             ];
             let report = run_case(move |cx| async move {
                 let managed = topology(&["first", "second"], RestartPolicy::OneForOne)
-                    .bind_managed(bindings, config(RestartPolicy::OneForOne, 1)).unwrap();
+                    .bind_managed(bindings, config(RestartPolicy::OneForOne, 1))
+                    .unwrap();
                 managed.run(&cx).await
             });
             assert!(report.outcome.is_panicked());
@@ -5607,72 +5623,75 @@ mod managed {
                         .open_child_region(ChildRegionSpec::inherit())
                         .await
                         .unwrap();
-                    let mut task = boundary.cx().spawn(|cx| async move {
-                        let registry = Arc::new(Mutex::new(NameRegistry::new()));
-                        let mut held = registry
-                            .lock()
-                            .register("shared-service", cx.task_id(), cx.region_id(), cx.now())
-                            .unwrap();
-                        let domain = Arc::new(SharedRestartDomain::new(
-                            SharedRestartConfig::new(0, Duration::from_secs(60)),
-                        ));
-                        let starts = Arc::new(AtomicUsize::new(0));
-                        let factory_starts = Arc::clone(&starts);
-                        let binding = ManagedChildBinding::new(
-                            "child",
-                            ManagedRestartMode::Temporary,
-                            move |_: Cx, _: ManagedGeneration| {
-                                factory_starts.fetch_add(1, Ordering::SeqCst);
-                                async { Outcome::<(), ()>::Ok(()) }
-                            },
-                        );
-                        let mut compiled = topology(&["child"], RestartPolicy::OneForOne);
-                        compiled.children[0].registration = NameRegistrationPolicy::Register {
-                            name: "shared-service".into(),
-                            collision: NameCollisionPolicy::Wait,
-                        };
-                        let mut managed = compiled
-                            .bind_managed_with_registry(
-                                vec![binding],
-                                config(RestartPolicy::OneForOne, 1),
-                                Arc::clone(&registry),
-                            )
-                            .unwrap();
-                        managed.set_shared_restarts(Arc::clone(&domain));
-                        let mut supervisor = managed.spawn(&cx).unwrap();
-                        let deadline = cx.now().as_nanos().saturating_add(2_000_000_000);
-                        while registry.lock().waiter_count() != 1 {
-                            assert!(
-                                cx.now().as_nanos() < deadline,
-                                "generation reaches the real name wait"
+                    let mut task = boundary
+                        .cx()
+                        .spawn(|cx| async move {
+                            let registry = Arc::new(Mutex::new(NameRegistry::new()));
+                            let mut held = registry
+                                .lock()
+                                .register("shared-service", cx.task_id(), cx.region_id(), cx.now())
+                                .unwrap();
+                            let domain = Arc::new(SharedRestartDomain::new(
+                                SharedRestartConfig::new(0, Duration::from_secs(60)),
+                            ));
+                            let starts = Arc::new(AtomicUsize::new(0));
+                            let factory_starts = Arc::clone(&starts);
+                            let binding = ManagedChildBinding::new(
+                                "child",
+                                ManagedRestartMode::Temporary,
+                                move |_: Cx, _: ManagedGeneration| {
+                                    factory_starts.fetch_add(1, Ordering::SeqCst);
+                                    async { Outcome::<(), ()>::Ok(()) }
+                                },
                             );
-                            crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
-                        }
-                        assert_eq!(starts.load(Ordering::SeqCst), 0);
-                        assert!(matches!(domain.admit(), RestartVerdict::Denied { .. }));
-                        registry
-                            .lock()
-                            .unregister_owned_and_grant(&held, cx.now())
-                            .unwrap();
-                        held.release().unwrap();
-                        let report = supervisor.join().await.unwrap();
-                        assert!(
-                            matches!(
-                                report.outcome,
-                                Outcome::Err(ManagedSupervisorError::SharedRestartLimit { .. })
-                            ),
-                            "{report:?}"
-                        );
-                        assert_eq!(starts.load(Ordering::SeqCst), 0);
-                        assert_eq!((report.started, report.joined), (0, 1));
-                        assert!(report.region_outcome.is_some());
-                        assert_eq!(report.children.len(), 1);
-                        assert!(report.children[0].outcome.is_cancelled());
-                        assert!(report.children[0].region_outcome.is_some());
-                        assert!(registry.lock().is_empty());
-                        assert_eq!(registry.lock().waiter_count(), 0);
-                        assert!(registry.lock().take_granted().is_empty());
-                    }).unwrap();
+                            let mut compiled = topology(&["child"], RestartPolicy::OneForOne);
+                            compiled.children[0].registration = NameRegistrationPolicy::Register {
+                                name: "shared-service".into(),
+                                collision: NameCollisionPolicy::Wait,
+                            };
+                            let mut managed = compiled
+                                .bind_managed_with_registry(
+                                    vec![binding],
+                                    config(RestartPolicy::OneForOne, 1),
+                                    Arc::clone(&registry),
+                                )
+                                .unwrap();
+                            managed.set_shared_restarts(Arc::clone(&domain));
+                            let mut supervisor = managed.spawn(&cx).unwrap();
+                            let deadline = cx.now().as_nanos().saturating_add(2_000_000_000);
+                            while registry.lock().waiter_count() != 1 {
+                                assert!(
+                                    cx.now().as_nanos() < deadline,
+                                    "generation reaches the real name wait"
+                                );
+                                crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                            }
+                            assert_eq!(starts.load(Ordering::SeqCst), 0);
+                            assert!(matches!(domain.admit(), RestartVerdict::Denied { .. }));
+                            registry
+                                .lock()
+                                .unregister_owned_and_grant(&held, cx.now())
+                                .unwrap();
+                            held.release().unwrap();
+                            let report = supervisor.join().await.unwrap();
+                            assert!(
+                                matches!(
+                                    report.outcome,
+                                    Outcome::Err(ManagedSupervisorError::SharedRestartLimit { .. })
+                                ),
+                                "{report:?}"
+                            );
+                            assert_eq!(starts.load(Ordering::SeqCst), 0);
+                            assert_eq!((report.started, report.joined), (0, 1));
+                            assert!(report.region_outcome.is_some());
+                            assert_eq!(report.children.len(), 1);
+                            assert!(report.children[0].outcome.is_cancelled());
+                            assert!(report.children[0].region_outcome.is_some());
+                            assert!(registry.lock().is_empty());
+                            assert_eq!(registry.lock().waiter_count(), 0);
+                            assert!(registry.lock().take_granted().is_empty());
+                        })
+                        .unwrap();
                     crate::time::timeout(cx.now(), Duration::from_secs(10), task.join(&cx))
                         .await
                         .unwrap()
@@ -5858,12 +5877,11 @@ mod managed {
                 .expect("sibling publishes before the trigger is released");
             let finalizer_completed = Arc::clone(&finalized);
             assert!(
-                runtime.handle().register_sync_finalizer_for_testing(
-                    original.region,
-                    move || {
+                runtime
+                    .handle()
+                    .register_sync_finalizer_for_testing(original.region, move || {
                         finalizer_completed.fetch_add(1, Ordering::Release);
-                    },
-                ),
+                    },),
                 "the held original generation is still open before the drain"
             );
             trigger_tx.send_blocking(()).unwrap();
@@ -5890,9 +5908,12 @@ mod managed {
                     .iter()
                     .all(|child| child.region_outcome.is_some())
             );
-            assert!(report.children.iter().all(|child| {
-                child.cleanup_outcome.as_ref().is_none_or(Outcome::is_ok)
-            }));
+            assert!(
+                report
+                    .children
+                    .iter()
+                    .all(|child| { child.cleanup_outcome.as_ref().is_none_or(Outcome::is_ok) })
+            );
             let sibling = report
                 .children
                 .iter()
@@ -5903,7 +5924,10 @@ mod managed {
                 .iter()
                 .filter_map(|(index, generation)| (*index == 1).then_some(*generation))
                 .collect();
-            assert_eq!(sibling_generations.len(), if should_restart { 2 } else { 1 });
+            assert_eq!(
+                sibling_generations.len(),
+                if should_restart { 2 } else { 1 }
+            );
             assert_eq!(sibling_generations[0], original);
             if should_restart {
                 assert_eq!(sibling.generation.number, 2);

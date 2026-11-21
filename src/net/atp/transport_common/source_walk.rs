@@ -76,22 +76,27 @@ impl DirectoryScan {
             };
             let entry = entry.map_err(|e| source_error(&self.dir, e))?;
             let path = entry.path();
-            let link_kind =
-                classify_path_link_sync(&path).map_err(|e| source_error(&path, e))?;
+            let link_kind = classify_path_link_sync(&path).map_err(|e| source_error(&path, e))?;
             let name = entry
                 .file_name()
                 .to_str()
                 .ok_or_else(|| source_error(&path, "source entry name is not valid Unicode"))?
                 .to_string();
             validate_portable_path_component(&name).map_err(|_| {
-                source_error(&path, format!("source entry name is not portable: {name:?}"))
+                source_error(
+                    &path,
+                    format!("source entry name is not portable: {name:?}"),
+                )
             })?;
             let file_type = entry.file_type().map_err(|e| source_error(&path, e))?;
             let is_dir = match link_kind {
                 PathLinkKind::NotLink => file_type.is_dir(),
                 PathLinkKind::Symlink(_) if self.preserve_symlinks => false,
                 PathLinkKind::Symlink(_) => {
-                    return Err(source_error(&path, "source symlink rejected by metadata policy"));
+                    return Err(source_error(
+                        &path,
+                        "source symlink rejected by metadata policy",
+                    ));
                 }
                 PathLinkKind::UnsupportedReparse => {
                     return Err(source_error(&path, "unsupported Windows reparse point"));

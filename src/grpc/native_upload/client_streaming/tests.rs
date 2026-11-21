@@ -72,9 +72,10 @@ struct Source<'a> {
 impl Streaming for Source<'_> {
     type Message = Bytes;
 
-    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>)
-        -> Poll<Option<Result<Bytes, Status>>>
-    {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         let this = self.as_ref().get_ref();
         assert!(!this.label.is_empty());
         assert_eq!(Cx::current().unwrap().task_id(), this.owner);
@@ -89,7 +90,11 @@ impl Streaming for Source<'_> {
             }
             return Poll::Pending;
         }
-        assert_eq!(this.stats.eof.load(Ordering::SeqCst), 0, "producer repolled after EOF");
+        assert_eq!(
+            this.stats.eof.load(Ordering::SeqCst),
+            0,
+            "producer repolled after EOF"
+        );
         if let Some(item) = state.items.pop_front() {
             this.stats.produced.fetch_add(1, Ordering::SeqCst);
             Poll::Ready(Some(item))
@@ -110,15 +115,25 @@ impl Drop for Source<'_> {
     }
 }
 
-fn source<'a>(label: &'a str, owner: &Cx, parked: mpsc::Sender<()>,
-    items: VecDeque<Result<Bytes, Status>>) -> (Source<'a>, Arc<Gate>, Arc<SourceStats>)
-{
+fn source<'a>(
+    label: &'a str,
+    owner: &Cx,
+    parked: mpsc::Sender<()>,
+    items: VecDeque<Result<Bytes, Status>>,
+) -> (Source<'a>, Arc<Gate>, Arc<SourceStats>) {
     let gate = Arc::new(Gate::default());
     let stats = Arc::new(SourceStats::default());
     let source = Source {
-        label, owner: owner.task_id(), gate: Arc::clone(&gate),
-        state: Mutex::new(SourceState { items, parked: Some(parked), address: None }),
-        stats: Arc::clone(&stats), _pin: PhantomPinned,
+        label,
+        owner: owner.task_id(),
+        gate: Arc::clone(&gate),
+        state: Mutex::new(SourceState {
+            items,
+            parked: Some(parked),
+            address: None,
+        }),
+        stats: Arc::clone(&stats),
+        _pin: PhantomPinned,
     };
     (source, gate, stats)
 }
@@ -134,11 +149,21 @@ struct Reply {
 
 impl Reply {
     fn normal(messages: usize, status: Option<&'static str>) -> Self {
-        Self { messages, status, early: false, hold_trailers: false, trailers_only: false }
+        Self {
+            messages,
+            status,
+            early: false,
+            hold_trailers: false,
+            trailers_only: false,
+        }
     }
 
     fn held() -> Self {
-        Self { early: true, hold_trailers: true, ..Self::normal(1, Some("0")) }
+        Self {
+            early: true,
+            hold_trailers: true,
+            ..Self::normal(1, Some("0"))
+        }
     }
 }
 
@@ -156,11 +181,17 @@ fn flush(socket: &mut std::net::TcpStream, connection: &mut Connection) {
     }
 }
 
-fn reply(socket: &mut std::net::TcpStream, connection: &mut Connection,
-    plan: Reply, finish: &mpsc::Receiver<bool>)
-{
-    let mut headers = vec![Header::new(":status", "200"),
-        Header::new("content-type", "application/grpc"), Header::new("x-place", "initial")];
+fn reply(
+    socket: &mut std::net::TcpStream,
+    connection: &mut Connection,
+    plan: Reply,
+    finish: &mpsc::Receiver<bool>,
+) {
+    let mut headers = vec![
+        Header::new(":status", "200"),
+        Header::new("content-type", "application/grpc"),
+        Header::new("x-place", "initial"),
+    ];
     let mut trailers = vec![Header::new("x-place", "trailing")];
     if let Some(status) = plan.status {
         trailers.push(Header::new("grpc-status", status));
@@ -178,7 +209,9 @@ fn reply(socket: &mut std::net::TcpStream, connection: &mut Connection,
     let mut codec = FramedCodec::new(IdentityCodec);
     for _ in 0..plan.messages {
         let mut bytes = BytesMut::new();
-        codec.encode_message(&Bytes::from_static(b"receipt"), &mut bytes).unwrap();
+        codec
+            .encode_message(&Bytes::from_static(b"receipt"), &mut bytes)
+            .unwrap();
         connection.send_data(1, bytes.freeze(), false).unwrap();
     }
     flush(socket, connection);
@@ -202,7 +235,10 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
             match listener.accept() {
                 Ok((socket, _)) => break socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "client-streaming accept watchdog");
+                    assert!(
+                        Instant::now() < deadline,
+                        "client-streaming accept watchdog"
+                    );
                     std::thread::park_timeout(Duration::from_millis(1));
                 }
                 Err(error) => panic!("client-streaming accept: {error}"),
@@ -219,7 +255,8 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
         let mut frames = FrameCodec::new();
         let mut input = BytesMut::new();
         let mut body = BytesMut::new();
-        let mut codec = FramedCodec::with_message_size_limits(IdentityCodec, MESSAGE_BYTES, MESSAGE_BYTES);
+        let mut codec =
+            FramedCodec::with_message_size_limits(IdentityCodec, MESSAGE_BYTES, MESSAGE_BYTES);
         let mut count = 0;
         let mut half_closed = false;
         let mut seen_headers = false;
@@ -227,8 +264,14 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
         loop {
             let n = match socket.read(&mut buffer) {
                 Ok(n) => n,
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe) => 0,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    0
+                }
                 Err(error) => panic!("client-streaming peer read: {error}"),
             };
             if n == 0 {
@@ -237,7 +280,11 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
             input.extend_from_slice(&buffer[..n]);
             while let Some(frame) = frames.decode(&mut input).unwrap() {
                 match connection.process_frame(frame).unwrap() {
-                    Some(ReceivedFrame::Headers { stream_id, end_stream, .. }) => {
+                    Some(ReceivedFrame::Headers {
+                        stream_id,
+                        end_stream,
+                        ..
+                    }) => {
                         assert_eq!(stream_id, 1);
                         assert!(!seen_headers && !end_stream);
                         seen_headers = true;
@@ -246,7 +293,11 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
                             reply(&mut socket, &mut connection, plan, &finishing);
                         }
                     }
-                    Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                    Some(ReceivedFrame::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    }) => {
                         assert_eq!(stream_id, 1);
                         assert!(seen_headers && !half_closed && !plan.early);
                         body.extend_from_slice(&data);
@@ -267,7 +318,11 @@ fn peer(plan: Reply, parked: mpsc::Receiver<()>) -> Peer {
             }
         }
     });
-    Peer { address, finish, worker }
+    Peer {
+        address,
+        finish,
+        worker,
+    }
 }
 
 fn bounded(test: impl FnOnce() + Send + 'static) {
@@ -276,7 +331,8 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(30))
+    let result = receive
+        .recv_timeout(Duration::from_secs(30))
         .expect("native client-streaming scenario must finish");
     worker.join().unwrap();
     if let Err(payload) = result {
@@ -285,8 +341,11 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
 }
 
 fn runtime(workers: usize) -> crate::runtime::Runtime {
-    let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-        else { RuntimeBuilder::new().worker_threads(workers) };
+    let builder = if workers == 1 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::new().worker_threads(workers)
+    };
     builder.build().unwrap()
 }
 
@@ -307,12 +366,20 @@ where
     poll_fn(|task| {
         {
             let mut waiting = pin!(call.response());
-            assert!(waiting.as_mut().poll(task).is_pending(), "message alone is not success");
+            assert!(
+                waiting.as_mut().poll(task).is_pending(),
+                "message alone is not success"
+            );
         }
         // The actual borrowing wait was dropped. Only owner-held state can
         // preserve this already-decoded message for the resumed call.
-        if call.first.is_some() { Poll::Ready(()) } else { Poll::Pending }
-    }).await;
+        if call.first.is_some() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
     assert!(call.status().is_none());
 }
 
@@ -334,15 +401,30 @@ fn native_uploads_empty_and_multiwindow_sources_before_collecting_one_response()
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let label = String::from("borrowed non-Unpin source");
-                    let items = (0..count).map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES]))).collect();
+                    let items = (0..count)
+                        .map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES])))
+                        .collect();
                     let (source, gate, stats) = source(&label, &cx, parked, items);
                     gate.release();
                     let channel = Channel::builder(format!("http://{}", peer.address))
-                        .timeout(LIMIT).max_send_message_size(MESSAGE_BYTES).connect().await.unwrap();
-                    let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                        &cx, "/test.Upload/Collect", Request::new(source),
-                    ).await.unwrap();
-                    assert_eq!(stats.produced.load(Ordering::SeqCst), 0, "setup must not poll source");
+                        .timeout(LIMIT)
+                        .max_send_message_size(MESSAGE_BYTES)
+                        .connect()
+                        .await
+                        .unwrap();
+                    let mut call = GrpcClient::new(channel)
+                        .into_native_client_streaming(
+                            &cx,
+                            "/test.Upload/Collect",
+                            Request::new(source),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        stats.produced.load(Ordering::SeqCst),
+                        0,
+                        "setup must not poll source"
+                    );
                     let response = call.response().await.unwrap();
                     assert_eq!(response.get_ref().as_ref(), b"receipt");
                     assert_eq!(ascii(response.metadata(), "x-place"), "initial");
@@ -351,7 +433,10 @@ fn native_uploads_empty_and_multiwindow_sources_before_collecting_one_response()
                     assert_eq!(stats.produced.load(Ordering::SeqCst), usize::from(count));
                     assert_eq!(stats.eof.load(Ordering::SeqCst), 1);
                     assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);
-                    assert_eq!(call.response().await.unwrap_err().code(), Code::FailedPrecondition);
+                    assert_eq!(
+                        call.response().await.unwrap_err().code(),
+                        Code::FailedPrecondition
+                    );
                     call.cancel();
                     assert_eq!(call.status().unwrap().code(), Code::Ok);
                 });
@@ -373,16 +458,27 @@ fn dropped_response_wait_retains_first_message_and_waits_for_trailers() {
                 let cx = Cx::current().unwrap();
                 let (source, _gate, stats) = source("early response", &cx, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &cx, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(&cx, "/test.Upload/Collect", Request::new(source))
+                    .await
+                    .unwrap();
                 retain_first(&mut call).await;
                 assert_eq!(stats.dropped.load(Ordering::SeqCst), 0);
                 peer.finish.send(true).unwrap();
-                assert_eq!(call.response().await.unwrap().into_inner().as_ref(), b"receipt");
+                assert_eq!(
+                    call.response().await.unwrap().into_inner().as_ref(),
+                    b"receipt"
+                );
                 assert_eq!(stats.produced.load(Ordering::SeqCst), 0);
-                assert_eq!(stats.eof.load(Ordering::SeqCst), 0, "early success does not imply source EOF");
+                assert_eq!(
+                    stats.eof.load(Ordering::SeqCst),
+                    0,
+                    "early success does not imply source EOF"
+                );
                 assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);
                 assert_eq!(ascii(call.trailers().unwrap(), "x-place"), "trailing");
             });
@@ -397,16 +493,26 @@ fn late_peer_error_discards_the_buffered_message_and_preserves_status_and_traile
     bounded(|| {
         for workers in [1, 2] {
             let (parked, witness) = mpsc::channel();
-            let peer = peer(Reply { status: Some("7"), ..Reply::held() }, witness);
+            let peer = peer(
+                Reply {
+                    status: Some("7"),
+                    ..Reply::held()
+                },
+                witness,
+            );
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let (source, _gate, stats) = source("late error", &cx, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &cx, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(&cx, "/test.Upload/Collect", Request::new(source))
+                    .await
+                    .unwrap();
                 retain_first(&mut call).await;
                 peer.finish.send(true).unwrap();
                 let error = call.response().await.unwrap_err();
@@ -429,21 +535,39 @@ fn successful_status_requires_exactly_one_message() {
         for workers in [1, 2] {
             for messages in [0, 2] {
                 let (parked, witness) = mpsc::channel();
-                let peer = peer(Reply { hold_trailers: messages > 1,
-                    ..Reply::normal(messages, Some("0")) }, witness);
+                let peer = peer(
+                    Reply {
+                        hold_trailers: messages > 1,
+                        ..Reply::normal(messages, Some("0"))
+                    },
+                    witness,
+                );
                 let runtime = runtime(workers);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let (source, gate, stats) = source("bad cardinality", &cx, parked, VecDeque::new());
+                    let (source, gate, stats) =
+                        source("bad cardinality", &cx, parked, VecDeque::new());
                     gate.release();
                     let channel = Channel::builder(format!("http://{}", peer.address))
-                        .timeout(LIMIT).connect().await.unwrap();
-                    let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                        &cx, "/test.Upload/Collect", Request::new(source),
-                    ).await.unwrap();
+                        .timeout(LIMIT)
+                        .connect()
+                        .await
+                        .unwrap();
+                    let mut call = GrpcClient::new(channel)
+                        .into_native_client_streaming(
+                            &cx,
+                            "/test.Upload/Collect",
+                            Request::new(source),
+                        )
+                        .await
+                        .unwrap();
                     let error = call.response().await.unwrap_err();
                     assert_eq!(error.code(), Code::Internal);
-                    assert!(error.message().contains(if messages == 0 { "no response" } else { "more than one" }));
+                    assert!(error.message().contains(if messages == 0 {
+                        "no response"
+                    } else {
+                        "more than one"
+                    }));
                     assert_eq!(call.status().unwrap().code(), Code::Internal);
                     assert!(call.first.is_none());
                     assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);
@@ -463,17 +587,27 @@ fn trailers_only_error_is_not_replaced_by_missing_message_error() {
     bounded(|| {
         for workers in [1, 2] {
             let (parked, witness) = mpsc::channel();
-            let peer = peer(Reply { early: true, trailers_only: true,
-                ..Reply::normal(0, Some("7")) }, witness);
+            let peer = peer(
+                Reply {
+                    early: true,
+                    trailers_only: true,
+                    ..Reply::normal(0, Some("7"))
+                },
+                witness,
+            );
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let (source, _gate, stats) = source("early refusal", &cx, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &cx, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(&cx, "/test.Upload/Collect", Request::new(source))
+                    .await
+                    .unwrap();
                 let error = call.response().await.unwrap_err();
                 assert_eq!(error.code(), Code::PermissionDenied);
                 assert_eq!(error.message(), "upload refused");
@@ -495,13 +629,21 @@ fn producer_error_after_a_response_does_not_become_success() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let (source, gate, stats) = source("producer failure", &cx, parked,
-                    VecDeque::from([Err(Status::resource_exhausted("upload quota"))]));
+                let (source, gate, stats) = source(
+                    "producer failure",
+                    &cx,
+                    parked,
+                    VecDeque::from([Err(Status::resource_exhausted("upload quota"))]),
+                );
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &cx, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(&cx, "/test.Upload/Collect", Request::new(source))
+                    .await
+                    .unwrap();
                 retain_first(&mut call).await;
                 gate.release();
                 let error = call.response().await.unwrap_err();
@@ -528,19 +670,31 @@ fn explicit_cancel_and_drop_retire_a_parked_source_and_buffered_response() {
                 let runtime = runtime(workers);
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
-                    let (source, _gate, stats) = source("retired caller", &cx, parked, VecDeque::new());
+                    let (source, _gate, stats) =
+                        source("retired caller", &cx, parked, VecDeque::new());
                     let channel = Channel::builder(format!("http://{}", peer.address))
-                        .timeout(LIMIT).connect().await.unwrap();
-                    let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                        &cx, "/test.Upload/Collect", Request::new(source),
-                    ).await.unwrap();
+                        .timeout(LIMIT)
+                        .connect()
+                        .await
+                        .unwrap();
+                    let mut call = GrpcClient::new(channel)
+                        .into_native_client_streaming(
+                            &cx,
+                            "/test.Upload/Collect",
+                            Request::new(source),
+                        )
+                        .await
+                        .unwrap();
                     retain_first(&mut call).await;
                     if cancel {
                         call.cancel();
                         call.cancel();
                         assert!(call.first.is_none());
                         assert_eq!(call.response().await.unwrap_err().code(), Code::Cancelled);
-                        assert_eq!(call.response().await.unwrap_err().code(), Code::FailedPrecondition);
+                        assert_eq!(
+                            call.response().await.unwrap_err().code(),
+                            Code::FailedPrecondition
+                        );
                     }
                     drop(call);
                     assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);
@@ -563,14 +717,26 @@ fn owner_cancel_after_first_message_discards_it_and_retires_the_call() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let owner = region.cx();
-                let (source, _gate, stats) = source("cancelled owner", owner, parked, VecDeque::new());
+                let (source, _gate, stats) =
+                    source("cancelled owner", owner, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    owner, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(
+                        owner,
+                        "/test.Upload/Collect",
+                        Request::new(source),
+                    )
+                    .await
+                    .unwrap();
                 retain_first(&mut call).await;
                 owner.cancel_with(CancelKind::User, Some("stop upload"));
                 assert_eq!(call.response().await.unwrap_err().code(), Code::Cancelled);
@@ -597,12 +763,19 @@ fn deadline_after_first_message_is_not_success_and_does_not_wait_for_source() {
                 let cx = Cx::current().unwrap();
                 let (source, _gate, stats) = source("deadline", &cx, parked, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(Duration::from_secs(2)).connect().await.unwrap();
-                let mut call = GrpcClient::new(channel).into_native_client_streaming(
-                    &cx, "/test.Upload/Collect", Request::new(source),
-                ).await.unwrap();
+                    .timeout(Duration::from_secs(2))
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut call = GrpcClient::new(channel)
+                    .into_native_client_streaming(&cx, "/test.Upload/Collect", Request::new(source))
+                    .await
+                    .unwrap();
                 retain_first(&mut call).await;
-                assert_eq!(call.response().await.unwrap_err().code(), Code::DeadlineExceeded);
+                assert_eq!(
+                    call.response().await.unwrap_err().code(),
+                    Code::DeadlineExceeded
+                );
                 assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);
                 assert!(call.first.is_none());
                 peer.finish.send(false).unwrap();
@@ -619,14 +792,18 @@ fn setup_refusal_never_polls_source_and_retires_captures_under_the_owner() {
         let runtime = runtime(1);
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
-            let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+            let region = cx
+                .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             let owner = region.cx();
             let (parked, _witness) = mpsc::channel();
             let (source, _gate, stats) = source("setup refused", owner, parked, VecDeque::new());
             let channel = Channel::connect("http://loopback:50051").await.unwrap();
-            let error = GrpcClient::new(channel).into_native_client_streaming(
-                owner, "/test.Upload/Collect", Request::new(source),
-            ).await.unwrap_err();
+            let error = GrpcClient::new(channel)
+                .into_native_client_streaming(owner, "/test.Upload/Collect", Request::new(source))
+                .await
+                .unwrap_err();
             assert_eq!(error.code(), Code::FailedPrecondition);
             assert_eq!(stats.produced.load(Ordering::SeqCst), 0);
             assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);

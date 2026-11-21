@@ -86,7 +86,9 @@ impl AsyncWrite for MemoryIo {
         if self.buffer_writes {
             self.buffered.extend_from_slice(&buf[..len]);
         } else {
-            self.outgoing.borrow_mut().extend(buf[..len].iter().copied());
+            self.outgoing
+                .borrow_mut()
+                .extend(buf[..len].iter().copied());
         }
         Poll::Ready(Ok(len))
     }
@@ -395,7 +397,11 @@ fn resumed_tls13_connections_get_fresh_bindings_and_reject_early_export() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut bytes = [0; 1];
     let mut buf = ReadBuf::new(&mut bytes);
-    assert!(Pin::new(&mut first).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut first)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     assert!(buf.filled().is_empty());
 
     let (mut resumed, mut resumed_peer) = streams(&cc, &sc);
@@ -415,7 +421,10 @@ fn resumed_tls13_connections_get_fresh_bindings_and_reject_early_export() {
     }
     let binding = resumed.tls_exporter_channel_binding().unwrap();
     assert_ne!(binding, first_binding);
-    assert_eq!(binding, resumed_peer.tls_exporter_channel_binding().unwrap());
+    assert_eq!(
+        binding,
+        resumed_peer.tls_exporter_channel_binding().unwrap()
+    );
     assert_eq!(binding, reference_binding(&resumed));
     assert_eq!(binding, reference_binding(&resumed_peer));
     send_and_read(&mut resumed, &mut resumed_peer);
@@ -546,7 +555,11 @@ fn failed_final_flush_cannot_be_retried_into_a_successful_handshake() {
             let (cc, sc) = configs(&[version], None, true);
             let (mut client, mut server) = streams(&cc, &sc);
             hold_final_flush(&mut client, &mut server, client_side);
-            let stream = if client_side { &mut client } else { &mut server };
+            let stream = if client_side {
+                &mut client
+            } else {
+                &mut server
+            };
             stream.io.block_flush = false;
             stream.io.flush_error = Some(io::ErrorKind::BrokenPipe);
             let mut cx = Context::from_waker(Waker::noop());
@@ -691,7 +704,11 @@ fn both_shutdown_apis_flush_buffered_records_before_closing_transport() {
                 }
                 let mut bytes = [0; 64];
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
                 assert!(buf.filled().is_empty(), "the transport has not flushed");
                 // A pending local shutdown must still permit inbound traffic.
                 send_and_read(peer, stream);
@@ -929,7 +946,11 @@ fn public_connect_accept_export_according_to_the_negotiated_version() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         // The client offers both versions. Restrict only the server so the
         // assertion tests the negotiated version, not the configured maximum.
-        let (mut cc, _) = configs(&[&rustls::version::TLS13, &rustls::version::TLS12], None, true);
+        let (mut cc, _) = configs(
+            &[&rustls::version::TLS13, &rustls::version::TLS12],
+            None,
+            true,
+        );
         let (_, mut sc) = configs(&[version], None, true);
         Arc::get_mut(&mut cc).unwrap().alpn_protocols = vec![b"xmpp-client".to_vec()];
         Arc::get_mut(&mut sc).unwrap().alpn_protocols = vec![b"xmpp-client".to_vec()];
@@ -1037,7 +1058,11 @@ fn public_acceptor_rejects_actual_early_data_but_exports_after_resumption() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut bytes = [0; 64];
     let mut buf = ReadBuf::new(&mut bytes);
-    assert!(Pin::new(&mut first).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut first)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     assert!(buf.filled().is_empty());
 
     let (client_io, server_io) = memory_pair();
@@ -1075,11 +1100,18 @@ fn public_acceptor_rejects_actual_early_data_but_exports_after_resumption() {
     assert_eq!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
     let binding = resumed.tls_exporter_channel_binding().unwrap();
     assert_ne!(binding, first_binding);
-    assert_eq!(binding, resumed_peer.tls_exporter_channel_binding().unwrap());
+    assert_eq!(
+        binding,
+        resumed_peer.tls_exporter_channel_binding().unwrap()
+    );
     assert_eq!(binding, reference_binding(&resumed));
     assert_eq!(binding, reference_binding(&resumed_peer));
     let mut buf = ReadBuf::new(&mut bytes);
-    assert!(Pin::new(&mut resumed_peer).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut resumed_peer)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     assert!(
         buf.filled().is_empty(),
         "rejected early bytes reached the application"
@@ -1138,10 +1170,7 @@ fn corrupt_or_truncated_records_permanently_revoke_exporter_access() {
                     Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
                     Poll::Ready(Err(error)) if error.kind() == expected
                 ));
-                assert!(
-                    buf.filled().is_empty(),
-                    "unauthenticated plaintext escaped"
-                );
+                assert!(buf.filled().is_empty(), "unauthenticated plaintext escaped");
                 assert!(receiver.is_closed());
                 assert_disconnected(receiver);
                 let io_calls = receiver.io.io_calls;
@@ -1225,11 +1254,18 @@ fn interrupted_transport_reads_preserve_live_tls_and_exporter() {
                 (&mut server, &mut client)
             };
             let binding = receiver.tls_exporter_channel_binding().ok();
-            receiver.io.read_errors.push_back(io::ErrorKind::Interrupted);
+            receiver
+                .io
+                .read_errors
+                .push_back(io::ErrorKind::Interrupted);
             let mut cx = Context::from_waker(Waker::noop());
             let mut bytes = [0; 64];
             let mut buf = ReadBuf::new(&mut bytes);
-            assert!(Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf).is_pending());
+            assert!(
+                Pin::new(&mut *receiver)
+                    .poll_read(&mut cx, &mut buf)
+                    .is_pending()
+            );
             assert!(buf.filled().is_empty());
             assert!(receiver.is_ready());
             assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
@@ -1305,7 +1341,11 @@ fn accepted_plaintext_is_counted_once_on_fatal_transport_write_error() {
                 }
                 let mut bytes = [0; 64];
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(
+                    Pin::new(&mut *receiver)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
                 assert!(buf.filled().is_empty(), "failed write leaked plaintext");
             }
         }

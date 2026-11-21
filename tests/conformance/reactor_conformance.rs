@@ -65,9 +65,9 @@
 use super::harness::{
     ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
 };
-use asupersync::runtime::reactor::{Events, Interest, Reactor, Token};
 #[cfg(any(unix, windows))]
 use asupersync::runtime::reactor::{Event, LabReactor, Source};
+use asupersync::runtime::reactor::{Events, Interest, Reactor, Token};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -917,14 +917,11 @@ fn differential_verdict(
         let explained = known_gap(contract, RowKind::IoUring) == Some(gap)
             && uring.violations.is_empty()
             && epoll.trace.len() == uring.trace.len()
-            && epoll
-                .trace
-                .iter()
-                .zip(&uring.trace)
-                .enumerate()
-                .all(|(line, (seen_by_epoll, seen_by_uring))| {
+            && epoll.trace.iter().zip(&uring.trace).enumerate().all(
+                |(line, (seen_by_epoll, seen_by_uring))| {
                     seen_by_epoll == seen_by_uring || uring.gap_lines.contains(&line)
-                });
+                },
+            );
         if explained {
             return TestVerdict::ExpectedGap(gap.to_owned());
         }
@@ -1039,10 +1036,8 @@ impl ReactorConformanceHarness {
                             Err(err) => {
                                 let mut failed = Observation::default();
                                 failed.violation(format!("reactor construction failed: {err}"));
-                                failed.note(format!(
-                                    "construction failed: {}",
-                                    describe_error(&err)
-                                ));
+                                failed
+                                    .note(format!("construction failed: {}", describe_error(&err)));
                                 failed
                             }
                         };
@@ -1142,7 +1137,11 @@ mod kernel_checks {
         Ok(reactor)
     }
 
-    pub(super) fn run(contract: Contract, kind: RowKind, reactor: &Arc<dyn Reactor>) -> Observation {
+    pub(super) fn run(
+        contract: Contract,
+        kind: RowKind,
+        reactor: &Arc<dyn Reactor>,
+    ) -> Observation {
         // Only the tracked io_uring gap can turn a deviation into an
         // ExpectedGap; on every other row and backend `gap` is None.
         let gap = known_gap(contract, kind);
@@ -1276,9 +1275,12 @@ mod kernel_checks {
                 let poller: &dyn Reactor = &*reactor;
                 let mut events = Events::with_capacity(16);
                 let _ = tx.send(PollerMessage::Entering);
-                let outcome = poller
-                    .poll(&mut events, None)
-                    .map(|_| events.iter().map(|event| (event.token, event.ready)).collect());
+                let outcome = poller.poll(&mut events, None).map(|_| {
+                    events
+                        .iter()
+                        .map(|event| (event.token, event.ready))
+                        .collect()
+                });
                 let _ = tx.send(PollerMessage::Returned(outcome));
             })
             .map_err(during("spawn poll(None) thread"))?;
@@ -1373,7 +1375,10 @@ mod kernel_checks {
         Ok(())
     }
 
-    fn deregister_stops_events(reactor: &Arc<dyn Reactor>, obs: &mut Observation) -> io::Result<()> {
+    fn deregister_stops_events(
+        reactor: &Arc<dyn Reactor>,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**reactor;
         let (local, peer) = connected_pair()?;
         let token = Token::new(104);
@@ -1433,7 +1438,9 @@ mod kernel_checks {
         obs.require(count == 1, || {
             format!("registration_count is {count} after rejected registrations, expected 1")
         });
-        obs.note(format!("registration_count after rejected registrations: {count}"));
+        obs.note(format!(
+            "registration_count after rejected registrations: {count}"
+        ));
         expect_error(
             obs,
             "modify of an unknown token",
@@ -1520,7 +1527,9 @@ mod kernel_checks {
         obs.require(count == 0, || {
             format!("registration_count is {count} after rejected descriptors, expected 0")
         });
-        obs.note(format!("registration_count after rejected descriptors: {count}"));
+        obs.note(format!(
+            "registration_count after rejected descriptors: {count}"
+        ));
         Ok(())
     }
 
@@ -1544,7 +1553,10 @@ mod kernel_checks {
             let seen = poll_once(r, &mut events, Some(timeout), obs)?;
             let elapsed = started.elapsed();
             obs.require(seen.is_empty(), || {
-                format!("poll {label} with nothing ready returned events: {}", list(&seen))
+                format!(
+                    "poll {label} with nothing ready returned events: {}",
+                    list(&seen)
+                )
             });
             obs.require(elapsed < ELAPSED_CEILING, || {
                 format!("poll {label} took {elapsed:?}, ceiling {ELAPSED_CEILING:?}")
@@ -1558,7 +1570,10 @@ mod kernel_checks {
         Ok(())
     }
 
-    fn wake_ends_blocking_poll(reactor: &Arc<dyn Reactor>, obs: &mut Observation) -> io::Result<()> {
+    fn wake_ends_blocking_poll(
+        reactor: &Arc<dyn Reactor>,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**reactor;
         // An idle registration: writing to its peer releases the poll thread
         // if wake() does not, so a failed wake() does not strand the thread.
@@ -1792,11 +1807,8 @@ mod kernel_checks {
                 .name("reactor-registrar".to_owned())
                 .spawn(move || {
                     let registrar: &dyn Reactor = &*reactor;
-                    let _ = registered_tx.send(registrar.register(
-                        &*local,
-                        token,
-                        Interest::READABLE,
-                    ));
+                    let _ =
+                        registered_tx.send(registrar.register(&*local, token, Interest::READABLE));
                 })
         };
         let registrar = match spawned {
@@ -1862,7 +1874,9 @@ mod kernel_checks {
                              thread was blocked in poll(None)"
                         ));
                         if !poll_still_blocked {
-                            obs.violation("register stalled although poll(None) had already returned");
+                            obs.violation(
+                                "register stalled although poll(None) had already returned",
+                            );
                         }
                         if let Err(err) = &woke {
                             obs.violation(format!("wake() failed: {err}"));
@@ -1890,8 +1904,7 @@ mod kernel_checks {
         let mut readiness_delivered = false;
         match poller_message {
             Ok(PollerMessage::Returned(Ok(seen))) => {
-                let observed =
-                    readiness_of(&seen, token).is_some_and(|ready| ready.is_readable());
+                let observed = readiness_of(&seen, token).is_some_and(|ready| ready.is_readable());
                 let line = format!(
                     "the blocked poll observed the new source: {}",
                     yes_no(observed)
@@ -1934,7 +1947,10 @@ mod kernel_checks {
             "readiness of the source registered during a blocked poll was never delivered"
                 .to_owned()
         });
-        obs.note(format!("readiness delivered: {}", yes_no(readiness_delivered)));
+        obs.note(format!(
+            "readiness delivered: {}",
+            yes_no(readiness_delivered)
+        ));
         obs.gap_closed_remark(gap, "register returned while poll(None) was blocked");
         if registered {
             r.deregister(token).map_err(during("deregister"))?;
@@ -2196,7 +2212,11 @@ mod lab_checks {
         poll_once(r, &mut events, Some(Duration::ZERO), obs)
     }
 
-    fn readable(lab: &Arc<LabReactor>, source: &dyn Source, obs: &mut Observation) -> io::Result<()> {
+    fn readable(
+        lab: &Arc<LabReactor>,
+        source: &dyn Source,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**lab;
         let token = Token::new(201);
         r.register(source, token, Interest::READABLE)
@@ -2217,7 +2237,11 @@ mod lab_checks {
         Ok(())
     }
 
-    fn writable(lab: &Arc<LabReactor>, source: &dyn Source, obs: &mut Observation) -> io::Result<()> {
+    fn writable(
+        lab: &Arc<LabReactor>,
+        source: &dyn Source,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**lab;
         let token = Token::new(202);
         r.register(source, token, Interest::WRITABLE)
@@ -2252,7 +2276,11 @@ mod lab_checks {
         Ok(())
     }
 
-    fn deregister(lab: &Arc<LabReactor>, source: &dyn Source, obs: &mut Observation) -> io::Result<()> {
+    fn deregister(
+        lab: &Arc<LabReactor>,
+        source: &dyn Source,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**lab;
         let token = Token::new(204);
         r.register(source, token, Interest::READABLE)
@@ -2325,7 +2353,11 @@ mod lab_checks {
         Ok(())
     }
 
-    fn poll_timeout(lab: &Arc<LabReactor>, source: &dyn Source, obs: &mut Observation) -> io::Result<()> {
+    fn poll_timeout(
+        lab: &Arc<LabReactor>,
+        source: &dyn Source,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**lab;
         let token = Token::new(207);
         r.register(source, token, Interest::READABLE)
@@ -2338,7 +2370,10 @@ mod lab_checks {
         let elapsed = started.elapsed();
         let advanced = lab.now().as_nanos().saturating_sub(start.as_nanos());
         obs.require(seen.is_empty(), || {
-            format!("poll Some(100ms) with nothing ready returned events: {}", list(&seen))
+            format!(
+                "poll Some(100ms) with nothing ready returned events: {}",
+                list(&seen)
+            )
         });
         obs.require(elapsed < ELAPSED_CEILING, || {
             format!("poll Some(100ms) took {elapsed:?} of wall time, ceiling {ELAPSED_CEILING:?}")
@@ -2436,7 +2471,11 @@ mod lab_checks {
         Ok(())
     }
 
-    fn peer_close(lab: &Arc<LabReactor>, source: &dyn Source, obs: &mut Observation) -> io::Result<()> {
+    fn peer_close(
+        lab: &Arc<LabReactor>,
+        source: &dyn Source,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let r: &dyn Reactor = &**lab;
         let token = Token::new(209);
         r.register(source, token, Interest::READABLE | Interest::HUP)
@@ -2500,7 +2539,11 @@ mod lab_checks {
         Ok(())
     }
 
-    fn churn(lab: &Arc<LabReactor>, source: &Arc<dyn Source>, obs: &mut Observation) -> io::Result<()> {
+    fn churn(
+        lab: &Arc<LabReactor>,
+        source: &Arc<dyn Source>,
+        obs: &mut Observation,
+    ) -> io::Result<()> {
         let reactor: Arc<dyn Reactor> = Arc::<LabReactor>::clone(lab);
         let worker_lab = Arc::clone(lab);
         let worker_source = Arc::clone(source);
@@ -2549,7 +2592,11 @@ mod tests {
                                 || row.test_name == contract.row_name(RowKind::IoUringVsEpoll))
                     })
                 });
-                assert!(tracked, "{} reports an untracked gap: {message}", row.test_name);
+                assert!(
+                    tracked,
+                    "{} reports an untracked gap: {message}",
+                    row.test_name
+                );
             }
         }
     }
@@ -2560,7 +2607,10 @@ mod tests {
         // One line per row, so a log shows which backends ran and how each
         // contract was judged, not only that the suite passed.
         for row in &results {
-            eprintln!("reactor_conformance row={} verdict={:?}", row.test_name, row.verdict);
+            eprintln!(
+                "reactor_conformance row={} verdict={:?}",
+                row.test_name, row.verdict
+            );
         }
         let categories: HashSet<TestCategory> = results.iter().map(|row| row.category).collect();
         for required in [
@@ -2659,7 +2709,8 @@ mod tests {
             for contract in Contract::ALL {
                 for kind in [RowKind::IoUring, RowKind::IoUringVsEpoll] {
                     assert!(
-                        rows.iter().any(|row| row.test_name == contract.row_name(kind)),
+                        rows.iter()
+                            .any(|row| row.test_name == contract.row_name(kind)),
                         "missing row {}",
                         contract.row_name(kind)
                     );
@@ -2814,7 +2865,11 @@ mod tests {
         let mut closed = conforming();
         closed.gap_closed_remark(Some(gap), "control");
         assert_eq!(closed.verdict(), TestVerdict::Pass);
-        assert_eq!(closed.remarks.len(), 1, "a gap that no longer reproduces is remarked");
+        assert_eq!(
+            closed.remarks.len(),
+            1,
+            "a gap that no longer reproduces is remarked"
+        );
 
         #[cfg(any(unix, windows))]
         {
@@ -2830,8 +2885,8 @@ mod tests {
             lab.set_ready(token, Event::readable(token));
             let mut events = Events::with_capacity(4);
             let mut dropped = Observation::default();
-            let seen = poll_once(r, &mut events, Some(Duration::ZERO), &mut dropped)
-                .expect("lab poll");
+            let seen =
+                poll_once(r, &mut events, Some(Duration::ZERO), &mut dropped).expect("lab poll");
             assert!(delivered(&mut dropped, "partitioned", &seen, token).is_none());
             assert!(
                 matches!(dropped.verdict(), TestVerdict::Fail(_)),
@@ -2841,8 +2896,8 @@ mod tests {
             lab.partition(token, false).expect("heal the partition");
             lab.set_ready(token, Event::readable(token));
             let mut healed = Observation::default();
-            let seen = poll_once(r, &mut events, Some(Duration::ZERO), &mut healed)
-                .expect("lab poll");
+            let seen =
+                poll_once(r, &mut events, Some(Duration::ZERO), &mut healed).expect("lab poll");
             assert!(
                 delivered(&mut healed, "healed", &seen, token)
                     .is_some_and(|ready| ready.is_readable())

@@ -438,7 +438,10 @@ impl PendingAuthenticatedAccept {
         {
             return Ok(());
         }
-        let (peer_cid, consumed) = match self.driver.recv_handshake_packet_with_consumed(&packet.data) {
+        let (peer_cid, consumed) = match self
+            .driver
+            .recv_handshake_packet_with_consumed(&packet.data)
+        {
             Ok(accepted) => accepted,
             Err(error)
                 if super::handshake_driver::is_stale_handshake_packet_error(&error)

@@ -192,9 +192,11 @@ mod tests {
         ));
         assert_eq!(stream.write_buffer(), b"ping");
         let mut waiting = [0; 4];
-        assert!(Pin::new(&mut peer)
-            .poll_read(&mut cx, &mut ReadBuf::new(&mut waiting))
-            .is_pending());
+        assert!(
+            Pin::new(&mut peer)
+                .poll_read(&mut cx, &mut ReadBuf::new(&mut waiting))
+                .is_pending()
+        );
         assert!(matches!(
             Pin::new(&mut stream).poll_flush(&mut cx),
             Poll::Ready(Ok(()))
@@ -334,10 +336,8 @@ mod tests {
         // AsyncRead to forward it.
         let mut writer = BufReader::new(Vec::<u8>::new());
         assert!(matches!(
-            Pin::new(&mut writer).poll_write_vectored(
-                &mut cx,
-                &[IoSlice::new(b"ab"), IoSlice::new(b"cd")],
-            ),
+            Pin::new(&mut writer)
+                .poll_write_vectored(&mut cx, &[IoSlice::new(b"ab"), IoSlice::new(b"cd")],),
             Poll::Ready(Ok(4))
         ));
         assert_eq!(writer.get_ref(), b"abcd");

@@ -236,7 +236,9 @@ mod native {
                 self.content_profile,
             );
             if self.initialized {
-                text.push_str("  Created history; initialization alone declares no common baseline.\n");
+                text.push_str(
+                    "  Created history; initialization alone declares no common baseline.\n",
+                );
             }
             for decision in &self.decisions {
                 let authorization = if decision.is_destructive() {
@@ -252,7 +254,9 @@ mod native {
                 );
             }
             if self.has_conflicts {
-                text.push_str("  Conflicts require resolution; neither version is selected automatically.\n");
+                text.push_str(
+                    "  Conflicts require resolution; neither version is selected automatically.\n",
+                );
             }
             if let Some(result) = &self.result {
                 let _ = writeln!(
@@ -335,7 +339,12 @@ mod native {
         output
             .flush()
             .map_err(|error| receipt_output_error(error, &report))?;
-        if report.mode == "apply" && !report.result.as_ref().is_some_and(ApplicationOutput::succeeded) {
+        if report.mode == "apply"
+            && !report
+                .result
+                .as_ref()
+                .is_some_and(ApplicationOutput::succeeded)
+        {
             let detail = report
                 .application_error
                 .as_deref()
@@ -390,16 +399,22 @@ mod native {
     }
 
     fn native_error(stage: &str, error: NativeDirectoryError) -> CliError {
-        CliError::new("atp_local_sync_refused", "Cannot prepare local synchronization")
-            .detail(error.to_string())
-            .context("stage", stage)
-            .exit_code(ExitCode::USER_ERROR)
+        CliError::new(
+            "atp_local_sync_refused",
+            "Cannot prepare local synchronization",
+        )
+        .detail(error.to_string())
+        .context("stage", stage)
+        .exit_code(ExitCode::USER_ERROR)
     }
 
     async fn execute(args: &LocalSyncArgs) -> Result<LocalSyncOutput, CliError> {
         let cx = Cx::current().ok_or_else(|| {
-            CliError::new("atp_local_sync_context", "Local sync has no runtime context")
-                .exit_code(ExitCode::RUNTIME_ERROR)
+            CliError::new(
+                "atp_local_sync_context",
+                "Local sync has no runtime context",
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
         let limits = NativeDirectoryLimits {
             max_entries: args.max_entries,
@@ -429,7 +444,16 @@ mod native {
             )
             .await
         }
-        .map_err(|error| native_error(if args.initialize { "initialize" } else { "reopen" }, error))?;
+        .map_err(|error| {
+            native_error(
+                if args.initialize {
+                    "initialize"
+                } else {
+                    "reopen"
+                },
+                error,
+            )
+        })?;
         let generation = session.generation();
         let state_directory = session.state_directory().to_path_buf();
         let prepared = session.prepare(&cx).await.map_err(|error| {

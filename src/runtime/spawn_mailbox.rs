@@ -62,6 +62,7 @@
 use crate::runtime::scheduler::global_queue::GlobalFifoQueue;
 use crate::runtime::state::SpawnError;
 use crate::runtime::stored_task::StoredTask;
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::trace::TraceBufferHandle;
 use crate::trace::event::TraceEvent;
 use crate::types::Outcome;
@@ -71,7 +72,6 @@ use parking_lot::{Mutex, RwLock};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll};
 
@@ -1722,7 +1722,10 @@ impl RegisterRegionFinalizer {
                     state.register_async_finalizer(self.region_id, finalizer)
                 }
             };
-            assert!(registered, "finalizer admission changed under the runtime state lock");
+            assert!(
+                registered,
+                "finalizer admission changed under the runtime state lock"
+            );
             Ok(())
         });
         self
@@ -1835,7 +1838,10 @@ impl BranchRegionSlot {
     /// passed its abort check but has not yet published the region.
     /// Called only outside runtime locks.
     pub(crate) fn request_close(&self, reason: CancelReason) -> Result<(), SpawnError> {
-        let owner = self.owner.as_ref().expect("only owned branches request close");
+        let owner = self
+            .owner
+            .as_ref()
+            .expect("only owned branches request close");
         let published = {
             let mut requested = owner.requested.lock();
             if let Some(previous) = requested.as_mut() {
@@ -1850,7 +1856,10 @@ impl BranchRegionSlot {
                 )
             })
         };
-        let gateway = owner.gateway.upgrade().ok_or(SpawnError::RuntimeUnavailable)?;
+        let gateway = owner
+            .gateway
+            .upgrade()
+            .ok_or(SpawnError::RuntimeUnavailable)?;
         if let Some((region_id, reason)) = published {
             gateway.enqueue_region_command(RegionCommand::Cancel { region_id, reason })?;
         } else if !gateway.is_runtime_available() {
@@ -1871,20 +1880,30 @@ impl BranchRegionSlot {
         close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
     ) {
         let requested = self.owner.as_ref().map(|owner| owner.requested.lock());
-        let first = self.minted.set(MintedBranchRegion {
-            region_id,
-            close_notify,
-            close_receipt,
-        }).is_ok();
-        let close = requested.as_ref().and_then(|reason| reason.as_ref().cloned());
+        let first = self
+            .minted
+            .set(MintedBranchRegion {
+                region_id,
+                close_notify,
+                close_receipt,
+            })
+            .is_ok();
+        let close = requested
+            .as_ref()
+            .and_then(|reason| reason.as_ref().cloned());
         drop(requested);
         if first
             && let Some(reason) = close
-            && let Some(gateway) = self.owner.as_ref().and_then(|owner| owner.gateway.upgrade())
+            && let Some(gateway) = self
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.gateway.upgrade())
         {
             // Callback-free handoff: do not use enqueue_region_command on the
             // gateway here, since its notifier is arbitrary external code.
-            gateway.mailbox().enqueue_region_command(RegionCommand::Cancel { region_id, reason });
+            gateway
+                .mailbox()
+                .enqueue_region_command(RegionCommand::Cancel { region_id, reason });
         }
     }
 }

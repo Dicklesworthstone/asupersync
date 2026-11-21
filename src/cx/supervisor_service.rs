@@ -21,10 +21,12 @@
 //! factories, unread results and tasks within a supplied tree have separate
 //! ownership/bounds; mailbox and child counts are not a byte-memory guarantee.
 
-use super::{CancelWakerToken, Cx, DynamicChildCompletion, DynamicChildId,
-    DynamicChildResult, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
-    DynamicSupervisorReport, DynamicWorkerConfig};
 use super::dynamic_supervisor::{SharedRestartConfig, SharedRestartDomain, SharedRestartStatus};
+use super::{
+    CancelWakerToken, Cx, DynamicChildCompletion, DynamicChildId, DynamicChildResult,
+    DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError, DynamicSupervisorReport,
+    DynamicWorkerConfig,
+};
 use crate::channel::{mpsc, oneshot};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::supervision::{ChildName, ManagedChildFactory, ManagedSupervisor};
@@ -62,8 +64,10 @@ pub enum DynamicServiceError {
 }
 
 fn cancellation(cx: &Cx) -> DynamicServiceError {
-    DynamicServiceError::Cancelled(cx.cancel_reason()
-        .unwrap_or_else(|| CancelReason::user("dynamic service caller cancelled")))
+    DynamicServiceError::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("dynamic service caller cancelled")),
+    )
 }
 
 enum Start<E> {
@@ -91,14 +95,18 @@ pub struct DynamicSupervisorClient<E> {
 
 impl<E> Clone for DynamicSupervisorClient<E> {
     fn clone(&self) -> Self {
-        Self { sender: self.sender.clone(), control: Arc::clone(&self.control),
-            shared_restarts: self.shared_restarts.clone() }
+        Self {
+            sender: self.sender.clone(),
+            control: Arc::clone(&self.control),
+            shared_restarts: self.shared_restarts.clone(),
+        }
     }
 }
 
 impl<E> fmt::Debug for DynamicSupervisorClient<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynamicSupervisorClient").finish_non_exhaustive()
+        f.debug_struct("DynamicSupervisorClient")
+            .finish_non_exhaustive()
     }
 }
 
@@ -121,7 +129,10 @@ impl<E> fmt::Debug for DynamicAdmission<E> {
 impl<E> DynamicAdmission<E> {
     /// Observe actual admission. Cancellation leaves this receipt resumable.
     /// Successful admission still does not assert that a worker factory is ready.
-    pub async fn admitted(&mut self, cx: &Cx) -> Result<DynamicServiceChild<E>, DynamicServiceError> {
+    pub async fn admitted(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<DynamicServiceChild<E>, DynamicServiceError> {
         match self.reply.recv(cx).await {
             Ok(result) => result,
             Err(oneshot::RecvError::Cancelled) => Err(cancellation(cx)),
@@ -145,15 +156,19 @@ pub struct DynamicServiceChild<E> {
 
 impl<E> fmt::Debug for DynamicServiceChild<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynamicServiceChild").field("id", &self.id)
-            .field("stop_requested", &self.stop.is_none()).finish_non_exhaustive()
+        f.debug_struct("DynamicServiceChild")
+            .field("id", &self.id)
+            .field("stop_requested", &self.stop.is_none())
+            .finish_non_exhaustive()
     }
 }
 
 impl<E> DynamicServiceChild<E> {
     /// Exact owner/region/admission generation; a reused name is a different ID.
     #[must_use]
-    pub fn id(&self) -> &DynamicChildId { &self.id }
+    pub fn id(&self) -> &DynamicChildId {
+        &self.id
+    }
 
     /// Idempotent, nonblocking stop signal, independent of the admission queue.
     pub fn request_stop(&mut self) {
@@ -168,7 +183,9 @@ impl<E> DynamicServiceChild<E> {
     /// Wait for this controller AND its enclosing child region to finish.
     /// Cleanup refusal retains the full result in the service's shutdown report.
     pub async fn join(&mut self) -> Result<DynamicChildCompletion<E>, DynamicServiceError> {
-        self.completion.recv_uninterruptible().await
+        self.completion
+            .recv_uninterruptible()
+            .await
             .map_err(|_| DynamicServiceError::Closed)?
             .map_err(DynamicServiceError::Supervisor)
     }
@@ -176,7 +193,9 @@ impl<E> DynamicServiceChild<E> {
 
 // Sender::drop wakes the service's retained receiver even without an explicit send.
 impl<E> Drop for DynamicServiceChild<E> {
-    fn drop(&mut self) { drop(self.stop.take()); }
+    fn drop(&mut self) {
+        drop(self.stop.take());
+    }
 }
 
 impl<E: Send + 'static> DynamicSupervisorClient<E> {
@@ -186,11 +205,20 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
         self.shared_restarts.as_ref().map(|domain| domain.status())
     }
 
-    fn submit(&self, cx: &Cx, name: ChildName, start: Start<E>)
-        -> Result<DynamicAdmission<E>, DynamicServiceError>
-    {
-        if cx.checkpoint().is_err() { return Err(cancellation(cx)); }
-        if let Some(refusal) = self.shared_restarts.as_ref().and_then(|domain| domain.refusal()) {
+    fn submit(
+        &self,
+        cx: &Cx,
+        name: ChildName,
+        start: Start<E>,
+    ) -> Result<DynamicAdmission<E>, DynamicServiceError> {
+        if cx.checkpoint().is_err() {
+            return Err(cancellation(cx));
+        }
+        if let Some(refusal) = self
+            .shared_restarts
+            .as_ref()
+            .and_then(|domain| domain.refusal())
+        {
             return Err(DynamicSupervisorError::SharedRestartLimit(refusal).into());
         }
         if self.control.mode.load(Ordering::Acquire) != RUNNING {
@@ -210,9 +238,12 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
 
     /// Submit an already-bound tree without waiting for mailbox capacity.
     /// Errors consume the supplied tree but never invoke its factories.
-    pub fn submit_child(&self, cx: &Cx, name: impl Into<ChildName>, tree: ManagedSupervisor<E>)
-        -> Result<DynamicAdmission<E>, DynamicServiceError>
-    {
+    pub fn submit_child(
+        &self,
+        cx: &Cx,
+        name: impl Into<ChildName>,
+        tree: ManagedSupervisor<E>,
+    ) -> Result<DynamicAdmission<E>, DynamicServiceError> {
         self.submit(cx, name.into(), Start::Tree(tree))
     }
 
@@ -221,7 +252,10 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
     /// Errors consume the factory without invoking it. Mailbox admission and
     /// dynamic child admission are separate checks; await the returned receipt.
     pub fn submit_worker(
-        &self, cx: &Cx, name: impl Into<ChildName>, config: DynamicWorkerConfig,
+        &self,
+        cx: &Cx,
+        name: impl Into<ChildName>,
+        config: DynamicWorkerConfig,
         factory: impl ManagedChildFactory<E>,
     ) -> Result<DynamicAdmission<E>, DynamicServiceError> {
         self.submit(cx, name.into(), Start::Worker(config, Arc::new(factory)))
@@ -253,7 +287,8 @@ pub struct DynamicSupervisorService<E> {
 
 impl<E> fmt::Debug for DynamicSupervisorService<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynamicSupervisorService").field("task", &self.task.task_id())
+        f.debug_struct("DynamicSupervisorService")
+            .field("task", &self.task.task_id())
             .finish_non_exhaustive()
     }
 }
@@ -280,7 +315,9 @@ impl<E> DynamicSupervisorService<E> {
     /// Existing children are NOT stopped. Permanent workers can therefore keep
     /// a drain pending indefinitely; `abort` escalates it to cancellation.
     /// Neither this signal nor `abort` waits for the actual root close.
-    pub fn begin_drain(&self) { self.control.request(DRAINING); }
+    pub fn begin_drain(&self) {
+        self.control.request(DRAINING);
+    }
 
     /// Await the actual service task terminal, then return its retained report.
     /// Caller cancellation does not bypass the child/root drain. Dropping this
@@ -289,17 +326,24 @@ impl<E> DynamicSupervisorService<E> {
         let task_outcome = poll_fn(|cx| self.task.poll_join(cx)).await;
         let report = self.report.lock().take();
         if let Some(supervision) = report {
-            return Ok(DynamicServiceReport { supervision, task_outcome });
+            return Ok(DynamicServiceReport {
+                supervision,
+                task_outcome,
+            });
         }
         match task_outcome {
             Err(error) => Err(error),
-            Ok(()) => Err(JoinError::Panicked(PanicPayload::new("dynamic service omitted its report"))),
+            Ok(()) => Err(JoinError::Panicked(PanicPayload::new(
+                "dynamic service omitted its report",
+            ))),
         }
     }
 }
 
 impl<E> Drop for DynamicSupervisorService<E> {
-    fn drop(&mut self) { self.abort(); }
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl Cx {
@@ -309,8 +353,11 @@ impl Cx {
     /// admission can still fail asynchronously; the service report preserves that
     /// original refusal. No runtime/authority is manufactured for detached Cx.
     pub fn spawn_dynamic_supervisor_mailbox<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
-    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
+        &self,
+        config: DynamicSupervisorConfig,
+        mailbox_capacity: usize,
+    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError>
+    {
         self.spawn_dynamic_supervisor_mailbox_inner(config, mailbox_capacity, None)
     }
 
@@ -325,34 +372,69 @@ impl Cx {
     /// service completion receipts. The original mailbox API retains independent
     /// per-tree restart windows.
     pub fn spawn_dynamic_supervisor_mailbox_with_shared_restarts<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
+        &self,
+        config: DynamicSupervisorConfig,
+        mailbox_capacity: usize,
         restarts: SharedRestartConfig,
-    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
+    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError>
+    {
         self.spawn_dynamic_supervisor_mailbox_inner(
-            config, mailbox_capacity, Some(Arc::new(SharedRestartDomain::new(restarts))),
+            config,
+            mailbox_capacity,
+            Some(Arc::new(SharedRestartDomain::new(restarts))),
         )
     }
 
     fn spawn_dynamic_supervisor_mailbox_inner<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig, mailbox_capacity: usize,
+        &self,
+        config: DynamicSupervisorConfig,
+        mailbox_capacity: usize,
         shared_restarts: Option<Arc<SharedRestartDomain>>,
-    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError> {
-        if mailbox_capacity == 0 { return Err(DynamicServiceError::InvalidCapacity); }
-        if self.checkpoint().is_err() { return Err(cancellation(self)); }
+    ) -> Result<(DynamicSupervisorClient<E>, DynamicSupervisorService<E>), DynamicServiceError>
+    {
+        if mailbox_capacity == 0 {
+            return Err(DynamicServiceError::InvalidCapacity);
+        }
+        if self.checkpoint().is_err() {
+            return Err(cancellation(self));
+        }
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
         let (notify, control_rx) = mpsc::channel(1);
-        let control = Arc::new(Control { mode: AtomicU8::new(RUNNING), notify });
+        let control = Arc::new(Control {
+            mode: AtomicU8::new(RUNNING),
+            notify,
+        });
         let driver_control = Arc::clone(&control);
         let report = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&report);
         let driver_restarts = shared_restarts.clone();
-        let task = self.spawn(move |cx| async move {
-            let result = drive(cx, config, receiver, driver_control, control_rx, driver_restarts).await;
-            *publication.lock() = Some(result);
-        }).map_err(DynamicServiceError::Spawn)?;
-        Ok((DynamicSupervisorClient { sender, control: Arc::clone(&control),
-                shared_restarts: shared_restarts.clone() },
-            DynamicSupervisorService { task, report, control, shared_restarts }))
+        let task = self
+            .spawn(move |cx| async move {
+                let result = drive(
+                    cx,
+                    config,
+                    receiver,
+                    driver_control,
+                    control_rx,
+                    driver_restarts,
+                )
+                .await;
+                *publication.lock() = Some(result);
+            })
+            .map_err(DynamicServiceError::Spawn)?;
+        Ok((
+            DynamicSupervisorClient {
+                sender,
+                control: Arc::clone(&control),
+                shared_restarts: shared_restarts.clone(),
+            },
+            DynamicSupervisorService {
+                task,
+                report,
+                control,
+                shared_restarts,
+            },
+        ))
     }
 }
 
@@ -392,7 +474,9 @@ struct Cancellation {
 
 impl Cancellation {
     fn requested(&mut self, cx: &Context<'_>) -> bool {
-        if self.observed { return true; }
+        if self.observed {
+            return true;
+        }
         self.token = Some(self.cx.refresh_cancel_waker(self.token, cx.waker()));
         self.observed = self.cx.checkpoint().is_err();
         self.observed
@@ -401,12 +485,15 @@ impl Cancellation {
 
 impl Drop for Cancellation {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
 fn poll_children<E: Send + 'static>(
-    owner: &mut DynamicSupervisor<E>, tickets: &mut BTreeMap<ChildName, Ticket<E>>,
+    owner: &mut DynamicSupervisor<E>,
+    tickets: &mut BTreeMap<ChildName, Ticket<E>>,
     cx: &mut Context<'_>,
 ) {
     // Do not return on the first Pending or quarantine. A different boundary's
@@ -425,7 +512,11 @@ fn poll_children<E: Send + 'static>(
             // handle explicitly relinquished its outcome, but only AFTER the
             // owner has attempted cleanup. Unclean children remain quarantined
             // in `owner` with their full report and reserved capacity intact.
-            let _ = ticket.completion.take().expect("one terminal publication").send_blocking(result);
+            let _ = ticket
+                .completion
+                .take()
+                .expect("one terminal publication")
+                .send_blocking(result);
             false
         } else {
             true
@@ -434,18 +525,29 @@ fn poll_children<E: Send + 'static>(
 }
 
 async fn drive<E: Send + 'static>(
-    cx: Cx, config: DynamicSupervisorConfig, receiver: mpsc::Receiver<Command<E>>,
-    control: Arc<Control>, mut control_rx: mpsc::Receiver<()>,
+    cx: Cx,
+    config: DynamicSupervisorConfig,
+    receiver: mpsc::Receiver<Command<E>>,
+    control: Arc<Control>,
+    mut control_rx: mpsc::Receiver<()>,
     shared_restarts: Option<Arc<SharedRestartDomain>>,
 ) -> Result<DynamicSupervisorReport<E>, DynamicSupervisorError> {
-    let mut owner = cx.open_dynamic_supervisor_with_domain::<E>(config, shared_restarts).await?;
-    let mut cancellation = Cancellation { cx: cx.clone(), token: None, observed: false };
+    let mut owner = cx
+        .open_dynamic_supervisor_with_domain::<E>(config, shared_restarts)
+        .await?;
+    let mut cancellation = Cancellation {
+        cx: cx.clone(),
+        token: None,
+        observed: false,
+    };
     let mut receiver = Some(receiver);
     let mut tickets = BTreeMap::new();
     loop {
         let command = poll_fn(|task_cx| {
-            if cancellation.requested(task_cx) || owner.is_closing()
-                || owner.shared_restart_refused() {
+            if cancellation.requested(task_cx)
+                || owner.is_closing()
+                || owner.shared_restart_refused()
+            {
                 control.mode.fetch_max(STOPPING, Ordering::AcqRel);
             }
             // Drain one coalesced notification, then register for the next.
@@ -469,7 +571,9 @@ async fn drive<E: Send + 'static>(
             let mode = control.mode.load(Ordering::Acquire);
             if mode != RUNNING {
                 drop(receiver.take());
-                if mode == STOPPING { owner.begin_shutdown(); }
+                if mode == STOPPING {
+                    owner.begin_shutdown();
+                }
             }
             poll_children(&mut owner, &mut tickets, task_cx);
             // A child's completion can seal the shared owner during this sweep.
@@ -480,7 +584,11 @@ async fn drive<E: Send + 'static>(
                 drop(receiver.take());
             }
             let Some(incoming) = &mut receiver else {
-                return if tickets.is_empty() { Poll::Ready(None) } else { Poll::Pending };
+                return if tickets.is_empty() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                };
             };
             match incoming.poll_recv(&cx, task_cx) {
                 Poll::Ready(Ok(command)) => Poll::Ready(Some(command)),
@@ -495,22 +603,40 @@ async fn drive<E: Send + 'static>(
                 }
                 Poll::Pending => Poll::Pending,
             }
-        }).await;
-        let Some(command) = command else { break; };
+        })
+        .await;
+        let Some(command) = command else {
+            break;
+        };
         if !command.reply.is_closed() {
             let result = match command.start {
                 Start::Tree(tree) => owner.start_child(command.name.clone(), tree).await,
                 Start::Worker(config, factory) => {
-                    owner.start_worker(command.name.clone(), config,
-                        move |cx: Cx, generation| factory.start(cx, generation)).await
+                    owner
+                        .start_worker(command.name.clone(), config, move |cx: Cx, generation| {
+                            factory.start(cx, generation)
+                        })
+                        .await
                 }
             };
             let reply = match result {
                 Ok(id) => {
                     let (stop, stop_rx) = oneshot::channel();
                     let (completion, completion_rx) = oneshot::channel();
-                    let child = DynamicServiceChild { id: id.clone(), stop: Some(stop), completion: completion_rx };
-                    tickets.insert(command.name, Ticket { id, stop: stop_rx, stopped: false, completion: Some(completion) });
+                    let child = DynamicServiceChild {
+                        id: id.clone(),
+                        stop: Some(stop),
+                        completion: completion_rx,
+                    };
+                    tickets.insert(
+                        command.name,
+                        Ticket {
+                            id,
+                            stop: stop_rx,
+                            stopped: false,
+                            completion: Some(completion),
+                        },
+                    );
                     Ok(child)
                 }
                 Err(error) => Err(DynamicServiceError::Supervisor(error)),

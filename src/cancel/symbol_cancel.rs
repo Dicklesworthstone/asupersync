@@ -5,12 +5,12 @@
 //! coordinating cancellation across peers, and [`CleanupCoordinator`] for
 //! managing partial symbol set cleanup.
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::fmt;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelAttributionConfig, CancelKind, CancelReason, Time};

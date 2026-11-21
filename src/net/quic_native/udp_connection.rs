@@ -1364,7 +1364,10 @@ impl NativeQuicUdpConnection {
                     return Err(NativeQuicUdpConnectionError::Cancelled);
                 }
                 Err(_err) => {
-                    if self.protection.integrity_limit_reached(PacketProtectionSpace::OneRtt) {
+                    if self
+                        .protection
+                        .integrity_limit_reached(PacketProtectionSpace::OneRtt)
+                    {
                         return Err(NativeQuicUdpConnectionError::Packet(
                             "1-RTT AEAD integrity limit reached".to_string(),
                         ));
@@ -1376,14 +1379,18 @@ impl NativeQuicUdpConnection {
             let header = unprotected.header;
             let plaintext = unprotected.plaintext;
             if unprotected.peer_key_update {
-                self.connection
-                    .inner_mut()
-                    .on_peer_key_phase_pn(cx, header.key_phase, header.packet_number)?;
-                self.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
+                self.connection.inner_mut().on_peer_key_phase_pn(
+                    cx,
+                    header.key_phase,
+                    header.packet_number,
+                )?;
+                self.protection
+                    .note_peer_key_update(PacketProtectionSpace::OneRtt);
                 if self.connection.inner().tls().local_key_phase() != header.key_phase {
                     self.connection.inner_mut().request_local_key_update(cx)?;
                     self.connection.inner_mut().commit_local_key_update(cx)?;
-                    self.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                    self.protection
+                        .note_local_key_update(PacketProtectionSpace::OneRtt);
                 }
             }
             self.connection

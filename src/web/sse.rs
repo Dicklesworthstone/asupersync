@@ -36,9 +36,9 @@ use std::time::Duration;
 use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::http::h1::codec::HttpError;
-use crate::time::{timeout, wall_now};
 use crate::http::h1::stream::{OutgoingBodySender, StreamingResponse};
 use crate::http::h1::types as h1_types;
+use crate::time::{timeout, wall_now};
 
 use super::response::{IntoResponse, Response, StatusCode};
 
@@ -675,9 +675,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         sender: &mut OutgoingBodySender,
         heartbeat_interval: Duration,
     ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
-        let now = cx
-            .timer_driver()
-            .map_or_else(wall_now, |timer| timer.now());
+        let now = cx.timer_driver().map_or_else(wall_now, |timer| timer.now());
         let prepared = timeout(
             now,
             heartbeat_interval,
@@ -884,7 +882,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         if let Some(pending) = self.pending_event_chunk.as_ref() {
             // Honor a cap lowered while a prior send future was pending, exactly
             // as the blocking prepare does.
-            return Poll::Ready(self.validate_event_chunk_len(pending.bytes.len()).map(|()| true));
+            return Poll::Ready(
+                self.validate_event_chunk_len(pending.bytes.len())
+                    .map(|()| true),
+            );
         }
 
         match self.source.poll_next_event(cx, task_cx) {

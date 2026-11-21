@@ -258,10 +258,14 @@ where
     C: FnMut(&LabRuntime, &T, &LabRunReport) -> Option<FailureKey>,
 {
     if limits.max_source_dispatches == 0 {
-        return Err(ScheduleMinimizerError::InvalidLimit("max_source_dispatches"));
+        return Err(ScheduleMinimizerError::InvalidLimit(
+            "max_source_dispatches",
+        ));
     }
     if limits.confirmations == 0 || limits.max_attempts <= limits.confirmations {
-        return Err(ScheduleMinimizerError::InvalidLimit("confirmations/max_attempts"));
+        return Err(ScheduleMinimizerError::InvalidLimit(
+            "confirmations/max_attempts",
+        ));
     }
     if limits.max_work_per_attempt == 0 || limits.max_total_work == 0 {
         return Err(ScheduleMinimizerError::InvalidLimit("work budget"));
@@ -275,15 +279,22 @@ where
         .terminal_steps()
         .checked_mul(2)
         .and_then(|work| work.checked_add(1))
-        .ok_or(ScheduleMinimizerError::InvalidLimit("baseline work overflow"))?;
+        .ok_or(ScheduleMinimizerError::InvalidLimit(
+            "baseline work overflow",
+        ))?;
     let confirmations = u64::try_from(limits.confirmations)
         .map_err(|_| ScheduleMinimizerError::InvalidLimit("confirmations overflow"))?;
-    let baseline_total = limits.max_work_per_attempt
+    let baseline_total = limits
+        .max_work_per_attempt
         .checked_mul(confirmations)
         .and_then(|work| work.checked_add(baseline_work))
-        .ok_or(ScheduleMinimizerError::InvalidLimit("baseline total overflow"))?;
+        .ok_or(ScheduleMinimizerError::InvalidLimit(
+            "baseline total overflow",
+        ))?;
     if baseline_work > limits.max_work_per_attempt || baseline_total > limits.max_total_work {
-        return Err(ScheduleMinimizerError::InvalidLimit("baseline work admission"));
+        return Err(ScheduleMinimizerError::InvalidLimit(
+            "baseline work admission",
+        ));
     }
     let digest = source_digest(source)?;
     let mut retained = Vec::new();
@@ -292,7 +303,10 @@ where
         .map_err(|_| ScheduleMinimizerError::Allocation)?;
     retained.extend(0..source.dispatches().len());
     let mut best = source
-        .derive_candidate(&retained, candidate_limits(limits, limits.max_work_per_attempt))
+        .derive_candidate(
+            &retained,
+            candidate_limits(limits, limits.max_work_per_attempt),
+        )
         .map_err(ScheduleMinimizerError::Source)?;
     let mut stats = ScheduleMinimizerStats::default();
     stats.attempts += 1;
@@ -306,8 +320,7 @@ where
             )
             .map_err(ScheduleMinimizerError::BaselineReplay)?;
         let lab = runtime.report();
-        classify(&runtime, &fixture, &lab)
-            .ok_or(ScheduleMinimizerError::NoBaselineFailure)?
+        classify(&runtime, &fixture, &lab).ok_or(ScheduleMinimizerError::NoBaselineFailure)?
     };
     // Confirm the full subsequence through the candidate engine too. Strict
     // replay and candidate replay have different time/command pumping rules;
@@ -319,7 +332,10 @@ where
         let report = runtime
             .run_forced_schedule_candidate(&best, candidate_limits(limits, grant))
             .map_err(ScheduleMinimizerError::BaselineReplay)?;
-        assert!(report.work_units <= grant, "candidate exceeded its work grant");
+        assert!(
+            report.work_units <= grant,
+            "candidate exceeded its work grant"
+        );
         stats.charged_work -= grant - report.work_units;
         if report.termination != ForcedScheduleCandidateTermination::Quiescent
             || classify(&runtime, &fixture, &report.lab) != Some(failure)
@@ -349,14 +365,15 @@ where
                     Err(stop) => break 'search stop,
                 };
                 let (mut runtime, fixture) = build();
-                let result = runtime.run_forced_schedule_candidate(
-                    &proposal,
-                    candidate_limits(limits, grant),
-                );
+                let result = runtime
+                    .run_forced_schedule_candidate(&proposal, candidate_limits(limits, grant));
                 let matched = match result {
                     Ok(report) => {
                         // The runner enforces this bound before each action.
-                        assert!(report.work_units <= grant, "candidate exceeded its work grant");
+                        assert!(
+                            report.work_units <= grant,
+                            "candidate exceeded its work grant"
+                        );
                         stats.charged_work -= grant - report.work_units;
                         if report.termination != ForcedScheduleCandidateTermination::Quiescent {
                             stats.incomplete += 1;

@@ -13,11 +13,11 @@
 use crate::runtime::resource_monitor::{
     OverloadBrownoutLedger, OverloadBrownoutPhase, OverloadBrownoutReason,
 };
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default maximum length for OTLP span attribute values per OTLP §2.5.3.

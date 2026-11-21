@@ -225,9 +225,8 @@ async fn parked_cleanup(
 }
 
 async fn streaming_pipeline_owns_body_and_children(cx: Cx) {
-    let (socket, mut peer, wire) = pair(
-        b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
-    );
+    let (socket, mut peer, wire) =
+        pair(b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n");
     let peer_addr = socket.inner.peer_addr().unwrap();
     let (read_ready, mut read_parked) = oneshot::channel();
     *wire.read_pending.lock().unwrap() = Some(read_ready);
@@ -294,15 +293,20 @@ async fn streaming_pipeline_owns_body_and_children(cx: Cx) {
                     let trailers = trailers.expect("one terminal trailer frame");
                     assert_eq!(trailers.len(), 1);
                     assert_eq!(
-                        trailers.get(&HeaderName::from_static("x-end")).unwrap().as_bytes(),
+                        trailers
+                            .get(&HeaderName::from_static("x-end"))
+                            .unwrap()
+                            .as_bytes(),
                         b"yes",
                     );
                     let (child_ready, mut child_parked) = oneshot::channel();
-                    request_cx.spawn(move |child_cx| async move {
-                        let _dropped = Dropped(drops);
-                        parked_until_cancelled(&child_cx, child_ready).await;
-                        parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
-                    }).unwrap();
+                    request_cx
+                        .spawn(move |child_cx| async move {
+                            let _dropped = Dropped(drops);
+                            parked_until_cancelled(&child_cx, child_ready).await;
+                            parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
+                        })
+                        .unwrap();
                     let child_cx = child_parked.recv(&request_cx).await.unwrap();
                     assert_eq!(child_cx.region_id(), request_cx.region_id());
                     Response::new(200, "OK", b"first".to_vec())
@@ -315,9 +319,13 @@ async fn streaming_pipeline_owns_body_and_children(cx: Cx) {
         config(),
     )
     .with_in_flight_requests(Arc::clone(&in_flight));
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned_with_peer_addr(&connection_cx, socket, Some(peer_addr)).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |connection_cx| async move {
+            server
+                .serve_owned_with_peer_addr(&connection_cx, socket, Some(peer_addr))
+                .await
+        })
+        .unwrap();
     let body_cx = body_parked.recv(&cx).await.unwrap();
     let driver_cx = read_parked.recv(&cx).await.unwrap();
     assert_eq!(body_cx.task_id(), driver_cx.task_id());
@@ -337,7 +345,8 @@ async fn streaming_pipeline_owns_body_and_children(cx: Cx) {
     poll_fn(|task| {
         assert!(serving.poll_join(task).is_pending());
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     release.send_blocking(()).unwrap();
     let received = response(&mut peer).await;
     assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 2);
@@ -359,9 +368,8 @@ fn owned_streaming_body_is_live_and_pipeline_waits_for_real_subtree_cleanup() {
 
 async fn cancellation_drains_pending_stream(cx: Cx) {
     for forced in [false, true] {
-        let (socket, mut peer, wire) = pair(
-            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n",
-        );
+        let (socket, mut peer, wire) =
+            pair(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n");
         let shutdown = ShutdownSignal::new();
         let (body_ready, mut body_parked) = oneshot::channel();
         let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
@@ -383,12 +391,14 @@ async fn cancellation_drains_pending_stream(cx: Cx) {
                     let _body_dropped = Dropped(Arc::clone(&drops));
                     let (child_ready, mut child_parked) = oneshot::channel();
                     let child_acks = Arc::clone(&acks);
-                    request_cx.spawn(move |child_cx| async move {
-                        let _child_dropped = Dropped(drops);
-                        parked_until_cancelled(&child_cx, child_ready).await;
-                        child_acks.fetch_add(1, Ordering::SeqCst);
-                        parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
-                    }).unwrap();
+                    request_cx
+                        .spawn(move |child_cx| async move {
+                            let _child_dropped = Dropped(drops);
+                            parked_until_cancelled(&child_cx, child_ready).await;
+                            child_acks.fetch_add(1, Ordering::SeqCst);
+                            parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
+                        })
+                        .unwrap();
                     child_parked.recv(&request_cx).await.unwrap();
                     let mut ready = Some(body_ready);
                     let frame = poll_fn(|task| {
@@ -399,8 +409,12 @@ async fn cancellation_drains_pending_stream(cx: Cx) {
                             ready.send_blocking(request_cx.clone()).unwrap();
                         }
                         result
-                    }).await;
-                    assert!(matches!(frame, Some(Err(IncomingBodyError::Cancelled { .. }))));
+                    })
+                    .await;
+                    assert!(matches!(
+                        frame,
+                        Some(Err(IncomingBodyError::Cancelled { .. }))
+                    ));
                     assert!(request_cx.checkpoint().is_err());
                     acks.fetch_add(1, Ordering::SeqCst);
                     Response::new(200, "OK", b"cancelled response must stay private".to_vec())
@@ -410,9 +424,11 @@ async fn cancellation_drains_pending_stream(cx: Cx) {
         )
         .with_shutdown_signal(shutdown.clone())
         .with_in_flight_requests(Arc::clone(&in_flight));
-        let mut serving = cx.spawn(move |connection_cx| async move {
-            server.serve_owned(&connection_cx, socket).await
-        }).unwrap();
+        let mut serving =
+            cx.spawn(move |connection_cx| async move {
+                server.serve_owned(&connection_cx, socket).await
+            })
+            .unwrap();
         body_parked.recv(&cx).await.unwrap();
         if forced {
             assert!(shutdown.begin_drain(Duration::from_secs(5)));
@@ -426,7 +442,8 @@ async fn cancellation_drains_pending_stream(cx: Cx) {
         poll_fn(|task| {
             assert!(serving.poll_join(task).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         release.send_blocking(()).unwrap();
         let joined = serving.join(&cx).await;
         assert!(!matches!(joined, Err(JoinError::Panicked(_))), "{joined:?}");
@@ -478,14 +495,19 @@ async fn streaming_deadline_preserves_transport(cx: Cx) {
                         frame.unwrap();
                     }
                     let (child_ready, mut child_parked) = oneshot::channel();
-                    request_cx.spawn(move |child_cx| async move {
-                        let _child_drop = Dropped(drops);
-                        parked_until_cancelled(&child_cx, child_ready).await;
-                        parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
-                    }).unwrap();
+                    request_cx
+                        .spawn(move |child_cx| async move {
+                            let _child_drop = Dropped(drops);
+                            parked_until_cancelled(&child_cx, child_ready).await;
+                            parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
+                        })
+                        .unwrap();
                     child_parked.recv(&request_cx).await.unwrap();
                     let reason = parked_until_cancelled(&request_cx, body_ready).await;
-                    assert!(matches!(reason.kind, CancelKind::Deadline | CancelKind::Timeout));
+                    assert!(matches!(
+                        reason.kind,
+                        CancelKind::Deadline | CancelKind::Timeout
+                    ));
                     std::future::pending::<Response>().await
                 } else {
                     assert_eq!(drops.load(Ordering::SeqCst), 2);
@@ -495,9 +517,9 @@ async fn streaming_deadline_preserves_transport(cx: Cx) {
         },
         settings,
     );
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned(&connection_cx, socket).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |connection_cx| async move { server.serve_owned(&connection_cx, socket).await })
+        .unwrap();
     let body_cx = body_parked.recv(&cx).await.unwrap();
     let monitor = cx.monitor(body_cx.task_id()).await.unwrap();
     cleanup_parked.recv(&cx).await.unwrap();
@@ -669,8 +691,9 @@ async fn streaming_merged_method_body_policies(cx: Cx) {
                         "/api",
                         Router::new().route(
                             "/items",
-                            put(FnHandler::new(|| "unused"))
-                                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(128)),
+                            put(FnHandler::new(|| "unused")).with_body_policy(
+                                RequestBodyPolicy::new().max_total_body_size(128),
+                            ),
                         ),
                     )
                 } else if strict_first {
@@ -754,9 +777,11 @@ async fn streaming_panics_return_transport(cx: Cx) {
             },
             config(),
         );
-        let mut serving = cx.spawn(move |connection_cx| async move {
-            server.serve_owned(&connection_cx, socket).await
-        }).unwrap();
+        let mut serving =
+            cx.spawn(move |connection_cx| async move {
+                server.serve_owned(&connection_cx, socket).await
+            })
+            .unwrap();
         let received = response(&mut peer).await;
         assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 1);
         assert!(received.starts_with("HTTP/1.1 500"), "{received}");
@@ -772,10 +797,12 @@ fn owned_streaming_factory_and_poll_panics_return_500_and_forbid_reuse() {
 }
 
 async fn streaming_abandonment_stays_owned(cx: Cx) {
-    let (socket, mut peer, wire) = pair(
-        b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n",
-    );
-    let enclosing = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let (socket, mut peer, wire) =
+        pair(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n");
+    let enclosing = cx
+        .open_child_region(ChildRegionSpec::inherit())
+        .await
+        .unwrap();
     let (body_ready, mut body_parked) = oneshot::channel();
     let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
     let (release, released) = oneshot::channel();
@@ -792,11 +819,13 @@ async fn streaming_abandonment_stays_owned(cx: Cx) {
             async move {
                 let _body_drop = Dropped(Arc::clone(&drops));
                 let (child_ready, mut child_parked) = oneshot::channel();
-                request_cx.spawn(move |child_cx| async move {
-                    let _child_drop = Dropped(drops);
-                    parked_until_cancelled(&child_cx, child_ready).await;
-                    parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
-                }).unwrap();
+                request_cx
+                    .spawn(move |child_cx| async move {
+                        let _child_drop = Dropped(drops);
+                        parked_until_cancelled(&child_cx, child_ready).await;
+                        parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
+                    })
+                    .unwrap();
                 child_parked.recv(&request_cx).await.unwrap();
                 parked_until_cancelled(&request_cx, body_ready).await;
                 Response::new(200, "OK", Vec::new())
@@ -804,15 +833,20 @@ async fn streaming_abandonment_stays_owned(cx: Cx) {
         },
         config(),
     );
-    let mut serving = enclosing.cx().spawn(move |connection_cx| async move {
-        let mut serving = Box::pin(server.serve_owned(&connection_cx, socket));
-        let mut abandon = pin!(abandoned.recv(&connection_cx));
-        poll_fn(|task| {
-            assert!(serving.as_mut().poll(task).is_pending());
-            abandon.as_mut().poll(task)
-        }).await.unwrap();
-        drop(serving);
-    }).unwrap();
+    let mut serving = enclosing
+        .cx()
+        .spawn(move |connection_cx| async move {
+            let mut serving = Box::pin(server.serve_owned(&connection_cx, socket));
+            let mut abandon = pin!(abandoned.recv(&connection_cx));
+            poll_fn(|task| {
+                assert!(serving.as_mut().poll(task).is_pending());
+                abandon.as_mut().poll(task)
+            })
+            .await
+            .unwrap();
+            drop(serving);
+        })
+        .unwrap();
     let body_cx = body_parked.recv(&cx).await.unwrap();
     let monitor = cx.monitor(body_cx.task_id()).await.unwrap();
     abandon.send_blocking(()).unwrap();
@@ -825,7 +859,8 @@ async fn streaming_abandonment_stays_owned(cx: Cx) {
     poll_fn(|task| {
         assert!(closing.as_mut().poll(task).is_pending());
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     release.send_blocking(()).unwrap();
     closing.await.unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 2);
@@ -839,9 +874,8 @@ fn dropping_owned_streaming_future_closes_transport_and_keeps_descendants_owned(
 
 async fn legacy_streaming_borrows_still_work(cx: Cx) {
     let message = String::from("borrowed handler and transport");
-    let (mut socket, mut peer, _) = pair(
-        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
+    let (mut socket, mut peer, _) =
+        pair(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     let server = Http1StreamingServer::with_config(
         |_request_cx, _request| async { Response::new(200, "OK", message.as_bytes().to_vec()) },
         config(),
@@ -877,11 +911,13 @@ async fn streaming_listener_drains_owned_requests(cx: Cx) {
             async move {
                 let _body_drop = Dropped(Arc::clone(&drops));
                 let (child_ready, mut child_parked) = oneshot::channel();
-                request_cx.spawn(move |child_cx| async move {
-                    let _child_drop = Dropped(drops);
-                    parked_until_cancelled(&child_cx, child_ready).await;
-                    parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
-                }).unwrap();
+                request_cx
+                    .spawn(move |child_cx| async move {
+                        let _child_drop = Dropped(drops);
+                        parked_until_cancelled(&child_cx, child_ready).await;
+                        parked_cleanup(&cleanup_owner, cleanup_ready, released).await;
+                    })
+                    .unwrap();
                 let child = child_parked.recv(&request_cx).await.unwrap();
                 assert_eq!(child.region_id(), request_cx.region_id());
                 let mut ready = Some(body_ready);
@@ -894,7 +930,9 @@ async fn streaming_listener_drains_owned_requests(cx: Cx) {
                         ready.send_blocking(request_cx.clone()).unwrap();
                     }
                     frame
-                }).await {
+                })
+                .await
+                {
                     if let Some(data) = frame.unwrap().into_data() {
                         bytes.extend_from_slice(data.into_inner().as_ref());
                     }
@@ -907,17 +945,22 @@ async fn streaming_listener_drains_owned_requests(cx: Cx) {
             .http_config(config().connection)
             .drain_timeout(Duration::from_secs(5))
             .hard_drain_timeout(Duration::from_secs(10)),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
-    let mut serving = cx.spawn(move |listener_cx| async move {
-        // Also requires the concrete owned streaming listener future be Send.
-        listener.run_streaming_owned_in(&listener_cx).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |listener_cx| async move {
+            // Also requires the concrete owned streaming listener future be Send.
+            listener.run_streaming_owned_in(&listener_cx).await
+        })
+        .unwrap();
     let mut peer = TcpStream::connect(address).await.unwrap();
     peer.write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n")
-        .await.unwrap();
+        .await
+        .unwrap();
     let body = body_parked.recv(&cx).await.unwrap();
     assert_ne!(body.task_id(), serving.task_id());
     assert_ne!(body.region_id(), cx.region_id());
@@ -931,13 +974,21 @@ async fn streaming_listener_drains_owned_requests(cx: Cx) {
     assert_eq!(manager.active_count(), 1);
     assert_eq!(in_flight.load(Ordering::SeqCst), 1);
     poll_fn(|task| {
-        assert!(serving.poll_join(task).is_pending(), "request cleanup still admitted");
+        assert!(
+            serving.poll_join(task).is_pending(),
+            "request cleanup still admitted"
+        );
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     release.send_blocking(()).unwrap();
     let received = response(&mut peer).await;
     assert!(received.ends_with("listener completed"), "{received}");
-    assert!(received.to_ascii_lowercase().contains("\r\nconnection: close\r\n"));
+    assert!(
+        received
+            .to_ascii_lowercase()
+            .contains("\r\nconnection: close\r\n")
+    );
     let stats = serving.join(&cx).await.unwrap().unwrap();
     assert!(stats.drain_report.unwrap().reached_quiescence);
     assert_eq!(drops.load(Ordering::SeqCst), 2);
@@ -954,20 +1005,31 @@ fn body_events<'trace>(
     trace: &'trace [TraceEvent],
     request: &Cx,
 ) -> Vec<(usize, &'trace TraceEvent)> {
-    trace.iter().enumerate().filter(|(_, event)| matches!(event.data,
-        TraceData::Obligation { task, region, kind: ObligationKind::IoOp, .. }
-        if task == request.task_id() && region == request.region_id()
-    )).collect()
+    trace
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(event.data,
+                TraceData::Obligation { task, region, kind: ObligationKind::IoOp, .. }
+                if task == request.task_id() && region == request.region_id()
+            )
+        })
+        .collect()
 }
 
 async fn pending_body_obligation(runtime: &RuntimeHandle, request: &Cx) -> ObligationId {
     loop {
         let trace = runtime.trace_snapshot().expect("live runtime trace");
         let events = body_events(&trace, request);
-        if let Some((_, reserved)) = events.iter().find(|(_, event)| {
-            event.kind == TraceEventKind::ObligationReserve
-        }) {
-            assert_eq!(events.len(), 1, "a parked live body has one unresolved credit");
+        if let Some((_, reserved)) = events
+            .iter()
+            .find(|(_, event)| event.kind == TraceEventKind::ObligationReserve)
+        {
+            assert_eq!(
+                events.len(),
+                1,
+                "a parked live body has one unresolved credit"
+            );
             let TraceData::Obligation { obligation, .. } = reserved.data else {
                 unreachable!("filtered obligation event");
             };
@@ -987,22 +1049,36 @@ fn assert_body_retired(
 ) {
     let trace = runtime.trace_snapshot().expect("live runtime trace");
     let events = body_events(&trace, request);
-    assert_eq!(events.len(), 2, "one reserve and one terminal event for the body");
+    assert_eq!(
+        events.len(),
+        2,
+        "one reserve and one terminal event for the body"
+    );
     assert_eq!(events[0].1.kind, TraceEventKind::ObligationReserve);
     let terminal = events[1];
-    assert_eq!(terminal.1.kind, if abort.is_some() {
-        TraceEventKind::ObligationAbort
-    } else {
-        TraceEventKind::ObligationCommit
-    });
+    assert_eq!(
+        terminal.1.kind,
+        if abort.is_some() {
+            TraceEventKind::ObligationAbort
+        } else {
+            TraceEventKind::ObligationCommit
+        }
+    );
     assert!(matches!(terminal.1.data,
         TraceData::Obligation { obligation: id, abort_reason, .. }
         if id == obligation && abort_reason == abort
     ));
-    let complete = trace.iter().position(|event| event.kind == TraceEventKind::Complete
-        && matches!(event.data, TraceData::Task { task, .. } if task == request.task_id())
-    ).expect("actual request task retired");
-    assert!(terminal.0 < complete, "body credit settles before its holder retires");
+    let complete = trace
+        .iter()
+        .position(|event| {
+            event.kind == TraceEventKind::Complete
+                && matches!(event.data, TraceData::Task { task, .. } if task == request.task_id())
+        })
+        .expect("actual request task retired");
+    assert!(
+        terminal.0 < complete,
+        "body credit settles before its holder retires"
+    );
 }
 
 async fn streaming_body_credit_tracks_eof_and_unread_drain(cx: Cx, runtime: RuntimeHandle) {
@@ -1023,7 +1099,11 @@ async fn streaming_body_credit_tracks_eof_and_unread_drain(cx: Cx, runtime: Runt
                     if unread {
                         drop(request.body);
                         wire.read_pending_armed.store(true, Ordering::SeqCst);
-                        ready.take().unwrap().send_blocking(request_cx.clone()).unwrap();
+                        ready
+                            .take()
+                            .unwrap()
+                            .send_blocking(request_cx.clone())
+                            .unwrap();
                     } else {
                         let mut received = Vec::new();
                         loop {
@@ -1036,7 +1116,8 @@ async fn streaming_body_credit_tracks_eof_and_unread_drain(cx: Cx, runtime: Runt
                                     ready.send_blocking(request_cx.clone()).unwrap();
                                 }
                                 result
-                            }).await;
+                            })
+                            .await;
                             match frame {
                                 Some(Ok(Frame::Data(bytes))) => {
                                     received.extend_from_slice(bytes.into_inner().as_ref());
@@ -1052,9 +1133,11 @@ async fn streaming_body_credit_tracks_eof_and_unread_drain(cx: Cx, runtime: Runt
             },
             config(),
         );
-        let mut serving = cx.spawn(move |connection_cx| async move {
-            server.serve_owned(&connection_cx, socket).await
-        }).unwrap();
+        let mut serving =
+            cx.spawn(move |connection_cx| async move {
+                server.serve_owned(&connection_cx, socket).await
+            })
+            .unwrap();
         let request = body_parked.recv(&cx).await.unwrap();
         let driver = read_parked.recv(&cx).await.unwrap();
         assert_eq!(request.task_id(), driver.task_id());
@@ -1078,9 +1161,8 @@ fn owned_streaming_body_credit_survives_pending_consumer_and_unread_drain_until_
 }
 
 async fn streaming_body_credit_aborts_on_force_close(cx: Cx, runtime: RuntimeHandle) {
-    let (socket, mut peer, wire) = pair(
-        b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n",
-    );
+    let (socket, mut peer, wire) =
+        pair(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n");
     let (body_ready, mut body_parked) = oneshot::channel();
     let (read_ready, mut read_parked) = oneshot::channel();
     *wire.read_pending.lock().unwrap() = Some(read_ready);
@@ -1097,25 +1179,34 @@ async fn streaming_body_credit_aborts_on_force_close(cx: Cx, runtime: RuntimeHan
             async move {
                 let frame = poll_fn(|task| {
                     let result = Pin::new(&mut request.body).poll_frame(task);
-                    if result.is_pending() && let Some(ready) = ready.take() {
+                    if result.is_pending()
+                        && let Some(ready) = ready.take()
+                    {
                         wire.read_pending_armed.store(true, Ordering::SeqCst);
                         ready.send_blocking(request_cx.clone()).unwrap();
                     }
                     result
-                }).await;
-                assert!(matches!(frame, Some(Err(IncomingBodyError::Cancelled {
-                    kind: CancelKind::Shutdown,
-                }))));
-                request_cx.checkpoint().expect_err("request acknowledged force close");
+                })
+                .await;
+                assert!(matches!(
+                    frame,
+                    Some(Err(IncomingBodyError::Cancelled {
+                        kind: CancelKind::Shutdown,
+                    }))
+                ));
+                request_cx
+                    .checkpoint()
+                    .expect_err("request acknowledged force close");
                 acknowledged.store(true, Ordering::SeqCst);
                 Response::new(200, "OK", b"must stay private".to_vec())
             }
         },
         config(),
-    ).with_shutdown_signal(shutdown.clone());
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned(&connection_cx, socket).await
-    }).unwrap();
+    )
+    .with_shutdown_signal(shutdown.clone());
+    let mut serving = cx
+        .spawn(move |connection_cx| async move { server.serve_owned(&connection_cx, socket).await })
+        .unwrap();
     let request = body_parked.recv(&cx).await.unwrap();
     let driver = read_parked.recv(&cx).await.unwrap();
     assert_eq!(request.task_id(), driver.task_id());
@@ -1125,7 +1216,12 @@ async fn streaming_body_credit_aborts_on_force_close(cx: Cx, runtime: RuntimeHan
     serving.join(&cx).await.unwrap().unwrap();
     assert!(acknowledged.load(Ordering::SeqCst));
     assert!(response(&mut peer).await.is_empty());
-    assert_body_retired(&runtime, &request, credit, Some(ObligationAbortReason::Cancel));
+    assert_body_retired(
+        &runtime,
+        &request,
+        credit,
+        Some(ObligationAbortReason::Cancel),
+    );
 }
 
 #[test]

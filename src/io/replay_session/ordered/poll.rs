@@ -18,13 +18,12 @@
 //! latter owns a different pending transcript and is refused on capture/import
 //! rather than publishing incompatible checkpoints. Live output stays unchanged.
 
-use super::{
-    OrderedCaptureError, OrderedRecordedSession, OrderedRecordingClock,
-    OrderedRecordingEntropy, OrderedRecordingIo, OrderedRecordingSession,
-    OrderedReplayClock, OrderedReplayEntropy, OrderedReplayError, OrderedReplayIo,
-    OrderedReplaySession,
-};
 use super::gate::{RecordOrder, ReplayOrder};
+use super::{
+    OrderedCaptureError, OrderedRecordedSession, OrderedRecordingClock, OrderedRecordingEntropy,
+    OrderedRecordingIo, OrderedRecordingSession, OrderedReplayClock, OrderedReplayEntropy,
+    OrderedReplayError, OrderedReplayIo, OrderedReplaySession,
+};
 use crate::io::AsyncWrite;
 use crate::time::TimeSource;
 use crate::util::entropy_replay::RecordingEntropy;
@@ -148,7 +147,8 @@ pub struct PollRecordingInputs<'a, T, S: ?Sized> {
 }
 impl<T, S: ?Sized> fmt::Debug for PollRecordingInputs<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PollRecordingInputs").finish_non_exhaustive()
+        f.debug_struct("PollRecordingInputs")
+            .finish_non_exhaustive()
     }
 }
 
@@ -188,10 +188,14 @@ impl fmt::Debug for PolledRecordedSession {
 impl PolledRecordedSession {
     /// Recorded consumer polls, including the final Ready poll.
     #[must_use]
-    pub fn consumer_polls(&self) -> usize { self.polls.frames.len() }
+    pub fn consumer_polls(&self) -> usize {
+        self.polls.frames.len()
+    }
     /// Recorded I/O polls, including Pending and destructor calls.
     #[must_use]
-    pub fn io_polls(&self) -> usize { self.polls.io.len() }
+    pub fn io_polls(&self) -> usize {
+        self.polls.io.len()
+    }
 
     /// Reproduce the supplied single consumer and verify all observations.
     ///
@@ -212,7 +216,11 @@ impl PolledRecordedSession {
 
     /// As [`run`](Self::run), preserving Send for the factory and its future.
     /// No task is spawned here: the caller supplies the task/region owner.
-    pub async fn run_send<R: Send, F>(self, max_polls: usize, consumer: F) -> Result<R, PolledRunError>
+    pub async fn run_send<R: Send, F>(
+        self,
+        max_polls: usize,
+        consumer: F,
+    ) -> Result<R, PolledRunError>
     where
         F: Send + for<'a> FnOnce(PollReplayInputs<'a>) -> SendPollConsumerFuture<'a, R>,
     {
@@ -234,7 +242,9 @@ impl<T: AsyncWrite, S: TimeSource + ?Sized> OrderedRecordingSession<T, S> {
     /// the owner's responsibility. Factory and destructor observations are
     /// captured; source users must not escape or execute concurrently.
     pub async fn record_polls<R, F>(
-        self, limits: PollCaptureLimits, consumer: F,
+        self,
+        limits: PollCaptureLimits,
+        consumer: F,
     ) -> (R, T, Result<PolledRecordedSession, PolledCaptureError>)
     where
         F: for<'a> FnOnce(PollRecordingInputs<'a, T, S>) -> PollConsumerFuture<'a, R>,
@@ -249,7 +259,9 @@ impl<T: AsyncWrite, S: TimeSource + ?Sized> OrderedRecordingSession<T, S> {
 
     /// As [`record_polls`](Self::record_polls), preserving a Send consumer future.
     pub async fn record_polls_send<R: Send, F>(
-        self, limits: PollCaptureLimits, consumer: F,
+        self,
+        limits: PollCaptureLimits,
+        consumer: F,
     ) -> (R, T, Result<PolledRecordedSession, PolledCaptureError>)
     where
         T: Send,
@@ -274,28 +286,56 @@ struct Recorder<T, S: ?Sized> {
 }
 impl<T, S: TimeSource + ?Sized> Recorder<T, S> {
     fn new(session: OrderedRecordingSession<T, S>, limits: PollCaptureLimits) -> Self {
-        let OrderedRecordingSession { io, entropy, clock, recorder, order } = session;
+        let OrderedRecordingSession {
+            io,
+            entropy,
+            clock,
+            recorder,
+            order,
+        } = session;
         let trace = Arc::new(RecordTrace::new(limits));
-        if order.effect_position() != 0 { trace.invalidate(PollCaptureError::Inconsistent); }
+        if order.effect_position() != 0 {
+            trace.invalidate(PollCaptureError::Inconsistent);
+        }
         let io = PolledIo::record(io, Arc::clone(&trace), Arc::clone(&order));
-        Self { io, entropy, clock, recorder, order, trace }
+        Self {
+            io,
+            entropy,
+            clock,
+            recorder,
+            order,
+            trace,
+        }
     }
     fn inputs(&mut self) -> PollRecordingInputs<'_, T, S> {
-        PollRecordingInputs { io: &mut self.io, entropy: &self.entropy, clock: &self.clock }
+        PollRecordingInputs {
+            io: &mut self.io,
+            entropy: &self.entropy,
+            clock: &self.clock,
+        }
     }
     fn finish(self) -> (T, Result<PolledRecordedSession, PolledCaptureError>) {
         let polls = self.trace.finish(self.order.effect_position());
         let (io, ordered) = OrderedRecordingSession {
-            io: self.io.into_inner(), entropy: self.entropy, clock: self.clock,
-            recorder: self.recorder, order: self.order,
-        }.into_parts();
+            io: self.io.into_inner(),
+            entropy: self.entropy,
+            clock: self.clock,
+            recorder: self.recorder,
+            order: self.order,
+        }
+        .into_parts();
         let error = PolledCaptureError {
             polls: polls.as_ref().err().copied(),
             ordered: ordered.as_ref().err().copied(),
         };
         let result = match (polls, ordered) {
-            (Ok(polls), Ok(ordered)) if polls.covers(&ordered) => Ok(PolledRecordedSession { ordered, polls }),
-            (Ok(_), Ok(_)) => Err(PolledCaptureError { polls: Some(PollCaptureError::Inconsistent), ordered: None }),
+            (Ok(polls), Ok(ordered)) if polls.covers(&ordered) => {
+                Ok(PolledRecordedSession { ordered, polls })
+            }
+            (Ok(_), Ok(_)) => Err(PolledCaptureError {
+                polls: Some(PollCaptureError::Inconsistent),
+                ordered: None,
+            }),
             _ => Err(error),
         };
         (io, result)
@@ -312,20 +352,44 @@ struct Replayer {
 impl Replayer {
     fn new(session: PolledRecordedSession, max: usize) -> Result<Self, PolledRunError> {
         let required = session.consumer_polls();
-        if required > max { return Err(PolledRunError::Budget { required, limit: max }); }
-        let OrderedReplaySession { io, entropy, clock, order } = session.ordered.replay();
+        if required > max {
+            return Err(PolledRunError::Budget {
+                required,
+                limit: max,
+            });
+        }
+        let OrderedReplaySession {
+            io,
+            entropy,
+            clock,
+            order,
+        } = session.ordered.replay();
         let trace = Arc::new(ReplayTrace::new(session.polls));
         let io = PolledIo::replay(io, Arc::clone(&trace), Arc::clone(&order));
-        Ok(Self { io, entropy, clock, order, trace })
+        Ok(Self {
+            io,
+            entropy,
+            clock,
+            order,
+            trace,
+        })
     }
     fn inputs(&mut self) -> PollReplayInputs<'_> {
-        PollReplayInputs { io: &mut self.io, entropy: &self.entropy, clock: &self.clock }
+        PollReplayInputs {
+            io: &mut self.io,
+            entropy: &self.entropy,
+            clock: &self.clock,
+        }
     }
     fn finish(self) -> Result<(), PolledRunError> {
         self.trace.finish(self.order.effect_position())?;
         OrderedReplaySession {
-            io: self.io.into_inner(), entropy: self.entropy, clock: self.clock, order: self.order,
-        }.verify_complete()?;
+            io: self.io.into_inner(),
+            entropy: self.entropy,
+            clock: self.clock,
+            order: self.order,
+        }
+        .verify_complete()?;
         Ok(())
     }
 }
@@ -337,17 +401,22 @@ async fn drive_record<F: Future>(future: F, trace: &RecordTrace, order: &RecordO
         let result = future.as_mut().poll(cx);
         trace.boundary(order.effect_position(), result.is_ready());
         result
-    }).await
+    })
+    .await
     // The pinned future is destroyed before control returns to Recorder::finish.
 }
 
 async fn drive_replay<F: Future>(
-    future: F, trace: &ReplayTrace, order: &ReplayOrder,
+    future: F,
+    trace: &ReplayTrace,
+    order: &ReplayOrder,
 ) -> Result<F::Output, PolledRunError> {
     trace.construction(order.effect_position())?;
     let mut future = std::pin::pin!(future);
     poll_fn(|cx| {
-        if let Err(error) = trace.before_poll() { return Poll::Ready(Err(error.into())); }
+        if let Err(error) = trace.before_poll() {
+            return Poll::Ready(Err(error.into()));
+        }
         let result = future.as_mut().poll(cx);
         if let Err(error) = trace.boundary(order.effect_position(), result.is_ready()) {
             return Poll::Ready(Err(error.into()));
@@ -361,7 +430,8 @@ async fn drive_replay<F: Future>(
                 Poll::Pending
             }
         }
-    }).await
+    })
+    .await
 }
 
 #[cfg(test)]

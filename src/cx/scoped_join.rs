@@ -170,7 +170,8 @@ impl std::fmt::Display for ScopedJoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooManyBranches { total } => write!(
-                f, "scoped join has {total} inputs; at most {MAX_SCOPED_JOIN_BRANCHES} are supported",
+                f,
+                "scoped join has {total} inputs; at most {MAX_SCOPED_JOIN_BRANCHES} are supported",
             ),
             Self::Spawn(error) => write!(f, "scoped join requires an owning runtime: {error}"),
         }
@@ -223,7 +224,9 @@ impl<T> Branch<T> {
             Ok(BodyResult::NotStarted) => ScopedJoinTask::NotStarted,
             Err(error) => ScopedJoinTask::Joined(Err(error)),
         };
-        let _ = self.region.request_close(CancelReason::user("scoped join body completed"));
+        let _ = self
+            .region
+            .request_close(CancelReason::user("scoped join body completed"));
         true
     }
 }
@@ -238,7 +241,9 @@ struct OwnedJoin<T> {
 impl<T> OwnedJoin<T> {
     fn new(total: usize, gateway: &Arc<SpawnGateway>) -> Self {
         Self {
-            branches: (0..total).map(|index| Branch::new(index, gateway)).collect(),
+            branches: (0..total)
+                .map(|index| Branch::new(index, gateway))
+                .collect(),
             armed: true,
         }
     }
@@ -592,7 +597,9 @@ fn retire_bounded_input<I, F>(
 }
 
 fn owner_reason<Caps>(owner: &Cx<Caps>) -> CancelReason {
-    owner.cancel_reason().unwrap_or_else(|| CancelReason::user("scoped join owner cancelled"))
+    owner
+        .cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("scoped join owner cancelled"))
 }
 
 /// Observe without acknowledging cancellation or charging the owner's budget.
@@ -641,17 +648,23 @@ fn record_bounded_input_panic(
 async fn close_receipt(
     region: Arc<BranchRegionSlot>,
     gateway: Arc<SpawnGateway>,
-) -> (Option<RegionId>, Option<Result<ScopedJoinClose, ChildRegionError>>) {
+) -> (
+    Option<RegionId>,
+    Option<Result<ScopedJoinClose, ChildRegionError>>,
+) {
     let Some(minted) = region.get() else {
         return (None, None);
     };
     let closed = RegionQuiescence::watch(minted.close_notify(), Some(gateway)).await;
     let receipt = closed.and_then(|()| {
-        minted.close_outcome().map(|receipt| ScopedJoinClose {
-            outcome: receipt.outcome,
-            cleanup_outcome: receipt.cleanup_outcome,
-            descendant_panic: receipt.descendant_panic,
-        }).ok_or(ChildRegionError::RuntimeUnavailable)
+        minted
+            .close_outcome()
+            .map(|receipt| ScopedJoinClose {
+                outcome: receipt.outcome,
+                cleanup_outcome: receipt.cleanup_outcome,
+                descendant_panic: receipt.descendant_panic,
+            })
+            .ok_or(ChildRegionError::RuntimeUnavailable)
     });
     (Some(minted.region_id), Some(receipt))
 }
@@ -1029,7 +1042,8 @@ where
                 owner_cancellation: None,
             });
         }
-        let gateway = self.spawn_gateway_handle()
+        let gateway = self
+            .spawn_gateway_handle()
             .ok_or(ScopedJoinError::Spawn(SpawnError::RuntimeUnavailable))?;
         // Guard declared after the iterator: cancellation must precede unused
         // factory destructors if this future is abandoned or unwinds.
@@ -1098,7 +1112,8 @@ where
                 } else {
                     Poll::Pending
                 }
-            }).await
+            })
+            .await
         };
         let reason = match &stop {
             ScopedJoinStop::Cancelled(reason) => reason.clone(),
@@ -1119,14 +1134,26 @@ where
             for branch in &mut owned.branches {
                 all_done &= branch.poll_result(task);
             }
-            if all_done { Poll::Ready(()) } else { Poll::Pending }
-        }).await;
+            if all_done {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
 
         // Each watch captures only the region slot, not &Branch<T>. This keeps
         // the collecting future Send even when a retained T is not Sync.
-        let mut closing: Vec<_> = owned.branches.iter().map(|branch| {
-            Some(Box::pin(close_receipt(Arc::clone(&branch.region), Arc::clone(&gateway))))
-        }).collect();
+        let mut closing: Vec<_> = owned
+            .branches
+            .iter()
+            .map(|branch| {
+                Some(Box::pin(close_receipt(
+                    Arc::clone(&branch.region),
+                    Arc::clone(&gateway),
+                )))
+            })
+            .collect();
         poll_fn(|task| {
             if cancelled.as_mut().poll(task).is_ready()
                 && observe_owner(self, &mut owner_cancellation)
@@ -1145,13 +1172,24 @@ where
                     }
                 }
             }
-            if all_done { Poll::Ready(()) } else { Poll::Pending }
-        }).await;
+            if all_done {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
         observe_owner(self, &mut owner_cancellation);
         owned.armed = false;
-        let attempts = std::mem::take(&mut owned.branches).into_iter()
-            .map(|branch| branch.receipt).collect();
-        Ok(ScopedJoinReport { stop, attempts, owner_cancellation })
+        let attempts = std::mem::take(&mut owned.branches)
+            .into_iter()
+            .map(|branch| branch.receipt)
+            .collect();
+        Ok(ScopedJoinReport {
+            stop,
+            attempts,
+            owner_cancellation,
+        })
     }
 
     /// Join two differently typed factories with [`Self::join_all_scoped`]'s
@@ -1180,14 +1218,20 @@ where
         ];
         let report = self.join_all_scoped(factories).await?;
         let mut attempts = report.attempts.into_iter();
-        let left = map_attempt(attempts.next().expect("left input retained"), |value| match value {
-            PairValue::Left(value) => value,
-            PairValue::Right(_) => unreachable!("left factory returns only a left value"),
-        });
-        let right = map_attempt(attempts.next().expect("right input retained"), |value| match value {
-            PairValue::Right(value) => value,
-            PairValue::Left(_) => unreachable!("right factory returns only a right value"),
-        });
+        let left = map_attempt(
+            attempts.next().expect("left input retained"),
+            |value| match value {
+                PairValue::Left(value) => value,
+                PairValue::Right(_) => unreachable!("left factory returns only a left value"),
+            },
+        );
+        let right = map_attempt(
+            attempts.next().expect("right input retained"),
+            |value| match value {
+                PairValue::Right(value) => value,
+                PairValue::Left(_) => unreachable!("right factory returns only a right value"),
+            },
+        );
         Ok(ScopedJoinPairReport {
             stop: report.stop,
             left,
@@ -1197,20 +1241,28 @@ where
     }
 }
 
-enum PairValue<L, R> { Left(L), Right(R) }
+enum PairValue<L, R> {
+    Left(L),
+    Right(R),
+}
 
-type PairFactory<Caps, L, R> = Box<
-    dyn FnOnce(Cx<Caps>) -> Pin<Box<dyn Future<Output = PairValue<L, R>> + Send>> + Send,
->;
+type PairFactory<Caps, L, R> =
+    Box<dyn FnOnce(Cx<Caps>) -> Pin<Box<dyn Future<Output = PairValue<L, R>> + Send>> + Send>;
 
-fn map_attempt<T, U>(attempt: ScopedJoinAttempt<T>, f: impl FnOnce(T) -> U) -> ScopedJoinAttempt<U> {
+fn map_attempt<T, U>(
+    attempt: ScopedJoinAttempt<T>,
+    f: impl FnOnce(T) -> U,
+) -> ScopedJoinAttempt<U> {
     let task = match attempt.task {
         ScopedJoinTask::NotStarted => ScopedJoinTask::NotStarted,
         ScopedJoinTask::SubmissionFailed(error) => ScopedJoinTask::SubmissionFailed(error),
         ScopedJoinTask::Joined(result) => ScopedJoinTask::Joined(result.map(f)),
     };
     ScopedJoinAttempt {
-        index: attempt.index, task, region_id: attempt.region_id, close: attempt.close,
+        index: attempt.index,
+        task,
+        region_id: attempt.region_id,
+        close: attempt.close,
     }
 }
 

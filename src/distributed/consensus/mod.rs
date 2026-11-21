@@ -20,12 +20,12 @@ pub use authenticated::{
     PbftIngressOutcome, PbftMembership, PbftPacketTransport,
 };
 pub use pbft::{PbftConfig, PbftConsensus, PbftNode, PbftState};
-#[cfg(not(target_arch = "wasm32"))]
-pub use udp::UdpPbftTransport;
 pub use types::{
     ConsensusBatch, ConsensusError, ConsensusRequest, ConsensusResponse, MessageDigest, PhaseKind,
     ReplicaId, SequenceNumber, ViewNumber,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use udp::UdpPbftTransport;
 
 #[cfg(test)]
 mod tests;

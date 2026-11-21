@@ -158,9 +158,12 @@ fn registered_unary_round_trips_binary_and_text_over_http1_and_http2() {
             assert!(response.headers.iter().any(|(name, value)| {
                 name == "content-length" && value == &response.body.len().to_string()
             }));
-            assert!(response.headers.iter().any(|(name, value)| {
-                name == "grpc-accept-encoding" && value == "identity"
-            }));
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "grpc-accept-encoding" && value == "identity" })
+            );
         }
     }
     assert_eq!(calls.load(Ordering::SeqCst), 6);
@@ -178,11 +181,15 @@ fn web_unary_compression_refusal_keeps_advertisement_in_initial_headers() {
             } else {
                 compressed.to_vec()
             };
-            request.headers.push(("grpc-encoding".to_owned(), encoding.to_owned()));
+            request
+                .headers
+                .push(("grpc-encoding".to_owned(), encoding.to_owned()));
             let response = run(&server, request, GrpcWebConfig::default());
             assert_eq!(status(&response), "12");
             assert_eq!(binary_body(&response)[0], 0x80, "no message on refusal");
-            let advertised: Vec<_> = response.headers.iter()
+            let advertised: Vec<_> = response
+                .headers
+                .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
                 .map(|(_, value)| value.as_str())
                 .collect();
@@ -213,10 +220,7 @@ fn independently_padded_text_chunks_may_split_the_frame_header_and_payload() {
 #[test]
 fn accept_negotiates_independently_and_honors_quality_and_explicit_exclusion() {
     let cases = [
-        (
-            "application/grpc-web-text",
-            Some(ContentType::GrpcWebText),
-        ),
+        ("application/grpc-web-text", Some(ContentType::GrpcWebText)),
         (
             "application/grpc-web-text;q=0.5, application/grpc-web;q=0.8",
             Some(ContentType::GrpcWeb),
@@ -246,10 +250,9 @@ fn accept_negotiates_independently_and_honors_quality_and_explicit_exclusion() {
     }
     let (server, _) = server();
     let mut request = request(ContentType::GrpcWeb);
-    request.headers.push((
-        "accept".to_owned(),
-        "application/grpc-web-text".to_owned(),
-    ));
+    request
+        .headers
+        .push(("accept".to_owned(), "application/grpc-web-text".to_owned()));
     let response = run(&server, request, GrpcWebConfig::default());
     assert_eq!(status(&response), "0");
     assert!(
@@ -393,7 +396,10 @@ fn request_metadata_peer_and_compression_flag_survive_translation() {
     assert_eq!(native.peer_addr, Some("127.0.0.1:1234".parse().unwrap()));
     assert_eq!(native.header_value("grpc-timeout"), Some("100m"));
     assert_eq!(native.header_value("grpc-encoding"), Some("gzip"));
-    assert_eq!(native.header_value("authorization"), Some("Bearer test-token"));
+    assert_eq!(
+        native.header_value("authorization"),
+        Some("Bearer test-token")
+    );
     assert!(native.header_value("connection").is_none());
     assert!(native.header_value("x-hop").is_none());
 }
@@ -499,7 +505,6 @@ fn zero_native_deadline_prevents_service_invocation() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-
 // Real HTTP/1.1 producer tests use an independent wire decoder and explicit
 // source readiness/drop witnesses (asupersync-server-stack-hardening-eeexl1.10).
 #[derive(Clone, Copy)]
@@ -553,9 +558,10 @@ impl NamedService for WebWatch {
 
 impl ServiceHandler for WebWatch {
     fn descriptor(&self) -> &ServiceDescriptor {
-        static METHODS: [MethodDescriptor; 1] = [
-            MethodDescriptor::server_streaming("Values", "/web.Watch/Values"),
-        ];
+        static METHODS: [MethodDescriptor; 1] = [MethodDescriptor::server_streaming(
+            "Values",
+            "/web.Watch/Values",
+        )];
         static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Watch", "web", &METHODS);
         &DESCRIPTOR
     }
@@ -669,9 +675,7 @@ impl Streaming for WebWatchSource {
         let index = self.index;
         self.index += 1;
         match self.mode {
-            WebStreamMode::Infinite => {
-                Poll::Ready(Some(Ok(Bytes::from(vec![0x55; 4096]))))
-            }
+            WebStreamMode::Infinite => Poll::Ready(Some(Ok(Bytes::from(vec![0x55; 4096])))),
             WebStreamMode::Error if index == 1 => {
                 Poll::Ready(Some(Err(Status::invalid_argument("bad %\n"))))
             }
@@ -756,8 +760,12 @@ impl WebStreamPeer {
     fn new(addr: SocketAddr, mode: ContentType, timeout: Option<&str>) -> Self {
         let mut socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
             .expect("connect real HTTP/1 listener");
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let request = request(mode);
         write!(
             socket,
@@ -793,7 +801,8 @@ impl WebStreamPeer {
                 break;
             }
             let (key, value) = line.trim_end_matches("\r\n").split_once(':').unwrap();
-            peer.initial.push((key.to_ascii_lowercase(), value.trim().to_owned()));
+            peer.initial
+                .push((key.to_ascii_lowercase(), value.trim().to_owned()));
             if key.eq_ignore_ascii_case("content-type") {
                 content_type = Some(value.trim().to_owned());
             }
@@ -801,7 +810,10 @@ impl WebStreamPeer {
                 assert_eq!(value.trim(), "chunked");
                 chunked = true;
             }
-            assert!(!key.eq_ignore_ascii_case("grpc-status"), "status belongs in body");
+            assert!(
+                !key.eq_ignore_ascii_case("grpc-status"),
+                "status belongs in body"
+            );
             assert!(!key.eq_ignore_ascii_case("content-length"));
         }
         assert_eq!(content_type.as_deref(), Some(mode.as_header_value()));
@@ -816,7 +828,8 @@ impl WebStreamPeer {
                 .as_mut()
                 .expect("live peer socket")
                 .read_line(&mut line)
-                .expect("bounded wire read") > 0
+                .expect("bounded wire read")
+                > 0
         );
         assert!(line.ends_with("\r\n"));
         assert!(line.len() <= 8192, "test peer header bound");
@@ -826,15 +839,18 @@ impl WebStreamPeer {
     fn chunk(&mut self) -> bool {
         assert!(!self.ended);
         let line = self.line();
-        let length = usize::from_str_radix(line.trim_end_matches("\r\n"), 16)
-            .expect("HTTP chunk size");
+        let length =
+            usize::from_str_radix(line.trim_end_matches("\r\n"), 16).expect("HTTP chunk size");
         if length == 0 {
             assert_eq!(self.line(), "\r\n", "no HTTP trailers are needed");
             assert!(self.quartet.is_empty(), "complete final base64 quartet");
             self.ended = true;
             return false;
         }
-        assert!(length <= 7, "text expansion must respect the HTTP DATA bound");
+        assert!(
+            length <= 7,
+            "text expansion must respect the HTTP DATA bound"
+        );
         let mut data = vec![0; length];
         self.socket
             .as_mut()
@@ -859,7 +875,9 @@ impl WebStreamPeer {
                         self.padded_quartets += 1;
                     }
                     self.binary.extend(
-                        STANDARD.decode(&self.quartet).expect("independent base64 quartet"),
+                        STANDARD
+                            .decode(&self.quartet)
+                            .expect("independent base64 quartet"),
                     );
                     self.quartet.clear();
                 }
@@ -914,7 +932,10 @@ impl WebStreamPeer {
 
     fn terminal(&mut self, code: &str) -> String {
         let (flag, payload) = self.frame();
-        assert_eq!(flag, 0x80, "terminal status is a gRPC-Web trailer body frame");
+        assert_eq!(
+            flag, 0x80,
+            "terminal status is a gRPC-Web trailer body frame"
+        );
         let block = String::from_utf8(payload).unwrap();
         let codes: Vec<_> = block
             .split("\r\n")
@@ -922,7 +943,10 @@ impl WebStreamPeer {
             .collect();
         assert_eq!(codes, vec![code]);
         assert!(block.ends_with("\r\n"));
-        assert!(!block.ends_with("\r\n\r\n"), "no HTTP header-block terminator");
+        assert!(
+            !block.ends_with("\r\n\r\n"),
+            "no HTTP header-block terminator"
+        );
         assert!(self.binary.is_empty(), "no data follows terminal trailers");
         assert!(!self.chunk(), "terminal trailer frame must be last");
         block
@@ -949,7 +973,9 @@ where
     let handler = server
         .registered_grpc_web_streaming_handler(wire, web_stream_config())
         .expect("valid gRPC-Web streaming handler");
-    let runtime = RuntimeBuilder::current_thread().build().expect("native runtime");
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native runtime");
     let handle = runtime.handle().clone();
     let peer_probe = Arc::clone(&probe);
     runtime.block_on(runtime.handle().spawn(async move {
@@ -990,14 +1016,18 @@ fn native_web_stream_delivers_before_source_eof_in_binary_and_padded_text() {
                     name == "grpc-accept-encoding" && value == "identity"
                 }));
                 assert_eq!(peer.frame(), (0, b"first".to_vec()));
-                parks.recv_timeout(Duration::from_secs(2)).expect("source parked after first");
+                parks
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source parked after first");
                 assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
                 probe.release();
                 assert_eq!(peer.frame(), (0, b"second".to_vec()));
                 let trailers = peer.terminal("0");
                 assert!(trailers.contains("x-end: done\r\n"));
                 assert!(trailers.contains("x-proof-bin: AQI\r\n"));
-                retirements.recv_timeout(Duration::from_secs(2)).expect("source dropped");
+                retirements
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source dropped");
                 if peer.mode.is_text_mode() {
                     assert!(peer.padded_quartets >= 2, "padding before text-stream EOF");
                 }
@@ -1099,21 +1129,31 @@ fn native_web_stream_initial_metadata_is_in_the_head_for_binary_and_text() {
             GrpcWebConfig::default(),
             None,
             |peer, parks, retired, probe| {
-                let values: Vec<_> = peer.initial.iter()
+                let values: Vec<_> = peer
+                    .initial
+                    .iter()
                     .filter(|(key, _)| key == "x-start")
                     .map(|(_, value)| value.as_str())
                     .collect();
                 assert_eq!(values, ["first", "second"]);
-                assert!(peer.initial.iter().any(|(key, value)| key == "x-start-bin" && value == "AP8"));
+                assert!(
+                    peer.initial
+                        .iter()
+                        .any(|(key, value)| key == "x-start-bin" && value == "AP8")
+                );
                 assert!(peer.initial.iter().all(|(key, _)| key != "x-end"));
                 assert_eq!(peer.frame(), (0, b"first".to_vec()));
-                parks.recv_timeout(Duration::from_secs(2)).expect("source parked after first message");
+                parks
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source parked after first message");
                 probe.release();
                 assert_eq!(peer.frame(), (0, b"second".to_vec()));
                 let trailers = peer.terminal("0");
                 assert!(!trailers.contains("x-start"));
                 assert!(trailers.contains("x-end: done\r\n"));
-                retired.recv_timeout(Duration::from_secs(2)).expect("source retired");
+                retired
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source retired");
             },
         );
     }
@@ -1133,9 +1173,15 @@ fn native_web_stream_rejects_initial_metadata_before_source_polling() {
                 GrpcWebConfig::default(),
                 None,
                 move |peer, _, retired, probe| {
-                    assert!(peer.initial.iter().all(|(key, _)| !key.starts_with("x-start")));
+                    assert!(
+                        peer.initial
+                            .iter()
+                            .all(|(key, _)| !key.starts_with("x-start"))
+                    );
                     peer.terminal(status);
-                    retired.recv_timeout(Duration::from_secs(2)).expect("unpolled source retired");
+                    retired
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("unpolled source retired");
                     assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
                     assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
                 },
@@ -1154,7 +1200,9 @@ fn native_web_stream_error_preserves_complete_message_and_terminal_status() {
             None,
             |peer, parks, retirements, probe| {
                 assert_eq!(peer.frame(), (0, b"first".to_vec()));
-                parks.recv_timeout(Duration::from_secs(2)).expect("source parked");
+                parks
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("source parked");
                 probe.release();
                 let trailers = peer.terminal("3");
                 // grpc-message keeps an internal space literal, as the gRPC
@@ -1164,7 +1212,9 @@ fn native_web_stream_error_preserves_complete_message_and_terminal_status() {
                     "{trailers:?}"
                 );
                 assert!(!trailers.contains("x-end:"));
-                retirements.recv_timeout(Duration::from_secs(2)).expect("error source dropped");
+                retirements
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("error source dropped");
             },
         );
     }
@@ -1182,7 +1232,9 @@ fn native_web_stream_wire_limits_preserve_clean_terminal_framing() {
         None,
         |peer, _parks, retirements, _probe| {
             peer.terminal("8"); // No prefix or partial message was queued first.
-            retirements.recv_timeout(Duration::from_secs(2)).expect("oversize source dropped");
+            retirements
+                .recv_timeout(Duration::from_secs(2))
+                .expect("oversize source dropped");
         },
     );
     web_native_case(
@@ -1195,11 +1247,15 @@ fn native_web_stream_wire_limits_preserve_clean_terminal_framing() {
         None,
         |peer, parks, retirements, probe| {
             assert_eq!(peer.frame(), (0, b"first".to_vec()));
-            parks.recv_timeout(Duration::from_secs(2)).expect("source parked");
+            parks
+                .recv_timeout(Duration::from_secs(2))
+                .expect("source parked");
             probe.release();
             assert_eq!(peer.frame(), (0, b"second".to_vec()));
             assert_eq!(peer.terminal("8"), "grpc-status: 8\r\n");
-            retirements.recv_timeout(Duration::from_secs(2)).expect("bounded trailer source dropped");
+            retirements
+                .recv_timeout(Duration::from_secs(2))
+                .expect("bounded trailer source dropped");
         },
     );
 }
@@ -1212,10 +1268,14 @@ fn native_web_stream_deadline_retires_a_parked_source_and_delivers_status() {
         GrpcWebConfig::default(),
         Some("1S"),
         |peer, parks, retirements, probe| {
-            parks.recv_timeout(Duration::from_secs(2)).expect("pending source registered");
+            parks
+                .recv_timeout(Duration::from_secs(2))
+                .expect("pending source registered");
             assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
             peer.terminal("4");
-            retirements.recv_timeout(Duration::from_secs(2)).expect("deadline dropped source");
+            retirements
+                .recv_timeout(Duration::from_secs(2))
+                .expect("deadline dropped source");
         },
     );
 }
@@ -1228,11 +1288,15 @@ fn native_web_stream_call_cancellation_retires_a_parked_source() {
         GrpcWebConfig::default(),
         None,
         |peer, parks, retirements, probe| {
-            let cx = parks.recv_timeout(Duration::from_secs(2)).expect("pending source registered");
+            let cx = parks
+                .recv_timeout(Duration::from_secs(2))
+                .expect("pending source registered");
             assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
             cx.cancel_with(CancelKind::User, Some("test cancels parked RPC"));
             peer.terminal("1");
-            retirements.recv_timeout(Duration::from_secs(2)).expect("cancel dropped source");
+            retirements
+                .recv_timeout(Duration::from_secs(2))
+                .expect("cancel dropped source");
         },
     );
 }
@@ -1248,7 +1312,9 @@ fn native_web_stream_disconnect_retires_active_source_before_listener_shutdown()
             assert_eq!(peer.frame(), (0, vec![0x55; 4096]));
             assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
             peer.disconnect();
-            retirements.recv_timeout(Duration::from_secs(3)).expect("disconnect dropped source");
+            retirements
+                .recv_timeout(Duration::from_secs(3))
+                .expect("disconnect dropped source");
             assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
         },
     );
@@ -1281,7 +1347,11 @@ fn produced_web_stream_bounds_prefetch_when_consumer_stalls_and_drops_source_on_
             .registered_grpc_web_streaming_handler(GrpcWebConfig::default(), web_stream_config())
             .unwrap();
         let produced = futures_lite::future::block_on(handler(cx.clone(), input));
-        assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "admission precedes user code");
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            0,
+            "admission precedes user code"
+        );
         assert_eq!(produced.max_retained_data_bytes(), 28); // (2 + 2) * 7.
         let (response, mut producer) = produced.into_parts(&cx);
         let mut task = Context::from_waker(Waker::noop());
@@ -1290,11 +1360,20 @@ fn produced_web_stream_bounds_prefetch_when_consumer_stalls_and_drops_source_on_
         for _ in 0..4 {
             assert!(producer.as_mut().poll(&mut task).is_pending());
         }
-        assert_eq!(probe.polls.load(Ordering::SeqCst), 1, "full queue stops source polling");
+        assert_eq!(
+            probe.polls.load(Ordering::SeqCst),
+            1,
+            "full queue stops source polling"
+        );
         assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
         drop(response.body);
-        assert!(matches!(producer.as_mut().poll(&mut task), Poll::Ready(Err(_))));
-        retirements.recv_timeout(Duration::from_secs(1)).expect("closed channel drops source");
+        assert!(matches!(
+            producer.as_mut().poll(&mut task),
+            Poll::Ready(Err(_))
+        ));
+        retirements
+            .recv_timeout(Duration::from_secs(1))
+            .expect("closed channel drops source");
         assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
     }
 }
@@ -1312,7 +1391,9 @@ fn produced_web_streaming_handler_preserves_registered_unary_dispatch() {
         let (mut response, producer) = produced.into_parts(&cx);
         let collect = async move {
             let mut bytes = Vec::new();
-            while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+            while let Some(frame) =
+                poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await
+            {
                 match frame.expect("produced unary frame") {
                     Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
                     Frame::Trailers(_) => panic!("gRPC-Web status belongs in the body"),
@@ -1322,9 +1403,8 @@ fn produced_web_streaming_handler_preserves_registered_unary_dispatch() {
             reply.headers = response.head.headers;
             reply
         };
-        let (completion, response) = futures_lite::future::block_on(
-            futures_lite::future::zip(producer, collect),
-        );
+        let (completion, response) =
+            futures_lite::future::block_on(futures_lite::future::zip(producer, collect));
         assert!(completion.is_ok());
         assert_eq!(status(&response), "0");
         assert!(binary_body(&response).starts_with(b"\x00\x00\x00\x00\x04ping"));
@@ -1338,21 +1418,28 @@ fn produced_web_stream_compression_refusal_preserves_retry_advertisement() {
         let (server, probe, _parks, _retirements) = web_stream_fixture(WebStreamMode::Never);
         let cx = Cx::for_testing();
         let mut request = request(content_type);
-        request.headers.push(("grpc-encoding".to_owned(), "zstd".to_owned()));
+        request
+            .headers
+            .push(("grpc-encoding".to_owned(), "zstd".to_owned()));
         let input = produced_request(&cx, request, "/web.Watch/Values");
         let handler = server
             .registered_grpc_web_streaming_handler(GrpcWebConfig::default(), web_stream_config())
             .unwrap();
         let produced = futures_lite::future::block_on(handler(cx.clone(), input));
         let (mut response, producer) = produced.into_parts(&cx);
-        let advertised: Vec<_> = response.head.headers.iter()
+        let advertised: Vec<_> = response
+            .head
+            .headers
+            .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("grpc-accept-encoding"))
             .map(|(_, value)| value.as_str())
             .collect();
         assert_eq!(advertised, ["identity"]);
         let collect = async move {
             let mut bytes = Vec::new();
-            while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+            while let Some(frame) =
+                poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await
+            {
                 match frame.expect("produced refusal frame") {
                     Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
                     Frame::Trailers(_) => panic!("gRPC-Web status belongs in the body"),
@@ -1362,9 +1449,8 @@ fn produced_web_stream_compression_refusal_preserves_retry_advertisement() {
             reply.headers = response.head.headers;
             reply
         };
-        let (completion, response) = futures_lite::future::block_on(
-            futures_lite::future::zip(producer, collect),
-        );
+        let (completion, response) =
+            futures_lite::future::block_on(futures_lite::future::zip(producer, collect));
         assert!(completion.is_ok());
         assert_eq!(status(&response), "12");
         assert_eq!(binary_body(&response)[0], 0x80);
@@ -1413,7 +1499,9 @@ mod http_request_decoding {
         let (mut response, producer) = produced.into_parts(cx);
         let collect = async move {
             let mut bytes = Vec::new();
-            while let Some(frame) = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await {
+            while let Some(frame) =
+                poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await
+            {
                 match frame.unwrap() {
                     Frame::Data(data) => bytes.extend_from_slice(data.chunk()),
                     Frame::Trailers(_) => panic!("gRPC-Web status belongs in the body"),
@@ -1423,15 +1511,15 @@ mod http_request_decoding {
             reply.headers = response.head.headers;
             reply
         };
-        let (completion, reply) = futures_lite::future::block_on(
-            futures_lite::future::zip(producer, collect),
-        );
+        let (completion, reply) =
+            futures_lite::future::block_on(futures_lite::future::zip(producer, collect));
         assert!(completion.is_ok());
         reply
     }
 
     fn reply_frames(response: &HttpResponse) -> Vec<(u8, Vec<u8>)> {
-        let text = response.header_value("content-type")
+        let text = response
+            .header_value("content-type")
             .is_some_and(|value| value.contains("grpc-web-text"));
         let bytes = if text {
             let mut bytes = Vec::new();
@@ -1459,7 +1547,8 @@ mod http_request_decoding {
         let (flag, payload) = frames.last().expect("terminal gRPC-Web frame");
         assert_eq!(*flag, 0x80);
         let block = std::str::from_utf8(payload).unwrap();
-        let statuses: Vec<_> = block.split("\r\n")
+        let statuses: Vec<_> = block
+            .split("\r\n")
             .filter_map(|line| line.strip_prefix("grpc-status: "))
             .collect();
         assert_eq!(statuses.len(), 1);
@@ -1471,7 +1560,9 @@ mod http_request_decoding {
         let (server, calls) = server();
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             let reply = run_decoded(
-                &server, request(mode), GrpcWebConfig::default(),
+                &server,
+                request(mode),
+                GrpcWebConfig::default(),
                 ContentDecodeLimits::new(1024, 1024),
             );
             assert_eq!(terminal_code(&reply), "0");
@@ -1481,25 +1572,45 @@ mod http_request_decoding {
 
         for (encoding, expected) in [("unknown-codec", "12"), ("gzip;level=1", "3"), ("", "3")] {
             let mut input = request(ContentType::GrpcWeb);
-            input.headers.push(("content-encoding".to_owned(), encoding.to_owned()));
+            input
+                .headers
+                .push(("content-encoding".to_owned(), encoding.to_owned()));
             let reply = run_decoded(
-                &server, input, GrpcWebConfig::default(),
+                &server,
+                input,
+                GrpcWebConfig::default(),
                 ContentDecodeLimits::new(1024, 1024),
             );
             assert_eq!(terminal_code(&reply), expected);
         }
-        for limits in [ContentDecodeLimits::new(0, 1024), ContentDecodeLimits::new(1024, 8)] {
-            let reply = run_decoded(&server, request(ContentType::GrpcWeb), GrpcWebConfig::default(), limits);
+        for limits in [
+            ContentDecodeLimits::new(0, 1024),
+            ContentDecodeLimits::new(1024, 8),
+        ] {
+            let reply = run_decoded(
+                &server,
+                request(ContentType::GrpcWeb),
+                GrpcWebConfig::default(),
+                limits,
+            );
             assert_eq!(terminal_code(&reply), "8");
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "refused inputs never invoke the service");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "refused inputs never invoke the service"
+        );
 
         #[cfg(not(feature = "compression"))]
         {
             let mut input = request(ContentType::GrpcWeb);
-            input.headers.push(("content-encoding".to_owned(), "gzip".to_owned()));
+            input
+                .headers
+                .push(("content-encoding".to_owned(), "gzip".to_owned()));
             let reply = run_decoded(
-                &server, input, GrpcWebConfig::default(),
+                &server,
+                input,
+                GrpcWebConfig::default(),
                 ContentDecodeLimits::new(1024, 1024),
             );
             assert_eq!(terminal_code(&reply), "12");
@@ -1517,21 +1628,35 @@ mod http_request_decoding {
     #[cfg(feature = "compression")]
     fn encoded_request(mode: ContentType, message_gzip: bool) -> HttpRequest {
         let mut input = request(mode);
-        let payload = if message_gzip { gzip(b"ping") } else { b"ping".to_vec() };
+        let payload = if message_gzip {
+            gzip(b"ping")
+        } else {
+            b"ping".to_vec()
+        };
         let mut frame = vec![u8::from(message_gzip)];
         frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
         frame.extend_from_slice(&payload);
         let representation = if mode.is_text_mode() {
             // Independently padded quartets split the five-byte gRPC prefix.
-            frame.chunks(1).map(|byte| STANDARD.encode(byte)).collect::<String>().into_bytes()
+            frame
+                .chunks(1)
+                .map(|byte| STANDARD.encode(byte))
+                .collect::<String>()
+                .into_bytes()
         } else {
             frame
         };
         input.body = gzip(&representation);
-        input.headers.push(("content-encoding".to_owned(), "gzip".to_owned()));
-        input.headers.push(("digest".to_owned(), "encoded-only".to_owned()));
+        input
+            .headers
+            .push(("content-encoding".to_owned(), "gzip".to_owned()));
+        input
+            .headers
+            .push(("digest".to_owned(), "encoded-only".to_owned()));
         if message_gzip {
-            input.headers.push(("grpc-encoding".to_owned(), "gzip".to_owned()));
+            input
+                .headers
+                .push(("grpc-encoding".to_owned(), "gzip".to_owned()));
         }
         input
     }
@@ -1540,15 +1665,22 @@ mod http_request_decoding {
     #[test]
     fn http_request_decoding_precedes_text_and_independent_message_compression() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let server = Arc::new(Server::builder()
-            .add_service(Echo { calls: Arc::clone(&calls) })
-            .accept_compression(crate::grpc::client::CompressionEncoding::Gzip)
-            .build());
+        let server = Arc::new(
+            Server::builder()
+                .add_service(Echo {
+                    calls: Arc::clone(&calls),
+                })
+                .accept_compression(crate::grpc::client::CompressionEncoding::Gzip)
+                .build(),
+        );
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             for message_gzip in [false, true] {
                 let reply = run_decoded(
-                    &server, encoded_request(mode, message_gzip), GrpcWebConfig::default(),
-                    ContentDecodeLimits::new(4096, 4096).with_chunk_size(NonZeroUsize::new(3).unwrap()),
+                    &server,
+                    encoded_request(mode, message_gzip),
+                    GrpcWebConfig::default(),
+                    ContentDecodeLimits::new(4096, 4096)
+                        .with_chunk_size(NonZeroUsize::new(3).unwrap()),
                 );
                 assert_eq!(terminal_code(&reply), "0");
                 assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
@@ -1558,10 +1690,16 @@ mod http_request_decoding {
 
         let (identity_server, identity_calls) = super::server();
         let reply = run_decoded(
-            &identity_server, encoded_request(ContentType::GrpcWeb, true), GrpcWebConfig::default(),
+            &identity_server,
+            encoded_request(ContentType::GrpcWeb, true),
+            GrpcWebConfig::default(),
             ContentDecodeLimits::new(4096, 4096),
         );
-        assert_eq!(terminal_code(&reply), "12", "HTTP decoding never opts into message gzip");
+        assert_eq!(
+            terminal_code(&reply),
+            "12",
+            "HTTP decoding never opts into message gzip"
+        );
         assert_eq!(identity_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -1569,10 +1707,14 @@ mod http_request_decoding {
     #[test]
     fn http_request_decoding_requires_integrity_and_counts_fields_before_erasure() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let server = Arc::new(Server::builder()
-            .add_service(Echo { calls: Arc::clone(&calls) })
-            .max_metadata_size(512)
-            .build());
+        let server = Arc::new(
+            Server::builder()
+                .add_service(Echo {
+                    calls: Arc::clone(&calls),
+                })
+                .max_metadata_size(512)
+                .build(),
+        );
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             for case in ["crc", "truncated", "encoded", "decoded", "head"] {
                 let mut input = encoded_request(mode, false);
@@ -1583,15 +1725,33 @@ mod http_request_decoding {
                         input.body[last_crc] ^= 0xff;
                         "3"
                     }
-                    "truncated" => { input.body.truncate(input.body.len() - 4); "3" }
-                    "encoded" => { limits = ContentDecodeLimits::new(8, 4096); "8" }
-                    "decoded" => { limits = ContentDecodeLimits::new(4096, 8); "8" }
-                    "head" => { input.headers.push(("content-digest".to_owned(), "x".repeat(512))); "8" }
+                    "truncated" => {
+                        input.body.truncate(input.body.len() - 4);
+                        "3"
+                    }
+                    "encoded" => {
+                        limits = ContentDecodeLimits::new(8, 4096);
+                        "8"
+                    }
+                    "decoded" => {
+                        limits = ContentDecodeLimits::new(4096, 8);
+                        "8"
+                    }
+                    "head" => {
+                        input
+                            .headers
+                            .push(("content-digest".to_owned(), "x".repeat(512)));
+                        "8"
+                    }
                     _ => unreachable!(),
                 };
                 let reply = run_decoded(&server, input, GrpcWebConfig::default(), limits);
                 assert_eq!(terminal_code(&reply), expected, "{case}, {mode:?}");
-                assert_eq!(reply_frames(&reply).len(), 1, "no provisional success frame");
+                assert_eq!(
+                    reply_frames(&reply).len(),
+                    1,
+                    "no provisional success frame"
+                );
             }
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1617,18 +1777,28 @@ mod http_request_decoding {
             let mut input = encoded_request(mode, false);
             let intermediate = input.body.len();
             input.body = gzip(&input.body);
-            input.headers.push(("Content-Encoding".to_owned(), "gzip".to_owned()));
+            input
+                .headers
+                .push(("Content-Encoding".to_owned(), "gzip".to_owned()));
             let reply = run_decoded(
-                &server, input.clone(), GrpcWebConfig::default(),
+                &server,
+                input.clone(),
+                GrpcWebConfig::default(),
                 ContentDecodeLimits::new(4096, 4096),
             );
             assert_eq!(terminal_code(&reply), "0");
             assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
             let reply = run_decoded(
-                &server, input, GrpcWebConfig::default(),
+                &server,
+                input,
+                GrpcWebConfig::default(),
                 ContentDecodeLimits::new(4096, intermediate - 1),
             );
-            assert_eq!(terminal_code(&reply), "8", "an intermediate representation is bounded");
+            assert_eq!(
+                terminal_code(&reply),
+                "8",
+                "an intermediate representation is bounded"
+            );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -1647,19 +1817,28 @@ mod http_request_decoding {
                 }
                 let encoded = std::mem::take(&mut input.body);
                 let (mut writer, body) = IncomingRequestBody::channel_with_limits(
-                    &cx, BodyKind::ContentLength(encoded.len() as u64), 1, 128,
+                    &cx,
+                    BodyKind::ContentLength(encoded.len() as u64),
+                    1,
+                    128,
                 );
                 futures_lite::future::block_on(writer.push_bytes(&cx, &encoded[..3])).unwrap();
-                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                    GrpcWebConfig::default(), web_stream_config(),
-                    ContentDecodeLimits::new(4096, 4096)
-                        .with_chunk_size(NonZeroUsize::new(3).unwrap()),
-                ).unwrap();
+                let handler = server
+                    .registered_grpc_web_streaming_handler_with_http_decoding(
+                        GrpcWebConfig::default(),
+                        web_stream_config(),
+                        ContentDecodeLimits::new(4096, 4096)
+                            .with_chunk_size(NonZeroUsize::new(3).unwrap()),
+                    )
+                    .unwrap();
                 let mut call = handler(cx.clone(), request_with_body(input, body));
                 let mut task = Context::from_waker(Waker::noop());
                 {
                     let mut push = std::pin::pin!(writer.push_bytes(&cx, &encoded[3..footer]));
-                    assert!(push.as_mut().poll(&mut task).is_pending(), "one-frame queue is full");
+                    assert!(
+                        push.as_mut().poll(&mut task).is_pending(),
+                        "one-frame queue is full"
+                    );
                     assert!(call.as_mut().poll(&mut task).is_pending());
                     assert!(matches!(push.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
                 }
@@ -1686,12 +1865,18 @@ mod http_request_decoding {
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             for exceeds_combined in [false, true] {
                 let calls = Arc::new(AtomicUsize::new(0));
-                let server = Arc::new(Server::builder()
-                    .add_service(Echo { calls: Arc::clone(&calls) })
-                    .max_metadata_size(512)
-                    .build());
+                let server = Arc::new(
+                    Server::builder()
+                        .add_service(Echo {
+                            calls: Arc::clone(&calls),
+                        })
+                        .max_metadata_size(512)
+                        .build(),
+                );
                 let input = encoded_request(mode, false);
-                let head_bytes: usize = input.headers.iter()
+                let head_bytes: usize = input
+                    .headers
+                    .iter()
                     .map(|(name, value)| name.len() + value.len() + 32)
                     .sum();
                 assert!(head_bytes < 512);
@@ -1703,19 +1888,35 @@ mod http_request_decoding {
                 assert!("digest".len() + trailer_value.len() + 32 < 512);
                 let mut raw = format!("{:x}\r\n", input.body.len()).into_bytes();
                 raw.extend_from_slice(&input.body);
-                raw.extend_from_slice(format!("\r\n0\r\nDigest: {trailer_value}\r\n\r\n").as_bytes());
+                raw.extend_from_slice(
+                    format!("\r\n0\r\nDigest: {trailer_value}\r\n\r\n").as_bytes(),
+                );
                 let cx = Cx::for_testing();
                 let (mut writer, body) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
                 futures_lite::future::block_on(writer.push_bytes(&cx, &raw)).unwrap();
                 writer.finish(&cx).unwrap();
-                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                    GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
-                ).unwrap();
-                let produced = futures_lite::future::block_on(handler(cx.clone(), request_with_body(input, body)));
+                let handler = server
+                    .registered_grpc_web_streaming_handler_with_http_decoding(
+                        GrpcWebConfig::default(),
+                        web_stream_config(),
+                        ContentDecodeLimits::new(4096, 4096),
+                    )
+                    .unwrap();
+                let produced = futures_lite::future::block_on(handler(
+                    cx.clone(),
+                    request_with_body(input, body),
+                ));
                 let reply = collect_produced(&cx, produced);
-                assert_eq!(terminal_code(&reply), if exceeds_combined { "8" } else { "3" });
+                assert_eq!(
+                    terminal_code(&reply),
+                    if exceeds_combined { "8" } else { "3" }
+                );
                 assert_eq!(reply_frames(&reply).len(), 1);
-                assert_eq!(calls.load(Ordering::SeqCst), 0, "sanitized trailers cannot admit a call");
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "sanitized trailers cannot admit a call"
+                );
                 assert!(cx.inner.read().cancel_waker_registrations.is_empty());
             }
         }
@@ -1725,21 +1926,35 @@ mod http_request_decoding {
     fn http_request_decoding_cancellation_and_drop_retire_the_pending_source() {
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             for (kind, code) in [
-                (CancelKind::User, "1"), (CancelKind::Shutdown, "1"),
-                (CancelKind::Timeout, "4"), (CancelKind::Deadline, "4"),
-                (CancelKind::PollQuota, "8"), (CancelKind::CostBudget, "8"),
+                (CancelKind::User, "1"),
+                (CancelKind::Shutdown, "1"),
+                (CancelKind::Timeout, "4"),
+                (CancelKind::Deadline, "4"),
+                (CancelKind::PollQuota, "8"),
+                (CancelKind::CostBudget, "8"),
             ] {
                 let (server, calls) = server();
                 let cx = Cx::for_testing();
                 let input = request(mode);
                 let (writer, body) = IncomingRequestBody::channel_with_limits(
-                    &cx, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+                    &cx,
+                    BodyKind::ContentLength(input.body.len() as u64),
+                    1,
+                    64,
                 );
-                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                    GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
-                ).unwrap();
+                let handler = server
+                    .registered_grpc_web_streaming_handler_with_http_decoding(
+                        GrpcWebConfig::default(),
+                        web_stream_config(),
+                        ContentDecodeLimits::new(4096, 4096),
+                    )
+                    .unwrap();
                 let mut call = handler(cx.clone(), request_with_body(input, body));
-                assert!(call.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(
+                    call.as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
                 assert!(!cx.inner.read().cancel_waker_registrations.is_empty());
                 cx.cancel_with(kind, Some("pending decoded request"));
                 let produced = futures_lite::future::block_on(call);
@@ -1748,7 +1963,10 @@ mod http_request_decoding {
                 let reply = collect_produced(&Cx::for_testing(), produced);
                 assert_eq!(terminal_code(&reply), code);
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
-                assert!(writer.consumer_dropped(), "decoder relinquishes the pending HTTP source");
+                assert!(
+                    writer.consumer_dropped(),
+                    "decoder relinquishes the pending HTTP source"
+                );
                 assert!(cx.inner.read().cancel_waker_registrations.is_empty());
             }
 
@@ -1756,13 +1974,24 @@ mod http_request_decoding {
             let cx = Cx::for_testing();
             let input = request(mode);
             let (writer, body) = IncomingRequestBody::channel_with_limits(
-                &cx, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+                &cx,
+                BodyKind::ContentLength(input.body.len() as u64),
+                1,
+                64,
             );
-            let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
-            ).unwrap();
+            let handler = server
+                .registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(),
+                    web_stream_config(),
+                    ContentDecodeLimits::new(4096, 4096),
+                )
+                .unwrap();
             let mut call = handler(cx.clone(), request_with_body(input, body));
-            assert!(call.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                call.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
             drop(call);
             assert!(writer.consumer_dropped());
             assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -1794,9 +2023,14 @@ mod http_request_decoding {
             // This owner is not assigned to a runtime task. No scheduler
             // deadline monitor or input frame can provide its wake.
             let owner = Cx::new_with_drivers(
-                RegionId::new_for_test(0, 1), TaskId::new_for_test(1, 0),
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(1, 0),
                 Budget::INFINITE.with_deadline(Time::from_millis(100)),
-                None, None, None, Some(timer.clone()), None,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
             );
             let ambient = Cx::for_testing();
             ambient.cancel_with(CancelKind::User, Some("unrelated polling context"));
@@ -1804,11 +2038,18 @@ mod http_request_decoding {
             let (server, calls) = server();
             let input = request(ContentType::GrpcWeb);
             let (writer, body) = IncomingRequestBody::channel_with_limits(
-                &owner, BodyKind::ContentLength(input.body.len() as u64), 1, 64,
+                &owner,
+                BodyKind::ContentLength(input.body.len() as u64),
+                1,
+                64,
             );
-            let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                GrpcWebConfig::default(), web_stream_config(), ContentDecodeLimits::new(4096, 4096),
-            ).unwrap();
+            let handler = server
+                .registered_grpc_web_streaming_handler_with_http_decoding(
+                    GrpcWebConfig::default(),
+                    web_stream_config(),
+                    ContentDecodeLimits::new(4096, 4096),
+                )
+                .unwrap();
             let mut call = handler(owner.clone(), request_with_body(input, body));
             let counter = Arc::new(DeadlineWake::default());
             let waker = Waker::from(Arc::clone(&counter));
@@ -1820,21 +2061,38 @@ mod http_request_decoding {
             let mut expire = || {
                 clock.advance_to(Time::from_millis(100));
                 assert_eq!(timer.process_timers(), 1);
-                assert!(counter.0.load(Ordering::SeqCst) > 0, "owner budget wakes without body input");
+                assert!(
+                    counter.0.load(Ordering::SeqCst) > 0,
+                    "owner budget wakes without body input"
+                );
                 if masked {
                     assert!(call.as_mut().poll(&mut task).is_pending());
                     assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::Deadline);
-                    assert!(timer.is_empty(), "spent deadline timer is retired under the mask");
+                    assert!(
+                        timer.is_empty(),
+                        "spent deadline timer is retired under the mask"
+                    );
                     assert!(!writer.consumer_dropped());
                     counter.0.store(0, Ordering::SeqCst);
                     for _ in 0..3 {
                         assert!(call.as_mut().poll(&mut task).is_pending());
-                        assert_eq!(counter.0.load(Ordering::SeqCst), 0, "masked elapsed budget does not spin");
+                        assert_eq!(
+                            counter.0.load(Ordering::SeqCst),
+                            0,
+                            "masked elapsed budget does not spin"
+                        );
                     }
                 }
             };
-            if masked { owner.masked(expire); } else { expire(); }
-            assert!(counter.0.load(Ordering::SeqCst) > 0, "unmask preserves the owner wake");
+            if masked {
+                owner.masked(expire);
+            } else {
+                expire();
+            }
+            assert!(
+                counter.0.load(Ordering::SeqCst) > 0,
+                "unmask preserves the owner wake"
+            );
             let produced = match call.as_mut().poll(&mut task) {
                 Poll::Ready(produced) => produced,
                 Poll::Pending => panic!("elapsed owner budget must terminate decoding"),
@@ -1863,10 +2121,14 @@ mod http_request_decoding {
         T: Send + 'static,
     {
         let runtime = if sharded {
-            RuntimeBuilder::multi_thread().worker_threads(2).with_sharded_state(true)
+            RuntimeBuilder::multi_thread()
+                .worker_threads(2)
+                .with_sharded_state(true)
         } else {
             RuntimeBuilder::current_thread()
-        }.build().expect("native request-decoding runtime");
+        }
+        .build()
+        .expect("native request-decoding runtime");
         let result = runtime.block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("native listener owner");
             let connection = Http1Config::default()
@@ -1876,9 +2138,13 @@ mod http_request_decoding {
             let config = Http1ListenerConfig::default().http_config(connection.clone());
             let (parked, parks) = sync_mpsc::channel();
             if produced {
-                let handler = server.registered_grpc_web_streaming_handler_with_http_decoding(
-                    GrpcWebConfig::default(), web_stream_config(), limits,
-                ).unwrap();
+                let handler = server
+                    .registered_grpc_web_streaming_handler_with_http_decoding(
+                        GrpcWebConfig::default(),
+                        web_stream_config(),
+                        limits,
+                    )
+                    .unwrap();
                 let observed = move |cx: Cx, request| -> GrpcWebStreamingHandlerFuture {
                     let mut future = handler(cx.clone(), request);
                     let parked = parked.clone();
@@ -1891,13 +2157,18 @@ mod http_request_decoding {
                                 let _ = parked.send(cx.clone());
                             }
                             result
-                        }).await
+                        })
+                        .await
                     })
                 };
-                let listener = Http1Listener::bind_produced_with_config("127.0.0.1:0", observed, config)
-                    .await.expect("bind produced decoding listener")
-                    .with_streaming_config(crate::http::h1::Http1StreamingConfig::from(connection)
-                        .incoming_body_queue(1, 128));
+                let listener =
+                    Http1Listener::bind_produced_with_config("127.0.0.1:0", observed, config)
+                        .await
+                        .expect("bind produced decoding listener")
+                        .with_streaming_config(
+                            crate::http::h1::Http1StreamingConfig::from(connection)
+                                .incoming_body_queue(1, 128),
+                        );
                 let addr = listener.local_addr().unwrap();
                 let shutdown = listener.shutdown_signal();
                 let thread = std::thread::spawn(move || {
@@ -1909,11 +2180,15 @@ mod http_request_decoding {
                 served.expect("produced decoding listener shutdown");
                 result
             } else {
-                let handler = server.registered_grpc_web_unary_handler_with_http_decoding(
-                    GrpcWebConfig::default(), limits,
-                ).unwrap();
+                let handler = server
+                    .registered_grpc_web_unary_handler_with_http_decoding(
+                        GrpcWebConfig::default(),
+                        limits,
+                    )
+                    .unwrap();
                 let listener = Http1Listener::bind_with_config("127.0.0.1:0", handler, config)
-                    .await.expect("bind buffered decoding listener");
+                    .await
+                    .expect("bind buffered decoding listener");
                 let addr = listener.local_addr().unwrap();
                 let shutdown = listener.shutdown_signal();
                 let thread = std::thread::spawn(move || {
@@ -1927,8 +2202,19 @@ mod http_request_decoding {
             }
         }));
         let drain = runtime.shutdown_drained(Duration::from_secs(3));
-        assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent, "{drain:?}");
-        assert_eq!((drain.live_tasks, drain.live_regions, drain.pending_obligations), (0, 0, 0));
+        assert_eq!(
+            drain.outcome,
+            crate::runtime::RootDrainOutcome::Quiescent,
+            "{drain:?}"
+        );
+        assert_eq!(
+            (
+                drain.live_tasks,
+                drain.live_regions,
+                drain.pending_obligations
+            ),
+            (0, 0, 0)
+        );
         assert_eq!((drain.pending_spawns, drain.queued_finalizers), (0, 0));
         assert!(!drain.has_pending_obligation_posts);
         assert!(runtime.is_quiescent());
@@ -1937,12 +2223,22 @@ mod http_request_decoding {
 
     fn connect_request(addr: SocketAddr, input: &HttpRequest) -> TcpStream {
         let mut socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        write!(socket, "POST {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
-            input.uri, input.body.len()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            socket,
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+            input.uri,
+            input.body.len()
+        )
+        .unwrap();
         for (name, value) in &input.headers {
-            if !["host", "connection", "content-length", "transfer-encoding"].iter()
+            if !["host", "connection", "content-length", "transfer-encoding"]
+                .iter()
                 .any(|skip| name.eq_ignore_ascii_case(skip))
             {
                 write!(socket, "{name}: {value}\r\n").unwrap();
@@ -1966,19 +2262,31 @@ mod http_request_decoding {
         let mut header_bytes = 0;
         loop {
             let field = line(&mut reader);
-            if field == "\r\n" { break; }
+            if field == "\r\n" {
+                break;
+            }
             header_bytes += field.len();
             assert!(header_bytes <= 16384);
             let (name, value) = field.trim_end_matches("\r\n").split_once(':').unwrap();
-            assert!(!name.eq_ignore_ascii_case("grpc-status"), "status is in the gRPC-Web body");
+            assert!(
+                !name.eq_ignore_ascii_case("grpc-status"),
+                "status is in the gRPC-Web body"
+            );
             headers.push((name.to_owned(), value.trim().to_owned()));
         }
         let mut bytes = Vec::new();
-        if headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("transfer-encoding") && value == "chunked") {
+        if headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding") && value == "chunked"
+        }) {
             loop {
-                let length = usize::from_str_radix(line(&mut reader).trim_end_matches("\r\n"), 16).unwrap();
+                let length =
+                    usize::from_str_radix(line(&mut reader).trim_end_matches("\r\n"), 16).unwrap();
                 if length == 0 {
-                    assert_eq!(line(&mut reader), "\r\n", "gRPC-Web does not require HTTP trailers");
+                    assert_eq!(
+                        line(&mut reader),
+                        "\r\n",
+                        "gRPC-Web does not require HTTP trailers"
+                    );
                     break;
                 }
                 assert!(length <= 7 && bytes.len() + length <= 65536);
@@ -1990,9 +2298,13 @@ mod http_request_decoding {
                 assert_eq!(crlf, *b"\r\n");
             }
         } else {
-            let length: usize = headers.iter()
+            let length: usize = headers
+                .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .expect("bounded response framing").1.parse().unwrap();
+                .expect("bounded response framing")
+                .1
+                .parse()
+                .unwrap();
             assert!(length <= 65536);
             bytes.resize(length, 0);
             reader.read_exact(&mut bytes).unwrap();
@@ -2009,31 +2321,50 @@ mod http_request_decoding {
             for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
                 for produced in [false, true] {
                     let (server, calls) = server();
-                    native_decoding_case(server, produced, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, _| {
-                        let input = encoded_request(mode, false);
-                        let mut socket = connect_request(addr, &input);
-                        for byte in input.body.chunks(1) { socket.write_all(byte).unwrap(); }
-                        let reply = read_reply(socket);
-                        assert_eq!(terminal_code(&reply), "0");
-                        assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
-                    });
+                    native_decoding_case(
+                        server,
+                        produced,
+                        sharded,
+                        ContentDecodeLimits::new(4096, 4096),
+                        move |addr, _| {
+                            let input = encoded_request(mode, false);
+                            let mut socket = connect_request(addr, &input);
+                            for byte in input.body.chunks(1) {
+                                socket.write_all(byte).unwrap();
+                            }
+                            let reply = read_reply(socket);
+                            assert_eq!(terminal_code(&reply), "0");
+                            assert_eq!(reply_frames(&reply)[0], (0, b"ping".to_vec()));
+                        },
+                    );
                     assert_eq!(calls.load(Ordering::SeqCst), 1);
                 }
-                let (server, probe, _parks, retirements) = web_stream_fixture(WebStreamMode::Values);
+                let (server, probe, _parks, retirements) =
+                    web_stream_fixture(WebStreamMode::Values);
                 probe.release();
-                native_decoding_case(server, true, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, _| {
-                    let mut input = encoded_request(mode, false);
-                    input.uri = "/web.Watch/Values".to_owned();
-                    let mut socket = connect_request(addr, &input);
-                    for byte in input.body.chunks(1) { socket.write_all(byte).unwrap(); }
-                    let reply = read_reply(socket);
-                    let frames = reply_frames(&reply);
-                    assert_eq!(frames.len(), 3);
-                    assert_eq!(frames[0], (0, b"first".to_vec()));
-                    assert_eq!(frames[1], (0, b"second".to_vec()));
-                    assert_eq!(terminal_code(&reply), "0");
-                    retirements.recv_timeout(Duration::from_secs(2)).expect("server stream source retired");
-                });
+                native_decoding_case(
+                    server,
+                    true,
+                    sharded,
+                    ContentDecodeLimits::new(4096, 4096),
+                    move |addr, _| {
+                        let mut input = encoded_request(mode, false);
+                        input.uri = "/web.Watch/Values".to_owned();
+                        let mut socket = connect_request(addr, &input);
+                        for byte in input.body.chunks(1) {
+                            socket.write_all(byte).unwrap();
+                        }
+                        let reply = read_reply(socket);
+                        let frames = reply_frames(&reply);
+                        assert_eq!(frames.len(), 3);
+                        assert_eq!(frames[0], (0, b"first".to_vec()));
+                        assert_eq!(frames[1], (0, b"second".to_vec()));
+                        assert_eq!(terminal_code(&reply), "0");
+                        retirements
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("server stream source retired");
+                    },
+                );
                 assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
                 assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
             }
@@ -2046,23 +2377,39 @@ mod http_request_decoding {
         for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
             let (server, probe, _parks, _retirements) = web_stream_fixture(WebStreamMode::Values);
             let observing = Arc::clone(&probe);
-            native_decoding_case(server, true, false, ContentDecodeLimits::new(4096, 4096), move |addr, parks| {
-                let mut input = encoded_request(mode, false);
-                input.uri = "/web.Watch/Values".to_owned();
-                let footer = input.body.len() - 8;
-                input.body[footer] ^= 0xff;
-                let mut socket = connect_request(addr, &input);
-                socket.write_all(&input.body[..footer]).unwrap();
-                let _owner = parks.recv_timeout(Duration::from_secs(2)).expect("native decoder parked on incomplete upload");
-                assert_eq!(observing.calls.load(Ordering::SeqCst), 0);
-                socket.write_all(&input.body[footer..]).unwrap();
-                let reply = read_reply(socket);
-                assert_eq!(terminal_code(&reply), "3");
-                assert_eq!(reply_frames(&reply).len(), 1, "no provisional DATA response");
-            });
+            native_decoding_case(
+                server,
+                true,
+                false,
+                ContentDecodeLimits::new(4096, 4096),
+                move |addr, parks| {
+                    let mut input = encoded_request(mode, false);
+                    input.uri = "/web.Watch/Values".to_owned();
+                    let footer = input.body.len() - 8;
+                    input.body[footer] ^= 0xff;
+                    let mut socket = connect_request(addr, &input);
+                    socket.write_all(&input.body[..footer]).unwrap();
+                    let _owner = parks
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("native decoder parked on incomplete upload");
+                    assert_eq!(observing.calls.load(Ordering::SeqCst), 0);
+                    socket.write_all(&input.body[footer..]).unwrap();
+                    let reply = read_reply(socket);
+                    assert_eq!(terminal_code(&reply), "3");
+                    assert_eq!(
+                        reply_frames(&reply).len(),
+                        1,
+                        "no provisional DATA response"
+                    );
+                },
+            );
             assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
             assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
-            assert_eq!(probe.drops.load(Ordering::SeqCst), 0, "no response source was constructed");
+            assert_eq!(
+                probe.drops.load(Ordering::SeqCst),
+                0,
+                "no response source was constructed"
+            );
         }
     }
 
@@ -2072,22 +2419,40 @@ mod http_request_decoding {
             for mode in [ContentType::GrpcWeb, ContentType::GrpcWebText] {
                 let (server, calls) = server();
                 let observing = Arc::clone(&calls);
-                let owner = native_decoding_case(server, true, sharded, ContentDecodeLimits::new(4096, 4096), move |addr, parks| {
-                    let input = request(mode);
-                    let mut socket = connect_request(addr, &input);
-                    socket.write_all(&input.body[..1]).unwrap();
-                    let owner = parks.recv_timeout(Duration::from_secs(2)).expect("native decoder genuinely pending");
-                    assert_eq!(observing.load(Ordering::SeqCst), 0);
-                    owner.cancel_with(CancelKind::User, Some("stop an incomplete decoded upload"));
-                    let mut wire = Vec::new();
-                    match (&mut socket).take(65537).read_to_end(&mut wire) {
-                        Ok(_) => {}
-                        Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => {}
-                        Err(error) => panic!("cancelled request connection did not close: {error}"),
-                    }
-                    assert!(wire.len() <= 65536);
-                    owner
-                });
+                let owner = native_decoding_case(
+                    server,
+                    true,
+                    sharded,
+                    ContentDecodeLimits::new(4096, 4096),
+                    move |addr, parks| {
+                        let input = request(mode);
+                        let mut socket = connect_request(addr, &input);
+                        socket.write_all(&input.body[..1]).unwrap();
+                        let owner = parks
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("native decoder genuinely pending");
+                        assert_eq!(observing.load(Ordering::SeqCst), 0);
+                        owner.cancel_with(
+                            CancelKind::User,
+                            Some("stop an incomplete decoded upload"),
+                        );
+                        let mut wire = Vec::new();
+                        match (&mut socket).take(65537).read_to_end(&mut wire) {
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::ConnectionReset
+                                        | io::ErrorKind::ConnectionAborted
+                                ) => {}
+                            Err(error) => {
+                                panic!("cancelled request connection did not close: {error}")
+                            }
+                        }
+                        assert!(wire.len() <= 65536);
+                        owner
+                    },
+                );
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert_eq!(owner.cancel_reason().unwrap().kind, CancelKind::User);
                 assert!(owner.inner.read().cancel_waker_registrations.is_empty());

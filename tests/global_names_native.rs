@@ -1,17 +1,19 @@
 //! Real mTLS propagation, owner lookups, admission and owned shutdown.
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 // An integration test is its own crate and does not inherit `src/lib.rs`'s
 // `recursion_limit`. Proving `Send` for its async chains exceeds rustc's default
 // depth, which the future-incompatible `recursion_depth_exceeding_limit` lint
 // (rust-lang #159228) will turn into a hard error.
 #![recursion_limit = "256"]
 
+use asupersync::Cx;
 use asupersync::bytes::BytesMut;
 use asupersync::channel::oneshot;
 use asupersync::codec::{Framed, LengthDelimitedCodec};
-use asupersync::distributed::global_names::{
-    GlobalNameConfig, GlobalNameRegistry,
-};
 use asupersync::distributed::global_names::native::{
     GlobalNamePropagationStop, NativeGlobalNameConfig, NativeGlobalNameError,
     NativeGlobalNameTransport,
@@ -19,6 +21,7 @@ use asupersync::distributed::global_names::native::{
 use asupersync::distributed::global_names::service::{
     GLOBAL_NAME_SERVICE_COMPUTATION, register_global_name_service,
 };
+use asupersync::distributed::global_names::{GlobalNameConfig, GlobalNameRegistry};
 use asupersync::distributed::membership::authority::{
     MembershipControllerLimits, MembershipFloor, MembershipUpdate,
 };
@@ -40,7 +43,6 @@ use asupersync::tls::{
     RootCertStore, TlsAcceptor, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
 };
 use asupersync::types::{Budget, CancelKind, Time};
-use asupersync::Cx;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
@@ -93,11 +95,14 @@ impl World {
             node("authority"),
             7,
             AuthKey::from_seed(42),
-            ["a", "b"].into_iter().map(|name| MembershipFloor {
-                node: node(name),
-                incarnation: 0,
-                sequence: 0,
-            }).collect(),
+            ["a", "b"]
+                .into_iter()
+                .map(|name| MembershipFloor {
+                    node: node(name),
+                    incarnation: 0,
+                    sequence: 0,
+                })
+                .collect(),
             MembershipControllerLimits {
                 max_members: 2,
                 max_lease_ids: 64,
@@ -121,14 +126,10 @@ impl World {
                 .unwrap();
         }
         let config = || GlobalNameConfig::new(8, 8, Duration::from_millis(20)).unwrap();
-        let a = GlobalNameRegistry::new(
-            node("a"), 1, [node("b")], membership.clone(), config(),
-        )
-        .unwrap();
-        let b = GlobalNameRegistry::new(
-            node("b"), 1, [node("a")], membership.clone(), config(),
-        )
-        .unwrap();
+        let a = GlobalNameRegistry::new(node("a"), 1, [node("b")], membership.clone(), config())
+            .unwrap();
+        let b = GlobalNameRegistry::new(node("b"), 1, [node("a")], membership.clone(), config())
+            .unwrap();
         let running = membership.clone();
         let membership_driver = cx
             .spawn(move |child| async move {
@@ -146,7 +147,13 @@ impl World {
         }
         within(cx, a.wait_running(cx)).await.unwrap();
         within(cx, b.wait_running(cx)).await.unwrap();
-        Self { membership, a, b, membership_driver, drivers }
+        Self {
+            membership,
+            a,
+            b,
+            membership_driver,
+            drivers,
+        }
     }
 
     async fn finish(mut self, cx: &Cx) {
@@ -248,10 +255,18 @@ impl Service {
         let operator = service.handle();
         let serving = cx
             .spawn(move |child| async move {
-                service.run(&child).await.expect("remote computation service")
+                service
+                    .run(&child)
+                    .await
+                    .expect("remote computation service")
             })
             .unwrap();
-        Self { client: client(address, connector), hello, operator, serving }
+        Self {
+            client: client(address, connector),
+            hello,
+            operator,
+            serving,
+        }
     }
 
     fn transport(&self, registry: GlobalNameRegistry) -> NativeGlobalNameTransport {
@@ -283,9 +298,18 @@ fn mtls_propagates_full_owner_catalog_and_answers_exact_owner_lookups() {
     for workers in [1, 2] {
         run_native(workers, |cx, _| async move {
             let world = World::new(&cx).await;
-            let local = world.a.register_global(&cx, "frontend", "frontend.run").await.unwrap();
-            let remote = world.b.register_global(&cx, "backend", "backend.run").await.unwrap();
-            let service = Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
+            let local = world
+                .a
+                .register_global(&cx, "frontend", "frontend.run")
+                .await
+                .unwrap();
+            let remote = world
+                .b
+                .register_global(&cx, "backend", "backend.run")
+                .await
+                .unwrap();
+            let service =
+                Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
             let transport = service.transport(world.a.clone());
             assert!(world.b.whereis_global(&cx, "frontend").unwrap().is_none());
             let round = within(&cx, transport.propagate_once(&cx)).await.unwrap();
@@ -303,9 +327,14 @@ fn mtls_propagates_full_owner_catalog_and_answers_exact_owner_lookups() {
             let absent = within(&cx, transport.lookup_owner(&cx, &node("b"), 1, "absent"))
                 .await
                 .unwrap();
-            assert!(absent.target.is_none(), "owner absence is an actual network answer");
-            assert!(world.a.whereis_global(&cx, "backend").unwrap().is_none(),
-                "a direct lookup does not mutate replicated catalogs");
+            assert!(
+                absent.target.is_none(),
+                "owner absence is an actual network answer"
+            );
+            assert!(
+                world.a.whereis_global(&cx, "backend").unwrap().is_none(),
+                "a direct lookup does not mutate replicated catalogs"
+            );
             assert_eq!(transport.in_flight(), 0);
             let report = service.finish(&cx).await;
             assert_eq!(report.accepted_connections(), 3);
@@ -324,13 +353,20 @@ fn mtls_allowlist_and_protocol_refusals_do_not_mutate_replica_catalogs() {
         ] {
             run_native(workers, move |cx, _| async move {
                 let world = World::new(&cx).await;
-                let lease = world.a.register_global(&cx, "private", "private.run").await.unwrap();
+                let lease = world
+                    .a
+                    .register_global(&cx, "private", "private.run")
+                    .await
+                    .unwrap();
                 let service = Service::start(&cx, world.b.clone(), grant, protocol).await;
                 let transport = service.transport(world.a.clone());
                 let report = within(&cx, transport.propagate_once(&cx)).await.unwrap();
                 assert_eq!(report.acknowledged(), 0);
                 assert_eq!(report.peers.len(), 1);
-                assert!(matches!(report.peers[0].result, Err(NativeGlobalNameError::Refused)));
+                assert!(matches!(
+                    report.peers[0].result,
+                    Err(NativeGlobalNameError::Refused)
+                ));
                 assert!(world.b.whereis_global(&cx, "private").unwrap().is_none());
                 assert_eq!(transport.in_flight(), 0);
                 assert_eq!(service.finish(&cx).await.accepted_connections(), 1);
@@ -377,85 +413,111 @@ fn native_propagation_clones_share_admission_and_cancel_parked_mtls_sockets() {
                 let address = listener.local_addr().unwrap();
                 let (reading, mut read_parked) = oneshot::channel();
                 let (closed, mut closed_socket) = oneshot::channel();
-                let mut peer = cx.spawn(move |child| async move {
-                    let mut reading = Some(reading);
-                    let mut closed = Some(closed);
-                    for index in 0..2 {
-                        let (tcp, _) = within(&child, listener.accept()).await.unwrap();
-                        let tls = within(&child, acceptor.accept(tcp)).await.unwrap();
-                        let codec = LengthDelimitedCodec::builder()
-                            .max_frame_length(128 * 1024)
-                            .big_endian()
-                            .new_codec();
-                        let mut framed = Framed::new(tls, codec)
-                            .with_max_buffer_len(128 * 1024 + 4);
-                        let bytes = within(&child, framed.next()).await.unwrap().unwrap();
-                        let request: RemoteServiceWireRequest = serde_json::from_slice(&bytes).unwrap();
-                        assert_eq!(request.hello().peer_node(), &node("a"));
-                        assert_eq!(request.hello().protocol_version(), RemoteProtocolVersion::V1);
-                        if index == 0 {
-                            // A complete authenticated application request has
-                            // arrived. Park on the very same socket; only local
-                            // transport retirement can produce EOF/reset here.
-                            let ended = {
-                                let mut next = pin!(framed.next());
-                                within(&child, poll_fn(|task| {
-                                    let result = next.as_mut().poll(task);
-                                    if result.is_pending()
-                                        && let Some(reading) = reading.take()
-                                    {
-                                        reading.send_blocking(()).unwrap();
-                                    }
-                                    result
-                                })).await
-                            };
-                            assert!(!matches!(ended, Some(Ok(_))),
-                                "cancellation does not dispatch a second application frame");
-                            drop(framed);
-                            closed.take().unwrap().send_blocking(()).unwrap();
-                        } else {
-                            // An explicit refusal is enough to prove the next
-                            // request crossed TLS after both guards recovered.
-                            let response = RemoteServiceWireResponse::Outcome {
-                                remote_task_id: request.remote_task_id().raw(),
-                                outcome: RemoteServiceWireOutcome::Failed("fixture refusal".into()),
-                            };
-                            let bytes = serde_json::to_vec(&response).unwrap();
-                            framed.send(BytesMut::from(bytes.as_slice())).unwrap();
-                            within(&child, poll_fn(|task| framed.poll_flush(task))).await.unwrap();
+                let mut peer = cx
+                    .spawn(move |child| async move {
+                        let mut reading = Some(reading);
+                        let mut closed = Some(closed);
+                        for index in 0..2 {
+                            let (tcp, _) = within(&child, listener.accept()).await.unwrap();
+                            let tls = within(&child, acceptor.accept(tcp)).await.unwrap();
+                            let codec = LengthDelimitedCodec::builder()
+                                .max_frame_length(128 * 1024)
+                                .big_endian()
+                                .new_codec();
+                            let mut framed =
+                                Framed::new(tls, codec).with_max_buffer_len(128 * 1024 + 4);
+                            let bytes = within(&child, framed.next()).await.unwrap().unwrap();
+                            let request: RemoteServiceWireRequest =
+                                serde_json::from_slice(&bytes).unwrap();
+                            assert_eq!(request.hello().peer_node(), &node("a"));
+                            assert_eq!(
+                                request.hello().protocol_version(),
+                                RemoteProtocolVersion::V1
+                            );
+                            if index == 0 {
+                                // A complete authenticated application request has
+                                // arrived. Park on the very same socket; only local
+                                // transport retirement can produce EOF/reset here.
+                                let ended = {
+                                    let mut next = pin!(framed.next());
+                                    within(
+                                        &child,
+                                        poll_fn(|task| {
+                                            let result = next.as_mut().poll(task);
+                                            if result.is_pending()
+                                                && let Some(reading) = reading.take()
+                                            {
+                                                reading.send_blocking(()).unwrap();
+                                            }
+                                            result
+                                        }),
+                                    )
+                                    .await
+                                };
+                                assert!(
+                                    !matches!(ended, Some(Ok(_))),
+                                    "cancellation does not dispatch a second application frame"
+                                );
+                                drop(framed);
+                                closed.take().unwrap().send_blocking(()).unwrap();
+                            } else {
+                                // An explicit refusal is enough to prove the next
+                                // request crossed TLS after both guards recovered.
+                                let response = RemoteServiceWireResponse::Outcome {
+                                    remote_task_id: request.remote_task_id().raw(),
+                                    outcome: RemoteServiceWireOutcome::Failed(
+                                        "fixture refusal".into(),
+                                    ),
+                                };
+                                let bytes = serde_json::to_vec(&response).unwrap();
+                                framed.send(BytesMut::from(bytes.as_slice())).unwrap();
+                                within(&child, poll_fn(|task| framed.poll_flush(task)))
+                                    .await
+                                    .unwrap();
+                            }
                         }
-                    }
-                    2_usize
-                }).unwrap();
+                        2_usize
+                    })
+                    .unwrap();
 
                 let mut schema = RemoteComputationRegistry::new();
                 register_global_name_service(&mut schema, world.b.clone()).unwrap();
                 let hello = RemotePeerAdmissionPolicy::new(
-                    RemoteProtocolVersion::V1, schema.schema_registry().clone(),
-                ).hello_for(node("a"));
+                    RemoteProtocolVersion::V1,
+                    schema.schema_registry().clone(),
+                )
+                .hello_for(node("a"));
                 // Longer than every watchdog: an old detached attempt cannot
                 // pass the EOF witness merely by reaching its own timeout.
                 let client = RemoteComputationClient::new(
-                    address, "localhost", connector,
+                    address,
+                    "localhost",
+                    connector,
                     RemoteComputationClientConfig::new()
                         .with_max_attempts(1)
                         .with_connect_timeout(Duration::from_secs(2))
                         .with_attempt_timeout(Duration::from_secs(60)),
-                ).unwrap();
+                )
+                .unwrap();
                 let transport = NativeGlobalNameTransport::new(
-                    world.a.clone(), hello, [(node("b"), client)],
+                    world.a.clone(),
+                    hello,
+                    [(node("b"), client)],
                     NativeGlobalNameConfig::new(1, Duration::from_secs(30)).unwrap(),
-                ).unwrap();
+                )
+                .unwrap();
                 let running = transport.clone();
                 let (parked, mut observed) = oneshot::channel();
-                let mut driver = cx.spawn(move |owner| {
-                    let run_owner = owner.clone();
-                    ParkWitness {
-                        operation: Box::pin(async move { running.run(&run_owner).await }),
-                        owner,
-                        parked: Some(parked),
-                    }
-                }).unwrap();
+                let mut driver = cx
+                    .spawn(move |owner| {
+                        let run_owner = owner.clone();
+                        ParkWitness {
+                            operation: Box::pin(async move { running.run(&run_owner).await }),
+                            owner,
+                            parked: Some(parked),
+                        }
+                    })
+                    .unwrap();
                 let owner = within(&cx, observed.recv(&cx)).await.unwrap();
                 within(&cx, read_parked.recv(&cx)).await.unwrap();
                 assert_eq!(transport.in_flight(), 1);
@@ -484,16 +546,24 @@ fn native_propagation_clones_share_admission_and_cancel_parked_mtls_sockets() {
 
                 let recovered = within(&cx, transport.propagate_once(&cx)).await.unwrap();
                 assert_eq!(recovered.peers.len(), 1);
-                assert!(matches!(recovered.peers[0].result, Err(NativeGlobalNameError::Refused)));
+                assert!(matches!(
+                    recovered.peers[0].result,
+                    Err(NativeGlobalNameError::Refused)
+                ));
                 assert_eq!(transport.in_flight(), 0);
-                assert_eq!(within(&cx, peer.join(&cx)).await.unwrap(), 2,
-                    "no admission refusal opened an extra TCP connection");
+                assert_eq!(
+                    within(&cx, peer.join(&cx)).await.unwrap(),
+                    2,
+                    "no admission refusal opened an extra TCP connection"
+                );
 
                 let retry = transport.clone();
-                let mut stopped = cx.spawn(move |child| async move {
-                    child.cancel_with(CancelKind::User, Some("driver guard recovery"));
-                    retry.run(&child).await
-                }).unwrap();
+                let mut stopped = cx
+                    .spawn(move |child| async move {
+                        child.cancel_with(CancelKind::User, Some("driver guard recovery"));
+                        retry.run(&child).await
+                    })
+                    .unwrap();
                 let report = within(&cx, stopped.join(&cx)).await.unwrap().unwrap();
                 assert_eq!(report.stop, GlobalNamePropagationStop::Cancelled);
                 world.finish(&cx).await;
@@ -507,13 +577,14 @@ fn expired_native_owner_budget_is_a_deadline_before_any_network_effect() {
     for workers in [1, 2] {
         run_native(workers, |cx, handle| async move {
             let world = World::new(&cx).await;
-            let service = Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
+            let service =
+                Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
             let transport = service.transport(world.a.clone());
-            let expired = handle.request_cx_with_budget(
-                Budget::INFINITE.with_deadline(Time::ZERO),
-            );
+            let expired = handle.request_cx_with_budget(Budget::INFINITE.with_deadline(Time::ZERO));
             assert!(matches!(
-                transport.lookup_owner(&expired, &node("b"), 1, "backend").await,
+                transport
+                    .lookup_owner(&expired, &node("b"), 1, "backend")
+                    .await,
                 Err(NativeGlobalNameError::Deadline)
             ));
             assert_eq!(transport.in_flight(), 0);
@@ -536,39 +607,45 @@ async fn replaying_peer(
     let address = listener.local_addr().unwrap();
     let (acceptor, connector, _) = tls();
     let forwarding = backend.client.clone();
-    let serving = cx.spawn(move |child| async move {
-        let mut captured = None;
-        for index in 0..calls {
-            let (tcp, _) = within(&child, listener.accept()).await.unwrap();
-            let tls = within(&child, acceptor.accept(tcp)).await.unwrap();
-            let codec = LengthDelimitedCodec::builder()
-                .max_frame_length(128 * 1024)
-                .big_endian()
-                .new_codec();
-            let mut framed = Framed::new(tls, codec)
-                .with_max_buffer_len(128 * 1024 + 4);
-            let frame = within(&child, framed.next()).await.unwrap().unwrap();
-            let request: RemoteServiceWireRequest = serde_json::from_slice(&frame).unwrap();
-            if index == 0 {
-                let response = within(&child, forwarding.call(&child, &request)).await.unwrap();
-                let RemoteServiceWireResponse::Outcome {
-                    outcome: RemoteServiceWireOutcome::Success(bytes),
-                    ..
-                } = response else {
-                    panic!("the original authenticated service reply must be successful");
+    let serving = cx
+        .spawn(move |child| async move {
+            let mut captured = None;
+            for index in 0..calls {
+                let (tcp, _) = within(&child, listener.accept()).await.unwrap();
+                let tls = within(&child, acceptor.accept(tcp)).await.unwrap();
+                let codec = LengthDelimitedCodec::builder()
+                    .max_frame_length(128 * 1024)
+                    .big_endian()
+                    .new_codec();
+                let mut framed = Framed::new(tls, codec).with_max_buffer_len(128 * 1024 + 4);
+                let frame = within(&child, framed.next()).await.unwrap().unwrap();
+                let request: RemoteServiceWireRequest = serde_json::from_slice(&frame).unwrap();
+                if index == 0 {
+                    let response = within(&child, forwarding.call(&child, &request))
+                        .await
+                        .unwrap();
+                    let RemoteServiceWireResponse::Outcome {
+                        outcome: RemoteServiceWireOutcome::Success(bytes),
+                        ..
+                    } = response
+                    else {
+                        panic!("the original authenticated service reply must be successful");
+                    };
+                    captured = Some(bytes);
+                }
+                let response = RemoteServiceWireResponse::Outcome {
+                    remote_task_id: request.remote_task_id().raw(),
+                    outcome: RemoteServiceWireOutcome::Success(captured.as_ref().unwrap().clone()),
                 };
-                captured = Some(bytes);
+                let bytes = serde_json::to_vec(&response).unwrap();
+                framed.send(BytesMut::from(bytes.as_slice())).unwrap();
+                within(&child, poll_fn(|task| framed.poll_flush(task)))
+                    .await
+                    .unwrap();
             }
-            let response = RemoteServiceWireResponse::Outcome {
-                remote_task_id: request.remote_task_id().raw(),
-                outcome: RemoteServiceWireOutcome::Success(captured.as_ref().unwrap().clone()),
-            };
-            let bytes = serde_json::to_vec(&response).unwrap();
-            framed.send(BytesMut::from(bytes.as_slice())).unwrap();
-            within(&child, poll_fn(|task| framed.poll_flush(task))).await.unwrap();
-        }
-        calls
-    }).unwrap();
+            calls
+        })
+        .unwrap();
     (client(address, connector), serving)
 }
 
@@ -577,21 +654,32 @@ fn native_owner_lookup_rejects_wrong_name_and_stale_incarnation_replies() {
     for workers in [1, 2] {
         run_native(workers, |cx, _| async move {
             let world = World::new(&cx).await;
-            let lease = world.b.register_global(&cx, "backend", "backend.run").await.unwrap();
-            let service = Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
+            let lease = world
+                .b
+                .register_global(&cx, "backend", "backend.run")
+                .await
+                .unwrap();
+            let service =
+                Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
             let (client, mut proxy) = replaying_peer(&cx, &service, 4).await;
             let transport = NativeGlobalNameTransport::new(
                 world.a.clone(),
                 service.hello.clone(),
                 [(node("b"), client)],
                 NativeGlobalNameConfig::new(1, Duration::from_secs(30)).unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let valid = within(&cx, transport.lookup_owner(&cx, &node("b"), 1, "backend"))
-                .await.unwrap();
+                .await
+                .unwrap();
             assert!(valid.target.is_some());
             assert!(matches!(
-                within(&cx, transport.lookup_owner(&cx, &node("b"), 1, "another-name")).await,
+                within(
+                    &cx,
+                    transport.lookup_owner(&cx, &node("b"), 1, "another-name")
+                )
+                .await,
                 Err(NativeGlobalNameError::Registry(_))
             ));
             assert!(matches!(
@@ -599,13 +687,17 @@ fn native_owner_lookup_rejects_wrong_name_and_stale_incarnation_replies() {
                 Err(NativeGlobalNameError::Registry(_))
             ));
             let recovered = within(&cx, transport.lookup_owner(&cx, &node("b"), 1, "backend"))
-                .await.unwrap();
+                .await
+                .unwrap();
             assert!(recovered.target.is_some());
             assert_eq!(transport.in_flight(), 0);
             assert!(world.a.whereis_global(&cx, "backend").unwrap().is_none());
             assert_eq!(within(&cx, proxy.join(&cx)).await.unwrap(), 4);
-            assert_eq!(service.finish(&cx).await.accepted_connections(), 1,
-                "all forged answers replay the single genuine application payload");
+            assert_eq!(
+                service.finish(&cx).await.accepted_connections(),
+                1,
+                "all forged answers replay the single genuine application payload"
+            );
             drop(lease);
             world.finish(&cx).await;
         });
@@ -617,23 +709,36 @@ fn native_propagation_receipt_must_acknowledge_the_exact_sent_snapshot() {
     for workers in [1, 2] {
         run_native(workers, |cx, _| async move {
             let world = World::new(&cx).await;
-            let first = world.a.register_global(&cx, "first", "first.run").await.unwrap();
-            let service = Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
+            let first = world
+                .a
+                .register_global(&cx, "first", "first.run")
+                .await
+                .unwrap();
+            let service =
+                Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
             let (client, mut proxy) = replaying_peer(&cx, &service, 2).await;
             let transport = NativeGlobalNameTransport::new(
                 world.a.clone(),
                 service.hello.clone(),
                 [(node("b"), client)],
                 NativeGlobalNameConfig::new(1, Duration::from_secs(30)).unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
             let first_round = within(&cx, transport.propagate_once(&cx)).await.unwrap();
             assert_eq!(first_round.acknowledged(), 1);
             assert!(world.b.whereis_global(&cx, "first").unwrap().is_some());
 
-            let later = world.a.register_global(&cx, "later", "later.run").await.unwrap();
+            let later = world
+                .a
+                .register_global(&cx, "later", "later.run")
+                .await
+                .unwrap();
             let stale = within(&cx, transport.propagate_once(&cx)).await.unwrap();
             assert_eq!(stale.acknowledged(), 0);
-            assert!(matches!(stale.peers[0].result, Err(NativeGlobalNameError::Registry(_))));
+            assert!(matches!(
+                stale.peers[0].result,
+                Err(NativeGlobalNameError::Registry(_))
+            ));
             assert!(world.b.whereis_global(&cx, "later").unwrap().is_none());
             assert!(world.a.whereis_global(&cx, "later").unwrap().is_some());
             assert_eq!(transport.in_flight(), 0);
@@ -650,10 +755,13 @@ fn native_transport_does_not_borrow_io_authority_from_a_stronger_ambient_task() 
     for workers in [1, 2] {
         run_native(workers, |cx, _| async move {
             let world = World::new(&cx).await;
-            let service = Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
+            let service =
+                Service::start(&cx, world.b.clone(), true, RemoteProtocolVersion::V1).await;
             let transport = service.transport(world.a.clone());
             let restricted = {
-                let _guard = cx.restrict::<asupersync::cx::NoCaps>().set_current_restricted();
+                let _guard = cx
+                    .restrict::<asupersync::cx::NoCaps>()
+                    .set_current_restricted();
                 Cx::current().unwrap()
             };
             assert!(cx.capabilities().io);
@@ -661,7 +769,9 @@ fn native_transport_does_not_borrow_io_authority_from_a_stronger_ambient_task() 
             // restrict shares the live runtime handles; only its authority
             // is attenuated, while the ambient caller remains unrestricted.
             assert!(matches!(
-                transport.lookup_owner(&restricted, &node("b"), 1, "backend").await,
+                transport
+                    .lookup_owner(&restricted, &node("b"), 1, "backend")
+                    .await,
                 Err(NativeGlobalNameError::Configuration)
             ));
             assert!(matches!(

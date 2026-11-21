@@ -1,8 +1,8 @@
 //! Two-phase, runtime-accounted name publication.
 
 use super::{Admission, TrackedNameError, TrackedNameLease, TrackedNameRegistry, validate_owner};
-use crate::cx::{CancelWakerToken, Cx};
 use crate::cx::registry::{NameLeaseError, NamePermit};
+use crate::cx::{CancelWakerToken, Cx};
 use crate::record::ObligationAbortReason;
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
 use crate::types::{RegionId, TaskId, Time};
@@ -76,7 +76,8 @@ impl TrackedNameRegistry {
         name: impl Into<String>,
         deadline: Time,
     ) -> Result<TrackedNamePermit<'a>, TrackedNameError> {
-        self.reserve_wait_inner(cx, name.into(), Some(deadline)).await
+        self.reserve_wait_inner(cx, name.into(), Some(deadline))
+            .await
     }
 
     async fn reserve_wait_inner<'a>(
@@ -108,7 +109,10 @@ impl TrackedNameRegistry {
                     // invoke user callbacks. This provisional permit never
                     // crosses an await or becomes observable to the caller.
                     let mut permit = TrackedNamePermit {
-                        registry: self.clone(), cx, permit: Some(raw), obligation: None,
+                        registry: self.clone(),
+                        cx,
+                        permit: Some(raw),
+                        obligation: None,
                     };
                     let mut admission = Admission::new(cx)?;
                     let admitted_at = cx.now();
@@ -131,7 +135,8 @@ impl TrackedNameRegistry {
             };
             let sleep = match wake_at {
                 Some(at) => Some(crate::time::Sleep::with_timer_driver(
-                    at, cx.timer_driver().ok_or(TrackedNameError::TimerRequired)?,
+                    at,
+                    cx.timer_driver().ok_or(TrackedNameError::TimerRequired)?,
                 )),
                 None => None,
             };
@@ -139,7 +144,8 @@ impl TrackedNameRegistry {
             let mut changed = pin!(interest.changed(epoch));
             let mut cancellation = WaitCancellation { cx, token: None };
             poll_fn(|task| {
-                cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+                cancellation.token =
+                    Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
                 if cx.checkpoint().is_err() {
                     return Poll::Ready(Err(TrackedNameError::Cancelled));
                 }
@@ -154,7 +160,8 @@ impl TrackedNameRegistry {
                     }
                 }
                 changed.as_mut().poll(task).map(|()| Ok(()))
-            }).await?;
+            })
+            .await?;
             retries += 1;
             if retries == 32 {
                 retries = 0;
@@ -167,15 +174,23 @@ impl TrackedNameRegistry {
 // Validate without reserving quota: the existing owner may hold the region's
 // last credit, and sleeping with a second credit would create a quota deadlock.
 fn wait_identity(cx: &Cx) -> Result<(TaskId, RegionId), TrackedNameError> {
-    let (gateway, holder) = cx.obligation_transfer_destination().map_err(TrackedNameError::Admission)?;
+    let (gateway, holder) = cx
+        .obligation_transfer_destination()
+        .map_err(TrackedNameError::Admission)?;
     if !gateway.is_runtime_available() {
-        return Err(TrackedNameError::Admission(ObligationAdmissionError::RuntimeUnavailable));
+        return Err(TrackedNameError::Admission(
+            ObligationAdmissionError::RuntimeUnavailable,
+        ));
     }
     if !holder.is_live() {
-        return Err(TrackedNameError::Admission(ObligationAdmissionError::HolderNotLive));
+        return Err(TrackedNameError::Admission(
+            ObligationAdmissionError::HolderNotLive,
+        ));
     }
     if holder.holder() != cx.task_id() || holder.region() != cx.region_id() {
-        return Err(TrackedNameError::Admission(ObligationAdmissionError::HolderMismatch));
+        return Err(TrackedNameError::Admission(
+            ObligationAdmissionError::HolderMismatch,
+        ));
     }
     if holder.region().as_u64() == 0 {
         return Err(TrackedNameError::UnscopedRegion);
@@ -184,7 +199,9 @@ fn wait_identity(cx: &Cx) -> Result<(TaskId, RegionId), TrackedNameError> {
 }
 
 fn wait_expired(name: &str) -> TrackedNameError {
-    TrackedNameError::Registry(NameLeaseError::WaitBudgetExceeded { name: name.to_owned() })
+    TrackedNameError::Registry(NameLeaseError::WaitBudgetExceeded {
+        name: name.to_owned(),
+    })
 }
 
 struct WaitCancellation<'a> {
@@ -238,13 +255,19 @@ impl TrackedNamePermit<'_> {
     /// Reservation time from the original context's clock.
     #[must_use]
     pub fn reserved_at(&self) -> Time {
-        self.permit.as_ref().expect("live name permit").reserved_at()
+        self.permit
+            .as_ref()
+            .expect("live name permit")
+            .reserved_at()
     }
 
     /// The same ticket will be carried by the committed lease.
     #[must_use]
     pub fn obligation_ticket(&self) -> u64 {
-        self.obligation.as_ref().expect("live name obligation").ticket()
+        self.obligation
+            .as_ref()
+            .expect("live name obligation")
+            .ticket()
     }
 
     /// Publishes discovery without releasing or reacquiring runtime quota.
@@ -253,9 +276,17 @@ impl TrackedNamePermit<'_> {
     /// reservation. As with other two-phase primitives, a cancellation racing
     /// after that checkpoint does not undo an already committed publication.
     pub fn commit(mut self) -> Result<TrackedNameLease, TrackedNameError> {
-        validate_owner(self.cx, self.obligation.as_ref().expect("live name obligation"))?;
-        self.cx.checkpoint().map_err(|_| TrackedNameError::Cancelled)?;
-        validate_owner(self.cx, self.obligation.as_ref().expect("live name obligation"))?;
+        validate_owner(
+            self.cx,
+            self.obligation.as_ref().expect("live name obligation"),
+        )?;
+        self.cx
+            .checkpoint()
+            .map_err(|_| TrackedNameError::Cancelled)?;
+        validate_owner(
+            self.cx,
+            self.obligation.as_ref().expect("live name obligation"),
+        )?;
         let name = self.name().to_owned();
         let permit = self.permit.take().expect("live name permit");
         let result = { self.registry.inner.lock().commit_permit(permit) };
@@ -312,7 +343,11 @@ impl TrackedNamePermit<'_> {
             gateway.notify();
         }
         removed?;
-        if accepted { Ok(()) } else { Err(TrackedNameError::SettlementRejected) }
+        if accepted {
+            Ok(())
+        } else {
+            Err(TrackedNameError::SettlementRejected)
+        }
     }
 }
 

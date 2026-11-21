@@ -5,15 +5,17 @@
 //! not create a second scheduler, restart tracker, or mutable graph. It inherits
 //! `worker_readiness`'s experimental `test-internals` feature gate.
 
-use super::{DependencyError, DependencyScopeConfig, DependencyScopeError, DependencyScopeReport};
+use super::super::{
+    ReadinessFactory, WorkerReadiness, WorkerReadinessPhase, initialized_worker, notify,
+};
 use super::WorkerDependencies;
-use super::super::{initialized_worker, notify, ReadinessFactory, WorkerReadiness, WorkerReadinessPhase};
+use super::{DependencyError, DependencyScopeConfig, DependencyScopeError, DependencyScopeReport};
 use crate::cx::{Cx, Scope};
 use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{
-    ChildName, ChildSpec, ChildStart, CompiledSupervisor, ManagedChildBinding, ManagedChildFactory, ManagedGeneration,
-    ManagedRestartMode, ManagedSupervisor, ManagedSupervisorBindError, SupervisionConfig,
-    SupervisorBuilder,
+    ChildName, ChildSpec, ChildStart, CompiledSupervisor, ManagedChildBinding, ManagedChildFactory,
+    ManagedGeneration, ManagedRestartMode, ManagedSupervisor, ManagedSupervisorBindError,
+    SupervisionConfig, SupervisorBuilder,
 };
 use crate::types::{Budget, Outcome, TaskId, policy::FailFast};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,9 +55,7 @@ pub enum InitializedBindError {
 /// No application error is cloned, stringified or replaced with a generic retry.
 pub type InitializedRunResult<E> = Result<DependencyScopeReport<(), E>, DependencyScopeError>;
 
-type BindFactory<E> = Box<
-    dyn FnOnce(WorkerDependencies, Budget) -> ManagedChildBinding<E> + Send,
->;
+type BindFactory<E> = Box<dyn FnOnce(WorkerDependencies, Budget) -> ManagedChildBinding<E> + Send>;
 
 /// Typed initialization/run pair erased only after their shared state is bound.
 ///
@@ -174,24 +174,37 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
                 };
                 async move {
                     let _terminal = retirement;
-                    let result = dependencies.run(
-                        &cx,
-                        DependencyScopeConfig::new(shutdown_budget),
-                        move |inner, _selected| {
-                            let identity = ManagedGeneration {
-                                number: generation.number,
-                                region: inner.region_id(),
-                                task: inner.task_id(),
-                            };
-                            worker.start(inner, identity)
-                        },
-                    ).await;
+                    let result = dependencies
+                        .run(
+                            &cx,
+                            DependencyScopeConfig::new(shutdown_budget),
+                            move |inner, _selected| {
+                                let identity = ManagedGeneration {
+                                    number: generation.number,
+                                    region: inner.region_id(),
+                                    task: inner.task_id(),
+                                };
+                                worker.start(inner, identity)
+                            },
+                        )
+                        .await;
                     classify(result)
                 }
             };
-            ManagedChildBinding::new(binding_name, mode, ReadinessFactory { inner: factory, readiness })
+            ManagedChildBinding::new(
+                binding_name,
+                mode,
+                ReadinessFactory {
+                    inner: factory,
+                    readiness,
+                },
+            )
         });
-        Self { name, readiness, bind }
+        Self {
+            name,
+            readiness,
+            bind,
+        }
     }
 
     /// Observe this binding even before binding/spawning the whole topology.
@@ -267,7 +280,8 @@ impl CompiledSupervisor {
         }
         let mut edges = 0usize;
         for child in &self.children {
-            edges = edges.checked_add(child.depends_on.len())
+            edges = edges
+                .checked_add(child.depends_on.len())
                 .ok_or(InitializedBindError::Limit("edges"))?;
             if edges > limits.max_edges {
                 return Err(InitializedBindError::Limit("edges"));
@@ -290,16 +304,26 @@ impl CompiledSupervisor {
             InitializedBindError::Managed(ManagedSupervisorBindError::Topology(error))
         })?;
         if compiled.start_order != supplied_order {
-            return Err(InitializedBindError::Managed(ManagedSupervisorBindError::StartOrder));
+            return Err(InitializedBindError::Managed(
+                ManagedSupervisorBindError::StartOrder,
+            ));
         }
         let mut by_name = BTreeMap::new();
         for binding in bindings {
-            if !compiled.children.iter().any(|child| child.name == binding.name) {
-                return Err(InitializedBindError::Managed(ManagedSupervisorBindError::Unknown(binding.name)));
+            if !compiled
+                .children
+                .iter()
+                .any(|child| child.name == binding.name)
+            {
+                return Err(InitializedBindError::Managed(
+                    ManagedSupervisorBindError::Unknown(binding.name),
+                ));
             }
             let name = binding.name.clone();
             if by_name.insert(name.clone(), binding).is_some() {
-                return Err(InitializedBindError::Managed(ManagedSupervisorBindError::Duplicate(name)));
+                return Err(InitializedBindError::Managed(
+                    ManagedSupervisorBindError::Duplicate(name),
+                ));
             }
         }
         for child in &compiled.children {
@@ -307,18 +331,30 @@ impl CompiledSupervisor {
                 return Err(InitializedBindError::Deferred(child.name.clone()));
             }
             if !by_name.contains_key(&child.name) {
-                return Err(InitializedBindError::Managed(ManagedSupervisorBindError::Missing(child.name.clone())));
+                return Err(InitializedBindError::Managed(
+                    ManagedSupervisorBindError::Missing(child.name.clone()),
+                ));
             }
         }
-        let named: BTreeMap<_, _> = by_name.iter()
-            .map(|(name, binding)| (name.clone(), binding.readiness.clone())).collect();
+        let named: BTreeMap<_, _> = by_name
+            .iter()
+            .map(|(name, binding)| (name.clone(), binding.readiness.clone()))
+            .collect();
         let all = WorkerDependencies::new(named.values().cloned().collect(), limits.max_children)
             .map_err(InitializedBindError::Dependencies)?;
         let mut managed = Vec::with_capacity(compiled.children.len());
         for child in &compiled.children {
             let mut seen = BTreeSet::new();
-            let dependencies = child.depends_on.iter().filter(|name| seen.insert(*name))
-                .map(|name| named.get(name).expect("compiler validated dependency").clone())
+            let dependencies = child
+                .depends_on
+                .iter()
+                .filter(|name| seen.insert(*name))
+                .map(|name| {
+                    named
+                        .get(name)
+                        .expect("compiler validated dependency")
+                        .clone()
+                })
                 .collect();
             let dependencies = WorkerDependencies::new(dependencies, limits.max_children)
                 .map_err(InitializedBindError::Dependencies)?;
@@ -327,7 +363,9 @@ impl CompiledSupervisor {
         }
         // The incumbent validates registration policy, restart configuration and
         // its topology again. No user initializer/run/classifier has been invoked.
-        let owner = compiled.bind_managed(managed, config).map_err(InitializedBindError::Managed)?;
+        let owner = compiled
+            .bind_managed(managed, config)
+            .map_err(InitializedBindError::Managed)?;
         Ok((owner, SupervisorReadiness { named, all }))
     }
 }

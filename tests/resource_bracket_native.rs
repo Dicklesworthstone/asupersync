@@ -27,8 +27,10 @@ fn pair() -> (TcpStream, StdTcpStream) {
     local.set_nonblocking(true).unwrap();
     local.set_nodelay(true).unwrap();
     peer.set_nodelay(true).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    peer.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     (TcpStream::from_std(local).unwrap(), peer)
 }
 
@@ -39,10 +41,13 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(30))
+    let result = receive
+        .recv_timeout(Duration::from_secs(30))
         .expect("native bracket must finish its observed cleanup and region drain");
     thread.join().unwrap();
-    if let Err(payload) = result { std::panic::resume_unwind(payload); }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 fn exercise(multithread: bool, drop_handle: bool) {
@@ -53,11 +58,16 @@ fn exercise(multithread: bool, drop_handle: bool) {
         let mut bytes = vec![0; RELEASE.len()];
         peer.read_exact(&mut bytes).unwrap();
         assert_eq!(bytes, RELEASE);
-        await_permission.recv_timeout(Duration::from_secs(10)).unwrap();
+        await_permission
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
         peer.write_all(b"!").unwrap();
         let mut tail = Vec::new();
         peer.read_to_end(&mut tail).unwrap();
-        assert!(tail.is_empty(), "release must not duplicate its protocol write");
+        assert!(
+            tail.is_empty(),
+            "release must not duplicate its protocol write"
+        );
     });
     let runtime = if multithread {
         RuntimeBuilder::new().worker_threads(2).build().unwrap()
@@ -66,69 +76,87 @@ fn exercise(multithread: bool, drop_handle: bool) {
     };
     let owner = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on_with_cx(owner.clone(), async move {
-        let enclosing = owner.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let enclosing = owner
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let (use_parked, mut wait_use) = oneshot::channel();
         let (release_parked, mut wait_release) = oneshot::channel();
         let (released, mut wait_released) = oneshot::channel();
         let completions = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&completions);
-        let handle = enclosing.cx().spawn_bracket(BracketConfig::new(u32::MAX),
-            move |_| async move { Outcome::<_, &'static str>::Ok(socket) },
-            move |use_cx: Cx, _socket: &mut TcpStream| -> BracketUseFuture<'_, (), &'static str> {
-                Box::pin(async move {
-                    let mut observed = Some(use_parked);
-                    let mut cancelled = std::pin::pin!(use_cx.cancelled());
-                    poll_fn(|task_cx| {
-                        let poll = cancelled.as_mut().poll(task_cx);
-                        if poll.is_pending() {
-                            if let Some(observed) = observed.take() {
-                                observed.send_blocking(()).unwrap();
-                            }
-                        }
-                        poll
-                    }).await;
-                    assert!(use_cx.checkpoint().is_err(), "acknowledge actual task cancellation");
-                    Outcome::Cancelled(use_cx.cancel_reason().unwrap())
-                })
-            },
-            move |release_cx: Cx, mut socket: TcpStream| async move {
-                assert!(release_cx.checkpoint().is_ok(), "release poll is masked");
-                let result: io::Result<()> = async {
-                    socket.write_all(RELEASE).await?;
-                    socket.flush().await?;
-                    let mut acknowledgement = [0];
-                    {
-                        let mut read = std::pin::pin!(socket.read_exact(&mut acknowledgement));
-                        let mut observed = Some(release_parked);
+        let handle = enclosing
+            .cx()
+            .spawn_bracket(
+                BracketConfig::new(u32::MAX),
+                move |_| async move { Outcome::<_, &'static str>::Ok(socket) },
+                move |use_cx: Cx,
+                      _socket: &mut TcpStream|
+                      -> BracketUseFuture<'_, (), &'static str> {
+                    Box::pin(async move {
+                        let mut observed = Some(use_parked);
+                        let mut cancelled = std::pin::pin!(use_cx.cancelled());
                         poll_fn(|task_cx| {
-                            let poll = read.as_mut().poll(task_cx);
+                            let poll = cancelled.as_mut().poll(task_cx);
                             if poll.is_pending() {
                                 if let Some(observed) = observed.take() {
-                                    // The peer is forbidden to send its ACK until this
-                                    // real AsyncRead future has returned Pending.
                                     observed.send_blocking(()).unwrap();
                                 }
                             }
                             poll
-                        }).await?;
+                        })
+                        .await;
+                        assert!(
+                            use_cx.checkpoint().is_err(),
+                            "acknowledge actual task cancellation"
+                        );
+                        Outcome::Cancelled(use_cx.cancel_reason().unwrap())
+                    })
+                },
+                move |release_cx: Cx, mut socket: TcpStream| async move {
+                    assert!(release_cx.checkpoint().is_ok(), "release poll is masked");
+                    let result: io::Result<()> = async {
+                        socket.write_all(RELEASE).await?;
+                        socket.flush().await?;
+                        let mut acknowledgement = [0];
+                        {
+                            let mut read = std::pin::pin!(socket.read_exact(&mut acknowledgement));
+                            let mut observed = Some(release_parked);
+                            poll_fn(|task_cx| {
+                                let poll = read.as_mut().poll(task_cx);
+                                if poll.is_pending() {
+                                    if let Some(observed) = observed.take() {
+                                        // The peer is forbidden to send its ACK until this
+                                        // real AsyncRead future has returned Pending.
+                                        observed.send_blocking(()).unwrap();
+                                    }
+                                }
+                                poll
+                            })
+                            .await?;
+                        }
+                        assert_eq!(acknowledgement, *b"!");
+                        // Async write-half shutdown (AsyncWriteExt); the inherent
+                        // TcpStream::shutdown(how) would shadow it. br-asupersync-ymj7j3.
+                        AsyncWriteExt::shutdown(&mut socket).await?;
+                        Ok(())
                     }
-                    assert_eq!(acknowledgement, *b"!");
-                    // Async write-half shutdown (AsyncWriteExt); the inherent
-                    // TcpStream::shutdown(how) would shadow it. br-asupersync-ymj7j3.
-                    AsyncWriteExt::shutdown(&mut socket).await?;
-                    Ok(())
-                }.await;
-                match result {
-                    Ok(()) => {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        released.send_blocking(()).unwrap();
-                        Outcome::Ok(())
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            released.send_blocking(()).unwrap();
+                            Outcome::Ok(())
+                        }
+                        Err(error) => Outcome::Err(error),
                     }
-                    Err(error) => Outcome::Err(error),
-                }
-            },
-        ).unwrap();
-        wait_use.recv(&owner).await.expect("use task really parked before stop");
+                },
+            )
+            .unwrap();
+        wait_use
+            .recv(&owner)
+            .await
+            .expect("use task really parked before stop");
         let mut handle = if drop_handle {
             drop(handle);
             None
@@ -136,16 +164,27 @@ fn exercise(multithread: bool, drop_handle: bool) {
             handle.abort();
             Some(handle)
         };
-        wait_release.recv(&owner).await.expect("release really waits for network readiness after stop");
+        wait_release
+            .recv(&owner)
+            .await
+            .expect("release really waits for network readiness after stop");
         assert_eq!(completions.load(Ordering::SeqCst), 0);
         if let Some(handle) = &mut handle {
             for _ in 0..3 {
                 let mut joining = std::pin::pin!(handle.join());
-                assert!(joining.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(
+                    joining
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
             }
         }
         allow_ack.send(()).unwrap();
-        wait_released.recv(&owner).await.expect("real asynchronous release completes");
+        wait_released
+            .recv(&owner)
+            .await
+            .expect("real asynchronous release completes");
         if let Some(handle) = &mut handle {
             let report = handle.join().await.unwrap();
             assert!(report.acquisition.as_ref().unwrap().is_success());
@@ -155,7 +194,10 @@ fn exercise(multithread: bool, drop_handle: bool) {
             assert!(report.unreleased.is_none());
             assert!(report.infrastructure.is_empty());
             assert!(report.cancellation.is_some());
-            assert!(!report.is_success(), "completed cleanup cannot turn cancellation into success");
+            assert!(
+                !report.is_success(),
+                "completed cleanup cannot turn cancellation into success"
+            );
         }
         // Also supplies the barrier in the handle-drop case: the release
         // notification alone is not a claim that its controller already joined.
@@ -167,10 +209,18 @@ fn exercise(multithread: bool, drop_handle: bool) {
 }
 
 #[test]
-fn cancelled_bracket_awaits_socket_release_current_thread() { bounded(|| exercise(false, false)); }
+fn cancelled_bracket_awaits_socket_release_current_thread() {
+    bounded(|| exercise(false, false));
+}
 #[test]
-fn cancelled_bracket_awaits_socket_release_two_workers() { bounded(|| exercise(true, false)); }
+fn cancelled_bracket_awaits_socket_release_two_workers() {
+    bounded(|| exercise(true, false));
+}
 #[test]
-fn dropped_bracket_handle_keeps_socket_release_region_owned_current_thread() { bounded(|| exercise(false, true)); }
+fn dropped_bracket_handle_keeps_socket_release_region_owned_current_thread() {
+    bounded(|| exercise(false, true));
+}
 #[test]
-fn dropped_bracket_handle_keeps_socket_release_region_owned_two_workers() { bounded(|| exercise(true, true)); }
+fn dropped_bracket_handle_keeps_socket_release_region_owned_two_workers() {
+    bounded(|| exercise(true, true));
+}

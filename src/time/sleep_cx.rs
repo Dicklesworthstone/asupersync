@@ -162,8 +162,7 @@ where
             .map_or(deadline, |owner_deadline| deadline.min(owner_deadline));
         let mut timer = std::pin::pin!(Sleep::with_timer_driver(wake_at, driver.clone()));
         poll_fn(|task| {
-            cancellation.token =
-                Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+            cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
             if cx.checkpoint().is_err() {
                 return Poll::Ready(());
             }

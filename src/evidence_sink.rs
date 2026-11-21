@@ -11,10 +11,10 @@
 //! - [`JsonlSink`]: Appends to a JSONL file via [`franken_evidence::export::JsonlExporter`].
 //! - [`CollectorSink`]: In-memory collection for testing.
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 use std::fmt;
 use std::path::PathBuf;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use franken_evidence::EvidenceLedger;
 use franken_evidence::export::JsonlExporter;

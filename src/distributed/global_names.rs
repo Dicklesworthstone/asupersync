@@ -39,10 +39,10 @@ use std::sync::{Arc, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
-pub mod service;
-pub mod wire;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub mod native;
+pub mod service;
+pub mod wire;
 
 /// Finite catalog, admission, and maintenance bounds.
 #[derive(Debug, Clone)]
@@ -56,20 +56,31 @@ impl GlobalNameConfig {
     /// Limit names to 1..=1024 per owner and maintenance to (0, 60s].
     /// Pending registrations and draining groups consume local capacity too.
     pub fn new(
-        max_local_names: usize, max_names_per_peer: usize, maintenance_interval: Duration,
+        max_local_names: usize,
+        max_names_per_peer: usize,
+        maintenance_interval: Duration,
     ) -> Result<Self, GlobalNameError> {
         if !(1..=wire::MAX_NAMES).contains(&max_local_names)
             || !(1..=wire::MAX_NAMES).contains(&max_names_per_peer)
-            || maintenance_interval.is_zero() || maintenance_interval > Duration::from_secs(60)
-        { return Err(GlobalNameError::Configuration); }
-        Ok(Self { max_local_names, max_names_per_peer, maintenance_interval,
-            registration_timeout: Duration::from_secs(30) })
+            || maintenance_interval.is_zero()
+            || maintenance_interval > Duration::from_secs(60)
+        {
+            return Err(GlobalNameError::Configuration);
+        }
+        Ok(Self {
+            max_local_names,
+            max_names_per_peer,
+            maintenance_interval,
+            registration_timeout: Duration::from_secs(30),
+        })
     }
 
     /// Set the maximum time a not-yet-published registration may retain credit.
     /// The driver observes expiry at its bounded maintenance interval.
     pub fn with_registration_timeout(mut self, timeout: Duration) -> Result<Self, GlobalNameError> {
-        if timeout.is_zero() || timeout > Duration::from_secs(300) { return Err(GlobalNameError::Configuration); }
+        if timeout.is_zero() || timeout > Duration::from_secs(300) {
+            return Err(GlobalNameError::Configuration);
+        }
         self.registration_timeout = timeout;
         Ok(self)
     }
@@ -85,13 +96,21 @@ pub struct GlobalNameTarget {
 }
 impl GlobalNameTarget {
     /// Direct authenticated owner.
-    pub fn node(&self) -> &NodeId { &self.node }
+    pub fn node(&self) -> &NodeId {
+        &self.node
+    }
     /// Independently authorized owner incarnation.
-    pub const fn incarnation(&self) -> u64 { self.incarnation }
+    pub const fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
     /// Non-reused registration identity within this incarnation.
-    pub const fn registration(&self) -> u64 { self.registration }
+    pub const fn registration(&self) -> u64 {
+        self.registration
+    }
     /// Explicitly chosen named computation; its own admission remains required.
-    pub fn computation(&self) -> &str { &self.computation }
+    pub fn computation(&self) -> &str {
+        &self.computation
+    }
 }
 
 /// A possibly stale local observation, never a global exclusivity certificate.
@@ -159,9 +178,10 @@ impl GlobalNameRetirement {
     /// Consult the retained close outcome for cleanup cancellation or panic.
     pub fn is_drained(&self) -> bool {
         self.exit.as_ref().is_some_and(|exit| {
-            exit.close.is_ok() && exit.task_outcome.as_ref().is_ok_and(|report| {
-                report.settlement_failures == 0 && report.state_error.is_none()
-            })
+            exit.close.is_ok()
+                && exit.task_outcome.as_ref().is_ok_and(|report| {
+                    report.settlement_failures == 0 && report.state_error.is_none()
+                })
         })
     }
 }
@@ -241,7 +261,11 @@ struct Signal {
 }
 impl Signal {
     fn new() -> Self {
-        Self { release: AtomicBool::new(false), status: Mutex::new(GlobalNameLeaseStatus::Active), changed: Notify::new() }
+        Self {
+            release: AtomicBool::new(false),
+            status: Mutex::new(GlobalNameLeaseStatus::Active),
+            changed: Notify::new(),
+        }
     }
     fn retiring(&self, reason: GlobalNameEndReason) {
         *self.status.lock() = GlobalNameLeaseStatus::Retiring(reason);
@@ -265,7 +289,9 @@ impl Request {
     fn finish(&self, value: Result<ProcessGroupClient<()>, GlobalNameError>) {
         {
             let mut reply = self.reply.lock();
-            if !reply.received { reply.value = Some(value); }
+            if !reply.received {
+                reply.value = Some(value);
+            }
         }
         wake(&self.changed);
     }
@@ -283,17 +309,22 @@ struct Local {
     finalized: bool,
 }
 impl Local {
-    fn published(&self) -> bool { self.member.is_some() }
+    fn published(&self) -> bool {
+        self.member.is_some()
+    }
 }
 impl Drop for Local {
     fn drop(&mut self) {
         if !self.finalized {
-            if let Some(group) = &self.group { group.request_abort(); }
+            if let Some(group) = &self.group {
+                group.request_abort();
+            }
             let reason = match &*self.signal.status.lock() {
                 GlobalNameLeaseStatus::Retiring(reason) => reason.clone(),
                 _ => GlobalNameEndReason::DriverDropped,
             };
-            self.signal.finish(Arc::new(GlobalNameRetirement { reason, exit: None }));
+            self.signal
+                .finish(Arc::new(GlobalNameRetirement { reason, exit: None }));
             self.request.finish(Err(GlobalNameError::Closed));
         }
         // The actual group owner is dropped outside registry locks. Its Drop
@@ -329,14 +360,20 @@ struct Shared {
 
 /// Cloneable capability; run its single driver in an explicitly owned task.
 #[derive(Clone)]
-pub struct GlobalNameRegistry { shared: Arc<Shared> }
+pub struct GlobalNameRegistry {
+    shared: Arc<Shared>,
+}
 impl fmt::Debug for GlobalNameRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.shared.state.lock();
-        f.debug_struct("GlobalNameRegistry").field("node", &self.shared.node)
-            .field("incarnation", &self.shared.incarnation).field("local_names", &state.locals.len())
-            .field("draining", &state.draining).field("running", &state.running)
-            .field("closed", &state.closed).finish_non_exhaustive()
+        f.debug_struct("GlobalNameRegistry")
+            .field("node", &self.shared.node)
+            .field("incarnation", &self.shared.incarnation)
+            .field("local_names", &state.locals.len())
+            .field("draining", &state.draining)
+            .field("running", &state.running)
+            .field("closed", &state.closed)
+            .finish_non_exhaustive()
     }
 }
 
@@ -350,8 +387,11 @@ pub struct GlobalNameLease {
 }
 impl fmt::Debug for GlobalNameLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GlobalNameLease").field("name", &self.name)
-            .field("target", &self.target).field("status", &self.status()).finish()
+        f.debug_struct("GlobalNameLease")
+            .field("name", &self.name)
+            .field("target", &self.target)
+            .field("status", &self.status())
+            .finish()
     }
 }
 
@@ -375,11 +415,19 @@ fn wake(notify: &Notify) {
 }
 
 fn runtime(cx: &Cx) -> Result<Weak<ObligationMailbox>, GlobalNameError> {
-    if cx.checkpoint().is_err() { return Err(GlobalNameError::Cancelled); }
-    let (gateway, holder) = cx.obligation_transfer_destination().map_err(|_| GlobalNameError::Runtime)?;
-    if !gateway.is_runtime_available() || !holder.is_live()
-        || holder.holder() != cx.task_id() || holder.region() != cx.region_id()
-    { return Err(GlobalNameError::Runtime); }
+    if cx.checkpoint().is_err() {
+        return Err(GlobalNameError::Cancelled);
+    }
+    let (gateway, holder) = cx
+        .obligation_transfer_destination()
+        .map_err(|_| GlobalNameError::Runtime)?;
+    if !gateway.is_runtime_available()
+        || !holder.is_live()
+        || holder.holder() != cx.task_id()
+        || holder.region() != cx.region_id()
+    {
+        return Err(GlobalNameError::Runtime);
+    }
     Ok(Arc::downgrade(gateway.mailbox()))
 }
 
@@ -426,36 +474,64 @@ impl GlobalNameRegistry {
     /// Restarted owners must restore a fresh trusted incarnation before serving;
     /// in-memory catalog high-water marks are not crash-persistent storage.
     pub fn new(
-        node: NodeId, incarnation: u64, peers: impl IntoIterator<Item = NodeId>,
-        membership: OwnedMembershipController, config: GlobalNameConfig,
+        node: NodeId,
+        incarnation: u64,
+        peers: impl IntoIterator<Item = NodeId>,
+        membership: OwnedMembershipController,
+        config: GlobalNameConfig,
     ) -> Result<Self, GlobalNameError> {
         wire::label(node.as_str()).map_err(|_| GlobalNameError::Configuration)?;
-        if incarnation == 0 { return Err(GlobalNameError::Configuration); }
+        if incarnation == 0 {
+            return Err(GlobalNameError::Configuration);
+        }
         let mut accepted = Vec::new();
         for peer in peers {
-            if accepted.len() == wire::MAX_PEERS || peer == node
-                || accepted.contains(&peer) || wire::label(peer.as_str()).is_err()
-            { return Err(GlobalNameError::Configuration); }
+            if accepted.len() == wire::MAX_PEERS
+                || peer == node
+                || accepted.contains(&peer)
+                || wire::label(peer.as_str()).is_err()
+            {
+                return Err(GlobalNameError::Configuration);
+            }
             accepted.push(peer);
         }
         accepted.sort();
-        Ok(Self { shared: Arc::new(Shared {
-            node, incarnation, peers: accepted, membership, config,
-            state: Mutex::new(State {
-                running: false, closed: false, driver_task: None, runtime: None, clock: None,
-                next_registration: 0, sequence: 1, locals: BTreeMap::new(),
-                draining: 0, remotes: BTreeMap::new(),
+        Ok(Self {
+            shared: Arc::new(Shared {
+                node,
+                incarnation,
+                peers: accepted,
+                membership,
+                config,
+                state: Mutex::new(State {
+                    running: false,
+                    closed: false,
+                    driver_task: None,
+                    runtime: None,
+                    clock: None,
+                    next_registration: 0,
+                    sequence: 1,
+                    locals: BTreeMap::new(),
+                    draining: 0,
+                    remotes: BTreeMap::new(),
+                }),
+                changed: Notify::new(),
             }),
-            changed: Notify::new(),
-        }) })
+        })
     }
 
     /// Immutable direct owner identity.
-    pub fn local_node(&self) -> &NodeId { &self.shared.node }
+    pub fn local_node(&self) -> &NodeId {
+        &self.shared.node
+    }
     /// Independently authorized local incarnation.
-    pub fn incarnation(&self) -> u64 { self.shared.incarnation }
+    pub fn incarnation(&self) -> u64 {
+        self.shared.incarnation
+    }
     /// Fixed allowlist; catalogs never add peers or routes.
-    pub fn peers(&self) -> impl Iterator<Item = &NodeId> { self.shared.peers.iter() }
+    pub fn peers(&self) -> impl Iterator<Item = &NodeId> {
+        self.shared.peers.iter()
+    }
     /// Whether the driver has bound its actual runtime and still admits work.
     pub fn is_running(&self) -> bool {
         let state = self.shared.state.lock();
@@ -465,59 +541,122 @@ impl GlobalNameRegistry {
     fn validate(&self, cx: &Cx) -> Result<(), GlobalNameError> {
         let identity = runtime(cx)?;
         let state = self.shared.state.lock();
-        if state.closed { return Err(GlobalNameError::Closed); }
-        if !state.running { return Err(GlobalNameError::NotRunning); }
-        if state.runtime.as_ref().is_none_or(|bound| !Weak::ptr_eq(bound, &identity)) {
+        if state.closed {
+            return Err(GlobalNameError::Closed);
+        }
+        if !state.running {
+            return Err(GlobalNameError::NotRunning);
+        }
+        if state
+            .runtime
+            .as_ref()
+            .is_none_or(|bound| !Weak::ptr_eq(bound, &identity))
+        {
             return Err(GlobalNameError::Runtime);
         }
         Ok(())
     }
 
     fn suspect(&self, node: &NodeId) -> bool {
-        self.shared.membership.stamp(node).is_some_and(|stamp| stamp.kind == MembershipKind::Suspect)
+        self.shared
+            .membership
+            .stamp(node)
+            .is_some_and(|stamp| stamp.kind == MembershipKind::Suspect)
     }
 
     fn local_permitted(&self) -> bool {
-        self.shared.membership.permits_name_observation(&self.shared.node, self.shared.incarnation)
+        self.shared
+            .membership
+            .permits_name_observation(&self.shared.node, self.shared.incarnation)
     }
 
     fn remote_winner(&self, state: &State, name: &str) -> Option<GlobalNameView> {
-        state.remotes.iter().filter_map(|(node, remote)| {
-            if !self.shared.membership.permits_name_observation(node, remote.snapshot.incarnation) {
-                return None;
-            }
-            remote.snapshot.names.get(name).map(|target| GlobalNameView {
-                target: target.clone(), owner_sequence: remote.snapshot.sequence,
-                observed_at: remote.observed_at, local_owner: false, owner_suspect: self.suspect(node),
+        state
+            .remotes
+            .iter()
+            .filter_map(|(node, remote)| {
+                if !self
+                    .shared
+                    .membership
+                    .permits_name_observation(node, remote.snapshot.incarnation)
+                {
+                    return None;
+                }
+                remote
+                    .snapshot
+                    .names
+                    .get(name)
+                    .map(|target| GlobalNameView {
+                        target: target.clone(),
+                        owner_sequence: remote.snapshot.sequence,
+                        observed_at: remote.observed_at,
+                        local_owner: false,
+                        owner_suspect: self.suspect(node),
+                    })
             })
-        }).min_by(|left, right| left.target.cmp(&right.target))
+            .min_by(|left, right| left.target.cmp(&right.target))
     }
 
     fn winner(&self, state: &State, name: &str) -> Option<GlobalNameView> {
         let remote = self.remote_winner(state, name);
-        let local = state.locals.get(name).filter(|entry| {
-            !entry.signal.release.load(Ordering::Acquire)
-                && entry.member.as_ref().is_some_and(ManagedGroupMembership::is_active)
-                && self.local_permitted()
-        }).map(|entry| GlobalNameView {
-            target: entry.target.clone(), owner_sequence: state.sequence,
-            observed_at: entry.published_at, local_owner: true,
-            owner_suspect: self.suspect(&self.shared.node),
-        });
+        let local = state
+            .locals
+            .get(name)
+            .filter(|entry| {
+                !entry.signal.release.load(Ordering::Acquire)
+                    && entry
+                        .member
+                        .as_ref()
+                        .is_some_and(ManagedGroupMembership::is_active)
+                    && self.local_permitted()
+            })
+            .map(|entry| GlobalNameView {
+                target: entry.target.clone(),
+                owner_sequence: state.sequence,
+                observed_at: entry.published_at,
+                local_owner: true,
+                owner_suspect: self.suspect(&self.shared.node),
+            });
         match (local, remote) {
-            (Some(local), Some(remote)) => Some(if local.target <= remote.target { local } else { remote }),
+            (Some(local), Some(remote)) => Some(if local.target <= remote.target {
+                local
+            } else {
+                remote
+            }),
             (local, remote) => local.or(remote),
         }
     }
 
-    fn retirement_reason(&self, state: &State, name: &str, entry: &Local, now: Time) -> Option<GlobalNameEndReason> {
-        if state.closed { return Some(GlobalNameEndReason::Shutdown); }
-        if entry.signal.release.load(Ordering::Acquire) { return Some(GlobalNameEndReason::Released); }
-        if !entry.published() && now >= entry.deadline { return Some(GlobalNameEndReason::AdmissionExpired); }
-        if entry.member.as_ref().is_some_and(|member| !member.is_active()) { return Some(GlobalNameEndReason::OwnerDown); }
-        if !self.local_permitted() { return Some(GlobalNameEndReason::MembershipLost); }
+    fn retirement_reason(
+        &self,
+        state: &State,
+        name: &str,
+        entry: &Local,
+        now: Time,
+    ) -> Option<GlobalNameEndReason> {
+        if state.closed {
+            return Some(GlobalNameEndReason::Shutdown);
+        }
+        if entry.signal.release.load(Ordering::Acquire) {
+            return Some(GlobalNameEndReason::Released);
+        }
+        if !entry.published() && now >= entry.deadline {
+            return Some(GlobalNameEndReason::AdmissionExpired);
+        }
+        if entry
+            .member
+            .as_ref()
+            .is_some_and(|member| !member.is_active())
+        {
+            return Some(GlobalNameEndReason::OwnerDown);
+        }
+        if !self.local_permitted() {
+            return Some(GlobalNameEndReason::MembershipLost);
+        }
         if let Some(winner) = self.remote_winner(state, name) {
-            if winner.target < entry.target { return Some(GlobalNameEndReason::Conflict(winner.target)); }
+            if winner.target < entry.target {
+                return Some(GlobalNameEndReason::Conflict(winner.target));
+            }
         }
         None
     }
@@ -531,10 +670,15 @@ impl GlobalNameRegistry {
         }));
         let mut cancelled = std::pin::pin!(cx.cancelled());
         poll_fn(|task| {
-            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() { return Poll::Ready(Err(GlobalNameError::Cancelled)); }
-            if changed.as_mut().poll(task).is_ready() { return Poll::Ready(Ok(())); }
+            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                return Poll::Ready(Err(GlobalNameError::Cancelled));
+            }
+            if changed.as_mut().poll(task).is_ready() {
+                return Poll::Ready(Ok(()));
+            }
             Poll::Pending
-        }).await?;
+        })
+        .await?;
         self.validate(cx)
     }
 
@@ -545,7 +689,10 @@ impl GlobalNameRegistry {
     /// installed. Cancellation or future abandonment releases the admission;
     /// forgotten pending futures expire on the explicit driver's clock.
     pub async fn register_global(
-        &self, cx: &Cx, name: impl Into<String>, computation: impl Into<String>,
+        &self,
+        cx: &Cx,
+        name: impl Into<String>,
+        computation: impl Into<String>,
     ) -> Result<GlobalNameLease, GlobalNameError> {
         self.validate(cx)?;
         let name = name.into();
@@ -555,43 +702,89 @@ impl GlobalNameRegistry {
         wire::label(&computation)?;
         let signal = Arc::new(Signal::new());
         let request = Arc::new(Request {
-            reply: Mutex::new(Reply { value: None, received: false }), changed: Notify::new(),
+            reply: Mutex::new(Reply {
+                value: None,
+                received: false,
+            }),
+            changed: Notify::new(),
         });
         let target = {
             let mut state = self.shared.state.lock();
-            if state.closed { return Err(GlobalNameError::Closed); }
-            if state.driver_task == Some(cx.task_id()) { return Err(GlobalNameError::DriverIsOwner); }
-            if !self.shared.membership.permits_native_route(&self.shared.node, self.shared.incarnation) {
+            if state.closed {
+                return Err(GlobalNameError::Closed);
+            }
+            if state.driver_task == Some(cx.task_id()) {
+                return Err(GlobalNameError::DriverIsOwner);
+            }
+            if !self
+                .shared
+                .membership
+                .permits_native_route(&self.shared.node, self.shared.incarnation)
+            {
                 return Err(GlobalNameError::Authority);
             }
-            if state.locals.len().saturating_add(state.draining) >= self.shared.config.max_local_names {
+            if state.locals.len().saturating_add(state.draining)
+                >= self.shared.config.max_local_names
+            {
                 return Err(GlobalNameError::Capacity);
             }
-            if let Some(current) = state.locals.get(&name) { return Err(GlobalNameError::Conflict(current.target.clone())); }
-            let registration = state.next_registration.checked_add(1).ok_or(GlobalNameError::Capacity)?;
+            if let Some(current) = state.locals.get(&name) {
+                return Err(GlobalNameError::Conflict(current.target.clone()));
+            }
+            let registration = state
+                .next_registration
+                .checked_add(1)
+                .ok_or(GlobalNameError::Capacity)?;
             let target = GlobalNameTarget {
-                node: self.shared.node.clone(), incarnation: self.shared.incarnation, registration, computation,
+                node: self.shared.node.clone(),
+                incarnation: self.shared.incarnation,
+                registration,
+                computation,
             };
             if let Some(winner) = self.remote_winner(&state, &name) {
-                if winner.target < target { return Err(GlobalNameError::Conflict(winner.target)); }
+                if winner.target < target {
+                    return Err(GlobalNameError::Conflict(winner.target));
+                }
             }
             let now = state.clock.as_ref().ok_or(GlobalNameError::Runtime)?.now();
             let deadline = now + self.shared.config.registration_timeout;
-            if deadline <= now { return Err(GlobalNameError::Capacity); }
+            if deadline <= now {
+                return Err(GlobalNameError::Capacity);
+            }
             state.next_registration = registration;
-            state.locals.insert(name.clone(), Local {
-                target: target.clone(), signal: Arc::clone(&signal), request: Arc::clone(&request),
-                group: None, member: None, opening: false, deadline, published_at: now, finalized: false,
-            });
+            state.locals.insert(
+                name.clone(),
+                Local {
+                    target: target.clone(),
+                    signal: Arc::clone(&signal),
+                    request: Arc::clone(&request),
+                    group: None,
+                    member: None,
+                    opening: false,
+                    deadline,
+                    published_at: now,
+                    finalized: false,
+                },
+            );
             target
         };
-        let mut admission = Admission { shared: Arc::clone(&self.shared), signal: Arc::clone(&signal), complete: false };
+        let mut admission = Admission {
+            shared: Arc::clone(&self.shared),
+            signal: Arc::clone(&signal),
+            complete: false,
+        };
         wake(&self.shared.changed);
         let client = {
-            let mut ready = std::pin::pin!(request.changed.wait_until(|| request.reply.lock().value.is_some()));
+            let mut ready = std::pin::pin!(
+                request
+                    .changed
+                    .wait_until(|| request.reply.lock().value.is_some())
+            );
             let mut cancelled = std::pin::pin!(cx.cancelled());
             poll_fn(|task| {
-                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() { return Poll::Ready(Err(GlobalNameError::Cancelled)); }
+                if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(GlobalNameError::Cancelled));
+                }
                 if ready.as_mut().poll(task).is_ready() {
                     let mut reply = request.reply.lock();
                     if let Some(value) = reply.value.take() {
@@ -600,28 +793,51 @@ impl GlobalNameRegistry {
                     }
                 }
                 Poll::Pending
-            }).await?
+            })
+            .await?
         };
         let mut member = Some(client.join(cx).await?);
-        if cx.checkpoint().is_err() { return Err(GlobalNameError::Cancelled); }
+        if cx.checkpoint().is_err() {
+            return Err(GlobalNameError::Cancelled);
+        }
         let publication = {
             let mut state = self.shared.state.lock();
             (|| {
-                if state.closed { return Err(GlobalNameError::Closed); }
-                if !self.shared.membership.permits_native_route(&self.shared.node, self.shared.incarnation) {
+                if state.closed {
+                    return Err(GlobalNameError::Closed);
+                }
+                if !self
+                    .shared
+                    .membership
+                    .permits_native_route(&self.shared.node, self.shared.incarnation)
+                {
                     return Err(GlobalNameError::Authority);
                 }
                 if let Some(winner) = self.remote_winner(&state, &name) {
-                    if winner.target < target { return Err(GlobalNameError::Conflict(winner.target)); }
+                    if winner.target < target {
+                        return Err(GlobalNameError::Conflict(winner.target));
+                    }
                 }
                 let now = state.clock.as_ref().ok_or(GlobalNameError::Runtime)?.now();
-                let sequence = state.sequence.checked_add(1).ok_or(GlobalNameError::Capacity)?;
+                let sequence = state
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(GlobalNameError::Capacity)?;
                 let entry = state.locals.get_mut(&name).ok_or(GlobalNameError::Closed)?;
-                if entry.target.registration != target.registration || entry.signal.release.load(Ordering::Acquire) {
+                if entry.target.registration != target.registration
+                    || entry.signal.release.load(Ordering::Acquire)
+                {
                     return Err(GlobalNameError::Closed);
                 }
-                if now >= entry.deadline { return Err(GlobalNameError::AdmissionExpired); }
-                if !member.as_ref().is_some_and(ManagedGroupMembership::is_active) { return Err(GlobalNameError::Closed); }
+                if now >= entry.deadline {
+                    return Err(GlobalNameError::AdmissionExpired);
+                }
+                if !member
+                    .as_ref()
+                    .is_some_and(ManagedGroupMembership::is_active)
+                {
+                    return Err(GlobalNameError::Closed);
+                }
                 entry.member = member.take();
                 entry.published_at = now;
                 state.sequence = sequence;
@@ -629,21 +845,34 @@ impl GlobalNameRegistry {
             })()
         };
         publication?;
-        if cx.checkpoint().is_err() { return Err(GlobalNameError::Cancelled); }
+        if cx.checkpoint().is_err() {
+            return Err(GlobalNameError::Cancelled);
+        }
         admission.complete = true;
         wake(&self.shared.changed);
-        Ok(GlobalNameLease { name, target, signal, shared: Arc::clone(&self.shared) })
+        Ok(GlobalNameLease {
+            name,
+            target,
+            signal,
+            shared: Arc::clone(&self.shared),
+        })
     }
 
     /// Return this observer's deterministic winner, including explicit suspicion.
     /// None is local absence, not a cluster-wide negative lookup. A partition can
     /// leave this result stale indefinitely; use an exact-owner round trip when
     /// a fresh observation at the selected owner is required.
-    pub fn whereis_global(&self, cx: &Cx, name: &str) -> Result<Option<GlobalNameView>, GlobalNameError> {
+    pub fn whereis_global(
+        &self,
+        cx: &Cx,
+        name: &str,
+    ) -> Result<Option<GlobalNameView>, GlobalNameError> {
         self.validate(cx)?;
         wire::label(name)?;
         let state = self.shared.state.lock();
-        if state.closed { return Err(GlobalNameError::Closed); }
+        if state.closed {
+            return Err(GlobalNameError::Closed);
+        }
         Ok(self.winner(&state, name))
     }
 
@@ -654,13 +883,19 @@ impl GlobalNameRegistry {
     pub fn snapshot(&self, cx: &Cx) -> Result<Vec<u8>, GlobalNameError> {
         self.validate(cx)?;
         let state = self.shared.state.lock();
-        if state.closed { return Err(GlobalNameError::Closed); }
-        if !self.local_permitted() { return Err(GlobalNameError::Authority); }
+        if state.closed {
+            return Err(GlobalNameError::Closed);
+        }
+        if !self.local_permitted() {
+            return Err(GlobalNameError::Authority);
+        }
         let now = state.clock.as_ref().ok_or(GlobalNameError::Runtime)?.now();
         let mut names = BTreeMap::new();
         for (name, entry) in &state.locals {
             if entry.published() {
-                if self.retirement_reason(&state, name, entry, now).is_some() { return Err(GlobalNameError::PendingRetirement); }
+                if self.retirement_reason(&state, name, entry, now).is_some() {
+                    return Err(GlobalNameError::PendingRetirement);
+                }
                 names.insert(name.clone(), entry.target.clone());
             }
         }
@@ -673,29 +908,55 @@ impl GlobalNameRegistry {
     /// retries are idempotent; older snapshots and sequence equivocation refuse.
     /// Accepted high-water marks survive member death for this registry lifetime.
     pub fn apply_authenticated_snapshot(
-        &self, cx: &Cx, peer: &NodeId, bytes: &[u8],
+        &self,
+        cx: &Cx,
+        peer: &NodeId,
+        bytes: &[u8],
     ) -> Result<GlobalNameSnapshotReceipt, GlobalNameError> {
         self.validate(cx)?;
-        if !self.shared.peers.contains(peer) { return Err(GlobalNameError::Authority); }
+        if !self.shared.peers.contains(peer) {
+            return Err(GlobalNameError::Authority);
+        }
         let snapshot = wire::decode_snapshot(peer, bytes, self.shared.config.max_names_per_peer)?;
         let receipt = GlobalNameSnapshotReceipt {
-            owner: peer.clone(), incarnation: snapshot.incarnation, sequence: snapshot.sequence, digest: snapshot.digest,
+            owner: peer.clone(),
+            incarnation: snapshot.incarnation,
+            sequence: snapshot.sequence,
+            digest: snapshot.digest,
         };
         {
             let mut state = self.shared.state.lock();
-            if state.closed { return Err(GlobalNameError::Closed); }
-            if !self.local_permitted() || !self.shared.membership.permits_native_route(peer, snapshot.incarnation) {
+            if state.closed {
+                return Err(GlobalNameError::Closed);
+            }
+            if !self.local_permitted()
+                || !self
+                    .shared
+                    .membership
+                    .permits_native_route(peer, snapshot.incarnation)
+            {
                 return Err(GlobalNameError::Authority);
             }
             if let Some(previous) = state.remotes.get(peer) {
                 let old = &previous.snapshot;
-                if (snapshot.incarnation, snapshot.sequence) < (old.incarnation, old.sequence) { return Err(GlobalNameError::Stale); }
-                if snapshot.incarnation == old.incarnation && snapshot.sequence == old.sequence && snapshot.digest != old.digest {
+                if (snapshot.incarnation, snapshot.sequence) < (old.incarnation, old.sequence) {
+                    return Err(GlobalNameError::Stale);
+                }
+                if snapshot.incarnation == old.incarnation
+                    && snapshot.sequence == old.sequence
+                    && snapshot.digest != old.digest
+                {
                     return Err(GlobalNameError::SequenceConflict);
                 }
             }
             let observed_at = state.clock.as_ref().ok_or(GlobalNameError::Runtime)?.now();
-            state.remotes.insert(peer.clone(), Remote { snapshot, observed_at });
+            state.remotes.insert(
+                peer.clone(),
+                Remote {
+                    snapshot,
+                    observed_at,
+                },
+            );
         }
         wake(&self.shared.changed);
         Ok(receipt)
@@ -704,12 +965,21 @@ impl GlobalNameRegistry {
     /// Answer an exact-incarnation round trip using only this owner's live claim.
     /// A remote cached winner is never represented as this node's authoritative
     /// answer. Suspect is still only local authority, not majority authority.
-    pub fn authoritative_reply(&self, cx: &Cx, name: &str, incarnation: u64) -> Result<Vec<u8>, GlobalNameError> {
+    pub fn authoritative_reply(
+        &self,
+        cx: &Cx,
+        name: &str,
+        incarnation: u64,
+    ) -> Result<Vec<u8>, GlobalNameError> {
         self.validate(cx)?;
         wire::label(name)?;
         let state = self.shared.state.lock();
-        if state.closed { return Err(GlobalNameError::Closed); }
-        if incarnation != self.shared.incarnation || !self.local_permitted() { return Err(GlobalNameError::Authority); }
+        if state.closed {
+            return Err(GlobalNameError::Closed);
+        }
+        if incarnation != self.shared.incarnation || !self.local_permitted() {
+            return Err(GlobalNameError::Authority);
+        }
         if let Some(entry) = state.locals.get(name) {
             let now = state.clock.as_ref().ok_or(GlobalNameError::Runtime)?.now();
             if entry.published() && self.retirement_reason(&state, name, entry, now).is_some() {
@@ -717,7 +987,12 @@ impl GlobalNameRegistry {
             }
         }
         let local = self.winner(&state, name).filter(|view| view.local_owner);
-        wire::lookup_reply(incarnation, state.sequence, name, local.as_ref().map(|view| &view.target))
+        wire::lookup_reply(
+            incarnation,
+            state.sequence,
+            name,
+            local.as_ref().map(|view| &view.target),
+        )
     }
 
     /// Permanently seal admission and wake the caller-owned drain loop.
@@ -738,9 +1013,17 @@ impl GlobalNameRegistry {
         let clock = cx.timer_driver().ok_or(GlobalNameError::Runtime)?;
         {
             let mut state = self.shared.state.lock();
-            if state.closed { return Err(GlobalNameError::Closed); }
-            if state.running { return Err(GlobalNameError::DriverRunning); }
-            if !self.shared.membership.permits_native_route(&self.shared.node, self.shared.incarnation) {
+            if state.closed {
+                return Err(GlobalNameError::Closed);
+            }
+            if state.running {
+                return Err(GlobalNameError::DriverRunning);
+            }
+            if !self
+                .shared
+                .membership
+                .permits_native_route(&self.shared.node, self.shared.incarnation)
+            {
                 return Err(GlobalNameError::Authority);
             }
             state.running = true;
@@ -767,24 +1050,44 @@ impl GlobalNameRegistry {
                 let mut state = self.shared.state.lock();
                 let now = clock.now();
                 let retirement = state.locals.iter().find_map(|(name, entry)| {
-                    self.retirement_reason(&state, name, entry, now).map(|reason| Work::Retire(name.clone(), reason))
+                    self.retirement_reason(&state, name, entry, now)
+                        .map(|reason| Work::Retire(name.clone(), reason))
                 });
-                if let Some(retirement) = retirement { retirement }
-                else if state.closed && state.locals.is_empty() { Work::Done }
-                else if let Some((name, entry)) = state.locals.iter_mut().find(|(_, entry)| !entry.opening && entry.group.is_none()) {
+                if let Some(retirement) = retirement {
+                    retirement
+                } else if state.closed && state.locals.is_empty() {
+                    Work::Done
+                } else if let Some((name, entry)) = state
+                    .locals
+                    .iter_mut()
+                    .find(|(_, entry)| !entry.opening && entry.group.is_none())
+                {
                     entry.opening = true;
                     Work::Open(name.clone(), Arc::clone(&entry.request))
-                } else { Work::Wait }
+                } else {
+                    Work::Wait
+                }
             };
             match work {
-                Work::Done => return if cancelled { Err(GlobalNameError::Cancelled) } else { Ok(report) },
+                Work::Done => {
+                    return if cancelled {
+                        Err(GlobalNameError::Cancelled)
+                    } else {
+                        Ok(report)
+                    };
+                }
                 Work::Retire(name, reason) => {
                     let mut entry = {
                         let mut state = self.shared.state.lock();
-                        let Some(entry) = state.locals.remove(&name) else { continue; };
+                        let Some(entry) = state.locals.remove(&name) else {
+                            continue;
+                        };
                         if entry.published() {
-                            if let Some(next) = state.sequence.checked_add(1) { state.sequence = next; }
-                            else { state.closed = true; }
+                            if let Some(next) = state.sequence.checked_add(1) {
+                                state.sequence = next;
+                            } else {
+                                state.closed = true;
+                            }
                         }
                         state.draining += 1;
                         entry
@@ -793,20 +1096,37 @@ impl GlobalNameRegistry {
                     entry.signal.retiring(reason.clone());
                     entry.request.finish(Err(match &reason {
                         GlobalNameEndReason::AdmissionExpired => GlobalNameError::AdmissionExpired,
-                        GlobalNameEndReason::Conflict(target) => GlobalNameError::Conflict(target.clone()),
+                        GlobalNameEndReason::Conflict(target) => {
+                            GlobalNameError::Conflict(target.clone())
+                        }
                         _ => GlobalNameError::Closed,
                     }));
                     let had_group = entry.group.is_some();
                     // Retain membership until shutdown has selected and settled
                     // the terminal. A conflict must abort the checked name lease.
                     let exit = if let Some(group) = entry.group.take() {
-                        Some(if reason == GlobalNameEndReason::Released { group.shutdown().await } else { group.abort().await })
-                    } else { None };
-                    let retirement = Arc::new(GlobalNameRetirement { reason: reason.clone(), exit });
+                        Some(if reason == GlobalNameEndReason::Released {
+                            group.shutdown().await
+                        } else {
+                            group.abort().await
+                        })
+                    } else {
+                        None
+                    };
+                    let retirement = Arc::new(GlobalNameRetirement {
+                        reason: reason.clone(),
+                        exit,
+                    });
                     report.retired += 1;
-                    if matches!(reason, GlobalNameEndReason::Conflict(_)) { report.conflicts += 1; }
-                    if reason == GlobalNameEndReason::OwnerDown { report.owner_down += 1; }
-                    if had_group && !retirement.is_drained() { report.close_failures += 1; }
+                    if matches!(reason, GlobalNameEndReason::Conflict(_)) {
+                        report.conflicts += 1;
+                    }
+                    if reason == GlobalNameEndReason::OwnerDown {
+                        report.owner_down += 1;
+                    }
+                    if had_group && !retirement.is_drained() {
+                        report.close_failures += 1;
+                    }
                     drop(_credit);
                     entry.signal.finish(retirement);
                     entry.finalized = true;
@@ -814,17 +1134,25 @@ impl GlobalNameRegistry {
                     wake(&self.shared.changed);
                 }
                 Work::Open(name, request) => {
-                    let group_name = GroupName::new(name.clone()).map_err(|_| GlobalNameError::Format)?;
+                    let group_name =
+                        GroupName::new(name.clone()).map_err(|_| GlobalNameError::Format)?;
                     let opened = ManagedProcessGroup::<()>::open(
-                        cx, group_name, self.shared.node.clone(), ManagedProcessGroupConfig::new(1, 1, 1, 4),
-                    ).await;
+                        cx,
+                        group_name,
+                        self.shared.node.clone(),
+                        ManagedProcessGroupConfig::new(1, 1, 1, 4),
+                    )
+                    .await;
                     match opened {
                         Ok(group) => {
                             group.abort_on_member_down();
                             let client = group.client();
                             {
                                 let mut state = self.shared.state.lock();
-                                let entry = state.locals.get_mut(&name).expect("only driver removes local admissions");
+                                let entry = state
+                                    .locals
+                                    .get_mut(&name)
+                                    .expect("only driver removes local admissions");
                                 entry.group = Some(group);
                             }
                             request.finish(Ok(client));
@@ -833,7 +1161,8 @@ impl GlobalNameRegistry {
                             let entry = self.shared.state.lock().locals.remove(&name);
                             if let Some(mut entry) = entry {
                                 entry.signal.finish(Arc::new(GlobalNameRetirement {
-                                    reason: GlobalNameEndReason::AdmissionFailed, exit: None,
+                                    reason: GlobalNameEndReason::AdmissionFailed,
+                                    exit: None,
                                 }));
                                 entry.request.finish(Err(GlobalNameError::Group(error)));
                                 entry.finalized = true;
@@ -845,21 +1174,30 @@ impl GlobalNameRegistry {
                 }
                 Work::Wait => {
                     let deadline = clock.now() + self.shared.config.maintenance_interval;
-                    let mut timer = std::pin::pin!(Sleep::with_timer_driver(deadline, clock.clone()));
+                    let mut timer =
+                        std::pin::pin!(Sleep::with_timer_driver(deadline, clock.clone()));
                     let mut changed = std::pin::pin!(self.shared.changed.wait_until(|| {
                         let state = self.shared.state.lock();
-                        state.closed || state.locals.iter().any(|(name, entry)| {
-                            (!entry.opening && entry.group.is_none())
-                                || self.retirement_reason(&state, name, entry, clock.now()).is_some()
-                        })
+                        state.closed
+                            || state.locals.iter().any(|(name, entry)| {
+                                (!entry.opening && entry.group.is_none())
+                                    || self
+                                        .retirement_reason(&state, name, entry, clock.now())
+                                        .is_some()
+                            })
                     }));
                     let mut cancellation = std::pin::pin!(cx.cancelled());
                     poll_fn(|task| {
                         if (cancellation.as_mut().poll(task).is_ready() && cx.checkpoint().is_err())
                             || changed.as_mut().poll(task).is_ready()
                             || timer.as_mut().poll_deadline(task).is_ready()
-                        { Poll::Ready(()) } else { Poll::Pending }
-                    }).await;
+                        {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
                 }
             }
         }
@@ -868,11 +1206,17 @@ impl GlobalNameRegistry {
 
 impl GlobalNameLease {
     /// Exact registered name.
-    pub fn name(&self) -> &str { &self.name }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     /// Immutable target identity for this registration.
-    pub fn target(&self) -> &GlobalNameTarget { &self.target }
+    pub fn target(&self) -> &GlobalNameTarget {
+        &self.target
+    }
     /// Driver-observed status, not permission to bypass invocation admission.
-    pub fn status(&self) -> GlobalNameLeaseStatus { self.signal.status.lock().clone() }
+    pub fn status(&self) -> GlobalNameLeaseStatus {
+        self.signal.status.lock().clone()
+    }
     /// Withdraw this exact generation without waiting or acquiring admission.
     pub fn request_release(&self) {
         self.signal.release.store(true, Ordering::Release);
@@ -881,7 +1225,15 @@ impl GlobalNameLease {
     /// Wait for the actual retirement report; this wait itself ignores caller
     /// cancellation so it can be used during owned cleanup.
     pub async fn ended(&self) -> Arc<GlobalNameRetirement> {
-        self.signal.changed.wait_until(|| matches!(*self.signal.status.lock(), GlobalNameLeaseStatus::Retired(_))).await;
+        self.signal
+            .changed
+            .wait_until(|| {
+                matches!(
+                    *self.signal.status.lock(),
+                    GlobalNameLeaseStatus::Retired(_)
+                )
+            })
+            .await;
         match &*self.signal.status.lock() {
             GlobalNameLeaseStatus::Retired(retirement) => Arc::clone(retirement),
             _ => unreachable!("terminal notification predicate"),
@@ -898,13 +1250,18 @@ impl GlobalNameLease {
                 let _ = cx.checkpoint();
                 return Poll::Ready(Ok(retirement));
             }
-            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() { return Poll::Ready(Err(GlobalNameError::Cancelled)); }
+            if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+                return Poll::Ready(Err(GlobalNameError::Cancelled));
+            }
             Poll::Pending
-        }).await
+        })
+        .await
     }
 }
 impl Drop for GlobalNameLease {
-    fn drop(&mut self) { self.request_release(); }
+    fn drop(&mut self) {
+        self.request_release();
+    }
 }
 
 #[cfg(test)]

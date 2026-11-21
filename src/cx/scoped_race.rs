@@ -451,10 +451,10 @@ where
         } else if self.is_cancel_requested() {
             // Cancellation observed between submissions starts no new branch.
             None
-        } else if !owned
-            .right
-            .submit(self, right_factory.take().expect("right factory submitted once"))
-        {
+        } else if !owned.right.submit(
+            self,
+            right_factory.take().expect("right factory submitted once"),
+        ) {
             Some(ScopedRaceBranch::Right)
         } else {
             None
@@ -462,9 +462,7 @@ where
 
         let mut cancelled = std::pin::pin!(self.cancelled());
         let stop = if observe_owner_cancellation(self, &mut owner_cancellation) {
-            ScopedRaceStop::Cancelled(
-                owner_cancellation.clone().expect("owner request observed"),
-            )
+            ScopedRaceStop::Cancelled(owner_cancellation.clone().expect("owner request observed"))
         } else if let Some(branch) = refused {
             ScopedRaceStop::NotAdmitted(branch)
         } else {

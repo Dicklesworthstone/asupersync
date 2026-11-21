@@ -194,12 +194,20 @@ fn parked_handshakes_wake_on_cancellation_without_an_io_event() {
                 let new = Arc::new(WakeCount::default());
                 let old_waker = Waker::from(Arc::clone(&old));
                 let new_waker = Waker::from(Arc::clone(&new));
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&old_waker))
+                        .is_pending()
+                );
                 assert!(probe.parked.load(Ordering::Acquire));
                 if client {
                     assert!(probe.written.load(Ordering::SeqCst) > 0);
                 }
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&new_waker))
+                        .is_pending()
+                );
                 let calls = probe.calls.load(Ordering::SeqCst);
                 cx.cancel_fast(CancelKind::User);
                 // Witness notification before repolling; the transport did not
@@ -223,12 +231,20 @@ fn abandoning_a_handshake_retires_its_cancellation_observer() {
         let count = Arc::new(WakeCount::default());
         let waker = Waker::from(Arc::clone(&count));
         let mut wait = begin(client, &cx, &connector, &acceptor, &probe, false);
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         drop(wait);
         assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
         assert!(probe.waker.lock().unwrap().is_none());
         cx.cancel_fast(CancelKind::User);
-        assert_eq!(count.0.load(Ordering::SeqCst), 0, "dropped wait kept a registration");
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            0,
+            "dropped wait kept a registration"
+        );
     }
 }
 
@@ -244,7 +260,11 @@ fn masked_requests_do_not_spin_or_bypass_the_checkpoint() {
         let mut wait = begin(client, &cx, &connector, &acceptor, &probe, false);
         cx.masked(|| {
             for _ in 0..3 {
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
             }
         });
         assert!(probe.parked.load(Ordering::Acquire));
@@ -262,7 +282,11 @@ fn restricted_resume_cannot_borrow_the_handshake_owners_authority() {
         let owner = Cx::for_testing();
         let probe = Arc::new(Probe::default());
         let mut wait = begin(client, &owner, &connector, &acceptor, &probe, false);
-        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
         let calls = probe.calls.load(Ordering::SeqCst);
         let restricted = Cx::detached_cancel_context();
         let result = futures_lite::future::block_on(
@@ -296,7 +320,9 @@ fn cancellation_during_completion_discards_success_but_preserves_tls_errors() {
     let cx = Cx::for_testing();
     let result = futures_lite::future::block_on(with_cancellation::<()>(&cx, async {
         cx.cancel_fast(CancelKind::User);
-        Err(TlsError::Certificate("original verification failure".into()))
+        Err(TlsError::Certificate(
+            "original verification failure".into(),
+        ))
     }));
     assert!(matches!(result, Err(TlsError::Certificate(message))
         if message == "original verification failure"));
@@ -331,10 +357,14 @@ fn context_handshakes_keep_protocol_alpn_pinning_and_exporter_checks() {
             // Keep completed streams alive while the other endpoint finishes.
             // A failed pin can close TCP before the server sends its tickets.
             for _ in 0..128 {
-                if c.is_none() && let Poll::Ready(result) = client.as_mut().poll(&mut task) {
+                if c.is_none()
+                    && let Poll::Ready(result) = client.as_mut().poll(&mut task)
+                {
                     c = Some(result);
                 }
-                if s.is_none() && let Poll::Ready(result) = server.as_mut().poll(&mut task) {
+                if s.is_none()
+                    && let Poll::Ready(result) = server.as_mut().poll(&mut task)
+                {
                     s = Some(result);
                 }
                 if c.is_some() && s.is_some() {
@@ -389,9 +419,16 @@ fn native_abort_joins_a_parked_handshake_with_its_typed_error() {
             let child_probe = Arc::clone(&probe);
             let mut child = parent
                 .spawn(move |child_cx| async move {
-                    begin(client, &child_cx, &connector, &acceptor, &child_probe, false)
-                        .await
-                        .map(|_| ())
+                    begin(
+                        client,
+                        &child_cx,
+                        &connector,
+                        &acceptor,
+                        &child_probe,
+                        false,
+                    )
+                    .await
+                    .map(|_| ())
                 })
                 .unwrap();
             for _ in 0..1024 {
@@ -400,24 +437,21 @@ fn native_abort_joins_a_parked_handshake_with_its_typed_error() {
                 }
                 yield_now().await;
             }
-            assert!(probe.parked.load(Ordering::Acquire), "must witness actual Pending");
+            assert!(
+                probe.parked.load(Ordering::Acquire),
+                "must witness actual Pending"
+            );
             let calls = probe.calls.load(Ordering::SeqCst);
             child.abort();
-            let result = crate::time::timeout(
-                parent.now(),
-                Duration::from_secs(2),
-                child.join(&parent),
-            )
-            .await;
+            let result =
+                crate::time::timeout(parent.now(), Duration::from_secs(2), child.join(&parent))
+                    .await;
             if result.is_err() {
                 // A regressed wrapper must not strand the native test forever.
                 probe.rescue();
-                let _ = crate::time::timeout(
-                    parent.now(),
-                    Duration::from_secs(2),
-                    child.join(&parent),
-                )
-                .await;
+                let _ =
+                    crate::time::timeout(parent.now(), Duration::from_secs(2), child.join(&parent))
+                        .await;
                 panic!("abort did not finish without a transport readiness event");
             }
             assert!(matches!(result, Ok(Ok(Err(TlsError::Io(error))))

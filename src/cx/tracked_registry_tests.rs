@@ -11,7 +11,10 @@ pub(super) fn fixture(limit: usize) -> (LabRuntime, Cx, TaskHandle<()>) {
     crate::test_utils::init_test_logging();
     let mut lab = LabRuntime::new(LabConfig::new(0x100_1ea5e).max_steps(512));
     let root = lab.state.create_root_region(Budget::INFINITE);
-    let region = lab.state.create_child_region(root, Budget::INFINITE).unwrap();
+    let region = lab
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .unwrap();
     assert!(lab.state.set_region_limits(
         region,
         crate::record::region::RegionLimits {
@@ -19,7 +22,10 @@ pub(super) fn fixture(limit: usize) -> (LabRuntime, Cx, TaskHandle<()>) {
             ..crate::record::region::RegionLimits::UNLIMITED
         },
     ));
-    let (task, handle) = lab.state.create_task(region, Budget::INFINITE, async {}).unwrap();
+    let (task, handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .unwrap();
     let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
     (lab, cx, handle)
 }
@@ -35,7 +41,11 @@ pub(super) fn finish(mut lab: LabRuntime, cx: &Cx, mut handle: TaskHandle<()>, r
     lab.scheduler.lock().schedule(cx.task_id(), 0);
     let report = lab.run_until_quiescent_with_report();
     assert!(report.invariant_violations.is_empty());
-    assert!(report.oracle_report.all_passed(), "{:?}", report.oracle_report.failures());
+    assert!(
+        report.oracle_report.all_passed(),
+        "{:?}",
+        report.oracle_report.failures()
+    );
     assert!(handle.try_join().unwrap().is_some());
     let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
     let stats = mailbox.stats();
@@ -58,7 +68,10 @@ fn registered_name_is_visible_and_accounted_until_release() {
     assert_eq!(lease.holder(), cx.task_id());
     assert_eq!(lease.region(), cx.region_id());
     assert_eq!(lease.acquired_at(), cx.now());
-    assert_eq!(lease.obligation.as_ref().unwrap().kind(), ObligationKind::Lease);
+    assert_eq!(
+        lease.obligation.as_ref().unwrap().kind(),
+        ObligationKind::Lease
+    );
     flush(&mut lab);
     assert_eq!(lab.state.pending_obligation_count(), 1);
     lease.release().unwrap();
@@ -73,7 +86,11 @@ fn dropping_or_aborting_name_removes_discovery_and_returns_quota() {
         let registry = TrackedNameRegistry::new();
         let lease = registry.register(&cx, "worker").unwrap();
         let first_ticket = lease.obligation_ticket();
-        if explicitly_abort { lease.abort().unwrap(); } else { drop(lease); }
+        if explicitly_abort {
+            lease.abort().unwrap();
+        } else {
+            drop(lease);
+        }
         assert_eq!(registry.whereis("worker"), None);
         // No mailbox drain: the same single credit must already be available.
         let next = registry.register(&cx, "worker").unwrap();
@@ -89,9 +106,9 @@ fn quota_refusal_never_publishes_a_name() {
     let registry = TrackedNameRegistry::new();
     assert!(matches!(
         registry.register(&cx, "worker"),
-        Err(TrackedNameError::Admission(ObligationAdmissionError::LimitReached {
-            limit: 0, live: 0,
-        }))
+        Err(TrackedNameError::Admission(
+            ObligationAdmissionError::LimitReached { limit: 0, live: 0 }
+        ))
     ));
     assert_eq!(registry.whereis("worker"), None);
     finish(lab, &cx, handle, 0);
@@ -102,8 +119,10 @@ fn name_collision_returns_unused_credit_without_displacing_owner() {
     let (lab, cx, handle) = fixture(2);
     let registry = TrackedNameRegistry::new();
     let first = registry.register(&cx, "worker").unwrap();
-    assert!(matches!(registry.register(&cx, "worker"),
-        Err(TrackedNameError::Registry(NameLeaseError::NameTaken { .. }))));
+    assert!(matches!(
+        registry.register(&cx, "worker"),
+        Err(TrackedNameError::Registry(NameLeaseError::NameTaken { .. }))
+    ));
     assert_eq!(registry.whereis("worker"), Some(first.holder()));
     let other = registry.register(&cx, "other").unwrap();
     first.release().unwrap();
@@ -114,16 +133,29 @@ fn name_collision_returns_unused_credit_without_displacing_owner() {
 #[test]
 fn stateless_and_cancelled_contexts_fail_closed() {
     let registry = TrackedNameRegistry::new();
-    assert!(matches!(registry.register(&Cx::for_testing(), "worker"),
-        Err(TrackedNameError::RuntimeRequired)));
+    assert!(matches!(
+        registry.register(&Cx::for_testing(), "worker"),
+        Err(TrackedNameError::RuntimeRequired)
+    ));
     let (lab, cx, handle) = fixture(1);
     cx.cancel_fast(CancelKind::User);
-    assert!(matches!(registry.register(&cx, "worker"), Err(TrackedNameError::Cancelled)));
+    assert!(matches!(
+        registry.register(&cx, "worker"),
+        Err(TrackedNameError::Cancelled)
+    ));
     assert_eq!(registry.whereis("worker"), None);
     // This test only inspects admission; do not demand a successful task outcome
     // from the deliberately cancelled holder.
     drop(handle);
-    assert_eq!(lab.state.obligation_gateway().unwrap().mailbox().stats().posted, 0);
+    assert_eq!(
+        lab.state
+            .obligation_gateway()
+            .unwrap()
+            .mailbox()
+            .stats()
+            .posted,
+        0
+    );
 }
 
 #[test]
@@ -152,7 +184,10 @@ fn admission_and_settlement_notifications_run_outside_registry_lock() {
     let gateway = Arc::new(ObligationGateway::new(
         Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
         Arc::new(move || {
-            assert!(observed_registry.inner.try_lock().is_some(), "notification under name lock");
+            assert!(
+                observed_registry.inner.try_lock().is_some(),
+                "notification under name lock"
+            );
             assert_eq!(observed_registry.whereis("worker"), None);
             observed_calls.fetch_add(1, Ordering::SeqCst);
         }),
@@ -174,11 +209,16 @@ fn cancellation_from_admission_notifier_rolls_back_before_publication() {
     let liveness = Arc::new(());
     let gateway = Arc::new(ObligationGateway::new(
         Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
-        Arc::new(move || { cancel_cx.cancel_fast(CancelKind::User); }),
+        Arc::new(move || {
+            cancel_cx.cancel_fast(CancelKind::User);
+        }),
         Arc::downgrade(&liveness),
     ));
     let cx = cx.with_obligation_gateway(Some(gateway), None);
-    assert!(matches!(registry.register(&cx, "worker"), Err(TrackedNameError::Cancelled)));
+    assert!(matches!(
+        registry.register(&cx, "worker"),
+        Err(TrackedNameError::Cancelled)
+    ));
     assert_eq!(registry.whereis("worker"), None);
     flush(&mut lab);
     assert_eq!(lab.state.pending_obligation_count(), 0);
@@ -222,7 +262,8 @@ fn notifier_panics_do_not_strand_names_or_quota() {
 #[test]
 fn retaining_guard_beyond_holder_completion_is_a_runtime_leak() {
     let (mut lab, cx, mut handle) = fixture(1);
-    lab.state.set_obligation_leak_response(crate::runtime::config::ObligationLeakResponse::Silent);
+    lab.state
+        .set_obligation_leak_response(crate::runtime::config::ObligationLeakResponse::Silent);
     let registry = TrackedNameRegistry::new();
     // Keep allocation alive just as forget would, but recover it after the
     // audit so this regression does not permanently leak test heap memory.
@@ -231,7 +272,10 @@ fn retaining_guard_beyond_holder_completion_is_a_runtime_leak() {
     assert_eq!(lab.state.pending_obligation_count(), 1);
     lab.scheduler.lock().schedule(cx.task_id(), 0);
     let _report = lab.run_until_quiescent_with_report();
-    assert!(!matches!(handle.try_join(), Ok(None)), "holder must terminate");
+    assert!(
+        !matches!(handle.try_join(), Ok(None)),
+        "holder must terminate"
+    );
     assert_eq!(lab.state.leak_count(), 1);
     assert_eq!(registry.whereis("worker"), Some(cx.task_id()));
     // Late physical cleanup must not rewrite the already chosen leak outcome.
@@ -304,13 +348,21 @@ fn lease_transfer_rebinds_name_to_child_task_without_leak_or_settlement_rejectio
     let names = TrackedNameRegistry::new();
     let mut lease = names.register(&parent_cx, "service").unwrap();
     assert_eq!(names.whereis("service"), Some(parent_cx.task_id()));
-    assert_eq!(names.whereis_cx(&parent_cx, "service").unwrap(), Some(parent_cx.task_id()));
+    assert_eq!(
+        names.whereis_cx(&parent_cx, "service").unwrap(),
+        Some(parent_cx.task_id())
+    );
     assert_eq!(lease.holder(), parent_cx.task_id());
 
     // Transfer lease to child
-    lease.try_transfer(&child_cx).expect("transfer must succeed within same runtime");
+    lease
+        .try_transfer(&child_cx)
+        .expect("transfer must succeed within same runtime");
     assert_eq!(names.whereis("service"), Some(child_cx.task_id()));
-    assert_eq!(names.whereis_cx(&child_cx, "service").unwrap(), Some(child_cx.task_id()));
+    assert_eq!(
+        names.whereis_cx(&child_cx, "service").unwrap(),
+        Some(child_cx.task_id())
+    );
     assert_eq!(lease.holder(), child_cx.task_id());
     assert_eq!(lease.region(), child_cx.region_id());
 
@@ -323,7 +375,9 @@ fn lease_transfer_rebinds_name_to_child_task_without_leak_or_settlement_rejectio
     assert_eq!(lab.state.leak_count(), 0);
 
     // Child releases lease
-    lease.release().expect("child lease release must succeed without settlement rejection");
+    lease
+        .release()
+        .expect("child lease release must succeed without settlement rejection");
     assert_eq!(names.whereis("service"), None);
 
     // Child completes and verifies all invariants and stats
@@ -404,7 +458,9 @@ fn lease_transfer_refusals_preserve_ownership_and_cross_region_handoff_returns_q
 
         assert_eq!(
             lease.try_transfer(&source),
-            Err(TrackedNameError::Transfer(ObligationTransferError::SameHolder))
+            Err(TrackedNameError::Transfer(
+                ObligationTransferError::SameHolder
+            ))
         );
         assert_eq!(
             lease.try_transfer(&target),
@@ -420,11 +476,17 @@ fn lease_transfer_refusals_preserve_ownership_and_cross_region_handoff_returns_q
         assert_eq!(lease.region(), source.region_id());
         assert_eq!(names.whereis("service"), Some(source.task_id()));
         assert_eq!(
-            lab.state.region(source.region_id()).unwrap().pending_obligations(),
+            lab.state
+                .region(source.region_id())
+                .unwrap()
+                .pending_obligations(),
             1
         );
         assert_eq!(
-            lab.state.region(target_region).unwrap().pending_obligations(),
+            lab.state
+                .region(target_region)
+                .unwrap()
+                .pending_obligations(),
             0
         );
 
@@ -441,15 +503,25 @@ fn lease_transfer_refusals_preserve_ownership_and_cross_region_handoff_returns_q
         assert_eq!(lease.region(), target_region);
         assert_eq!(names.whereis("service"), Some(target_id));
         assert_eq!(
-            lab.state.region(source.region_id()).unwrap().pending_obligations(),
+            lab.state
+                .region(source.region_id())
+                .unwrap()
+                .pending_obligations(),
             0
         );
         assert_eq!(
-            lab.state.region(target_region).unwrap().pending_obligations(),
+            lab.state
+                .region(target_region)
+                .unwrap()
+                .pending_obligations(),
             1
         );
         // Handoff returns the source quota synchronously, before mailbox drain.
-        names.register(&source, "source-reused").unwrap().release().unwrap();
+        names
+            .register(&source, "source-reused")
+            .unwrap()
+            .release()
+            .unwrap();
         lease.release().unwrap();
         assert_eq!(names.whereis("service"), None);
 
@@ -478,12 +550,20 @@ fn lease_transfer_validates_name_incarnation_before_moving_runtime_credit() {
         // holder, region and virtual timestamp; only its incarnation differs.
         names.inner.lock().force_unregister("service").unwrap();
         let replacement = replace_name.then(|| names.register(&source, "service").unwrap());
-        let posted_before = lab.state.obligation_gateway().unwrap().mailbox().stats().posted;
+        let posted_before = lab
+            .state
+            .obligation_gateway()
+            .unwrap()
+            .mailbox()
+            .stats()
+            .posted;
         let result = lease.try_transfer(&target);
         if replace_name {
             assert!(matches!(
                 result,
-                Err(TrackedNameError::Registry(NameLeaseError::PermissionDenied { .. }))
+                Err(TrackedNameError::Registry(
+                    NameLeaseError::PermissionDenied { .. }
+                ))
             ));
         } else {
             assert!(matches!(
@@ -494,9 +574,17 @@ fn lease_transfer_validates_name_incarnation_before_moving_runtime_credit() {
         assert_eq!(lease.obligation_ticket(), original_ticket);
         assert_eq!(lease.holder(), source.task_id());
         assert_eq!(lease.region(), source.region_id());
-        assert_eq!(lease.obligation.as_ref().unwrap().holder(), source.task_id());
         assert_eq!(
-            lab.state.obligation_gateway().unwrap().mailbox().stats().posted,
+            lease.obligation.as_ref().unwrap().holder(),
+            source.task_id()
+        );
+        assert_eq!(
+            lab.state
+                .obligation_gateway()
+                .unwrap()
+                .mailbox()
+                .stats()
+                .posted,
             posted_before,
             "a registry refusal must not enqueue an irreversible handoff"
         );
@@ -552,15 +640,17 @@ fn lease_transfer_notifier_panic_preserves_committed_owner_and_safe_cleanup() {
             Arc::downgrade(&liveness),
         ));
         let target = target.with_obligation_gateway(Some(gateway), None);
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            lease.try_transfer(&target)
-        }))
-        .expect_err("the accepted transfer invokes its notifier");
+        let panic =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lease.try_transfer(&target)))
+                .expect_err("the accepted transfer invokes its notifier");
         assert_eq!(
             panic.downcast_ref::<&str>(),
             Some(&"planted transfer notification panic")
         );
-        let owner = lease.obligation.as_ref().map(|token| (token.holder(), token.region()));
+        let owner = lease
+            .obligation
+            .as_ref()
+            .map(|token| (token.holder(), token.region()));
         let lease_owner = (lease.holder(), lease.region());
         let expected_owner = (target.task_id(), target.region_id());
 
@@ -575,7 +665,11 @@ fn lease_transfer_notifier_panic_preserves_committed_owner_and_safe_cleanup() {
         } else {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(lease)))
         };
-        assert_eq!(owner, Some(expected_owner), "the name guard lost its runtime credit");
+        assert_eq!(
+            owner,
+            Some(expected_owner),
+            "the name guard lost its runtime credit"
+        );
         assert_eq!(lease_owner, expected_owner);
         if drop_while_unwinding {
             assert_eq!(
@@ -584,12 +678,18 @@ fn lease_transfer_notifier_panic_preserves_committed_owner_and_safe_cleanup() {
             );
             assert_eq!(*notifications.lock(), vec![Some(target_id)]);
         } else {
-            assert!(cleanup.is_ok(), "dropping the guard caused a secondary panic");
+            assert!(
+                cleanup.is_ok(),
+                "dropping the guard caused a secondary panic"
+            );
             assert_eq!(*notifications.lock(), vec![Some(target_id), None]);
         }
         assert_eq!(names.whereis("service"), None);
         assert_eq!(
-            lab.state.region(source.region_id()).unwrap().pending_obligations(),
+            lab.state
+                .region(source.region_id())
+                .unwrap()
+                .pending_obligations(),
             0
         );
         flush(&mut lab);
@@ -660,7 +760,10 @@ fn lease_transfer_drops_source_gateway_captures_after_registry_unlock() {
         });
     let (result, lease) = transfer.join().unwrap();
     let cleanup = lease.abort();
-    assert!(retained, "the transfer never reached its source-gateway upgrade");
+    assert!(
+        retained,
+        "the transfer never reached its source-gateway upgrade"
+    );
     result.unwrap();
     cleanup.unwrap();
     assert_eq!(

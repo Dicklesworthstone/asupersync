@@ -967,7 +967,9 @@ impl Decoder {
         stream_id: u32,
     ) -> Result<Vec<Header>, H2Error> {
         if stream_id == 0 {
-            return Err(H2Error::protocol("cannot decode a field block for stream 0"));
+            return Err(H2Error::protocol(
+                "cannot decode a field block for stream 0",
+            ));
         }
         self.decode_impl(src, Some(stream_id))
     }
@@ -1116,8 +1118,7 @@ impl Decoder {
         }
 
         // Literal without indexing
-        let (name, value, _) =
-            self.decode_literal(src, 4, remaining_budget, validate_fields)?;
+        let (name, value, _) = self.decode_literal(src, 4, remaining_budget, validate_fields)?;
         Ok(Header::new(name, value))
     }
 

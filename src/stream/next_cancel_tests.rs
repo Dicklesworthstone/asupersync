@@ -97,7 +97,10 @@ fn with_cx_waker_migration_releases_old_task() {
     cx.cancel_fast(CancelKind::User);
     assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
     assert!(new_count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(wait.as_mut().poll(&mut new_task), Poll::Ready(Err(_))));
+    assert!(matches!(
+        wait.as_mut().poll(&mut new_task),
+        Poll::Ready(Err(_))
+    ));
 }
 
 #[test]
@@ -115,7 +118,10 @@ fn with_cx_same_waker_waits_have_independent_ownership() {
     drop(first);
     cx.cancel_fast(CancelKind::User);
     assert!(count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(second.as_mut().poll(&mut task), Poll::Ready(Err(_))));
+    assert!(matches!(
+        second.as_mut().poll(&mut task),
+        Poll::Ready(Err(_))
+    ));
     assert_eq!(Arc::strong_count(&count), 2);
 }
 
@@ -148,7 +154,10 @@ fn with_cx_keeps_item_when_source_cancels_during_ready_poll() {
     let mut task = Context::from_waker(&waker);
     let mut wait = Box::pin(source.next().with_cx(&cx));
 
-    assert!(matches!(wait.as_mut().poll(&mut task), Poll::Ready(Ok(Some(7)))));
+    assert!(matches!(
+        wait.as_mut().poll(&mut task),
+        Poll::Ready(Ok(Some(7)))
+    ));
     assert!(cx.is_cancel_requested());
 }
 
@@ -188,10 +197,16 @@ fn with_cx_ready_and_eof_do_not_leave_cancel_wakers() {
     let (count, waker) = counter();
     let mut task = Context::from_waker(&waker);
     let mut first = Box::pin(source.next().with_cx(&cx));
-    assert!(matches!(first.as_mut().poll(&mut task), Poll::Ready(Ok(Some(11)))));
+    assert!(matches!(
+        first.as_mut().poll(&mut task),
+        Poll::Ready(Ok(Some(11)))
+    ));
     drop(first);
     let mut eof = Box::pin(source.next().with_cx(&cx));
-    assert!(matches!(eof.as_mut().poll(&mut task), Poll::Ready(Ok(None))));
+    assert!(matches!(
+        eof.as_mut().poll(&mut task),
+        Poll::Ready(Ok(None))
+    ));
     assert_eq!(Arc::strong_count(&count), 2);
     cx.cancel_fast(CancelKind::User);
     assert_eq!(count.0.load(Ordering::SeqCst), 0);

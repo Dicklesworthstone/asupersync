@@ -115,9 +115,10 @@ pub use dynamic_service::{
     DynamicServiceExit, DynamicServiceHandle, DynamicSupervisorClient,
 };
 pub use dynamic_supervisor::{
-    DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildResult, DynamicChildState,
-    DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
-    DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
+    DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildResult,
+    DynamicChildState, DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig,
+    DynamicSupervisorError, DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig,
+    SharedRestartStatus,
 };
 pub use fiber::{FiberHandle, FiberScope, LocalFiberScope};
 pub use io_gate::{IoCapabilityDenied, WithAmbient};
@@ -139,13 +140,13 @@ pub use scoped_first_ok::{
 };
 pub use scoped_fs::{ScopedFs, ScopedFsError};
 pub use scoped_hedge::{
-    ScopedHedgeBranch, ScopedHedgeBranchReport, ScopedHedgeClose, ScopedHedgeError, ScopedHedgeReport,
-    ScopedHedgeStop, ScopedHedgeTask,
+    ScopedHedgeBranch, ScopedHedgeBranchReport, ScopedHedgeClose, ScopedHedgeError,
+    ScopedHedgeReport, ScopedHedgeStop, ScopedHedgeTask,
 };
 pub use scoped_join::{
     MAX_SCOPED_JOIN_BRANCHES, ScopedJoinAttempt, ScopedJoinBoundedReport, ScopedJoinBoundedStop,
-    ScopedJoinClose, ScopedJoinError,
-    ScopedJoinPairReport, ScopedJoinReport, ScopedJoinStop, ScopedJoinTask,
+    ScopedJoinClose, ScopedJoinError, ScopedJoinPairReport, ScopedJoinReport, ScopedJoinStop,
+    ScopedJoinTask,
 };
 pub use scoped_quorum::{
     MAX_SCOPED_QUORUM_BRANCHES, ScopedQuorumAttempt, ScopedQuorumClose, ScopedQuorumError,
@@ -163,7 +164,8 @@ pub use scoped_retry::{
     ScopedRetryTask,
 };
 pub use scoped_timeout::{
-    ScopedTimeoutClose, ScopedTimeoutError, ScopedTimeoutReport, ScopedTimeoutStop, ScopedTimeoutTask,
+    ScopedTimeoutClose, ScopedTimeoutError, ScopedTimeoutReport, ScopedTimeoutStop,
+    ScopedTimeoutTask,
 };
 pub use tracked_registry::{
     TrackedNameError, TrackedNameLease, TrackedNamePermit, TrackedNameRegistry,

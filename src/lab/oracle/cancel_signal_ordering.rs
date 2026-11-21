@@ -24,13 +24,13 @@
 //! - Monitors parent-child relationships during cancellation
 //! - Provides diagnostics with causality chains and timing information
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{CancelReason, RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for the cancel signal ordering oracle.
 #[derive(Debug, Clone)]

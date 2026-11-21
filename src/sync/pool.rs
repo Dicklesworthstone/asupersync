@@ -229,10 +229,10 @@
 //! - Reducing `max_lifetime` to force refresh
 //! - Adding health checks before returning resources to pool
 
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -2673,8 +2673,12 @@ where
                 }
 
                 // Try to get a healthy idle resource.
-                while let Some(IdleResource { resource, created_at, publication, .. }) =
-                    self.try_get_idle(cleanup.waiter_id)
+                while let Some(IdleResource {
+                    resource,
+                    created_at,
+                    publication,
+                    ..
+                }) = self.try_get_idle(cleanup.waiter_id)
                 {
                     let mut checkout = ActiveCheckoutGuard::new(self);
                     let is_healthy = if self.config.health_check_on_acquire {
@@ -3122,10 +3126,10 @@ impl DestroyReason {
 #[cfg(feature = "metrics")]
 mod pool_metrics {
     use super::{DestroyReason, Duration, PoolStats};
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use opentelemetry::KeyValue;
     use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
     use std::sync::Arc;
-    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Shared state backing observable gauges for pool metrics.
     #[derive(Debug, Default)]

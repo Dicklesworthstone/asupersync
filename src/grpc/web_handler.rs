@@ -100,7 +100,8 @@ impl Server {
     pub fn registered_grpc_web_unary_handler(
         self: &Arc<Self>,
         config: GrpcWebConfig,
-    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static>
+    {
         self.grpc_web_unary_handler(config, None)
     }
 
@@ -133,7 +134,8 @@ impl Server {
         self: &Arc<Self>,
         config: GrpcWebConfig,
         limits: ContentDecodeLimits,
-    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static>
+    {
         self.grpc_web_unary_handler(config, Some(limits))
     }
 
@@ -141,7 +143,8 @@ impl Server {
         self: &Arc<Self>,
         config: GrpcWebConfig,
         decoding: Option<ContentDecodeLimits>,
-    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static> {
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcWebHandlerFuture + Clone + Send + Sync + 'static>
+    {
         let native = self.registered_unary_handler()?;
         let metadata_limit = self.config().max_metadata_size;
         Ok(move |request: HttpRequest| -> GrpcWebHandlerFuture {
@@ -164,8 +167,13 @@ impl Server {
                     let mut request = request;
                     let source = Bytes::from(std::mem::take(&mut request.body));
                     match decode_request_body(
-                        &cx, request, source, |never| match never {}, &config,
-                        limits, metadata_limit,
+                        &cx,
+                        request,
+                        source,
+                        |never| match never {},
+                        &config,
+                        limits,
+                        metadata_limit,
                     )
                     .await
                     {
@@ -310,7 +318,12 @@ impl Server {
             let wire = wire.clone();
             Box::pin(async move {
                 let collected = if let Some(limits) = decoding {
-                    let StreamingServerRequest { head, peer_addr, body, .. } = request;
+                    let StreamingServerRequest {
+                        head,
+                        peer_addr,
+                        body,
+                        ..
+                    } = request;
                     let request = HttpRequest {
                         method: head.method,
                         uri: head.uri,
@@ -321,8 +334,13 @@ impl Server {
                         peer_addr,
                     };
                     decode_request_body(
-                        &cx, request, body, incoming_body_status, &wire,
-                        limits, server.config().max_metadata_size,
+                        &cx,
+                        request,
+                        body,
+                        incoming_body_status,
+                        &wire,
+                        limits,
+                        server.config().max_metadata_size,
                     )
                     .await
                 } else {
@@ -353,9 +371,8 @@ impl Server {
                 let prepared = match server.prepare_registered_server_stream(request, Some(&cx)) {
                     Ok(prepared) => prepared,
                     Err(status) => {
-                        let response = server.advertise_request_compression(error_response(
-                            &status, mode, version,
-                        ));
+                        let response = server
+                            .advertise_request_compression(error_response(&status, mode, version));
                         return produced_buffered(response, streaming);
                     }
                 };
@@ -400,7 +417,12 @@ async fn collect_streaming_request(
     request: StreamingServerRequest,
     config: &GrpcWebConfig,
 ) -> Result<HttpRequest, HttpResponse> {
-    let StreamingServerRequest { head, peer_addr, mut body, .. } = request;
+    let StreamingServerRequest {
+        head,
+        peer_addr,
+        mut body,
+        ..
+    } = request;
     let mut request = HttpRequest {
         method: head.method,
         uri: head.uri,
@@ -429,9 +451,9 @@ async fn collect_streaming_request(
         let frame = frame.map_err(|_| {
             let status = if cx.is_cancel_requested() {
                 match cx.cancel_reason().map(|reason| reason.kind) {
-                    Some(crate::types::CancelKind::Timeout | crate::types::CancelKind::Deadline) => {
-                        Status::deadline_exceeded("gRPC-Web request deadline exceeded")
-                    }
+                    Some(
+                        crate::types::CancelKind::Timeout | crate::types::CancelKind::Deadline,
+                    ) => Status::deadline_exceeded("gRPC-Web request deadline exceeded"),
                     _ => Status::cancelled("gRPC-Web request cancelled"),
                 }
             } else {
@@ -500,9 +522,9 @@ impl<B: Body + Unpin> Body for RequestContentSource<B> {
                 Ok(Frame::Data(data)) => Ok(Frame::Data(data)),
                 Ok(Frame::Trailers(trailers)) => {
                     request_metadata_remaining(
-                        trailers.iter().map(|(name, value)| {
-                            (name.as_str().len(), value.as_bytes().len())
-                        }),
+                        trailers
+                            .iter()
+                            .map(|(name, value)| (name.as_str().len(), value.as_bytes().len())),
                         this.metadata_remaining,
                     )?;
                     Err(Status::invalid_argument(
@@ -578,7 +600,10 @@ async fn decode_request_body<B: Body + Unpin>(
     let version = request.version;
     let reject = |status| error_response(&status, output_mode, version);
     let metadata_remaining = request_metadata_remaining(
-        request.headers.iter().chain(&request.trailers)
+        request
+            .headers
+            .iter()
+            .chain(&request.trailers)
             .map(|(name, value)| (name.len(), value.len())),
         (metadata_limit != 0).then_some(metadata_limit),
     )
@@ -593,21 +618,30 @@ async fn decode_request_body<B: Body + Unpin>(
     } else {
         config.max_request_bytes
     };
-    let coding = ContentDecoder::from_request_fields(request.headers.iter().filter_map(|(key, value)| {
-        key.eq_ignore_ascii_case("content-encoding").then_some(value.as_str())
-    }))
-    .map_err(|error| reject(request_decoding_io_status(&error)))?;
+    let coding =
+        ContentDecoder::from_request_fields(request.headers.iter().filter_map(|(key, value)| {
+            key.eq_ignore_ascii_case("content-encoding")
+                .then_some(value.as_str())
+        }))
+        .map_err(|error| reject(request_decoding_io_status(&error)))?;
     let transformed = !coding.is_identity();
     let plan = ContentDecodePlan::new(coding, limits.tightened(limit))
         .map_err(|error| reject(request_decoding_io_status(&error)))?;
-    let source = RequestContentSource { body: source, map_error, metadata_remaining };
+    let source = RequestContentSource {
+        body: source,
+        map_error,
+        metadata_remaining,
+    };
     let mut decoded = ContentDecodedBody::from_plan(source, plan).with_cx(cx);
     let mut deadline = cx.budget_deadline_sleep();
     while let Some(frame) = poll_fn(|task| {
         // Preserve the explicit owner's budget wake even when another native
         // task drives this handler. Once a masked deadline fires, retire the
         // spent timer; the decoder keeps its cancellation token through unmask.
-        if deadline.as_mut().is_some_and(|sleep| Pin::new(sleep).poll_deadline(task).is_ready()) {
+        if deadline
+            .as_mut()
+            .is_some_and(|sleep| Pin::new(sleep).poll_deadline(task).is_ready())
+        {
             deadline = None;
         }
         Pin::new(&mut decoded).poll_frame(task)
@@ -625,7 +659,8 @@ async fn decode_request_body<B: Body + Unpin>(
     }
     cx.checkpoint().map_err(|_| {
         reject(request_cancellation_status(
-            cx.cancel_reason().map_or(CancelKind::User, |reason| reason.kind),
+            cx.cancel_reason()
+                .map_or(CancelKind::User, |reason| reason.kind),
         ))
     })?;
     if transformed {
@@ -638,7 +673,13 @@ fn produced_buffered(
     response: HttpResponse,
     config: ServerStreamingConfig,
 ) -> Http1ProducedResponse {
-    let HttpResponse { status, reason, headers, body, .. } = response;
+    let HttpResponse {
+        status,
+        reason,
+        headers,
+        body,
+        ..
+    } = response;
     let mut produced = Http1ProducedResponse::with_content_length_and_max_frame_bytes(
         config.frame_capacity,
         config.max_frame_bytes,
@@ -706,7 +747,9 @@ impl ServerStreamSink for WebBodySender {
         let mut response = HttpResponse::new(200, "OK", Vec::new());
         for (name, value) in trailers.iter() {
             let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
-            response.trailers.push((name.as_str().to_owned(), value.to_owned()));
+            response
+                .trailers
+                .push((name.as_str().to_owned(), value.to_owned()));
         }
         let block = trailer_block(&response, self.max_trailer_bytes).unwrap_or_else(|status| {
             // Preserve a clean, bounded terminal frame after complete messages.
@@ -1074,10 +1117,9 @@ fn finish_response(
         response.body = base64_encode(&response.body).into_bytes();
     }
     response.version = version;
-    response.headers.push((
-        "content-type".to_owned(),
-        mode.as_header_value().to_owned(),
-    ));
+    response
+        .headers
+        .push(("content-type".to_owned(), mode.as_header_value().to_owned()));
     response
         .headers
         .push(("content-length".to_owned(), response.body.len().to_string()));

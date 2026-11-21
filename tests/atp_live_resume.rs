@@ -1045,19 +1045,21 @@ fn a_receiver_persists_its_drained_commit_before_returning_interruption() {
                 };
                 let mut receiving = cx
                     .spawn_in(&scope, move |child| {
-                        let future: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
-                            let report = incoming.receive_journaled(&child, &mut store).await;
-                            (incoming, store, report)
-                        });
+                        let future: Pin<Box<dyn Future<Output = _> + Send>> =
+                            Box::pin(async move {
+                                let report = incoming.receive_journaled(&child, &mut store).await;
+                                (incoming, store, report)
+                            });
                         future
                     })
                     .unwrap();
                 let mut sending = cx
                     .spawn_in(&scope, move |child| {
-                        let future: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
-                            let report = outgoing.send(&child).await;
-                            (outgoing, report)
-                        });
+                        let future: Pin<Box<dyn Future<Output = _> + Send>> =
+                            Box::pin(async move {
+                                let report = outgoing.send(&child).await;
+                                (outgoing, report)
+                            });
                         future
                     })
                     .unwrap();
@@ -1098,7 +1100,10 @@ fn a_receiver_persists_its_drained_commit_before_returning_interruption() {
                     .await
                     .expect("acknowledged cancellation retains the journal owner");
                 let (mut outgoing, sent) = sending.join(&cx).await.unwrap();
-                assert!(sent.outcome.is_err(), "no Proof may precede the terminal record");
+                assert!(
+                    sent.outcome.is_err(),
+                    "no Proof may precede the terminal record"
+                );
                 assert_eq!(*probe.bytes.lock().unwrap(), b"abcdefgh");
                 if fail_commit {
                     assert!(received.completed.is_none());
@@ -1106,7 +1111,11 @@ fn a_receiver_persists_its_drained_commit_before_returning_interruption() {
                     assert_eq!(probe.commits.load(Ordering::SeqCst), 0);
                     match received.outcome.unwrap_err() {
                         ResumeError::Transfer(LiveStreamError::Commit(error)) => match *error {
-                            LiveStreamCommitError::Unconfirmed { source, interruption, .. } => {
+                            LiveStreamCommitError::Unconfirmed {
+                                source,
+                                interruption,
+                                ..
+                            } => {
                                 assert_eq!(source.kind(), io::ErrorKind::BrokenPipe);
                                 assert!(matches!(
                                     *interruption.unwrap(),

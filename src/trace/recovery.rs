@@ -169,7 +169,11 @@ impl CrashFrames {
         }
     }
 
-    fn read_input(&mut self, length: usize, next_event: usize) -> Result<Vec<u8>, CrashRecoveryStop> {
+    fn read_input(
+        &mut self,
+        length: usize,
+        next_event: usize,
+    ) -> Result<Vec<u8>, CrashRecoveryStop> {
         if length as u64 > self.reader.limit() {
             return Err(CrashRecoveryStop::InputByteLimitReached);
         }
@@ -231,15 +235,18 @@ impl CrashFrames {
             let length = self.next_input_length(next_event)?;
             let max = self.limits.max_chunk_bytes.min(MAX_COMPRESSED_CHUNK_LEN);
             if length > max {
-                return Err(CrashRecoveryStop::ChunkLimitReached { declared: length, max });
+                return Err(CrashRecoveryStop::ChunkLimitReached {
+                    declared: length,
+                    max,
+                });
             }
             if length < 4 {
                 return Err(Self::corrupt(next_event, TraceFileError::Truncated));
             }
             let compressed = self.read_input(length, next_event)?;
-            let decoded_length = u32::from_le_bytes(
-                compressed[..4].try_into().expect("validated chunk prefix"),
-            ) as usize;
+            let decoded_length =
+                u32::from_le_bytes(compressed[..4].try_into().expect("validated chunk prefix"))
+                    as usize;
             if decoded_length > max {
                 return Err(CrashRecoveryStop::ChunkLimitReached {
                     declared: decoded_length,
@@ -265,8 +272,8 @@ impl CrashFrames {
         if available.len() < 4 {
             return Err(Self::corrupt(next_event, TraceFileError::Truncated));
         }
-        let length = u32::from_le_bytes(available[..4].try_into().expect("validated frame prefix"))
-            as usize;
+        let length =
+            u32::from_le_bytes(available[..4].try_into().expect("validated frame prefix")) as usize;
         Self::check_frame_length(length, remaining, next_event)?;
         if length > available.len() - 4 {
             return Err(Self::corrupt(next_event, TraceFileError::Truncated));
@@ -353,7 +360,9 @@ pub fn recover_crashed_trace_prefix(
     reader.read_exact(&mut metadata_bytes).map_err(read_error)?;
     let actual_digest: [u8; TRACE_CHECKSUM_LEN] = Sha256::digest(&metadata_bytes).into();
     if metadata_digest != actual_digest {
-        return Err(TraceFileError::ChecksumMismatch { section: "metadata" });
+        return Err(TraceFileError::ChecksumMismatch {
+            section: "metadata",
+        });
     }
     let metadata: TraceMetadata = decode_exact(&metadata_bytes)?;
     if metadata.version != REPLAY_SCHEMA_VERSION {
@@ -385,7 +394,8 @@ pub fn recover_crashed_trace_prefix(
         if events.len() >= limits.max_events {
             break CrashRecoveryStop::EventLimitReached;
         }
-        let frame = match frames.next_frame(limits.max_decoded_bytes - decoded_bytes, events.len()) {
+        let frame = match frames.next_frame(limits.max_decoded_bytes - decoded_bytes, events.len())
+        {
             Ok(frame) => frame,
             Err(stop) => break stop,
         };

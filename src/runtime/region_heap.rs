@@ -82,8 +82,8 @@
 //! // Memory is reclaimed when heap is dropped (region close)
 //! ```
 
-use std::any::{Any, TypeId};
 use crate::sync::atomic::{AtomicU64, Ordering};
+use std::any::{Any, TypeId};
 
 /// Statistics for region heap allocations.
 ///

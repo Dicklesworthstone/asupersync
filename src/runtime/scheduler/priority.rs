@@ -1183,8 +1183,7 @@ impl Scheduler {
     }
 
     fn exact_exploration_entry_count(&self) -> usize {
-        self
-            .cancel_lane
+        self.cancel_lane
             .len()
             .saturating_add(self.timed_lane.len())
             .saturating_add(self.ready_lane.len())
@@ -1192,9 +1191,21 @@ impl Scheduler {
 
     /// Copies that exact dispatch removes in addition to the chosen entry.
     pub(crate) fn exact_exploration_discarded_copies(&self, task: TaskId) -> usize {
-        let entries = self.cancel_lane.iter().filter(|entry| entry.task == task).count()
-            + self.timed_lane.iter().filter(|entry| entry.task == task).count()
-            + self.ready_lane.iter().filter(|entry| entry.task == task).count();
+        let entries = self
+            .cancel_lane
+            .iter()
+            .filter(|entry| entry.task == task)
+            .count()
+            + self
+                .timed_lane
+                .iter()
+                .filter(|entry| entry.task == task)
+                .count()
+            + self
+                .ready_lane
+                .iter()
+                .filter(|entry| entry.task == task)
+                .count();
         entries.saturating_sub(1)
     }
 
@@ -1226,19 +1237,28 @@ impl Scheduler {
                 });
             }
         }
-        debug_assert!(selected, "copied exact dispatch must select the cancel lane");
-        copies.extend(self.timed_lane.iter().filter(|entry| entry.task == task).map(
-            |entry| ExactExplorationCopy {
-                task,
-                key: ExactExplorationKey::Timed(entry.deadline),
-            },
-        ));
-        copies.extend(self.ready_lane.iter().filter(|entry| entry.task == task).map(
-            |entry| ExactExplorationCopy {
-                task,
-                key: ExactExplorationKey::Ready(entry.priority),
-            },
-        ));
+        debug_assert!(
+            selected,
+            "copied exact dispatch must select the cancel lane"
+        );
+        copies.extend(
+            self.timed_lane
+                .iter()
+                .filter(|entry| entry.task == task)
+                .map(|entry| ExactExplorationCopy {
+                    task,
+                    key: ExactExplorationKey::Timed(entry.deadline),
+                }),
+        );
+        copies.extend(
+            self.ready_lane
+                .iter()
+                .filter(|entry| entry.task == task)
+                .map(|entry| ExactExplorationCopy {
+                    task,
+                    key: ExactExplorationKey::Ready(entry.priority),
+                }),
+        );
         copies
     }
 
@@ -1255,13 +1275,18 @@ impl Scheduler {
         discarded: usize,
         max_entries: usize,
     ) -> Result<(), &'static str> {
-        let entries = self.exact_exploration_entry_count()
+        let entries = self
+            .exact_exploration_entry_count()
             .checked_add(discarded)
             .ok_or("discarded cancel copies exceed the inventory bound")?;
         if entries > max_entries {
             return Err("discarded cancel copies exceed the inventory bound");
         }
-        let window = self.scratch_entries.capacity().min(self.scratch_timed.capacity()).max(1);
+        let window = self
+            .scratch_entries
+            .capacity()
+            .min(self.scratch_timed.capacity())
+            .max(1);
         if entries > window {
             return Err("cancel-copy inventory exceeds the legacy selection window");
         }
@@ -1305,7 +1330,10 @@ impl Scheduler {
             .collect();
         let actual = ExactExplorationCopy::frontier(&entries, now, cancel_first);
         entries.extend(
-            copies.iter().copied().filter(|entry| self.scheduled.contains(entry.task)),
+            copies
+                .iter()
+                .copied()
+                .filter(|entry| self.scheduled.contains(entry.task)),
         );
         if ExactExplorationCopy::frontier(&entries, now, cancel_first) != actual {
             return Err("retained cancel copies change the eligible scheduler frontier");
@@ -1596,18 +1624,27 @@ impl ExactExplorationCopy {
         now: Time,
         cancel_first: bool,
     ) -> (Option<ExactExplorationKey>, Vec<TaskId>) {
-        let cancel = entries.iter().filter_map(|entry| match entry.key {
-            ExactExplorationKey::Cancel(priority) => Some(priority),
-            _ => None,
-        }).max();
-        let timed = entries.iter().filter_map(|entry| match entry.key {
-            ExactExplorationKey::Timed(deadline) if deadline <= now => Some(deadline),
-            _ => None,
-        }).min();
-        let ready = entries.iter().filter_map(|entry| match entry.key {
-            ExactExplorationKey::Ready(priority) => Some(priority),
-            _ => None,
-        }).max();
+        let cancel = entries
+            .iter()
+            .filter_map(|entry| match entry.key {
+                ExactExplorationKey::Cancel(priority) => Some(priority),
+                _ => None,
+            })
+            .max();
+        let timed = entries
+            .iter()
+            .filter_map(|entry| match entry.key {
+                ExactExplorationKey::Timed(deadline) if deadline <= now => Some(deadline),
+                _ => None,
+            })
+            .min();
+        let ready = entries
+            .iter()
+            .filter_map(|entry| match entry.key {
+                ExactExplorationKey::Ready(priority) => Some(priority),
+                _ => None,
+            })
+            .max();
         let key = if cancel_first && cancel.is_some() {
             cancel.map(ExactExplorationKey::Cancel)
         } else if timed.is_some() {
@@ -1617,7 +1654,8 @@ impl ExactExplorationCopy {
         } else {
             cancel.map(ExactExplorationKey::Cancel)
         };
-        let mut tasks: Vec<_> = entries.iter()
+        let mut tasks: Vec<_> = entries
+            .iter()
             .filter(|entry| Some(entry.key) == key)
             .map(|entry| entry.task)
             .collect();

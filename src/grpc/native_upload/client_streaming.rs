@@ -147,7 +147,10 @@ where
         status
     }
 
-    fn poll_response(&mut self, task: &mut Context<'_>) -> Poll<Result<Response<C::Decode>, Status>> {
+    fn poll_response(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<Response<C::Decode>, Status>> {
         if self.collected {
             return Poll::Ready(Err(Status::failed_precondition(
                 "native client-streaming response already collected",
@@ -187,7 +190,10 @@ where
                         ))));
                     };
                     self.collected = true;
-                    let metadata = self.stream.initial_metadata().cloned()
+                    let metadata = self
+                        .stream
+                        .initial_metadata()
+                        .cloned()
                         .unwrap_or_else(Metadata::new);
                     return Poll::Ready(Ok(Response::with_metadata(message, metadata)));
                 }

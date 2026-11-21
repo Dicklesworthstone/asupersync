@@ -1614,7 +1614,12 @@ impl NameRegistry {
         entry.holder = new_holder;
         entry.region = new_region;
         lease.rebind(new_holder, new_region);
-        self.emit_name_change(lease.name(), new_holder, new_region, NameOwnershipKind::Acquired);
+        self.emit_name_change(
+            lease.name(),
+            new_holder,
+            new_region,
+            NameOwnershipKind::Acquired,
+        );
         Ok(())
     }
 
@@ -2343,10 +2348,22 @@ mod bounded_registration_tests {
             wait(&mut registry, "busy", 12, 1, 2, 10, limits),
             Err(BoundedNameRegistrationError::PerNameLimit { limit: 0, .. })
         ));
-        assert_eq!(registry.waiter_count(), 0, "only Wait pressure sweeps expiry");
+        assert_eq!(
+            registry.waiter_count(),
+            0,
+            "only Wait pressure sweeps expiry"
+        );
         assert_eq!(registry.whereis("busy"), Some(tid(3)));
         assert!(matches!(
-            wait(&mut registry, "busy", 12, 1, 2, 10, NameWaitLimits::new(1, 0)),
+            wait(
+                &mut registry,
+                "busy",
+                12,
+                1,
+                2,
+                10,
+                NameWaitLimits::new(1, 0)
+            ),
             Err(BoundedNameRegistrationError::TotalLimit { limit: 0, .. })
         ));
         assert!(registry.take_granted().is_empty());
@@ -2370,7 +2387,11 @@ mod bounded_registration_tests {
             Err(BoundedNameRegistrationError::TotalLimit { limit: 2, .. })
         ));
         wait_legacy(&mut registry, "gamma", 13, 3, 100);
-        assert_eq!(registry.waiter_count(), 4, "legacy admission is unrestricted");
+        assert_eq!(
+            registry.waiter_count(),
+            4,
+            "legacy admission is unrestricted"
+        );
         registry.cleanup_task_at(tid(10), Time::from_secs(2));
         assert_eq!(registry.waiter_count(), 2);
         assert!(matches!(
@@ -2400,9 +2421,7 @@ mod bounded_registration_tests {
         assert_eq!(registry.whereis("alpha"), Some(tid(1)));
         assert_eq!(registry.whereis("beta"), Some(tid(2)));
         assert_eq!(registry.whereis("gamma"), Some(tid(3)));
-        crate::test_complete!(
-            "bounded_wait_counts_legacy_admissions_and_cleanup_frees_capacity"
-        );
+        crate::test_complete!("bounded_wait_counts_legacy_admissions_and_cleanup_frees_capacity");
     }
 
     #[test]
@@ -2441,7 +2460,15 @@ mod bounded_registration_tests {
                 .is_none()
         );
         assert!(matches!(
-            wait(&mut registry, "pending", 12, 3, 3, 100, NameWaitLimits::new(1, 1)),
+            wait(
+                &mut registry,
+                "pending",
+                12,
+                3,
+                3,
+                100,
+                NameWaitLimits::new(1, 1)
+            ),
             Ok(NameCollisionOutcome::Enqueued)
         ));
         assert_granted(&mut registry, "pending", 11, 2);

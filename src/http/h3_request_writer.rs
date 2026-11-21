@@ -89,7 +89,10 @@ impl RequestWriters {
     pub(super) fn remove(&self, stream: &StreamId, owner: &Arc<RequestWriteOwner>) {
         let removed = {
             let mut owners = self.owners.lock();
-            if owners.get(stream).is_some_and(|current| Arc::ptr_eq(current, owner)) {
+            if owners
+                .get(stream)
+                .is_some_and(|current| Arc::ptr_eq(current, owner))
+            {
                 owners.remove(stream)
             } else {
                 None
@@ -315,11 +318,12 @@ impl NativeH3RequestWriter {
         };
         let remaining = pending.wire.len() - self.write_offset;
         let required = u64::from(remaining != 0);
-        let capacity = match connection.poll_stream_write_ready(cx, self.stream_id(), required, task_cx) {
-            Poll::Ready(Ok(capacity)) => capacity,
-            Poll::Ready(Err(error)) => return self.fail(error.into()),
-            Poll::Pending => return Poll::Pending,
-        };
+        let capacity =
+            match connection.poll_stream_write_ready(cx, self.stream_id(), required, task_cx) {
+                Poll::Ready(Ok(capacity)) => capacity,
+                Poll::Ready(Err(error)) => return self.fail(error.into()),
+                Poll::Pending => return Poll::Pending,
+            };
         let count = remaining.min(usize::try_from(capacity).unwrap_or(usize::MAX));
         let end = self.write_offset + count;
         let stream_id = self.stream_id();
@@ -332,7 +336,12 @@ impl NativeH3RequestWriter {
         let wire = pending.wire.slice(self.write_offset..end);
         let fin = complete && pending.fin;
         if let Err(error) = super::write_prepared_head(
-            &mut pending.qpack_section, cx, connection, stream_id, wire, fin,
+            &mut pending.qpack_section,
+            cx,
+            connection,
+            stream_id,
+            wire,
+            fin,
         ) {
             return self.fail(error);
         }
@@ -357,7 +366,9 @@ impl NativeH3RequestWriter {
                 .store(RequestWriterState::Finished as u8, Ordering::Release);
         }
         let event = match pending.event {
-            NativeH3WriteEvent::Head { end_stream } => NativeH3RequestWriteEvent::Headers { end_stream },
+            NativeH3WriteEvent::Head { end_stream } => {
+                NativeH3RequestWriteEvent::Headers { end_stream }
+            }
             NativeH3WriteEvent::Data { payload_bytes } => {
                 NativeH3RequestWriteEvent::Data { payload_bytes }
             }
@@ -509,20 +520,22 @@ impl NativeH3ResponseBodyWriter {
         connection: &mut QuicConnection,
         task_cx: &mut Context<'_>,
     ) -> Poll<Result<Option<NativeH3ResponseWriteEvent>, NativeH3SessionError>> {
-        self.writer.poll_flush(cx, connection, task_cx).map(|result| {
-            result.map(|event| {
-                event.map(|event| match event {
-                    NativeH3RequestWriteEvent::Headers { end_stream } => {
-                        NativeH3ResponseWriteEvent::Headers { end_stream }
-                    }
-                    NativeH3RequestWriteEvent::Data { payload_bytes } => {
-                        NativeH3ResponseWriteEvent::Data { payload_bytes }
-                    }
-                    NativeH3RequestWriteEvent::Trailers => NativeH3ResponseWriteEvent::Trailers,
-                    NativeH3RequestWriteEvent::Finished => NativeH3ResponseWriteEvent::Finished,
+        self.writer
+            .poll_flush(cx, connection, task_cx)
+            .map(|result| {
+                result.map(|event| {
+                    event.map(|event| match event {
+                        NativeH3RequestWriteEvent::Headers { end_stream } => {
+                            NativeH3ResponseWriteEvent::Headers { end_stream }
+                        }
+                        NativeH3RequestWriteEvent::Data { payload_bytes } => {
+                            NativeH3ResponseWriteEvent::Data { payload_bytes }
+                        }
+                        NativeH3RequestWriteEvent::Trailers => NativeH3ResponseWriteEvent::Trailers,
+                        NativeH3RequestWriteEvent::Finished => NativeH3ResponseWriteEvent::Finished,
+                    })
                 })
             })
-        })
     }
 }
 

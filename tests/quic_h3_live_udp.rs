@@ -3677,8 +3677,15 @@ mod native_h3_listener_live {
                 for peer in 0..CLIENTS {
                     let started = Instant::now();
                     let (mut owner, mut session) = connect(&cx, address, 40 + peer).await;
-                    response(&cx, &mut owner, &mut session, "/flood", &head, BODY.as_bytes())
-                        .await;
+                    response(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        "/flood",
+                        &head,
+                        BODY.as_bytes(),
+                    )
+                    .await;
                     eprintln!(
                         "event=h3_initial_flood_client peer={peer} spoofed={SPOOFED} elapsed_ms={}",
                         started.elapsed().as_millis()
@@ -6045,8 +6052,7 @@ impl asupersync::io::AsyncRead for OwnedUploadReader {
         );
         if let Some(gate) = self.gate_after
             && self.observed.produced.load(Ordering::SeqCst) >= gate
-            && (!self.gate_polled
-                || self.observed.peer_bytes.load(Ordering::SeqCst) < gate)
+            && (!self.gate_polled || self.observed.peer_bytes.load(Ordering::SeqCst) < gate)
         {
             self.gate_polled = true;
             self.observed.record_pending(task);
@@ -6352,9 +6358,9 @@ where
             let may_respond = stream.is_some()
                 && (!matches!(reply, OwnedClientReply::AfterUpload) || progress.request_finished)
                 && (!matches!(reply, OwnedClientReply::Early413)
-                    || observed.as_ref().is_none_or(|observed| {
-                        observed.pending_reads.load(Ordering::SeqCst) != 0
-                    }));
+                    || observed
+                        .as_ref()
+                        .is_none_or(|observed| observed.pending_reads.load(Ordering::SeqCst) != 0));
             if may_respond && !progress.response_started {
                 progress.response_started = true;
                 let stream = stream.unwrap();
@@ -6616,8 +6622,8 @@ fn owned_h3_client_streaming_source_pending_keeps_response_and_deadline_live() {
             assert!(!progress.request_finished);
             if early_reply {
                 assert!(progress.response_started);
-                let response = result
-                    .expect("a stalled producer cannot block a complete early response");
+                let response =
+                    result.expect("a stalled producer cannot block a complete early response");
                 assert_eq!(response.head.status, 413);
                 assert_eq!(
                     &response.body[..],
@@ -7339,8 +7345,7 @@ mod owned_native_h3_client_drop {
             )
             .expect("ordinary GET request");
             let observed = streaming.then(|| Arc::new(OwnedUploadObservation::default()));
-            let mut execute =
-                owned_client_parked_execution(client, &cx, head, observed.clone());
+            let mut execute = owned_client_parked_execution(client, &cx, head, observed.clone());
             let mut parent = None::<Arc<ManagedParentWake>>;
             let mut attempts = 0;
             std::future::poll_fn(|task_cx| {
@@ -7360,9 +7365,10 @@ mod owned_native_h3_client_drop {
                     "a silent peer cannot complete the response: {result:?}"
                 );
                 if parent.wakes.load(Ordering::SeqCst) == before {
-                    if observed.as_ref().is_none_or(|observed| {
-                        observed.pending_reads.load(Ordering::SeqCst) > 0
-                    }) {
+                    if observed
+                        .as_ref()
+                        .is_none_or(|observed| observed.pending_reads.load(Ordering::SeqCst) > 0)
+                    {
                         Poll::Ready(())
                     } else {
                         // A parked handshake or HEADERS flush does not prove
@@ -7417,7 +7423,10 @@ mod owned_native_h3_client_cancel {
             let (client, server) =
                 live_pair_with_client_session(&cx, H3_ALPN, H3_ALPN, false).await;
             let (owner, session) = client.expect("authenticated fresh HTTP/3 client");
-            assert!(session.is_none(), "the consuming client initializes its own session");
+            assert!(
+                session.is_none(),
+                "the consuming client initializes its own session"
+            );
             let server = server.expect("authenticated silent HTTP/3 peer");
             let local = owner.local_addr();
             let client = NativeH3Client::new(
@@ -7449,9 +7458,8 @@ mod owned_native_h3_client_cancel {
                     // explicit without recursively expanding the parent task.
                     let future: std::pin::Pin<
                         Box<
-                            dyn Future<
-                                    Output = Result<NativeH3ClientResponse, NativeH3ClientError>,
-                                > + Send,
+                            dyn Future<Output = Result<NativeH3ClientResponse, NativeH3ClientError>>
+                                + Send,
                         >,
                     > = Box::pin(async move {
                         let mut execute = owned_client_parked_execution(
@@ -7470,8 +7478,7 @@ mod owned_native_h3_client_cancel {
                             });
                             let waker = Waker::from(Arc::clone(parent));
                             let before = parent.wakes.load(Ordering::SeqCst);
-                            let result =
-                                execute.as_mut().poll(&mut Context::from_waker(&waker));
+                            let result = execute.as_mut().poll(&mut Context::from_waker(&waker));
                             if result.is_pending()
                                 && parent.wakes.load(Ordering::SeqCst) == before
                                 && child_observed.as_ref().is_none_or(|observed| {
@@ -7495,7 +7502,10 @@ mod owned_native_h3_client_cancel {
                     started.elapsed() < IO_TIMEOUT,
                     "native HTTP/3 execution must reach stable Pending before abort"
                 );
-                assert!(!child.is_finished(), "silent exchange completed before cancellation");
+                assert!(
+                    !child.is_finished(),
+                    "silent exchange completed before cancellation"
+                );
                 asupersync::runtime::yield_now().await;
             }
             assert_owned_source_pending(&observed);

@@ -25,7 +25,11 @@ fn negotiated_deflate_is_decodable_by_a_zlib_client() {
     let input = b"HTTP response payload: repeated repeated repeated.";
     let encoding = negotiate_encoding(
         Some("deflate, identity;q=0"),
-        &[ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Identity],
+        &[
+            ContentEncoding::Gzip,
+            ContentEncoding::Deflate,
+            ContentEncoding::Identity,
+        ],
     )
     .unwrap();
     assert_eq!(encoding, ContentEncoding::Deflate);
@@ -83,8 +87,17 @@ fn corrupted_adler_checksum_is_not_retried_as_raw() {
     let mut decoder = DeflateDecompressor::new(Some(1024));
     let mut output = b"existing".to_vec();
     assert!(decoder.decompress(&wire, &mut output).is_err());
-    assert_eq!(output, b"existing", "failing call must not publish partial bytes");
-    assert!(decoder.decompress(&[], &mut output).unwrap_err().to_string().contains("poisoned"));
+    assert_eq!(
+        output, b"existing",
+        "failing call must not publish partial bytes"
+    );
+    assert!(
+        decoder
+            .decompress(&[], &mut output)
+            .unwrap_err()
+            .to_string()
+            .contains("poisoned")
+    );
     assert!(decoder.finish(&mut output).is_err());
     assert_eq!(output, b"existing");
 }
@@ -189,6 +202,9 @@ fn zlib_wrapper_bytes_are_included_in_compressed_output_limit() {
     let result = encoder
         .compress(b"", &mut output)
         .and_then(|()| encoder.finish(&mut output));
-    assert!(result.is_err(), "a header alone is not a complete HTTP deflate body");
+    assert!(
+        result.is_err(),
+        "a header alone is not a complete HTTP deflate body"
+    );
     assert!(output.len() <= 2);
 }

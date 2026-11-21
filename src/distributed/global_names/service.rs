@@ -101,12 +101,7 @@ pub fn register_global_name_service(
                         "global-name peer is not configured".to_owned(),
                     ));
                 }
-                let result = apply_request(
-                    &registry,
-                    &cx,
-                    peer,
-                    invocation.request().input.data(),
-                );
+                let result = apply_request(&registry, &cx, peer, invocation.request().input.data());
                 // Cancellation never claims rollback of a catalog already
                 // admitted. Preserve the attributed cancellation outcome.
                 if cx.checkpoint().is_err() {

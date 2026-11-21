@@ -20,8 +20,7 @@ pub(super) const MAGIC: &[u8; 8] = b"ATPRFL02";
 pub(super) const MAX_SNAPSHOTS: u32 = 1_048_576;
 pub(super) const MAX_CHECKPOINT: usize = super::super::FIXED + EPOCH_HEADER_BYTES + 64;
 const SLOT_HEADER: usize = 48;
-const MAX_PENDING: usize =
-    MAX_RECEIVER_CHECKPOINT_BYTES - super::super::FIXED - 32;
+const MAX_PENDING: usize = MAX_RECEIVER_CHECKPOINT_BYTES - super::super::FIXED - 32;
 const SLOT_BYTES: usize = SLOT_HEADER + MAX_PENDING;
 pub(super) const INTENT_BYTES: usize = 2 * SLOT_BYTES;
 const SLOT_MAGIC: &[u8; 8] = b"ATPRIN02";
@@ -170,20 +169,19 @@ pub(super) fn decode(
     if !(fixed + 32..=MAX_CHECKPOINT).contains(&record.len()) {
         return Err(invalid());
     }
-    let length =
-        u32::from_be_bytes(record[281..285].try_into().expect("bounded length")) as usize;
+    let length = u32::from_be_bytes(record[281..285].try_into().expect("bounded length")) as usize;
     if length == 0 {
         return ReceiverCheckpoint::from_canonical_bytes(record);
     }
-    if !(EPOCH_HEADER_BYTES + 1..=MAX_PENDING).contains(&length)
-        || record.len() != MAX_CHECKPOINT
-    {
+    if !(EPOCH_HEADER_BYTES + 1..=MAX_PENDING).contains(&length) || record.len() != MAX_CHECKPOINT {
         return Err(invalid());
     }
     let payload_length = length - EPOCH_HEADER_BYTES;
     let offset = u64::from_be_bytes(record[168..176].try_into().expect("bounded offset"));
     let epoch = u64::from_be_bytes(record[160..168].try_into().expect("bounded epoch"));
-    let end = offset.checked_add(payload_length as u64).ok_or_else(invalid)?;
+    let end = offset
+        .checked_add(payload_length as u64)
+        .ok_or_else(invalid)?;
     let expected: [u8; 32] = record[fixed + EPOCH_HEADER_BYTES..fixed + EPOCH_HEADER_BYTES + 32]
         .try_into()
         .expect("bounded commitment");
@@ -204,8 +202,7 @@ pub(super) fn decode(
         // the completed historical epoch still has its exact durable data.
         && pending_hash(&slot[SLOT_HEADER..SLOT_HEADER + length]) == expected;
     if matching_slot {
-        full[fixed..fixed + length]
-            .copy_from_slice(&slot[SLOT_HEADER..SLOT_HEADER + length]);
+        full[fixed..fixed + length].copy_from_slice(&slot[SLOT_HEADER..SLOT_HEADER + length]);
     } else {
         // Only complete historical payloads can replace an obsolete intent
         // slot. Partial data never fabricates the absent pending suffix.

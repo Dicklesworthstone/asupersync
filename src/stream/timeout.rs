@@ -272,7 +272,10 @@ impl<S: Stream, Caps: cap::HasTime> Stream for Timeout<'_, S, Caps> {
                 }
             }
             Poll::Pending => {
-                let waiting = this.waiting.as_mut().expect("item wait starts before polling");
+                let waiting = this
+                    .waiting
+                    .as_mut()
+                    .expect("item wait starts before polling");
                 match waiting.poll(task) {
                     Poll::Ready(error) => {
                         *this.done = true;

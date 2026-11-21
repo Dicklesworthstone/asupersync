@@ -54,12 +54,17 @@ fn a_large_limit_yields_admission_without_losing_or_duplicating_items() {
             let source = CountedSource {
                 admitted: Arc::clone(&admitted),
             };
-            let mut work = pin!(for_each_concurrent(&cx, source, usize::MAX, move |_, item| {
-                let seen = Arc::clone(&seen);
-                async move {
-                    seen[item].fetch_add(1, Ordering::SeqCst);
+            let mut work = pin!(for_each_concurrent(
+                &cx,
+                source,
+                usize::MAX,
+                move |_, item| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        seen[item].fetch_add(1, Ordering::SeqCst);
+                    }
                 }
-            }));
+            ));
             // Observe one actual poll, then resume the SAME future. No mock
             // spawn gateway or alternate admission implementation is involved.
             let first = poll_fn(|task| Poll::Ready(work.as_mut().poll(task))).await;
@@ -124,17 +129,16 @@ fn cancellation_at_an_admission_yield_stops_growth_and_drains_started_children()
                             let finished = Arc::clone(&item_finished);
                             async move {
                                 started.fetch_add(1, Ordering::SeqCst);
-                                let _result = OwnedSemaphorePermit::acquire(gate, &item_cx, 1).await;
+                                let _result =
+                                    OwnedSemaphorePermit::acquire(gate, &item_cx, 1).await;
                                 finished.fetch_add(1, Ordering::SeqCst);
                                 Err::<(), &'static str>("child cancelled")
                             }
                         },
                     ));
                     let first = poll_fn(|task| Poll::Ready(work.as_mut().poll(task))).await;
-                    driver_first_burst.store(
-                        driver_admitted.load(Ordering::SeqCst),
-                        Ordering::SeqCst,
-                    );
+                    driver_first_burst
+                        .store(driver_admitted.load(Ordering::SeqCst), Ordering::SeqCst);
 
                     let outcome = match first {
                         Poll::Ready(outcome) => outcome,

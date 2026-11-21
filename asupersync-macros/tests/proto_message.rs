@@ -222,7 +222,10 @@ fn derived_packed_projections_preserve_slice_wire_bytes_and_exact_budgets() {
         .encode_fields(&mut derived_encoder)
         .expect("same exact limits as slice writers");
     assert_eq!(derived_encoder.work_used(), slice_encoder.work_used());
-    assert_eq!(derived_encoder.fields_written(), slice_encoder.fields_written());
+    assert_eq!(
+        derived_encoder.fields_written(),
+        slice_encoder.fields_written()
+    );
     let wire = derived_encoder.finish().expect("finish projected values");
     assert_eq!(wire, slice_encoder.finish().expect("finish legacy wire"));
     assert_eq!(

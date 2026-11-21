@@ -219,8 +219,14 @@ impl SymbolDistributor {
         auth_context: &SecurityContext,
     ) -> DistributionResult {
         self.distribute_with_strategy(
-            cx, encoded, replicas, transport, auth_context, AssignmentStrategy::Full,
-        ).await
+            cx,
+            encoded,
+            replicas,
+            transport,
+            auth_context,
+            AssignmentStrategy::Full,
+        )
+        .await
     }
 
     /// Distribute an explicit symbol layout through the same bounded fanout.
@@ -242,9 +248,21 @@ impl SymbolDistributor {
         strategy: AssignmentStrategy,
     ) -> DistributionResult {
         let assignments = Self::compute_assignments_with_strategy(
-            encoded, replicas, auth_context, None, strategy,
+            encoded,
+            replicas,
+            auth_context,
+            None,
+            strategy,
         );
-        self.distribute_assignments(cx, encoded, assignments, transport, auth_context, usize::MAX).await
+        self.distribute_assignments(
+            cx,
+            encoded,
+            assignments,
+            transport,
+            auth_context,
+            usize::MAX,
+        )
+        .await
     }
 
     // Checkpoint preparation retains the exact plan it authenticated. Do not
@@ -259,8 +277,15 @@ impl SymbolDistributor {
         in_flight_ceiling: usize,
     ) -> DistributionResult {
         self.distribute_assignments_with_completion(
-            cx, encoded, assignments, transport, auth_context, in_flight_ceiling, None,
-        ).await
+            cx,
+            encoded,
+            assignments,
+            transport,
+            auth_context,
+            in_flight_ceiling,
+            None,
+        )
+        .await
     }
 
     // A checkpoint can require both receipt quorum and authenticated coverage.
@@ -284,7 +309,10 @@ impl SymbolDistributor {
     ) -> DistributionResult {
         let capped;
         let config = if self.config.max_concurrent > in_flight_ceiling {
-            capped = DistributionConfig { max_concurrent: in_flight_ceiling, ..self.config.clone() };
+            capped = DistributionConfig {
+                max_concurrent: in_flight_ceiling,
+                ..self.config.clone()
+            };
             &capped
         } else {
             &self.config
@@ -293,10 +321,27 @@ impl SymbolDistributor {
         let start = driver::now(timer.as_ref());
         let fanout = if completion.is_some() {
             driver::run_with_completion(
-                config, cx, encoded, assignments, transport, auth_context, timer.clone(), completion,
-            ).await
+                config,
+                cx,
+                encoded,
+                assignments,
+                transport,
+                auth_context,
+                timer.clone(),
+                completion,
+            )
+            .await
         } else {
-            driver::run(config, cx, encoded, assignments, transport, auth_context, timer.clone()).await
+            driver::run(
+                config,
+                cx,
+                encoded,
+                assignments,
+                transport,
+                auth_context,
+                timer.clone(),
+            )
+            .await
         };
         let duration = Duration::from_nanos(driver::now(timer.as_ref()).duration_since(start));
 
@@ -312,7 +357,11 @@ impl SymbolDistributor {
             Self::required_acks(self.config.consistency, fanout.eligible_replicas)
         };
         self.evaluate_outcomes_with_sent(
-            encoded, required, fanout.outcomes, fanout.symbols_attempted, duration,
+            encoded,
+            required,
+            fanout.outcomes,
+            fanout.symbols_attempted,
+            duration,
         )
     }
 
@@ -358,7 +407,11 @@ impl SymbolDistributor {
         region_id: Option<&str>,
     ) -> Vec<super::assignment::ReplicaAssignment> {
         Self::compute_assignments_with_strategy(
-            encoded, replicas, security_context, region_id, AssignmentStrategy::Full,
+            encoded,
+            replicas,
+            security_context,
+            region_id,
+            AssignmentStrategy::Full,
         )
     }
 

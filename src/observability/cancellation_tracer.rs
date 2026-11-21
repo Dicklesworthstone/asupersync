@@ -12,10 +12,10 @@
 //! cancellation step itself (asupersync-7yq1pv).
 
 use crate::runtime::TraceStorageProfile;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{CancelKind, CancelReason};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 

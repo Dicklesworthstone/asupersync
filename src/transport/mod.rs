@@ -15,10 +15,10 @@ pub mod multipath_stream;
 pub mod router;
 pub mod sink;
 pub mod stream;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod udp;
 #[cfg(test)]
 mod tests;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod udp;
 
 pub use aggregator::{
     AggregatorConfig, AggregatorStats, DeduplicatorConfig, DeduplicatorStats,
@@ -44,7 +44,9 @@ pub use router::{
     Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, LoadBalancer, RouteKey, RouteResult,
     RoutingEntry, RoutingError, RoutingTable, SymbolDispatcher, SymbolRouter,
 };
-pub use sink::{MultipathPathStats, MultipathPendingSymbol, MultipathSink, SymbolSink, SymbolSinkExt};
+pub use sink::{
+    MultipathPathStats, MultipathPendingSymbol, MultipathSink, SymbolSink, SymbolSinkExt,
+};
 pub use stream::{SymbolStream, SymbolStreamExt};
 #[cfg(not(target_arch = "wasm32"))]
 pub use udp::{SymbolDatagramLimits, UdpSymbolSink, UdpSymbolStream, UdpSymbolStreamStats};

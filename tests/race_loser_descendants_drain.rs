@@ -76,7 +76,10 @@ where
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::new().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("real admitted native task");
@@ -156,7 +159,9 @@ fn loser_grandchild_is_drained_with_factories(workers: usize) {
                     park_forever(child, loser_receiver).await
                 }),
                 boxed(move |_child| async move {
-                    awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+                    awaited
+                        .wait(|seen| seen.parked.load(Ordering::Acquire))
+                        .await;
                     7_u8
                 }),
             ])
@@ -208,7 +213,9 @@ fn loser_grandchild_is_drained_with_prebuilt_futures(workers: usize) {
                 park_forever(child, loser_receiver).await
             }),
             Box::pin(async move {
-                awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+                awaited
+                    .wait(|seen| seen.parked.load(Ordering::Acquire))
+                    .await;
                 9_u8
             }),
         ];
@@ -255,7 +262,9 @@ fn winner_grandchild_outlives_the_race(workers: usize) {
                             .expect("a winner descendant can spawn after the race");
                         })
                         .expect("the winning branch spawns a grandchild");
-                    awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+                    awaited
+                        .wait(|seen| seen.parked.load(Ordering::Acquire))
+                        .await;
                     5_u8
                 }),
                 boxed(move |child| park_forever(child, loser_receiver)),
@@ -264,7 +273,8 @@ fn winner_grandchild_outlives_the_race(workers: usize) {
         assert_eq!(result.expect("the first branch wins"), 5);
         assert!(grandchild.parked.load(Ordering::Acquire));
         assert!(
-            !grandchild.cancelled.load(Ordering::Acquire) && !grandchild.retired.load(Ordering::Acquire),
+            !grandchild.cancelled.load(Ordering::Acquire)
+                && !grandchild.retired.load(Ordering::Acquire),
             "the winner's grandchild must keep running after the race returns"
         );
         grandchild_sender
@@ -273,7 +283,9 @@ fn winner_grandchild_outlives_the_race(workers: usize) {
             .expect("the winner's grandchild is still receiving");
         late.wait(|seen| seen.retired.load(Ordering::Acquire)).await;
         assert!(late.finished.load(Ordering::Acquire));
-        grandchild.wait(|seen| seen.retired.load(Ordering::Acquire)).await;
+        grandchild
+            .wait(|seen| seen.retired.load(Ordering::Acquire))
+            .await;
         assert!(grandchild.finished.load(Ordering::Acquire));
         assert!(!grandchild.cancelled.load(Ordering::Acquire));
     });
@@ -322,16 +334,30 @@ fn owner_cancellation_drains_every_branchs_descendants() {
             })
             .expect("spawn the racing task");
         first.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
-        second.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+        second
+            .wait(|seen| seen.parked.load(Ordering::Acquire))
+            .await;
         racer.abort();
         let outcome = racer.join(&owner).await;
         assert!(
-            matches!(outcome, Err(JoinError::Cancelled(_)) | Ok(Err(JoinError::Cancelled(_)))),
+            matches!(
+                outcome,
+                Err(JoinError::Cancelled(_)) | Ok(Err(JoinError::Cancelled(_)))
+            ),
             "the cancelled race reports cancellation, got {outcome:?}"
         );
-        for (seen, what) in [(&first, "first branch's grandchild"), (&second, "second branch's grandchild")] {
-            assert!(seen.cancelled.load(Ordering::Acquire), "{what} still running after the race failed");
-            assert!(seen.retired.load(Ordering::Acquire), "{what} not terminal after the race failed");
+        for (seen, what) in [
+            (&first, "first branch's grandchild"),
+            (&second, "second branch's grandchild"),
+        ] {
+            assert!(
+                seen.cancelled.load(Ordering::Acquire),
+                "{what} still running after the race failed"
+            );
+            assert!(
+                seen.retired.load(Ordering::Acquire),
+                "{what} not terminal after the race failed"
+            );
         }
     });
 }
@@ -364,8 +390,12 @@ fn lab_oracles_accept_branch_regions_across_seeds() {
                             child
                                 .spawn(move |gcx| descendant(gcx, kept_receiver, kept_spawned))
                                 .expect("the winning branch spawns");
-                            lost_awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
-                            kept_awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+                            lost_awaited
+                                .wait(|seen| seen.parked.load(Ordering::Acquire))
+                                .await;
+                            kept_awaited
+                                .wait(|seen| seen.parked.load(Ordering::Acquire))
+                                .await;
                             11_u8
                         }),
                     ])
@@ -375,13 +405,22 @@ fn lab_oracles_accept_branch_regions_across_seeds() {
                     && lost.retired.load(Ordering::Acquire)
                     && !kept.cancelled.load(Ordering::Acquire)
                     && !kept.retired.load(Ordering::Acquire);
-                kept_sender.send(&owner, ()).await.expect("the winner's grandchild still receives");
+                kept_sender
+                    .send(&owner, ())
+                    .await
+                    .expect("the winner's grandchild still receives");
                 kept.wait(|seen| seen.retired.load(Ordering::Acquire)).await;
                 (value, loser_drained, kept.finished.load(Ordering::Acquire))
             });
         assert_eq!(value, 11, "seed {seed}");
-        assert!(loser_drained, "seed {seed}: loser drained, winner untouched at return");
-        assert!(winner_finished, "seed {seed}: the winner's grandchild finished normally");
+        assert!(
+            loser_drained,
+            "seed {seed}: loser drained, winner untouched at return"
+        );
+        assert!(
+            winner_finished,
+            "seed {seed}: the winner's grandchild finished normally"
+        );
         assert!(report.quiescent, "seed {seed}: the lab run ends quiescent");
         assert!(
             report.oracle_report.all_passed(),
@@ -416,7 +455,9 @@ fn lab_race_drains_a_losing_branchs_grandchild() {
                     park_forever(child, loser_receiver).await
                 }),
                 boxed(move |_child| async move {
-                    awaited.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
+                    awaited
+                        .wait(|seen| seen.parked.load(Ordering::Acquire))
+                        .await;
                     3_u8
                 }),
             ])
@@ -535,7 +576,6 @@ fn a_timed_race_drains_a_branch_that_finished_at_its_deadline() {
         );
     }
 }
-
 
 /// Scoped races own both subtrees. Exercise the real scheduler under every
 /// native state shape; a wall-clock watchdog only bounds a broken test and is
@@ -795,9 +835,7 @@ async fn scoped_race_owner_cancel_during_drain(owner: Cx) {
                         result
                     },
                     move |_| async move {
-                        ready
-                            .wait(|seen| seen.parked.load(Ordering::Acquire))
-                            .await;
+                        ready.wait(|seen| seen.parked.load(Ordering::Acquire)).await;
                         Err::<u8, _>("typed winner failure")
                     },
                 )
@@ -809,7 +847,8 @@ async fn scoped_race_owner_cancel_during_drain(owner: Cx) {
         .unwrap();
     // The child's cleanup is Pending, proving the race has already selected
     // its winner and requested the loser's subtree cancellation.
-    seen.wait(|seen| seen.cancelled.load(Ordering::Acquire)).await;
+    seen.wait(|seen| seen.cancelled.load(Ordering::Acquire))
+        .await;
     racing.abort_with_reason(
         CancelReason::shutdown().with_cause(CancelReason::user("owner stopped during race drain")),
     );

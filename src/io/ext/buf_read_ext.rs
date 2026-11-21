@@ -318,9 +318,9 @@ impl<R: AsyncBufRead + Unpin> Stream for Split<R> {
                     }
                     return Poll::Ready(Some(Ok(std::mem::take(&mut this.segment))));
                 }
-                let remaining = this.max_segment_bytes.map_or(usize::MAX, |max| {
-                    max.saturating_sub(this.segment.len())
-                });
+                let remaining = this
+                    .max_segment_bytes
+                    .map_or(usize::MAX, |max| max.saturating_sub(this.segment.len()));
                 // A delimiter immediately after a full segment still fits;
                 // inspect that one byte, but never append it to the segment.
                 let inspect = available.len().min(remaining.saturating_add(1));

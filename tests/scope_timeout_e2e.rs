@@ -306,8 +306,7 @@ fn fallible_sleep_stops_at_scope_timeout_before_running_subsequent_effects() {
                     Duration::from_millis(250),
                     move |task_cx| async move {
                         let _cleanup = Cleanup(task_cleanup);
-                        let mut waiting =
-                            Box::pin(sleep_cx(&task_cx, Duration::from_secs(3600)));
+                        let mut waiting = Box::pin(sleep_cx(&task_cx, Duration::from_secs(3600)));
                         std::future::poll_fn(|task| {
                             let polled = waiting.as_mut().poll(task);
                             if polled.is_pending() {
@@ -350,7 +349,9 @@ fn fallible_sleep_stops_at_scope_timeout_before_running_subsequent_effects() {
 
         match done_rx.recv_timeout(Duration::from_secs(20)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                runner.join().expect("fallible sleep scope timeout scenario");
+                runner
+                    .join()
+                    .expect("fallible sleep scope timeout scenario");
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 panic!("fallible sleep scope timeout exceeded its external watchdog");
@@ -358,7 +359,6 @@ fn fallible_sleep_stops_at_scope_timeout_before_running_subsequent_effects() {
         }
     }
 }
-
 
 /// A production-runtime proof that the deadline drains a real operation
 /// subtree, even after the direct task's retirement barrier has opened.
@@ -460,27 +460,34 @@ fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
                     move |body| async move {
                         *published_body.lock().unwrap() = Some(body.task_id());
                         let body_region = body.region_id();
-                        let _child = body.spawn(move |child| async move {
-                            let region = child
-                                .open_child_region(ChildRegionSpec::inherit())
-                                .await
-                                .unwrap();
-                            assert_ne!(region.region_id(), body_region);
-                            let mut grandchild = region.cx().spawn(move |grandchild| async move {
-                                let mut cancelled = std::pin::pin!(grandchild.cancelled());
-                                std::future::poll_fn(|task| {
-                                    let poll = cancelled.as_mut().poll(task);
-                                    if poll.is_pending() {
-                                        body_cancellation_parked.store(true, Ordering::SeqCst);
-                                    }
-                                    poll
-                                }).await;
-                                assert!(grandchild.checkpoint().is_err());
-                                WaitGate(descendant_cleanup).await;
-                            }).unwrap();
-                            let _ = grandchild.join(&child).await;
-                            region.close().await.unwrap();
-                        }).unwrap();
+                        let _child = body
+                            .spawn(move |child| async move {
+                                let region = child
+                                    .open_child_region(ChildRegionSpec::inherit())
+                                    .await
+                                    .unwrap();
+                                assert_ne!(region.region_id(), body_region);
+                                let mut grandchild = region
+                                    .cx()
+                                    .spawn(move |grandchild| async move {
+                                        let mut cancelled = std::pin::pin!(grandchild.cancelled());
+                                        std::future::poll_fn(|task| {
+                                            let poll = cancelled.as_mut().poll(task);
+                                            if poll.is_pending() {
+                                                body_cancellation_parked
+                                                    .store(true, Ordering::SeqCst);
+                                            }
+                                            poll
+                                        })
+                                        .await;
+                                        assert!(grandchild.checkpoint().is_err());
+                                        WaitGate(descendant_cleanup).await;
+                                    })
+                                    .unwrap();
+                                let _ = grandchild.join(&child).await;
+                                region.close().await.unwrap();
+                            })
+                            .unwrap();
                         body.cancelled().await;
                         assert!(body.checkpoint().is_err());
                         WaitGate(body_return).await;
@@ -490,7 +497,8 @@ fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
                 std::future::poll_fn(|task| {
                     assert!(timeout.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
 
                 // Observe an actual Pending cancellation registration before
                 // advancing the clock; admission speed cannot consume the bound.
@@ -503,7 +511,8 @@ fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
                 std::future::poll_fn(|task| {
                     assert!(timeout.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 while !cleanup_gate.parked.load(Ordering::SeqCst)
                     || !body_gate.parked.load(Ordering::SeqCst)
                 {
@@ -519,21 +528,32 @@ fn scoped_timeout_native_waits_for_grandchild_after_direct_body_has_finished() {
                         parent: task.waker().clone(),
                     });
                     let waker = Waker::from(Arc::clone(&joined));
-                    assert!(timeout.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+                    assert!(
+                        timeout
+                            .as_mut()
+                            .poll(&mut Context::from_waker(&waker))
+                            .is_pending()
+                    );
                     Poll::Ready(joined)
-                }).await;
+                })
+                .await;
                 body_gate.release();
                 while joined.count.load(Ordering::SeqCst) == 0 {
                     yield_now().await;
                 }
-                assert!(inspector.inspect_task(actual_body).is_none_or(|task| task.is_terminal()));
+                assert!(
+                    inspector
+                        .inspect_task(actual_body)
+                        .is_none_or(|task| task.is_terminal())
+                );
 
                 // The direct join is now ready. A task-only timeout would be
                 // Ready here; the owned timeout must still await the grandchild.
                 std::future::poll_fn(|task| {
                     assert!(timeout.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 assert!(!cleanup_gate.released.load(Ordering::SeqCst));
                 cleanup_gate.release();
                 let report = timeout.await.unwrap();

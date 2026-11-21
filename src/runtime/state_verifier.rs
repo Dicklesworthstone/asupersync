@@ -17,9 +17,9 @@
 //! - an obligation panics if it is resolved twice.
 
 use crate::record::{ObligationState, region::RegionState, task::TaskPhase};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{ObligationId, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 

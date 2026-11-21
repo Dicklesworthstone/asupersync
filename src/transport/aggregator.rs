@@ -9,13 +9,13 @@
 
 use crate::distributed::encoding::PathQualitySnapshot;
 use crate::error::{Error, ErrorKind};
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ============================================================================
 // Path Types

@@ -38,10 +38,10 @@ use crate::observability::pressure_governor::{
     AdmissionDecision, Instant, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
 };
 use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, ResourceMonitor};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 

@@ -207,6 +207,7 @@ use crate::supervision::{
     ManagedGeneration, ManagedRestartMode, ManagedSupervisor, ManagedSupervisorReport,
     RestartPolicy, SupervisionConfig, SupervisorBuilder,
 };
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::trace::replay::ReplayTrace;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, Time};
 use crate::util::DetRng;
@@ -217,7 +218,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 mod cancellation;
@@ -3185,7 +3185,8 @@ impl ParticipantWorkload {
                 }
                 PlannedWork::Work { fail_times } => {
                     let lifecycle = participant.lifecycle.as_ref().map(|plan| {
-                        let control = Arc::new(lifecycle::Control::new(plan.clone(), runtime.now()));
+                        let control =
+                            Arc::new(lifecycle::Control::new(plan.clone(), runtime.now()));
                         workload.lifecycle.push(Arc::clone(&control));
                         control
                     });
@@ -3656,11 +3657,12 @@ impl ParticipantWorkload {
     ) {
         let budget = max_restarts.unwrap_or_else(|| {
             let failures = workers.iter().fold(0_u64, |total, worker| {
-                total
-                    .saturating_add(worker.fail_times)
-                    .saturating_add(worker.lifecycle.as_ref().map_or(0, |control| {
-                        control.plan.crash_allowance
-                    }))
+                total.saturating_add(worker.fail_times).saturating_add(
+                    worker
+                        .lifecycle
+                        .as_ref()
+                        .map_or(0, |control| control.plan.crash_allowance),
+                )
             });
             u32::try_from(failures).unwrap_or(u32::MAX)
         });
@@ -3961,9 +3963,8 @@ async fn run_worker_generation(
             lifecycle::WorkExit::Cancelled => {
                 bump(&state.cancelled);
                 return Outcome::Cancelled(
-                    cx.cancel_reason().unwrap_or_else(|| {
-                        CancelReason::user("worker generation cancelled")
-                    }),
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("worker generation cancelled")),
                 );
             }
             lifecycle::WorkExit::ClockExhausted => {
@@ -5422,7 +5423,12 @@ impl ScenarioRunner {
         // 2. Build runtime and spawn the bound participants
         let config = Self::lab_config_for(scenario, seed_override);
         let mut runtime = LabRuntime::new(config);
-        Ok(Self::run_prepared(scenario, seed_override, &plan, &mut runtime))
+        Ok(Self::run_prepared(
+            scenario,
+            seed_override,
+            &plan,
+            &mut runtime,
+        ))
     }
 
     /// Shared execution path for an ordinary run and a bounded campaign trial.

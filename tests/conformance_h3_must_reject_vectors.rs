@@ -248,11 +248,15 @@ fn rfc9204_decoder_stream_acknowledges_each_dynamic_section_and_rejects_an_extra
     )
     .expect("directional state");
     qpack
-        .apply_local_encoder_instruction(
-            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 256 },
-        )
+        .apply_local_encoder_instruction(&QpackEncoderInstruction::SetDynamicTableCapacity {
+            capacity: 256,
+        })
         .expect("select encoder capacity");
-    for (name, value) in [(":status", "103"), (":status", "200"), ("x-checksum", "done")] {
+    for (name, value) in [
+        (":status", "103"),
+        (":status", "200"),
+        ("x-checksum", "done"),
+    ] {
         qpack
             .apply_local_encoder_instruction(&QpackEncoderInstruction::InsertWithoutNameReference {
                 name: name.to_string(),
@@ -292,9 +296,9 @@ fn rfc9204_decoder_stream_acknowledges_each_dynamic_section_and_rejects_an_extra
     );
     assert_eq!(qpack.decoder_feedback().outstanding_reference_count(), 2);
     qpack
-        .apply_local_encoder_instruction(
-            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
-        )
+        .apply_local_encoder_instruction(&QpackEncoderInstruction::SetDynamicTableCapacity {
+            capacity: 0,
+        })
         .expect_err("later sections must remain protected after the first ACK");
     assert!(qpack.first_failure().is_none());
 
@@ -334,9 +338,9 @@ fn rfc9204_decoder_stream_acknowledges_each_dynamic_section_and_rejects_an_extra
         }
     }
     qpack
-        .apply_local_encoder_instruction(
-            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
-        )
+        .apply_local_encoder_instruction(&QpackEncoderInstruction::SetDynamicTableCapacity {
+            capacity: 0,
+        })
         .expect("every outstanding section has released its references");
     assert!(qpack.context().dynamic_table().is_empty());
     assert!(qpack.received_context().dynamic_table().is_empty());

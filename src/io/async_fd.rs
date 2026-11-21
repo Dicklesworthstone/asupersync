@@ -749,11 +749,11 @@ mod tests {
     use crate::cx::Cx;
     use crate::runtime::IoDriverHandle;
     use crate::runtime::reactor::{Event, LabReactor, Reactor, Token};
+    use crate::sync::atomic::AtomicUsize;
     use crate::types::{Budget, RegionId, TaskId};
     use std::future::Future;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
-    use crate::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -1285,7 +1285,10 @@ mod tests {
             dispatch(&reactor, &driver, token, READ);
         }))
         .expect_err("the aggregate reactor wake must still propagate the panic");
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"descriptor wake failed"));
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"descriptor wake failed")
+        );
         assert!(fd.readiness.waiters.lock().is_empty());
         assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), READ);
         assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), 0);
@@ -1300,7 +1303,9 @@ mod tests {
             assert!(guard.is_readable());
         }
         let mut byte = [0];
-        fd.get_ref().read_exact(&mut byte).expect("read the peer byte");
+        fd.get_ref()
+            .read_exact(&mut byte)
+            .expect("read the peer byte");
         assert_eq!(byte, *b"x");
     }
 

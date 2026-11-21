@@ -590,7 +590,11 @@ mod scheduler_metamorphic_tests {
             .collect();
         let dispatched_timed: Vec<(TaskId, Time)> = dispatched
             .into_iter()
-            .filter_map(|task_id| deadline_of.get(&task_id).map(|&deadline| (task_id, deadline)))
+            .filter_map(|task_id| {
+                deadline_of
+                    .get(&task_id)
+                    .map(|&deadline| (task_id, deadline))
+            })
             .collect();
         // All three deadlines are in the past, so every timed task must be
         // dispatched; otherwise the ordering check below would pass vacuously.

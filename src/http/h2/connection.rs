@@ -183,7 +183,9 @@ impl Decoder for FrameCodec {
         // The wire length is 24 bits even if a caller sets a larger limit.
         // Include the header without consulting any peer-advertised length.
         let payload = self.max_frame_size.min(super::frame::MAX_FRAME_SIZE);
-        usize::try_from(payload).ok()?.checked_add(FRAME_HEADER_SIZE)
+        usize::try_from(payload)
+            .ok()?
+            .checked_add(FRAME_HEADER_SIZE)
     }
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {

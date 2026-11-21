@@ -221,8 +221,10 @@ fn timeout_preserves_a_completed_half_close_while_the_other_direction_is_parked(
     assert_eq!(b_probe.shutdowns.load(Ordering::SeqCst), 1);
     clock.advance_to(DEADLINE);
     assert_eq!(driver.process_timers(), 1);
-    assert!(matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
-        if error.kind() == io::ErrorKind::TimedOut));
+    assert!(
+        matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
+        if error.kind() == io::ErrorKind::TimedOut)
+    );
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
     drop(run);
@@ -230,7 +232,10 @@ fn timeout_preserves_a_completed_half_close_while_the_other_direction_is_parked(
     assert_eq!(session.pending_b_to_a(), b"wxyz");
     release.store(true, Ordering::Release);
     let mut run = Box::pin(session.run_until(&cx, Time::from_millis(200)));
-    assert!(matches!(run.as_mut().poll(&mut task), Poll::Ready(Ok((0, 6)))));
+    assert!(matches!(
+        run.as_mut().poll(&mut task),
+        Poll::Ready(Ok((0, 6)))
+    ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
     drop(run);
@@ -249,8 +254,10 @@ fn expired_active_sessions_do_not_poll_but_completed_sessions_keep_their_result(
     let mut session = ReadExactSession::new(reader, &mut buffer);
     let mut task = Context::from_waker(Waker::noop());
     let mut expired = Box::pin(session.run_until(&cx, Time::ZERO));
-    assert!(matches!(expired.as_mut().poll(&mut task), Poll::Ready(Err(error))
-        if error.kind() == io::ErrorKind::TimedOut));
+    assert!(
+        matches!(expired.as_mut().poll(&mut task), Poll::Ready(Err(error))
+        if error.kind() == io::ErrorKind::TimedOut)
+    );
     drop(expired);
     assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
     let mut run = Box::pin(session.run_until(&cx, DEADLINE));
@@ -258,7 +265,10 @@ fn expired_active_sessions_do_not_poll_but_completed_sessions_keep_their_result(
     drop(run);
     cx.cancel_with_reason(CancelReason::user("already finished"));
     let mut cached = Box::pin(session.run_until(&cx, Time::ZERO));
-    assert!(matches!(cached.as_mut().poll(&mut task), Poll::Ready(Ok(6))));
+    assert!(matches!(
+        cached.as_mut().poll(&mut task),
+        Poll::Ready(Ok(6))
+    ));
     assert_eq!(probe.polls.load(Ordering::SeqCst), 1);
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
@@ -266,8 +276,7 @@ fn expired_active_sessions_do_not_poll_but_completed_sessions_keep_their_result(
 
 #[test]
 fn masked_owner_budget_rearms_once_and_explicit_deadline_still_expires() {
-    let (cx, clock, driver) =
-        virtual_owner(Budget::INFINITE.with_deadline(Time::from_millis(10)));
+    let (cx, clock, driver) = virtual_owner(Budget::INFINITE.with_deadline(Time::from_millis(10)));
     let release = Arc::new(AtomicBool::new(false));
     let (reader, _) = Endpoint::new(b"abcdef", 2, usize::MAX, &release);
     let mut buffer = [0; 6];
@@ -291,8 +300,10 @@ fn masked_owner_budget_rearms_once_and_explicit_deadline_still_expires() {
         }
         clock.advance_to(DEADLINE);
         assert_eq!(driver.process_timers(), 1);
-        assert!(matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
-            if error.kind() == io::ErrorKind::TimedOut));
+        assert!(
+            matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
+            if error.kind() == io::ErrorKind::TimedOut)
+        );
         assert!(driver.is_empty());
         assert_eq!(registrations(&cx), 0);
     });
@@ -325,9 +336,14 @@ fn masked_cancellation_keeps_the_unmask_wake_without_advancing_time() {
             assert_eq!(registrations(&cx), 2);
             wakes.0.store(0, Ordering::SeqCst);
         });
-        assert!(wakes.0.load(Ordering::SeqCst) > 0, "unmask must wake the run");
-        assert!(matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
-            if error.kind() == io::ErrorKind::Interrupted));
+        assert!(
+            wakes.0.load(Ordering::SeqCst) > 0,
+            "unmask must wake the run"
+        );
+        assert!(
+            matches!(run.as_mut().poll(&mut task), Poll::Ready(Err(error))
+            if error.kind() == io::ErrorKind::Interrupted)
+        );
         assert_eq!(cx.cancel_reason(), Some(reason));
         assert_eq!(driver.now(), Time::ZERO);
         assert!(driver.is_empty());
@@ -514,7 +530,10 @@ mod native {
             Stop::OwnerBudget | Stop::Cancel | Stop::MaskedCancel => io::ErrorKind::Interrupted,
         };
         assert_eq!(error.kind(), expected);
-        assert!(driver.is_empty(), "completion retires the timer before drop");
+        assert!(
+            driver.is_empty(),
+            "completion retires the timer before drop"
+        );
         assert_eq!(registrations(cx), 0);
     }
 
@@ -542,7 +561,15 @@ mod native {
             Kind::Read => {
                 let mut buffer = [0; 6];
                 let mut session = ReadExactSession::new(endpoint, &mut buffer);
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.filled(), b"ab");
                 assert_eq!(session.bytes_read(), 2);
                 controls.release.store(true, Ordering::Release);
@@ -554,7 +581,15 @@ mod native {
             }
             Kind::Write => {
                 let mut session = WriteAllSession::new(endpoint, b"abcdef");
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.bytes_written(), 2);
                 assert_eq!(session.pending_bytes(), b"cdef");
                 controls.release.store(true, Ordering::Release);
@@ -574,16 +609,32 @@ mod native {
                     IoSliceMut::new(&mut suffix),
                 ];
                 let mut session = ReadExactVectoredSession::new(endpoint, &mut plan).unwrap();
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.bytes_read(), 2);
                 assert_eq!(
-                    session.filled_slices().flatten().copied().collect::<Vec<_>>(),
+                    session
+                        .filled_slices()
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>(),
                     b"ab"
                 );
                 controls.release.store(true, Ordering::Release);
                 assert_eq!(session.run_until(&fresh, resume_at).await.unwrap(), 6);
                 assert_eq!(
-                    session.filled_slices().flatten().copied().collect::<Vec<_>>(),
+                    session
+                        .filled_slices()
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>(),
                     b"abcdef"
                 );
                 let polls = probe.polls.load(Ordering::SeqCst);
@@ -591,9 +642,21 @@ mod native {
                 assert_eq!(probe.polls.load(Ordering::SeqCst), polls);
             }
             Kind::WriteVectored => {
-                let plan = [IoSlice::new(b"ab"), IoSlice::new(b""), IoSlice::new(b"cdef")];
+                let plan = [
+                    IoSlice::new(b"ab"),
+                    IoSlice::new(b""),
+                    IoSlice::new(b"cdef"),
+                ];
                 let mut session = WriteAllVectoredSession::new(endpoint, &plan).unwrap();
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.bytes_written(), 2);
                 assert_eq!(session.remaining(), 4);
                 controls.release.store(true, Ordering::Release);
@@ -606,7 +669,15 @@ mod native {
             Kind::Copy => {
                 let (writer, writes) = Endpoint::new(b"", usize::MAX, 2, &controls.release);
                 let mut session = CopySession::new(endpoint, writer);
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.progress().read, 6);
                 assert_eq!(session.progress().written, 2);
                 assert_eq!(session.pending_bytes(), b"cdef");
@@ -623,7 +694,15 @@ mod native {
             Kind::Bidirectional => {
                 let (peer, peer_probe) = Endpoint::new(b"uvwxyz", usize::MAX, 2, &controls.release);
                 let mut session = BidirectionalCopySession::new(endpoint, peer);
-                stopped(session.run_until(cx, DEADLINE), cx, driver, controls, started, stop).await;
+                stopped(
+                    session.run_until(cx, DEADLINE),
+                    cx,
+                    driver,
+                    controls,
+                    started,
+                    stop,
+                )
+                .await;
                 assert_eq!(session.progress().a_to_b.written, 2);
                 assert_eq!(session.progress().b_to_a.written, 2);
                 assert_eq!(session.pending_a_to_b(), b"cdef");
@@ -663,7 +742,9 @@ mod native {
         let ambient_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(100)));
         let ambient = TimerDriverHandle::with_virtual_clock(ambient_clock);
         let builder = if multithread {
-            RuntimeBuilder::new().worker_threads(2).with_sharded_state(true)
+            RuntimeBuilder::new()
+                .worker_threads(2)
+                .with_sharded_state(true)
         } else {
             RuntimeBuilder::current_thread()
         };
@@ -699,7 +780,10 @@ mod native {
                 })
                 .unwrap();
             started.notified().await;
-            assert!(controls.parked.load(Ordering::Acquire), "{kind:?} must actually park");
+            assert!(
+                controls.parked.load(Ordering::Acquire),
+                "{kind:?} must actually park"
+            );
             let reason = reason();
             match stop {
                 Stop::Deadline => {
@@ -713,12 +797,17 @@ mod native {
                 Stop::Cancel => {
                     let cancel_cx = cx.clone();
                     let reason = reason.clone();
-                    thread::spawn(move || cancel_cx.cancel_with_reason(reason)).join().unwrap();
+                    thread::spawn(move || cancel_cx.cancel_with_reason(reason))
+                        .join()
+                        .unwrap();
                 }
                 Stop::MaskedCancel => {}
             }
             let joined = child.join(&root).await;
-            assert!(matches!(&joined, Ok(Outcome::Ok(()))), "{kind:?} {stop:?}: {joined:?}");
+            assert!(
+                matches!(&joined, Ok(Outcome::Ok(()))),
+                "{kind:?} {stop:?}: {joined:?}"
+            );
             match stop {
                 Stop::Deadline => assert!(!cx.is_cancel_requested()),
                 Stop::OwnerBudget => {
@@ -731,7 +820,10 @@ mod native {
             }
         }));
         drop(watchdog);
-        assert!(!fired.load(Ordering::Acquire), "{kind:?} {stop:?} needed the rescue wake");
+        assert!(
+            !fired.load(Ordering::Acquire),
+            "{kind:?} {stop:?} needed the rescue wake"
+        );
         assert!(check_driver.is_empty());
         assert!(ambient.is_empty());
         assert_eq!(registrations(&check_cx), 0);

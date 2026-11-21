@@ -33,8 +33,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -103,7 +103,9 @@ struct H2Peer {
 impl H2Peer {
     async fn connect(addr: SocketAddr, settings: Vec<Setting>) -> Self {
         let mut peer = Self {
-            stream: bounded(TcpStream::connect(addr)).await.expect("connect raw HTTP/2"),
+            stream: bounded(TcpStream::connect(addr))
+                .await
+                .expect("connect raw HTTP/2"),
             codec: FrameCodec::new(),
             input: BytesMut::new(),
         };
@@ -220,20 +222,24 @@ where
 {
     let work = body(runtime.handle());
     runtime.block_on(async move {
-        asupersync::time::timeout(
-            Cx::current().unwrap().now(),
-            Duration::from_secs(20),
-            work,
-        )
-        .await
-        .expect("shared-port lifecycle must finish");
+        asupersync::time::timeout(Cx::current().unwrap().now(), Duration::from_secs(20), work)
+            .await
+            .expect("shared-port lifecycle must finish");
     });
     let started = Instant::now();
     while !runtime.is_quiescent() {
-        assert!(started.elapsed() < Duration::from_secs(5), "HTTP tasks must retire");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "HTTP tasks must retire"
+        );
         runtime.block_on(yield_now());
     }
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
 }
@@ -273,7 +279,10 @@ enum OwnedStop {
 
 async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
     let cx = Cx::current().unwrap();
-    let service = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let service = cx
+        .open_child_region(ChildRegionSpec::inherit())
+        .await
+        .unwrap();
     let service_id = service.region_id();
     assert_ne!(service_id, cx.region_id());
     let owner = service.cx().clone();
@@ -284,10 +293,10 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
         move |request: Request| {
             let observed = Arc::clone(&handler_observed);
             async move {
-                observed.lock().unwrap().push((
-                    request.uri.clone(),
-                    Cx::current().unwrap().region_id(),
-                ));
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((request.uri.clone(), Cx::current().unwrap().region_id()));
                 report(request).await
             }
         },
@@ -339,9 +348,13 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
         .unwrap()
         .into_iter()
         .filter_map(|event| match (event.kind, event.data) {
-            (TraceEventKind::RegionCreated, TraceData::Region { region, parent: Some(parent) }) => {
-                Some((region, parent))
-            }
+            (
+                TraceEventKind::RegionCreated,
+                TraceData::Region {
+                    region,
+                    parent: Some(parent),
+                },
+            ) => Some((region, parent)),
             _ => None,
         })
         .collect();
@@ -350,7 +363,10 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
     for (request, mut region) in observed {
         let mut visited = BTreeSet::new();
         while region != service_id {
-            assert!(visited.insert(region), "cyclic region ancestry for {request}");
+            assert!(
+                visited.insert(region),
+                "cyclic region ancestry for {request}"
+            );
             region = *parents
                 .get(&region)
                 .unwrap_or_else(|| panic!("{request} escaped service region {service_id:?}"));
@@ -367,7 +383,11 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
     let with_detector = wait_for_service_tasks(&handle, service_id, 6).await;
     assert!(baseline.is_subset(&with_detector));
     let added: Vec<_> = with_detector.difference(&baseline).copied().collect();
-    assert_eq!(added.len(), 1, "the silent peer admits exactly one detector");
+    assert_eq!(
+        added.len(),
+        1,
+        "the silent peer admits exactly one detector"
+    );
     let detector = added[0];
     bounded(partial_http1.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n"))
         .await
@@ -414,11 +434,23 @@ async fn owned_service_lifecycle(handle: RuntimeHandle, stop: OwnedStop) {
         assert!(stats.http2.drain_report.unwrap().reached_quiescence);
     }
     if stop == OwnedStop::Coordinator {
-        assert!(!owner.is_cancel_requested(), "only the ambient task was aborted");
+        assert!(
+            !owner.is_cancel_requested(),
+            "only the ambient task was aborted"
+        );
     }
     bounded(service.close()).await.unwrap();
-    assert!(handle.task_inspector(Default::default()).unwrap().by_region(service_id).is_empty());
-    assert!(!cx.is_cancel_requested(), "closing the service must not cancel its parent");
+    assert!(
+        handle
+            .task_inspector(Default::default())
+            .unwrap()
+            .by_region(service_id)
+            .is_empty()
+    );
+    assert!(
+        !cx.is_cancel_requested(),
+        "closing the service must not cancel its parent"
+    );
 
     // Region close is a resource barrier, including undecided and partial
     // requests. No timer or task cancellation on these clients creates EOF.
@@ -639,7 +671,10 @@ fn shared_port_http2_enforces_connection_and_global_request_limits() {
                     if request.uri == "/hold" {
                         calls.fetch_add(1, Ordering::SeqCst);
                         entered.notify_one();
-                        release.changed.wait_until(|| release.released.load(Ordering::Acquire)).await;
+                        release
+                            .changed
+                            .wait_until(|| release.released.load(Ordering::Acquire))
+                            .await;
                     }
                     report(request).await
                 }
@@ -712,7 +747,10 @@ fn shared_port_http2_flow_control_timeout_resets_only_the_stalled_stream() {
         ])))
         .await;
         peer.request(3, "/credit-restored").await;
-        assert_eq!(peer.response_body(3).await, b"Http2 /credit-restored peer=true");
+        assert_eq!(
+            peer.response_body(3).await,
+            b"Http2 /credit-restored peer=true"
+        );
         let mut http1 = TcpStream::connect(addr).await.unwrap();
         let response = bounded(http1_get(&mut http1, "/after-flow-timeout")).await;
         assert!(
@@ -1017,4 +1055,3 @@ fn tls_auto_listener_refuses_an_acceptor_without_alpn() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }));
 }
-

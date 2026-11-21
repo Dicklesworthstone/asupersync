@@ -207,7 +207,9 @@ fn run_pair(
     test: impl FnOnce(Stream, Stream) + Send + 'static,
 ) {
     let mut runtime = LabRuntimeTarget::create_runtime(
-        TestConfig::new().with_seed(0xC710_0001).with_max_steps(20_000),
+        TestConfig::new()
+            .with_seed(0xC710_0001)
+            .with_max_steps(20_000),
     );
     LabRuntimeTarget::block_on(&mut runtime, async move {
         let (client, server) = establish(version).await;
@@ -220,7 +222,10 @@ fn binding(stream: &Stream) -> Option<[u8; 32]> {
     if stream.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3) {
         Some(stream.tls_exporter_channel_binding().unwrap())
     } else {
-        assert!(matches!(stream.tls_exporter_channel_binding(), Err(TlsError::Configuration(_))));
+        assert!(matches!(
+            stream.tls_exporter_channel_binding(),
+            Err(TlsError::Configuration(_))
+        ));
         None
     }
 }
@@ -236,24 +241,23 @@ enum Operation {
 
 type Wait<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
-fn begin<'a>(
-    op: Operation,
-    stream: &'a mut Stream,
-    cx: &'a Cx,
-    buf: &'a mut [u8],
-) -> Wait<'a> {
+fn begin<'a>(op: Operation, stream: &'a mut Stream, cx: &'a Cx, buf: &'a mut [u8]) -> Wait<'a> {
     Box::pin(async move {
         match op {
             Operation::Read => stream.read_with_cx(cx, buf).await,
             Operation::Write => stream.write_with_cx(cx, MESSAGE).await,
             Operation::Flush => stream.flush_with_cx(cx).await.map(|()| 0),
             Operation::Shutdown => stream.shutdown_with_cx(cx).await.map(|()| 0),
-            Operation::TlsShutdown => stream.shutdown_tls_with_cx(cx).await
-                .map(|()| 0)
-                .map_err(|error| match error {
-                    TlsError::Io(error) => error,
-                    other => io::Error::other(other),
-                }),
+            Operation::TlsShutdown => {
+                stream
+                    .shutdown_tls_with_cx(cx)
+                    .await
+                    .map(|()| 0)
+                    .map_err(|error| match error {
+                        TlsError::Io(error) => error,
+                        other => io::Error::other(other),
+                    })
+            }
         }
     })
 }
@@ -271,8 +275,12 @@ fn assert_cancelled<T>(result: Poll<io::Result<T>>) {
 #[derive(Default)]
 struct WakeCount(AtomicUsize);
 impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 async fn receive(stream: &mut Stream, cx: &Cx, length: usize) -> Vec<u8> {
@@ -300,14 +308,23 @@ fn pre_cancelled_io_waits_do_not_touch_or_close_an_established_stream() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
             run_pair(version, move |mut client, mut server| {
-                let stream = if client_side { &mut client } else { &mut server };
+                let stream = if client_side {
+                    &mut client
+                } else {
+                    &mut server
+                };
                 let before = binding(stream);
                 let probe = Arc::clone(&stream.get_ref().probe);
                 let calls = probe.calls();
                 let cx = Cx::for_testing();
                 cx.cancel_fast(CancelKind::User);
-                for op in [Operation::Read, Operation::Write, Operation::Flush,
-                    Operation::TlsShutdown, Operation::Shutdown] {
+                for op in [
+                    Operation::Read,
+                    Operation::Write,
+                    Operation::Flush,
+                    Operation::TlsShutdown,
+                    Operation::Shutdown,
+                ] {
                     let mut bytes = [0xA5; 64];
                     let mut wait = begin(op, stream, &cx, &mut bytes);
                     assert_cancelled(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())));
@@ -328,8 +345,11 @@ fn parked_read_observes_cancellation_and_replacement_wakers_without_losing_data(
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
             run_pair(version, move |mut client, mut server| {
-                let (stream, peer) = if client_side { (&mut client, &mut server) }
-                    else { (&mut server, &mut client) };
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
                 let before = binding(stream);
                 let probe = Arc::clone(&stream.get_ref().probe);
                 let cx = Cx::for_testing();
@@ -339,15 +359,26 @@ fn parked_read_observes_cancellation_and_replacement_wakers_without_losing_data(
                 let new_waker = Waker::from(Arc::clone(&new));
                 let mut bytes = [0xA5; 64];
                 let mut wait = Box::pin(stream.read_with_cx(&cx, &mut bytes));
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&old_waker)).is_pending());
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&new_waker)).is_pending());
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&old_waker))
+                        .is_pending()
+                );
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&new_waker))
+                        .is_pending()
+                );
                 assert!(probe.parked.load(Ordering::Acquire));
                 let calls = probe.calls();
                 let old_count = old.0.load(Ordering::SeqCst);
                 let new_count = new.0.load(Ordering::SeqCst);
                 cx.cancel_fast(CancelKind::User);
                 assert_eq!(old.0.load(Ordering::SeqCst), old_count);
-                assert!(new.0.load(Ordering::SeqCst) > new_count, "cancel must wake before repoll");
+                assert!(
+                    new.0.load(Ordering::SeqCst) > new_count,
+                    "cancel must wake before repoll"
+                );
                 assert_cancelled(wait.as_mut().poll(&mut Context::from_waker(&new_waker)));
                 drop(wait);
                 assert_eq!(probe.calls(), calls);
@@ -367,23 +398,38 @@ fn parked_read_observes_cancellation_and_replacement_wakers_without_losing_data(
 fn pending_flush_and_shutdown_cancellation_preserves_buffered_records() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
-            for (op, stop_in_flush) in [(Operation::Flush, true),
-                (Operation::TlsShutdown, true), (Operation::Shutdown, true),
-                (Operation::Shutdown, false)] {
+            for (op, stop_in_flush) in [
+                (Operation::Flush, true),
+                (Operation::TlsShutdown, true),
+                (Operation::Shutdown, true),
+                (Operation::Shutdown, false),
+            ] {
                 run_pair(version, move |mut client, mut server| {
-                    let (stream, peer) = if client_side { (&mut client, &mut server) }
-                        else { (&mut server, &mut client) };
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
                     let before = binding(stream);
                     let probe = Arc::clone(&stream.get_ref().probe);
                     let fresh = Cx::for_testing();
-                    assert_eq!(finish(stream.write_with_cx(&fresh, MESSAGE)).unwrap(), MESSAGE.len());
+                    assert_eq!(
+                        finish(stream.write_with_cx(&fresh, MESSAGE)).unwrap(),
+                        MESSAGE.len()
+                    );
                     assert!(!stream.get_ref().writer.buffer().is_empty());
                     probe.block_flush.store(stop_in_flush, Ordering::Release);
-                    probe.block_shutdown.store(!stop_in_flush, Ordering::Release);
+                    probe
+                        .block_shutdown
+                        .store(!stop_in_flush, Ordering::Release);
                     let owner = Cx::for_testing();
                     let mut bytes = [0; 1];
                     let mut wait = begin(op, stream, &owner, &mut bytes);
-                    assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                    assert!(
+                        wait.as_mut()
+                            .poll(&mut Context::from_waker(Waker::noop()))
+                            .is_pending()
+                    );
                     let calls = probe.calls();
                     owner.cancel_fast(CancelKind::User);
                     assert_cancelled(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())));
@@ -401,7 +447,11 @@ fn pending_flush_and_shutdown_cancellation_preserves_buffered_records() {
                     if matches!(op, Operation::Flush) {
                         let mut task = Context::from_waker(Waker::noop());
                         let mut buf = ReadBuf::new(&mut extra);
-                        assert!(Pin::new(&mut *peer).poll_read(&mut task, &mut buf).is_pending());
+                        assert!(
+                            Pin::new(&mut *peer)
+                                .poll_read(&mut task, &mut buf)
+                                .is_pending()
+                        );
                         assert!(buf.filled().is_empty(), "plaintext was duplicated");
                         assert_eq!(binding(stream), before);
                     } else {
@@ -421,8 +471,11 @@ fn cancelling_an_unaccepted_write_does_not_resubmit_or_lose_earlier_bytes() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
             run_pair(version, move |mut client, mut server| {
-                let (stream, peer) = if client_side { (&mut client, &mut server) }
-                    else { (&mut server, &mut client) };
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
                 let probe = Arc::clone(&stream.get_ref().probe);
                 probe.block_write.store(true, Ordering::Release);
                 let mut accepted = Vec::<u8>::new();
@@ -434,11 +487,17 @@ fn cancelling_an_unaccepted_write_does_not_resubmit_or_lose_earlier_bytes() {
                             assert!(n > 0);
                             accepted.extend(std::iter::repeat_n(0x44, n));
                         }
-                        Poll::Pending => { full = true; break; }
+                        Poll::Pending => {
+                            full = true;
+                            break;
+                        }
                         Poll::Ready(Err(error)) => panic!("buffer admission: {error}"),
                     }
                 }
-                assert!(full && !accepted.is_empty(), "must witness real rustls backpressure");
+                assert!(
+                    full && !accepted.is_empty(),
+                    "must witness real rustls backpressure"
+                );
                 let owner = Cx::for_testing();
                 let mut bytes = [0; 1];
                 let mut wait = begin(Operation::Write, stream, &owner, &mut bytes);
@@ -456,8 +515,15 @@ fn cancelling_an_unaccepted_write_does_not_resubmit_or_lose_earlier_bytes() {
                 flushed.unwrap();
                 assert_eq!(received, accepted);
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut task, &mut buf).is_pending());
-                assert!(buf.filled().is_empty(), "cancelled write was accepted or bytes duplicated");
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut task, &mut buf)
+                        .is_pending()
+                );
+                assert!(
+                    buf.filled().is_empty(),
+                    "cancelled write was accepted or bytes duplicated"
+                );
                 assert_eq!(binding(stream), binding(peer));
             });
         }
@@ -469,12 +535,18 @@ fn completed_reads_writes_and_errors_are_not_replaced_by_racing_cancellation() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
             run_pair(version, move |mut client, mut server| {
-                let (stream, peer) = if client_side { (&mut client, &mut server) }
-                    else { (&mut server, &mut client) };
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
                 let probe = Arc::clone(&stream.get_ref().probe);
                 let writer_cx = Cx::for_testing();
                 *probe.cancel_on_write.lock().unwrap() = Some(writer_cx.clone());
-                assert_eq!(finish(stream.write_with_cx(&writer_cx, MESSAGE)).unwrap(), MESSAGE.len());
+                assert_eq!(
+                    finish(stream.write_with_cx(&writer_cx, MESSAGE)).unwrap(),
+                    MESSAGE.len()
+                );
                 assert!(writer_cx.is_cancel_requested());
                 let fresh = Cx::for_testing();
                 finish(stream.flush_with_cx(&fresh)).unwrap();
@@ -508,14 +580,25 @@ fn dropping_a_parked_wait_retires_its_observer_but_not_the_tls_stream() {
         let waker = Waker::from(Arc::clone(&count));
         let mut bytes = [0; 64];
         let mut wait = Box::pin(client.read_with_cx(&owner, &mut bytes));
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         drop(wait);
         let wakes = count.0.load(Ordering::SeqCst);
         owner.cancel_fast(CancelKind::User);
-        assert_eq!(count.0.load(Ordering::SeqCst), wakes, "dropped wait leaked a cancellation observer");
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            wakes,
+            "dropped wait leaked a cancellation observer"
+        );
         assert_eq!(probe.dropped.load(Ordering::SeqCst), 0);
         send(&mut server, MESSAGE);
-        assert_eq!(finish(receive(&mut client, &Cx::for_testing(), MESSAGE.len())), MESSAGE);
+        assert_eq!(
+            finish(receive(&mut client, &Cx::for_testing(), MESSAGE.len())),
+            MESSAGE
+        );
     });
 }
 
@@ -530,20 +613,34 @@ fn masks_and_restricted_resumes_preserve_the_context_io_boundary() {
         let mut wait = Box::pin(client.read_with_cx(&owner, &mut bytes));
         owner.masked(|| {
             for _ in 0..3 {
-                assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
             }
         });
-        assert_eq!(count.0.load(Ordering::SeqCst), 0, "masked wait must not busy-wake");
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            0,
+            "masked wait must not busy-wake"
+        );
         assert_cancelled(wait.as_mut().poll(&mut Context::from_waker(&waker)));
         drop(wait);
         send(&mut server, MESSAGE);
-        let n = owner.masked(|| finish(client.read_with_cx(&owner, &mut bytes))).unwrap();
+        let n = owner
+            .masked(|| finish(client.read_with_cx(&owner, &mut bytes)))
+            .unwrap();
         assert_eq!(&bytes[..n], MESSAGE);
 
         let owner = Cx::for_testing();
         let probe = Arc::clone(&client.get_ref().probe);
         let mut wait = Box::pin(client.read_with_cx(&owner, &mut bytes));
-        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
         let calls = probe.calls();
         let restricted = Cx::detached_cancel_context();
         let result = finish(restricted.with_ambient(poll_fn(|task| wait.as_mut().poll(task))));
@@ -586,29 +683,40 @@ fn native_abort_joins_an_established_parked_tls_read_without_an_io_event() {
         let parent = Cx::current().expect("native task context");
         for client_side in [true, false] {
             let (client, server) = establish(&rustls::version::TLS13).await;
-            let (mut stream, _peer) = if client_side { (client, server) } else { (server, client) };
+            let (mut stream, _peer) = if client_side {
+                (client, server)
+            } else {
+                (server, client)
+            };
             let probe = Arc::clone(&stream.get_ref().probe);
             probe.parked.store(false, Ordering::Release);
             probe.block_read.store(true, Ordering::Release);
-            let mut child = parent.spawn(move |child_cx| async move {
-                let mut bytes = [0; 64];
-                stream.read_with_cx(&child_cx, &mut bytes).await
-            }).unwrap();
+            let mut child = parent
+                .spawn(move |child_cx| async move {
+                    let mut bytes = [0; 64];
+                    stream.read_with_cx(&child_cx, &mut bytes).await
+                })
+                .unwrap();
             for _ in 0..1024 {
-                if probe.parked.load(Ordering::Acquire) { break; }
+                if probe.parked.load(Ordering::Acquire) {
+                    break;
+                }
                 yield_now().await;
             }
-            assert!(probe.parked.load(Ordering::Acquire), "must witness the child's Pending read");
+            assert!(
+                probe.parked.load(Ordering::Acquire),
+                "must witness the child's Pending read"
+            );
             let calls = probe.calls();
             child.abort();
-            let result = crate::time::timeout(
-                parent.now(), Duration::from_secs(2), child.join(&parent),
-            ).await;
+            let result =
+                crate::time::timeout(parent.now(), Duration::from_secs(2), child.join(&parent))
+                    .await;
             if result.is_err() {
                 probe.rescue();
-                let _ = crate::time::timeout(
-                    parent.now(), Duration::from_secs(2), child.join(&parent),
-                ).await;
+                let _ =
+                    crate::time::timeout(parent.now(), Duration::from_secs(2), child.join(&parent))
+                        .await;
                 panic!("cancelled TLS read waited for transport readiness");
             }
             assert!(matches!(result, Ok(Ok(Err(error)))

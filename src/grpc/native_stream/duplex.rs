@@ -100,7 +100,14 @@ where
         admitted: Option<CallDeadline>,
     ) -> Result<Self, Status> {
         Self::new_admitted_with_windows(
-            cx, io, authority, path, request, codec, config, admitted,
+            cx,
+            io,
+            authority,
+            path,
+            request,
+            codec,
+            config,
+            admitted,
             NativeStreamWindows::default(),
         )
     }
@@ -170,10 +177,7 @@ where
         Ok(self)
     }
 
-    pub(crate) fn with_keepalive_backoff(
-        mut self,
-        backoff: Option<Arc<KeepaliveBackoff>>,
-    ) -> Self {
+    pub(crate) fn with_keepalive_backoff(mut self, backoff: Option<Arc<KeepaliveBackoff>>) -> Self {
         self.inner = self.inner.with_keepalive_backoff(backoff);
         self
     }

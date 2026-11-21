@@ -30,9 +30,9 @@
 //! - `Permanent`: Unrecoverable, do not retry
 //! - `Unknown`: Recoverability depends on context
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use core::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use crate::observability::SpanId;
 use crate::sync::LockError;

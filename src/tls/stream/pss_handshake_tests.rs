@@ -2,8 +2,8 @@
 //! Fixtures reuse the repository's public test key and are valid 2026-2036.
 
 use super::{
-    KEY_PEM, MemoryIo, TlsStream, assert_disconnected, assert_incomplete, establish,
-    handshake, streams,
+    KEY_PEM, MemoryIo, TlsStream, assert_disconnected, assert_incomplete, establish, handshake,
+    streams,
 };
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsError};
@@ -40,9 +40,9 @@ fn pss_configs(
     if version.version == ProtocolVersion::TLSv1_3 {
         // Deliberately force a SHA-256 cipher-suite hash even when the CA's
         // certificate signature hash is SHA-384 or SHA-512.
-        provider.cipher_suites.retain(|suite| {
-            suite.suite() == CipherSuite::TLS13_AES_128_GCM_SHA256
-        });
+        provider
+            .cipher_suites
+            .retain(|suite| suite.suite() == CipherSuite::TLS13_AES_128_GCM_SHA256);
     }
     let provider = Arc::new(provider);
     let client = ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -73,7 +73,10 @@ fn exchange(sender: &mut TlsStream<MemoryIo>, receiver: &mut TlsStream<MemoryIo>
         Pin::new(&mut *sender).poll_write(&mut task, message),
         Poll::Ready(Ok(written)) if written == message.len(),
     ));
-    assert!(matches!(Pin::new(sender).poll_flush(&mut task), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(sender).poll_flush(&mut task),
+        Poll::Ready(Ok(()))
+    ));
     let mut bytes = [0; 128];
     let mut read = ReadBuf::new(&mut bytes);
     assert!(matches!(
@@ -92,18 +95,33 @@ fn run_bindings(version: &'static rustls::SupportedProtocolVersion) {
         establish(&mut client, &mut server);
         assert_eq!(client.protocol_version(), Some(version.version));
         if version.version == ProtocolVersion::TLSv1_3 {
-            assert_eq!(client.negotiated_cipher_suite(), Some(CipherSuite::TLS13_AES_128_GCM_SHA256));
+            assert_eq!(
+                client.negotiated_cipher_suite(),
+                Some(CipherSuite::TLS13_AES_128_GCM_SHA256)
+            );
         }
         let calls = client.io.io_calls;
         let binding = client.tls_server_end_point_channel_binding().unwrap();
         assert_eq!(binding, hex::decode(expected).unwrap());
-        assert_eq!(binding, certificate.tls_server_end_point_channel_binding().unwrap());
-        assert_eq!(binding, client.tls_server_end_point_channel_binding().unwrap());
+        assert_eq!(
+            binding,
+            certificate.tls_server_end_point_channel_binding().unwrap()
+        );
+        assert_eq!(
+            binding,
+            client.tls_server_end_point_channel_binding().unwrap()
+        );
         assert_eq!(client.io.io_calls, calls);
-        assert!(matches!(server.tls_server_end_point_channel_binding(), Err(TlsError::Configuration(_))));
+        assert!(matches!(
+            server.tls_server_end_point_channel_binding(),
+            Err(TlsError::Configuration(_))
+        ));
         exchange(&mut client, &mut server);
         exchange(&mut server, &mut client);
-        assert_eq!(binding, client.tls_server_end_point_channel_binding().unwrap());
+        assert_eq!(
+            binding,
+            client.tls_server_end_point_channel_binding().unwrap()
+        );
     }
 }
 
@@ -131,7 +149,10 @@ fn pss_binding_waits_for_final_handshake_flush() {
     assert_incomplete(&client);
     client.io.block_flush = false;
     establish(&mut client, &mut server);
-    assert_eq!(client.tls_server_end_point_channel_binding().unwrap(), hex::decode(CASES[1].1).unwrap());
+    assert_eq!(
+        client.tls_server_end_point_channel_binding().unwrap(),
+        hex::decode(CASES[1].1).unwrap()
+    );
 }
 
 #[test]
@@ -145,7 +166,10 @@ fn computable_pss_binding_does_not_bypass_certificate_signature_verification() {
         let (cc, sc) = pss_configs(version, corrupt.clone());
         let (mut client, mut server) = streams(&cc, &sc);
         let (result, _) = handshake(&mut client, &mut server);
-        assert!(result.is_err(), "a corrupt PSS signature must fail authentication");
+        assert!(
+            result.is_err(),
+            "a corrupt PSS signature must fail authentication"
+        );
         assert_disconnected(&client);
     }
 }
@@ -162,14 +186,25 @@ fn pss_session_resumption_preserves_certificate_binding_not_exporter_identity() 
     let mut task = Context::from_waker(Waker::noop());
     let mut bytes = [0; 1];
     let mut read = ReadBuf::new(&mut bytes);
-    assert!(Pin::new(&mut first).poll_read(&mut task, &mut read).is_pending());
+    assert!(
+        Pin::new(&mut first)
+            .poll_read(&mut task, &mut read)
+            .is_pending()
+    );
     let (mut resumed, mut peer) = streams(&cc, &sc);
-    let super::TlsConnection::Client(conn) = &mut resumed.conn else { unreachable!() };
+    let super::TlsConnection::Client(conn) = &mut resumed.conn else {
+        unreachable!()
+    };
     assert!(conn.early_data().is_some());
     assert_incomplete(&resumed);
     establish(&mut resumed, &mut peer);
-    let super::TlsConnection::Client(conn) = &resumed.conn else { unreachable!() };
+    let super::TlsConnection::Client(conn) = &resumed.conn else {
+        unreachable!()
+    };
     assert_eq!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
-    assert_eq!(resumed.tls_server_end_point_channel_binding().unwrap(), binding);
+    assert_eq!(
+        resumed.tls_server_end_point_channel_binding().unwrap(),
+        binding
+    );
     assert_ne!(resumed.tls_exporter_channel_binding().unwrap(), exporter);
 }

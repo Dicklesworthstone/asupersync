@@ -20,12 +20,12 @@
 //!     .build();
 //! ```
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};

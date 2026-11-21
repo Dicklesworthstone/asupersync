@@ -22,7 +22,8 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = catch_unwind(AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(45))
+    let result = receive
+        .recv_timeout(Duration::from_secs(45))
         .expect("owned join must terminate and retire every participant");
     worker.join().unwrap();
     if let Err(payload) = result {
@@ -52,19 +53,23 @@ fn drained(runtime: &Runtime) {
 async fn parked_until_cancelled(cx: &Cx, started: oneshot::Sender<Cx>) -> CancelKind {
     let mut started = Some(started);
     let mut wait = pin!(cx.cancelled());
-    poll_fn(|task| {
-        match wait.as_mut().poll(task) {
-            Poll::Ready(()) => Poll::Ready(()),
-            Poll::Pending => {
-                if let Some(started) = started.take() {
-                    started.send_blocking(cx.clone()).unwrap();
-                }
-                Poll::Pending
+    poll_fn(|task| match wait.as_mut().poll(task) {
+        Poll::Ready(()) => Poll::Ready(()),
+        Poll::Pending => {
+            if let Some(started) = started.take() {
+                started.send_blocking(cx.clone()).unwrap();
             }
+            Poll::Pending
         }
-    }).await;
-    assert!(cx.checkpoint().is_err(), "child acknowledges the delivered request");
-    cx.cancel_reason().expect("delivered cancellation has a reason").kind
+    })
+    .await;
+    assert!(
+        cx.checkpoint().is_err(),
+        "child acknowledges the delivered request"
+    );
+    cx.cancel_reason()
+        .expect("delivered cancellation has a reason")
+        .kind
 }
 
 #[test]
@@ -78,26 +83,35 @@ fn pair_forwards_to_both_children_before_waiting_for_dependent_cleanup() {
                 let (start_b, mut parked_b) = oneshot::channel();
                 let (peer_done, mut peer_wait) = oneshot::channel();
                 let drain_cx = cx.clone();
-                let mut owner = cx.spawn(move |owner| async move {
-                    let first = owner.spawn(move |child| async move {
-                        let reason = parked_until_cancelled(&child, start_a).await;
-                        // A's cleanup needs B to have observed its cancellation.
-                        peer_wait.recv(&drain_cx).await.unwrap();
-                        (11_u8, reason)
-                    }).unwrap();
-                    let second = owner.spawn(move |child| async move {
-                        let reason = parked_until_cancelled(&child, start_b).await;
-                        peer_done.send_blocking(()).unwrap();
-                        (String::from("drained"), reason)
-                    }).unwrap();
-                    owner.scope().join_owned(&owner, first, second).await
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let first = owner
+                            .spawn(move |child| async move {
+                                let reason = parked_until_cancelled(&child, start_a).await;
+                                // A's cleanup needs B to have observed its cancellation.
+                                peer_wait.recv(&drain_cx).await.unwrap();
+                                (11_u8, reason)
+                            })
+                            .unwrap();
+                        let second = owner
+                            .spawn(move |child| async move {
+                                let reason = parked_until_cancelled(&child, start_b).await;
+                                peer_done.send_blocking(()).unwrap();
+                                (String::from("drained"), reason)
+                            })
+                            .unwrap();
+                        owner.scope().join_owned(&owner, first, second).await
+                    })
+                    .unwrap();
                 let child_a = parked_a.recv(&cx).await.unwrap();
                 let child_b = parked_b.recv(&cx).await.unwrap();
                 owner.abort_with_reason(CancelReason::race_loser());
                 let (first, second) = owner.join(&cx).await.unwrap();
                 assert_eq!(first.unwrap(), (11, CancelKind::RaceLost));
-                assert_eq!(second.unwrap(), (String::from("drained"), CancelKind::RaceLost));
+                assert_eq!(
+                    second.unwrap(),
+                    (String::from("drained"), CancelKind::RaceLost)
+                );
                 assert!(child_a.is_cancel_requested());
                 assert!(child_b.is_cancel_requested());
                 assert!(!cx.is_cancel_requested());
@@ -121,16 +135,24 @@ fn many_forwards_owner_reason_to_every_parked_child_and_preserves_input_order() 
                     senders.push(send);
                     receivers.push(receive);
                 }
-                let mut owner = cx.spawn(move |owner| async move {
-                    let handles = senders.into_iter().enumerate().map(|(index, started)| {
-                        owner.spawn(move |child| async move {
-                            let reason = parked_until_cancelled(&child, started).await;
-                            yield_now().await;
-                            (index, reason)
-                        }).unwrap()
-                    }).collect();
-                    owner.scope().join_all_owned(&owner, handles).await
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let handles = senders
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, started)| {
+                                owner
+                                    .spawn(move |child| async move {
+                                        let reason = parked_until_cancelled(&child, started).await;
+                                        yield_now().await;
+                                        (index, reason)
+                                    })
+                                    .unwrap()
+                            })
+                            .collect();
+                        owner.scope().join_all_owned(&owner, handles).await
+                    })
+                    .unwrap();
                 for receiver in &mut receivers {
                     receiver.recv(&cx).await.unwrap();
                 }
@@ -155,15 +177,18 @@ fn cancellation_of_an_explicit_nonscheduled_owner_wakes_the_collector() {
                 let cx = Cx::current().unwrap();
                 let owner = Cx::detached_cancel_context();
                 let (started, mut parked) = oneshot::channel();
-                let handle = cx.spawn(move |child| async move {
-                    parked_until_cancelled(&child, started).await
-                }).unwrap();
+                let handle = cx
+                    .spawn(
+                        move |child| async move { parked_until_cancelled(&child, started).await },
+                    )
+                    .unwrap();
                 parked.recv(&cx).await.unwrap();
                 let mut joining = Box::pin(cx.scope().join_all_owned(&owner, vec![handle]));
                 poll_fn(|task| {
                     assert!(joining.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 // This context has no runtime task/cancel-lane waker. Only the
                 // collector's owned cancellation registration can wake it.
                 let publisher = std::thread::spawn(move || {
@@ -172,7 +197,10 @@ fn cancellation_of_an_explicit_nonscheduled_owner_wakes_the_collector() {
                 let results = joining.await;
                 publisher.join().unwrap();
                 assert_eq!(results.len(), 1);
-                assert_eq!(results.into_iter().next().unwrap().unwrap(), CancelKind::User);
+                assert_eq!(
+                    results.into_iter().next().unwrap().unwrap(),
+                    CancelKind::User
+                );
                 assert!(!cx.is_cancel_requested());
             });
             drained(&runtime);
@@ -194,14 +222,20 @@ fn normal_empty_and_large_joins_preserve_nonclone_nonunpin_results() {
                 let cx = Cx::current().unwrap();
                 let empty = cx.scope().join_all_owned::<Value, _>(&cx, Vec::new()).await;
                 assert!(empty.is_empty());
-                let handles = (0..130).map(|index| {
-                    cx.spawn(move |_| async move {
-                        if index % 2 == 0 {
-                            yield_now().await;
-                        }
-                        Value { index, _pin: PhantomPinned }
-                    }).unwrap()
-                }).collect();
+                let handles = (0..130)
+                    .map(|index| {
+                        cx.spawn(move |_| async move {
+                            if index % 2 == 0 {
+                                yield_now().await;
+                            }
+                            Value {
+                                index,
+                                _pin: PhantomPinned,
+                            }
+                        })
+                        .unwrap()
+                    })
+                    .collect();
                 let future = {
                     let scope = cx.scope();
                     scope.join_all_owned(&cx, handles)
@@ -232,16 +266,23 @@ fn dropping_an_unpolled_pair_requests_both_children_without_cancelling_parent() 
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let owner = region.cx();
                 let (start_a, mut parked_a) = oneshot::channel();
                 let (start_b, mut parked_b) = oneshot::channel();
-                let first = owner.spawn(move |child| async move {
-                    parked_until_cancelled(&child, start_a).await
-                }).unwrap();
-                let second = owner.spawn(move |child| async move {
-                    parked_until_cancelled(&child, start_b).await
-                }).unwrap();
+                let first = owner
+                    .spawn(
+                        move |child| async move { parked_until_cancelled(&child, start_a).await },
+                    )
+                    .unwrap();
+                let second = owner
+                    .spawn(
+                        move |child| async move { parked_until_cancelled(&child, start_b).await },
+                    )
+                    .unwrap();
                 let a = parked_a.recv(&cx).await.unwrap();
                 let b = parked_b.recv(&cx).await.unwrap();
                 drop(owner.scope().join_owned(owner, first, second));
@@ -262,15 +303,22 @@ fn dropping_an_unpolled_many_join_already_owns_the_entire_input() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let owner = region.cx();
                 let mut handles = Vec::new();
                 let mut children = Vec::new();
                 for _ in 0..3 {
                     let (started, mut parked) = oneshot::channel();
-                    handles.push(owner.spawn(move |child| async move {
-                        parked_until_cancelled(&child, started).await
-                    }).unwrap());
+                    handles.push(
+                        owner
+                            .spawn(move |child| async move {
+                                parked_until_cancelled(&child, started).await
+                            })
+                            .unwrap(),
+                    );
                     children.push(parked.recv(&cx).await.unwrap());
                 }
                 drop(owner.scope().join_all_owned(owner, handles));
@@ -290,13 +338,18 @@ fn dropping_a_partial_many_join_cancels_the_unpolled_suffix_not_the_ready_prefix
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let owner = region.cx();
                 let (prefix_started, mut prefix_cx) = oneshot::channel();
-                let prefix = owner.spawn(move |child| async move {
-                    prefix_started.send_blocking(child).unwrap();
-                    0_usize
-                }).unwrap();
+                let prefix = owner
+                    .spawn(move |child| async move {
+                        prefix_started.send_blocking(child).unwrap();
+                        0_usize
+                    })
+                    .unwrap();
                 let completed_cx = prefix_cx.recv(&cx).await.unwrap();
                 while !prefix.is_finished() {
                     yield_now().await;
@@ -307,18 +360,23 @@ fn dropping_a_partial_many_join_cancels_the_unpolled_suffix_not_the_ready_prefix
                 for index in 1..3 {
                     let (started, mut parked) = oneshot::channel();
                     let cleaned = Arc::clone(&cleaned);
-                    handles.push(owner.spawn(move |child| async move {
-                        parked_until_cancelled(&child, started).await;
-                        cleaned.fetch_add(1, Ordering::SeqCst);
-                        index
-                    }).unwrap());
+                    handles.push(
+                        owner
+                            .spawn(move |child| async move {
+                                parked_until_cancelled(&child, started).await;
+                                cleaned.fetch_add(1, Ordering::SeqCst);
+                                index
+                            })
+                            .unwrap(),
+                    );
                     pending.push(parked.recv(&cx).await.unwrap());
                 }
                 let mut joining = Box::pin(owner.scope().join_all_owned(owner, handles));
                 poll_fn(|task| {
                     assert!(joining.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 drop(joining);
                 assert!(!completed_cx.is_cancel_requested());
                 assert!(pending.iter().all(Cx::is_cancel_requested));
@@ -341,19 +399,25 @@ fn child_panic_is_retained_and_does_not_skip_sibling_cleanup() {
                 let (start_b, mut parked_b) = oneshot::channel();
                 let cleaned = Arc::new(AtomicUsize::new(0));
                 let observed = Arc::clone(&cleaned);
-                let mut owner = cx.spawn(move |owner| async move {
-                    let a: TaskHandle<()> = owner.spawn(move |child| async move {
-                        parked_until_cancelled(&child, start_a).await;
-                        panic!("owned join child panic");
-                    }).unwrap();
-                    let b = owner.spawn(move |child| async move {
-                        parked_until_cancelled(&child, start_b).await;
-                        yield_now().await;
-                        observed.fetch_add(1, Ordering::SeqCst);
-                        23_u8
-                    }).unwrap();
-                    owner.scope().join_owned(&owner, a, b).await
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let a: TaskHandle<()> = owner
+                            .spawn(move |child| async move {
+                                parked_until_cancelled(&child, start_a).await;
+                                panic!("owned join child panic");
+                            })
+                            .unwrap();
+                        let b = owner
+                            .spawn(move |child| async move {
+                                parked_until_cancelled(&child, start_b).await;
+                                yield_now().await;
+                                observed.fetch_add(1, Ordering::SeqCst);
+                                23_u8
+                            })
+                            .unwrap();
+                        owner.scope().join_owned(&owner, a, b).await
+                    })
+                    .unwrap();
                 parked_a.recv(&cx).await.unwrap();
                 parked_b.recv(&cx).await.unwrap();
                 owner.abort();
@@ -380,13 +444,18 @@ fn precancelled_owner_preserves_ready_results_and_cancels_only_pending_work() {
                     yield_now().await;
                 }
                 let (started, mut parked) = oneshot::channel();
-                let pending = cx.spawn(move |child| async move {
-                    parked_until_cancelled(&child, started).await;
-                    31_u8
-                }).unwrap();
+                let pending = cx
+                    .spawn(move |child| async move {
+                        parked_until_cancelled(&child, started).await;
+                        31_u8
+                    })
+                    .unwrap();
                 parked.recv(&cx).await.unwrap();
                 owner.cancel_with(CancelKind::User, Some("before owned join"));
-                let results = cx.scope().join_all_owned(&owner, vec![completed, pending]).await;
+                let results = cx
+                    .scope()
+                    .join_all_owned(&owner, vec![completed, pending])
+                    .await;
                 let values: Vec<_> = results.into_iter().map(Result::unwrap).collect();
                 assert_eq!(values, [19, 31]);
             });

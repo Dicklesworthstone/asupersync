@@ -79,11 +79,15 @@ pub enum GroupSessionTapeError {
 pub struct GroupSessionBytes(Zeroizing<Vec<u8>>);
 impl fmt::Debug for GroupSessionBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GroupSessionBytes").field("encoded_bytes", &self.0.len()).finish_non_exhaustive()
+        f.debug_struct("GroupSessionBytes")
+            .field("encoded_bytes", &self.0.len())
+            .finish_non_exhaustive()
     }
 }
 impl AsRef<[u8]> for GroupSessionBytes {
-    fn as_ref(&self) -> &[u8] { &self.0 }
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 fn add(a: usize, b: usize) -> Result<usize, GroupSessionTapeError> {
@@ -93,39 +97,68 @@ fn mul(a: usize, b: usize) -> Result<usize, GroupSessionTapeError> {
     a.checked_mul(b).ok_or(GroupSessionTapeError::Overflow)
 }
 fn number(bytes: &[u8], at: usize) -> Result<u64, GroupSessionTapeError> {
-    let slice = bytes.get(at..add(at, 8)?).ok_or(GroupSessionTapeError::Truncated)?;
-    Ok(u64::from_le_bytes(slice.try_into().expect("eight-byte field")))
+    let slice = bytes
+        .get(at..add(at, 8)?)
+        .ok_or(GroupSessionTapeError::Truncated)?;
+    Ok(u64::from_le_bytes(
+        slice.try_into().expect("eight-byte field"),
+    ))
 }
 fn count(bytes: &[u8], at: usize) -> Result<usize, GroupSessionTapeError> {
     usize::try_from(number(bytes, at)?).map_err(|_| GroupSessionTapeError::Overflow)
 }
 fn put(out: &mut Vec<u8>, value: usize) -> Result<(), GroupSessionTapeError> {
-    out.extend_from_slice(&u64::try_from(value).map_err(|_| GroupSessionTapeError::Overflow)?.to_le_bytes());
+    out.extend_from_slice(
+        &u64::try_from(value)
+            .map_err(|_| GroupSessionTapeError::Overflow)?
+            .to_le_bytes(),
+    );
     Ok(())
 }
 fn vector<T>(capacity: usize) -> Result<Vec<T>, GroupSessionTapeError> {
     let mut out = Vec::new();
-    out.try_reserve_exact(capacity).map_err(|_| GroupSessionTapeError::Allocation)?;
+    out.try_reserve_exact(capacity)
+        .map_err(|_| GroupSessionTapeError::Allocation)?;
     Ok(out)
 }
 fn checksum(bytes: &[u8]) -> [u8; 32] {
-    let mut hash = Sha256::new(); hash.update(DOMAIN); hash.update(bytes); hash.finalize().into()
+    let mut hash = Sha256::new();
+    hash.update(DOMAIN);
+    hash.update(bytes);
+    hash.finalize().into()
 }
 fn io_tag(operation: IoOperation) -> u8 {
     match operation {
-        IoOperation::Read => 0, IoOperation::Write => 1, IoOperation::WriteVectored => 2,
-        IoOperation::Flush => 3, IoOperation::Shutdown => 4,
+        IoOperation::Read => 0,
+        IoOperation::Write => 1,
+        IoOperation::WriteVectored => 2,
+        IoOperation::Flush => 3,
+        IoOperation::Shutdown => 4,
     }
 }
 fn io_operation(tag: u8) -> Result<IoOperation, GroupSessionTapeError> {
     match tag {
-        0 => Ok(IoOperation::Read), 1 => Ok(IoOperation::Write), 2 => Ok(IoOperation::WriteVectored),
-        3 => Ok(IoOperation::Flush), 4 => Ok(IoOperation::Shutdown), _ => Err(GroupSessionTapeError::Format),
+        0 => Ok(IoOperation::Read),
+        1 => Ok(IoOperation::Write),
+        2 => Ok(IoOperation::WriteVectored),
+        3 => Ok(IoOperation::Flush),
+        4 => Ok(IoOperation::Shutdown),
+        _ => Err(GroupSessionTapeError::Format),
     }
 }
-struct Descriptor { id: u64, start: usize, end: usize }
+struct Descriptor {
+    id: u64,
+    start: usize,
+    end: usize,
+}
 fn metadata_bytes(streams: usize, effects: usize) -> Result<usize, GroupSessionTapeError> {
-    let stream = add(size_of::<RecordedStream>(), add(size_of::<Descriptor>(), add(size_of::<(u64, usize)>(), size_of::<usize>())?)?)?;
+    let stream = add(
+        size_of::<RecordedStream>(),
+        add(
+            size_of::<Descriptor>(),
+            add(size_of::<(u64, usize)>(), size_of::<usize>())?,
+        )?,
+    )?;
     add(mul(streams, stream)?, mul(effects, size_of::<Entry>())?)
 }
 
@@ -145,45 +178,73 @@ impl RecordedGroupSession {
     /// A shrinking total byte budget applies during nested encoding. Encoded
     /// temporaries and the final zeroizing output each fit that bound; original
     /// tapes, bounded metadata vectors and allocator overhead are separate.
-    pub fn to_canonical_bytes(&self, max_encoded_bytes: usize) -> Result<GroupSessionBytes, GroupSessionTapeError> {
-        let overhead = add(HEADER + CHECKSUM, add(mul(self.streams.len(), 16)?, mul(self.entries.len(), EFFECT_BYTES)?)?)?;
-        let mut remaining = max_encoded_bytes.checked_sub(overhead).ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
+    pub fn to_canonical_bytes(
+        &self,
+        max_encoded_bytes: usize,
+    ) -> Result<GroupSessionBytes, GroupSessionTapeError> {
+        let overhead = add(
+            HEADER + CHECKSUM,
+            add(
+                mul(self.streams.len(), 16)?,
+                mul(self.entries.len(), EFFECT_BYTES)?,
+            )?,
+        )?;
+        let mut remaining = max_encoded_bytes
+            .checked_sub(overhead)
+            .ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
         let mut components = vector(self.streams.len())?;
         let mut ids = vector(self.streams.len())?;
         for (index, stream) in self.streams.iter().enumerate() {
             let bytes = stream.tape.to_canonical_bytes(remaining)?;
-            remaining = remaining.checked_sub(bytes.as_ref().len()).ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
+            remaining = remaining
+                .checked_sub(bytes.as_ref().len())
+                .ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
             components.push(bytes);
             ids.push((stream.id, index));
         }
         ids.sort_unstable();
         let entropy = self.entropy.to_canonical_bytes(remaining)?;
-        remaining = remaining.checked_sub(entropy.as_ref().len()).ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
+        remaining = remaining
+            .checked_sub(entropy.as_ref().len())
+            .ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
         let clock = self.clock.to_canonical_bytes(remaining)?;
-        remaining = remaining.checked_sub(clock.as_ref().len()).ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
+        remaining = remaining
+            .checked_sub(clock.as_ref().len())
+            .ok_or(GroupSessionTapeError::Limit("encoded bytes"))?;
         let length = max_encoded_bytes - remaining;
         let mut out = GroupSessionBytes(Zeroizing::new(vector(length)?));
-        out.0.extend_from_slice(MAGIC); out.0.extend_from_slice(&VERSION.to_le_bytes());
-        put(&mut out.0, self.streams.len())?; put(&mut out.0, self.entries.len())?;
-        put(&mut out.0, entropy.as_ref().len())?; put(&mut out.0, clock.as_ref().len())?;
+        out.0.extend_from_slice(MAGIC);
+        out.0.extend_from_slice(&VERSION.to_le_bytes());
+        put(&mut out.0, self.streams.len())?;
+        put(&mut out.0, self.entries.len())?;
+        put(&mut out.0, entropy.as_ref().len())?;
+        put(&mut out.0, clock.as_ref().len())?;
         for (stream, bytes) in self.streams.iter().zip(&components) {
             out.0.extend_from_slice(&stream.id.to_le_bytes());
-            put(&mut out.0, bytes.as_ref().len())?; out.0.extend_from_slice(bytes.as_ref());
+            put(&mut out.0, bytes.as_ref().len())?;
+            out.0.extend_from_slice(bytes.as_ref());
         }
-        out.0.extend_from_slice(entropy.as_ref()); out.0.extend_from_slice(clock.as_ref());
+        out.0.extend_from_slice(entropy.as_ref());
+        out.0.extend_from_slice(clock.as_ref());
         for entry in &self.entries {
             let (tag, subject) = match entry.effect {
                 GroupEffect::Io { stream, operation } => {
-                    let index = ids.binary_search_by_key(&stream, |pair| pair.0).map_err(|_| GroupSessionTapeError::Coverage)?;
+                    let index = ids
+                        .binary_search_by_key(&stream, |pair| pair.0)
+                        .map_err(|_| GroupSessionTapeError::Coverage)?;
                     (io_tag(operation), ids[index].1)
                 }
                 GroupEffect::Clock => (5, 0),
                 GroupEffect::Entropy(source) => (6, source),
                 GroupEffect::Fork(source) => (7, source),
             };
-            out.0.push(tag); put(&mut out.0, subject)?; put(&mut out.0, entry.child)?;
+            out.0.push(tag);
+            put(&mut out.0, subject)?;
+            put(&mut out.0, entry.child)?;
         }
-        let mut digest = checksum(&out.0); out.0.extend_from_slice(&digest); digest.zeroize();
+        let mut digest = checksum(&out.0);
+        out.0.extend_from_slice(&digest);
+        digest.zeroize();
         debug_assert_eq!(out.0.len(), length);
         Ok(out)
     }
@@ -201,61 +262,125 @@ impl RecordedGroupSession {
     /// An unkeyed checksum is not trust. Request shapes, operation kinds and exact
     /// entropy fork TaskIds are checked during replay; import does not assert that
     /// a consumer reproduces the window. Require complete execution verification.
-    pub fn from_canonical_bytes(bytes: &[u8], limits: GroupSessionDecodeLimits) -> Result<Self, GroupSessionTapeError> {
-        if bytes.len() > limits.max_encoded_bytes { return Err(GroupSessionTapeError::Limit("encoded bytes")); }
-        if bytes.len() < HEADER + CHECKSUM { return Err(GroupSessionTapeError::Truncated); }
-        if &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() { return Err(GroupSessionTapeError::Format); }
-        let streams = count(bytes, 12)?; let effects = count(bytes, 20)?;
-        let entropy_len = count(bytes, 28)?; let clock_len = count(bytes, 36)?;
-        if streams > limits.max_streams { return Err(GroupSessionTapeError::Limit("streams")); }
-        if effects > limits.max_effects { return Err(GroupSessionTapeError::Limit("effects")); }
-        if metadata_bytes(streams, effects)? > limits.max_group_bytes { return Err(GroupSessionTapeError::Limit("group storage")); }
-        if entropy_len > limits.entropy.max_encoded_bytes { return Err(GroupSessionTapeError::Limit("entropy encoded bytes")); }
-        if clock_len > limits.clock.max_encoded_bytes { return Err(GroupSessionTapeError::Limit("clock encoded bytes")); }
-        let min_size = add(HEADER + CHECKSUM, add(mul(streams, 16)?, add(mul(effects, EFFECT_BYTES)?, add(entropy_len, clock_len)?)?)?)?;
-        if min_size > bytes.len() { return Err(GroupSessionTapeError::Truncated); }
+    pub fn from_canonical_bytes(
+        bytes: &[u8],
+        limits: GroupSessionDecodeLimits,
+    ) -> Result<Self, GroupSessionTapeError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(GroupSessionTapeError::Limit("encoded bytes"));
+        }
+        if bytes.len() < HEADER + CHECKSUM {
+            return Err(GroupSessionTapeError::Truncated);
+        }
+        if &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() {
+            return Err(GroupSessionTapeError::Format);
+        }
+        let streams = count(bytes, 12)?;
+        let effects = count(bytes, 20)?;
+        let entropy_len = count(bytes, 28)?;
+        let clock_len = count(bytes, 36)?;
+        if streams > limits.max_streams {
+            return Err(GroupSessionTapeError::Limit("streams"));
+        }
+        if effects > limits.max_effects {
+            return Err(GroupSessionTapeError::Limit("effects"));
+        }
+        if metadata_bytes(streams, effects)? > limits.max_group_bytes {
+            return Err(GroupSessionTapeError::Limit("group storage"));
+        }
+        if entropy_len > limits.entropy.max_encoded_bytes {
+            return Err(GroupSessionTapeError::Limit("entropy encoded bytes"));
+        }
+        if clock_len > limits.clock.max_encoded_bytes {
+            return Err(GroupSessionTapeError::Limit("clock encoded bytes"));
+        }
+        let min_size = add(
+            HEADER + CHECKSUM,
+            add(
+                mul(streams, 16)?,
+                add(mul(effects, EFFECT_BYTES)?, add(entropy_len, clock_len)?)?,
+            )?,
+        )?;
+        if min_size > bytes.len() {
+            return Err(GroupSessionTapeError::Truncated);
+        }
         let mut position = HEADER;
         for _ in 0..streams {
             let length = count(bytes, add(position, 8)?)?;
-            if length > limits.per_stream.max_encoded_bytes { return Err(GroupSessionTapeError::Limit("stream encoded bytes")); }
+            if length > limits.per_stream.max_encoded_bytes {
+                return Err(GroupSessionTapeError::Limit("stream encoded bytes"));
+            }
             position = add(add(position, 16)?, length)?;
-            if position > bytes.len() - CHECKSUM { return Err(GroupSessionTapeError::Truncated); }
+            if position > bytes.len() - CHECKSUM {
+                return Err(GroupSessionTapeError::Truncated);
+            }
         }
         let entropy_start = position;
         let clock_start = add(entropy_start, entropy_len)?;
         let order_start = add(clock_start, clock_len)?;
         let body_end = add(order_start, mul(effects, EFFECT_BYTES)?)?;
         let total = add(body_end, CHECKSUM)?;
-        if total > bytes.len() { return Err(GroupSessionTapeError::Truncated); }
-        if total < bytes.len() { return Err(GroupSessionTapeError::TrailingData); }
+        if total > bytes.len() {
+            return Err(GroupSessionTapeError::Truncated);
+        }
+        if total < bytes.len() {
+            return Err(GroupSessionTapeError::TrailingData);
+        }
         let mut expected = checksum(&bytes[..body_end]);
-        let valid = expected.as_slice() == &bytes[body_end..]; expected.zeroize();
-        if !valid { return Err(GroupSessionTapeError::Checksum); }
-        let mut descriptors = vector(streams)?; let mut ids = vector(streams)?;
+        let valid = expected.as_slice() == &bytes[body_end..];
+        expected.zeroize();
+        if !valid {
+            return Err(GroupSessionTapeError::Checksum);
+        }
+        let mut descriptors = vector(streams)?;
+        let mut ids = vector(streams)?;
         position = HEADER;
         for index in 0..streams {
-            let id = number(bytes, position)?; let length = count(bytes, position + 8)?;
-            let start = position + 16; let end = start + length; // preflight checked
-            descriptors.push(Descriptor { id, start, end }); ids.push((id, index)); position = end;
+            let id = number(bytes, position)?;
+            let length = count(bytes, position + 8)?;
+            let start = position + 16;
+            let end = start + length; // preflight checked
+            descriptors.push(Descriptor { id, start, end });
+            ids.push((id, index));
+            position = end;
         }
         ids.sort_unstable();
-        if ids.windows(2).any(|pair| pair[0].0 == pair[1].0) { return Err(GroupSessionTapeError::Coverage); }
-        let mut counts = vector(streams)?; counts.resize(streams, 0usize);
+        if ids.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(GroupSessionTapeError::Coverage);
+        }
+        let mut counts = vector(streams)?;
+        counts.resize(streams, 0usize);
         let mut entries = vector(effects)?;
         let (mut entropy_count, mut clock_count, mut sources) = (0usize, 0usize, 1usize);
         for bytes in bytes[order_start..body_end].chunks_exact(EFFECT_BYTES) {
-            let tag = bytes[0]; let subject = count(bytes, 1)?; let child = count(bytes, 9)?;
-            if tag != 7 && child != 0 { return Err(GroupSessionTapeError::Format); }
+            let tag = bytes[0];
+            let subject = count(bytes, 1)?;
+            let child = count(bytes, 9)?;
+            if tag != 7 && child != 0 {
+                return Err(GroupSessionTapeError::Format);
+            }
             let effect = match tag {
                 0..=4 => {
-                    let descriptor = descriptors.get(subject).ok_or(GroupSessionTapeError::Coverage)?;
+                    let descriptor = descriptors
+                        .get(subject)
+                        .ok_or(GroupSessionTapeError::Coverage)?;
                     counts[subject] += 1;
-                    GroupEffect::Io { stream: descriptor.id, operation: io_operation(tag)? }
+                    GroupEffect::Io {
+                        stream: descriptor.id,
+                        operation: io_operation(tag)?,
+                    }
                 }
-                5 if subject == 0 => { clock_count += 1; GroupEffect::Clock }
-                6 if subject < sources => { entropy_count += 1; GroupEffect::Entropy(subject) }
+                5 if subject == 0 => {
+                    clock_count += 1;
+                    GroupEffect::Clock
+                }
+                6 if subject < sources => {
+                    entropy_count += 1;
+                    GroupEffect::Entropy(subject)
+                }
                 7 if subject < sources && child == sources => {
-                    entropy_count += 1; sources = add(sources, 1)?;
+                    entropy_count += 1;
+                    sources = add(sources, 1)?;
                     GroupEffect::Fork(subject)
                 }
                 5..=7 => return Err(GroupSessionTapeError::Coverage),
@@ -265,16 +390,33 @@ impl RecordedGroupSession {
         }
         let mut decoded = vector(streams)?;
         for (descriptor, count) in descriptors.iter().zip(counts) {
-            let tape = IoTape::from_canonical_bytes(&bytes[descriptor.start..descriptor.end], limits.per_stream)?;
-            if tape.operations() != count { return Err(GroupSessionTapeError::Coverage); }
-            decoded.push(RecordedStream { id: descriptor.id, tape });
+            let tape = IoTape::from_canonical_bytes(
+                &bytes[descriptor.start..descriptor.end],
+                limits.per_stream,
+            )?;
+            if tape.operations() != count {
+                return Err(GroupSessionTapeError::Coverage);
+            }
+            decoded.push(RecordedStream {
+                id: descriptor.id,
+                tape,
+            });
         }
-        let entropy = EntropyTape::from_canonical_bytes(&bytes[entropy_start..clock_start], limits.entropy)?;
+        let entropy =
+            EntropyTape::from_canonical_bytes(&bytes[entropy_start..clock_start], limits.entropy)?;
         let clock = TimeTape::from_canonical_bytes(&bytes[clock_start..order_start], limits.clock)?;
-        if entropy.calls() != entropy_count || entropy.streams() != sources || clock.observations() != clock_count {
+        if entropy.calls() != entropy_count
+            || entropy.streams() != sources
+            || clock.observations() != clock_count
+        {
             return Err(GroupSessionTapeError::Coverage);
         }
-        Ok(Self { streams: decoded, entropy, clock, entries })
+        Ok(Self {
+            streams: decoded,
+            entropy,
+            clock,
+            entries,
+        })
     }
 }
 

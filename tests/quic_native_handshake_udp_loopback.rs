@@ -1189,7 +1189,10 @@ fn assert_real_tls13_managed_application_close_reaches_peer(drop_first_close: bo
                 );
                 let closes = client_closes.lock().unwrap();
                 assert_eq!(closes.len(), 2, "first close dropped, second forwarded");
-                assert_eq!(closes[0], closes[1], "retry reuses identical protected bytes");
+                assert_eq!(
+                    closes[0], closes[1],
+                    "retry reuses identical protected bytes"
+                );
             }
             assert_eq!(server.connection().state(), QuicConnectionState::Draining);
             assert_eq!(
@@ -1647,11 +1650,7 @@ fn datagram_and_stream_exchange(rotate_keys: bool) {
             client_protection.set_key_update_confidentiality_threshold(1);
         }
         client_router
-            .install_packet_protection(
-                &cx,
-                app_cid,
-                client_protection,
-            )
+            .install_packet_protection(&cx, app_cid, client_protection)
             .expect("install client protection");
         server_router
             .install_packet_protection(
@@ -1786,7 +1785,9 @@ fn datagram_and_stream_exchange(rotate_keys: bool) {
                 .await
                 .expect("route")
             {
-                RoutingResult::Routed { outgoing_packets, .. } => {
+                RoutingResult::Routed {
+                    outgoing_packets, ..
+                } => {
                     acknowledgements.extend(outgoing_packets);
                 }
                 other => panic!("expected routed app-data packet, got {other:?}"),
@@ -1826,8 +1827,9 @@ fn datagram_and_stream_exchange(rotate_keys: bool) {
                                 // A retained final TLS flight can still arrive.
                                 continue;
                             }
-                            let RoutingResult::Routed { outgoing_packets, .. } =
-                                client_router.route_packet(&cx, packet).await.unwrap()
+                            let RoutingResult::Routed {
+                                outgoing_packets, ..
+                            } = client_router.route_packet(&cx, packet).await.unwrap()
                             else {
                                 panic!("round {round}: ACK was not routed");
                             };
@@ -1841,31 +1843,48 @@ fn datagram_and_stream_exchange(rotate_keys: bool) {
                         }
                     }
 
-                    let client = client_router.connection_mut_for_testing(&cx, app_cid).unwrap();
+                    let client = client_router
+                        .connection_mut_for_testing(&cx, app_cid)
+                        .unwrap();
                     let previous_phase = client.tls().local_key_phase();
                     let payload = Bytes::from(vec![round; 32]);
                     client.send_datagram(&cx, payload.clone()).unwrap();
-                    let packets = client_router.drain_application_data_for_testing(
-                        &cx, app_cid, server_addr, Instant::now(),
-                    ).await.unwrap();
+                    let packets = client_router
+                        .drain_application_data_for_testing(
+                            &cx,
+                            app_cid,
+                            server_addr,
+                            Instant::now(),
+                        )
+                        .await
+                        .unwrap();
                     assert!(!packets.is_empty());
-                    let phase = client_router.connection_mut_for_testing(&cx, app_cid)
-                        .unwrap().tls().local_key_phase();
-                    assert_ne!(phase, previous_phase, "round {round}: send key did not rotate");
+                    let phase = client_router
+                        .connection_mut_for_testing(&cx, app_cid)
+                        .unwrap()
+                        .tls()
+                        .local_key_phase();
+                    assert_ne!(
+                        phase, previous_phase,
+                        "round {round}: send key did not rotate"
+                    );
                     client_ep.send_batch(&cx, &packets).await.unwrap();
                     loop {
                         for packet in server_ep.receive_batch(&cx, 16).await.unwrap() {
                             if packet.data[0] & 0x80 != 0 {
                                 continue;
                             }
-                            let RoutingResult::Routed { outgoing_packets, .. } =
-                                server_router.route_packet(&cx, packet).await.unwrap()
+                            let RoutingResult::Routed {
+                                outgoing_packets, ..
+                            } = server_router.route_packet(&cx, packet).await.unwrap()
                             else {
                                 panic!("round {round}: updated-key packet was not routed");
                             };
                             acknowledgements.extend(outgoing_packets);
                         }
-                        let server = server_router.connection_mut_for_testing(&cx, app_cid).unwrap();
+                        let server = server_router
+                            .connection_mut_for_testing(&cx, app_cid)
+                            .unwrap();
                         if let Some(received) = server.recv_datagram() {
                             assert_eq!(received, payload, "round {round}: decrypted payload");
                             assert_eq!(server.tls().remote_key_phase(), phase);
@@ -1875,7 +1894,9 @@ fn datagram_and_stream_exchange(rotate_keys: bool) {
                         }
                     }
                 }
-            }).await.expect("repeated key updates and acknowledgements timed out");
+            })
+            .await
+            .expect("repeated key updates and acknowledgements timed out");
         }
     });
 }
@@ -2552,7 +2573,10 @@ mod managed_quiet {
                         assert!(terminal.is_none(), "one selected libtest terminal");
                         // Exactly the helper ran. The filtered count is every other
                         // test in this binary, so it grows as tests are added.
-                        let rest = line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
+                        let rest = line
+                            .strip_prefix(
+                                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ",
+                            )
                             .expect("exact helper selection must be 1/0/0/0");
                         let (filtered, elapsed) = rest
                             .split_once(" filtered out; finished in ")
@@ -3092,7 +3116,11 @@ async fn served_pair(
     .encode(&mut parameters)
     .unwrap();
     let client_driver = QuicHandshakeDriver::client(
-        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+        client_config(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap(),
         ServerName::try_from("localhost").unwrap(),
         parameters.clone(),
     )
@@ -3325,8 +3353,11 @@ fn a_second_client_is_refused_at_once_while_the_first_is_served() {
             .encode(&mut parameters)
             .unwrap();
         let driver = QuicHandshakeDriver::client(
-            client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()])
-                .unwrap(),
+            client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
             ServerName::try_from("localhost").unwrap(),
             parameters,
         )

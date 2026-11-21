@@ -7001,11 +7001,7 @@ impl LabScheduler {
             copies,
             max_entries,
         )?;
-        let choices = self.workers[0].exact_exploration_choices(
-            now,
-            cancel_first,
-            max_entries,
-        )?;
+        let choices = self.workers[0].exact_exploration_choices(now, cancel_first, max_entries)?;
         if choices.iter().any(|(task, _)| {
             !self.scheduled.contains(task) || self.assignment_for(*task) != Some(0)
         }) {

@@ -1,12 +1,12 @@
 //! Bounded, pull-driven HTTP content encoding.
 
-use crate::bytes::{Buf, Bytes, BytesCursor};
-use crate::cx::{CancelWakerToken, Cx};
-use crate::types::CancelKind;
 use super::body::{Body, Frame, HeaderMap, HeaderValue, SizeHint};
 use super::compress::{
     CompressionLimitExceeded, Compressor, ContentCoding, make_compressor_with_output_limit,
 };
+use crate::bytes::{Buf, Bytes, BytesCursor};
+use crate::cx::{CancelWakerToken, Cx};
+use crate::types::CancelKind;
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
@@ -38,7 +38,11 @@ impl ContentEncodeLimits {
     /// Set independent cumulative source and encoded-output limits.
     #[must_use]
     pub const fn new(max_source_bytes: usize, max_encoded_bytes: usize) -> Self {
-        Self { max_source_bytes, max_encoded_bytes, chunk_bytes: DEFAULT_CHUNK }
+        Self {
+            max_source_bytes,
+            max_encoded_bytes,
+            chunk_bytes: DEFAULT_CHUNK,
+        }
     }
 
     /// Set the input quantum and emitted DATA-frame ceiling, capped at 64 KiB.
@@ -50,15 +54,21 @@ impl ContentEncodeLimits {
 
     /// Maximum source data bytes, before this adapter's content coding.
     #[must_use]
-    pub const fn max_source_bytes(self) -> usize { self.max_source_bytes }
+    pub const fn max_source_bytes(self) -> usize {
+        self.max_source_bytes
+    }
 
     /// Maximum encoded data bytes, including framing and the final footer.
     #[must_use]
-    pub const fn max_encoded_bytes(self) -> usize { self.max_encoded_bytes }
+    pub const fn max_encoded_bytes(self) -> usize {
+        self.max_encoded_bytes
+    }
 
     /// Maximum codec input quantum and returned DATA-frame size.
     #[must_use]
-    pub const fn chunk_size(self) -> usize { self.chunk_bytes }
+    pub const fn chunk_size(self) -> usize {
+        self.chunk_bytes
+    }
 }
 
 /// Terminal failure while producing an encoded HTTP body.
@@ -103,8 +113,13 @@ impl<E: fmt::Display> fmt::Display for ContentEncodeError<E> {
         match self {
             Self::Body(error) => write!(f, "response body source failed: {error}"),
             Self::Encode(error) => write!(f, "content encoding failed: {error}"),
-            Self::SourceLimit { actual, limit } => write!(f, "source body exceeds {limit} bytes (observed {actual:?})"),
-            Self::EncodedLimit { actual, limit } => write!(f, "encoded body exceeds {limit} bytes (observed {actual:?})"),
+            Self::SourceLimit { actual, limit } => {
+                write!(f, "source body exceeds {limit} bytes (observed {actual:?})")
+            }
+            Self::EncodedLimit { actual, limit } => write!(
+                f,
+                "encoded body exceeds {limit} bytes (observed {actual:?})"
+            ),
             Self::Cancelled { kind } => write!(f, "content encoding cancelled: {kind:?}"),
         }
     }
@@ -194,11 +209,15 @@ impl<B: Body> ContentEncodedBody<B> {
 
     /// The coding applied by this adapter.
     #[must_use]
-    pub const fn coding(&self) -> ContentCoding { self.state.coding }
+    pub const fn coding(&self) -> ContentCoding {
+        self.state.coding
+    }
 
     /// The mandatory cumulative and chunk limits.
     #[must_use]
-    pub const fn limits(&self) -> ContentEncodeLimits { self.state.limits }
+    pub const fn limits(&self) -> ContentEncodeLimits {
+        self.state.limits
+    }
 }
 
 /// Shared by the encoder and the Body-to-produced transport bridge. Every
@@ -209,22 +228,34 @@ pub struct BodyCancellation {
 }
 
 impl BodyCancellation {
-    pub(crate) fn new(cx: &Cx) -> Self { Self { cx: cx.clone(), token: None } }
+    pub(crate) fn new(cx: &Cx) -> Self {
+        Self {
+            cx: cx.clone(),
+            token: None,
+        }
+    }
 
     pub(crate) fn register(&mut self, task: &Context<'_>) {
-        self.token = Some(self.cx.refresh_cancel_waker(self.token.take(), task.waker()));
+        self.token = Some(
+            self.cx
+                .refresh_cancel_waker(self.token.take(), task.waker()),
+        );
     }
 
     pub(crate) fn check(&self) -> Result<(), CancelKind> {
         self.cx.checkpoint().map_err(|_| {
-            self.cx.cancel_reason().map_or(CancelKind::User, |reason| reason.kind())
+            self.cx
+                .cancel_reason()
+                .map_or(CancelKind::User, |reason| reason.kind())
         })
     }
 }
 
 impl Drop for BodyCancellation {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
@@ -237,23 +268,35 @@ enum Encoder {
 
 impl Encoder {
     fn new(coding: ContentCoding, limits: ContentEncodeLimits) -> io::Result<Self> {
-        if coding == ContentCoding::Identity { return Ok(Self::Identity); }
+        if coding == ContentCoding::Identity {
+            return Ok(Self::Identity);
+        }
         if let Some(encoding) = coding.standard() {
             return make_compressor_with_output_limit(encoding, Some(limits.max_encoded_bytes))
                 .map(Self::Standard)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "content codec requires compression feature"));
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "content codec requires compression feature",
+                    )
+                });
         }
         #[cfg(feature = "zstd")]
         {
             let frame_size = limits.max_source_bytes.clamp(1, 1024 * 1024);
             let codec = asupersync_zstd::StreamEncoder::new(
-                asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast), frame_size,
-            ).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast),
+                frame_size,
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             Ok(Self::Zstd(Box::new(codec)))
         }
         #[cfg(not(feature = "zstd"))]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "content codec requires zstd feature"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "content codec requires zstd feature",
+            ))
         }
     }
 
@@ -281,7 +324,11 @@ impl Encoder {
         let complete = match self {
             Self::Identity => true,
             Self::Standard(codec) => {
-                if finish { codec.finish(&mut output)?; } else { codec.flush(&mut output)?; }
+                if finish {
+                    codec.finish(&mut output)?;
+                } else {
+                    codec.flush(&mut output)?;
+                }
                 true
             }
             #[cfg(feature = "zstd")]
@@ -326,8 +373,14 @@ impl<D: Buf> EncodeState<D> {
     }
 
     fn codec_error<E>(&self, error: io::Error) -> ContentEncodeError<E> {
-        if error.get_ref().is_some_and(|source| source.is::<CompressionLimitExceeded>()) {
-            ContentEncodeError::EncodedLimit { actual: None, limit: self.limits.max_encoded_bytes }
+        if error
+            .get_ref()
+            .is_some_and(|source| source.is::<CompressionLimitExceeded>())
+        {
+            ContentEncodeError::EncodedLimit {
+                actual: None,
+                limit: self.limits.max_encoded_bytes,
+            }
         } else {
             ContentEncodeError::Encode(error)
         }
@@ -336,7 +389,10 @@ impl<D: Buf> EncodeState<D> {
     fn output<E>(&mut self, output: Bytes) -> Result<(), ContentEncodeError<E>> {
         let actual = self.encoded_bytes.checked_add(output.len());
         let Some(total) = actual.filter(|total| *total <= self.limits.max_encoded_bytes) else {
-            return Err(ContentEncodeError::EncodedLimit { actual, limit: self.limits.max_encoded_bytes });
+            return Err(ContentEncodeError::EncodedLimit {
+                actual,
+                limit: self.limits.max_encoded_bytes,
+            });
         };
         self.encoded_bytes = total;
         self.pending = output;
@@ -351,7 +407,11 @@ impl<D: Buf> EncodeState<D> {
             } else {
                 let input = data.chunk();
                 let input = &input[..input.len().min(quantum)];
-                let result = self.codec.as_mut().expect("live encoder retains codec").encode(input, quantum);
+                let result = self
+                    .codec
+                    .as_mut()
+                    .expect("live encoder retains codec")
+                    .encode(input, quantum);
                 let (read, output) = match result {
                     Ok(step) => step,
                     Err(error) => return Err(self.codec_error(error)),
@@ -368,10 +428,17 @@ impl<D: Buf> EncodeState<D> {
         }
         if self.flush_pending || (self.source_ended && !self.finished) {
             let finish = !self.flush_pending;
-            let result = self.codec.as_mut().expect("live encoder retains codec")
+            let result = self
+                .codec
+                .as_mut()
+                .expect("live encoder retains codec")
                 .flush(finish, self.limits.chunk_bytes);
             let (complete, output) = result.map_err(|error| self.codec_error(error))?;
-            if finish { self.finished = complete; } else { self.flush_pending = !complete; }
+            if finish {
+                self.finished = complete;
+            } else {
+                self.flush_pending = !complete;
+            }
             self.output(output)?;
             return Ok(true);
         }
@@ -380,16 +447,24 @@ impl<D: Buf> EncodeState<D> {
 
     fn take_trailers(&mut self) -> Option<HeaderMap> {
         let original = self.trailers.take()?;
-        if self.coding == ContentCoding::Identity { return Some(original); }
+        if self.coding == ContentCoding::Identity {
+            return Some(original);
+        }
         let mut trailers = HeaderMap::new();
         for (name, value) in original.iter() {
-            if super::decode::invalidated_field(name.as_str()) { continue; }
+            if super::decode::invalidated_field(name.as_str()) {
+                continue;
+            }
             let value = if name.as_str().eq_ignore_ascii_case("etag") {
                 match value.to_str() {
-                    Ok(value) if !value.starts_with("W/") => HeaderValue::from_string(format!("W/{value}")),
+                    Ok(value) if !value.starts_with("W/") => {
+                        HeaderValue::from_string(format!("W/{value}"))
+                    }
                     _ => value.clone(),
                 }
-            } else { value.clone() };
+            } else {
+                value.clone()
+            };
             trailers.append(name.clone(), value);
         }
         Some(trailers)
@@ -400,10 +475,17 @@ impl<B: Body> Body for ContentEncodedBody<B> {
     type Data = BytesCursor;
     type Error = ContentEncodeError<B::Error>;
 
-    fn poll_frame(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let mut this = self.project();
-        if this.state.done { return Poll::Ready(None); }
-        if let Some(cancel) = this.cancellation.as_mut() { cancel.register(task); }
+        if this.state.done {
+            return Poll::Ready(None);
+        }
+        if let Some(cancel) = this.cancellation.as_mut() {
+            cancel.register(task);
+        }
         let error = 'encoding: {
             for _ in 0..POLL_STEPS {
                 if let Some(cancel) = this.cancellation.as_ref()
@@ -414,7 +496,9 @@ impl<B: Body> Body for ContentEncodedBody<B> {
                 if !this.state.pending.is_empty() {
                     let length = this.state.pending.len().min(this.state.limits.chunk_bytes);
                     let data = this.state.pending.split_to(length);
-                    if this.state.pending.is_empty() { this.state.pending = Bytes::new(); }
+                    if this.state.pending.is_empty() {
+                        this.state.pending = Bytes::new();
+                    }
                     this.state.emitted_bytes += length;
                     return Poll::Ready(Some(Ok(Frame::Data(BytesCursor::new(data)))));
                 }
@@ -430,26 +514,45 @@ impl<B: Body> Body for ContentEncodedBody<B> {
                     *this.cancellation = None;
                     return Poll::Ready(trailers.map(|trailers| Ok(Frame::Trailers(trailers))));
                 }
-                let source = this.inner.as_mut().as_pin_mut().expect("live encoder retains source until EOF");
+                let source = this
+                    .inner
+                    .as_mut()
+                    .as_pin_mut()
+                    .expect("live encoder retains source until EOF");
                 match source.poll_frame(task) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Some(Ok(Frame::Data(data)))) => {
                         if this.state.trailers.is_some() {
-                            break 'encoding ContentEncodeError::Encode(io::Error::new(io::ErrorKind::InvalidData, "body data follows trailers"));
+                            break 'encoding ContentEncodeError::Encode(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "body data follows trailers",
+                            ));
                         }
                         let actual = this.state.source_bytes.checked_add(data.remaining());
-                        let Some(total) = actual.filter(|total| *total <= this.state.limits.max_source_bytes) else {
-                            break 'encoding ContentEncodeError::SourceLimit { actual, limit: this.state.limits.max_source_bytes };
+                        let Some(total) =
+                            actual.filter(|total| *total <= this.state.limits.max_source_bytes)
+                        else {
+                            break 'encoding ContentEncodeError::SourceLimit {
+                                actual,
+                                limit: this.state.limits.max_source_bytes,
+                            };
                         };
                         this.state.source_bytes = total;
-                        if data.has_remaining() { this.state.source_data = Some(data); }
+                        if data.has_remaining() {
+                            this.state.source_data = Some(data);
+                        }
                     }
                     Poll::Ready(Some(Ok(Frame::Trailers(trailers)))) => {
                         if this.state.trailers.replace(trailers).is_some() {
-                            break 'encoding ContentEncodeError::Encode(io::Error::new(io::ErrorKind::InvalidData, "duplicate body trailer frame"));
+                            break 'encoding ContentEncodeError::Encode(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "duplicate body trailer frame",
+                            ));
                         }
                     }
-                    Poll::Ready(Some(Err(error))) => break 'encoding ContentEncodeError::Body(error),
+                    Poll::Ready(Some(Err(error))) => {
+                        break 'encoding ContentEncodeError::Body(error);
+                    }
                     Poll::Ready(None) => {
                         this.state.source_ended = true;
                         this.inner.set(None);
@@ -465,12 +568,24 @@ impl<B: Body> Body for ContentEncodedBody<B> {
         Poll::Ready(Some(Err(error)))
     }
 
-    fn is_end_stream(&self) -> bool { self.state.done }
+    fn is_end_stream(&self) -> bool {
+        self.state.done
+    }
 
     fn size_hint(&self) -> SizeHint {
-        if self.state.done { return SizeHint::with_exact(0); }
+        if self.state.done {
+            return SizeHint::with_exact(0);
+        }
         let mut hint = SizeHint::new();
-        hint.set_upper(u64::try_from(self.state.limits.max_encoded_bytes.saturating_sub(self.state.emitted_bytes)).unwrap_or(u64::MAX));
+        hint.set_upper(
+            u64::try_from(
+                self.state
+                    .limits
+                    .max_encoded_bytes
+                    .saturating_sub(self.state.emitted_bytes),
+            )
+            .unwrap_or(u64::MAX),
+        );
         hint
     }
 }

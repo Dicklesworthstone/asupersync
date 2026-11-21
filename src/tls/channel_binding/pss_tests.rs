@@ -82,9 +82,10 @@ fn children(sequence: &[u8]) -> Vec<&[u8]> {
 }
 
 fn certificate_with_parameters(inner: Option<&[u8]>, outer: Option<&[u8]>) -> Certificate {
-    let certificate = Certificate::from_pem(include_bytes!("../../../tests/fixtures/tls/server.crt"))
-        .unwrap()
-        .remove(0);
+    let certificate =
+        Certificate::from_pem(include_bytes!("../../../tests/fixtures/tls/server.crt"))
+            .unwrap()
+            .remove(0);
     let fields = children(certificate.as_der());
     assert_eq!(fields.len(), 3);
     let tbs = children(fields[0]);
@@ -106,8 +107,15 @@ fn certificate_with_parameters(inner: Option<&[u8]>, outer: Option<&[u8]>) -> Ce
 fn defaults_and_explicit_sha1_use_sha256_without_a_hash_substitution_mismatch() {
     assert_eq!(classify(&[0x30, 0]).unwrap(), BindingHash::Sha256);
     for null in [false, true] {
-        for (hash, mask) in [(None, Some(SHA1)), (Some(SHA1), None), (Some(SHA1), Some(SHA1))] {
-            assert_eq!(classify(&parameters(hash, mask, null)).unwrap(), BindingHash::Sha256);
+        for (hash, mask) in [
+            (None, Some(SHA1)),
+            (Some(SHA1), None),
+            (Some(SHA1), Some(SHA1)),
+        ] {
+            assert_eq!(
+                classify(&parameters(hash, mask, null)).unwrap(),
+                BindingHash::Sha256
+            );
         }
     }
     assert!(matches!(binding_hash(None), Err(TlsError::Certificate(_))));
@@ -123,7 +131,10 @@ fn supported_sha2_hashes_accept_absent_and_null_algorithm_parameters() {
         (SHA512, BindingHash::Sha512),
     ] {
         for null in [false, true] {
-            assert_eq!(classify(&parameters(Some(oid), Some(oid), null)).unwrap(), expected);
+            assert_eq!(
+                classify(&parameters(Some(oid), Some(oid), null)).unwrap(),
+                expected
+            );
         }
     }
 }
@@ -167,7 +178,10 @@ fn duplicate_reordered_unknown_and_implicit_fields_are_rejected() {
         tlv(0x60, &algorithm(SHA256, None)),
         tlv(0xa0, &[]),
         tlv(0xa0, &[algorithm(SHA256, None), vec![5, 0]].concat()),
-        tlv(0xa0, &tlv(0x30, &[tlv(6, SHA256), vec![5, 0, 5, 0]].concat())),
+        tlv(
+            0xa0,
+            &tlv(0x30, &[tlv(6, SHA256), vec![5, 0, 5, 0]].concat()),
+        ),
     ] {
         malformed(&tlv(0x30, &content));
     }
@@ -185,7 +199,10 @@ fn salt_and_trailer_encodings_are_validated_without_allocating_the_salt() {
         malformed(&tlv(0x30, &tlv(0xa2, &tlv(2, &salt))));
     }
     malformed(&tlv(0x30, &tlv(0xa2, &[0x22, 1, 1])));
-    assert_eq!(classify(&tlv(0x30, &tlv(0xa3, &[2, 1, 1]))).unwrap(), BindingHash::Sha256);
+    assert_eq!(
+        classify(&tlv(0x30, &tlv(0xa3, &[2, 1, 1]))).unwrap(),
+        BindingHash::Sha256
+    );
     for trailer in [0, 2, 0xff] {
         malformed(&tlv(0x30, &tlv(0xa3, &[2, 1, trailer])));
     }
@@ -208,17 +225,35 @@ fn public_certificate_binding_matches_independent_asn1_and_hashlib_vectors() {
     // backed hashlib over the full DER. Existing signature bytes are retained:
     // these are hash-selection vectors, not certificate-validation fixtures.
     for (encoded, expected) in [
-        ("3000", "bd8fc56de941595e5add84af5f3b59987d78c95b7b654c78b4b3f605ca648700"),
-        ("3034a00f300d06096086480165030402040500a11c301a06092a864886f70d010108300d06096086480165030402040500a20302011c", "24807cabef8655fa3602f9be52f1aa4fb20d4c65d4a471b711eab136"),
-        ("3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120", "abfb1836035c402260a1f0fab8700006307ece405c89d0bf3cda6a14669864b8"),
-        ("3034a00f300d06096086480165030402020500a11c301a06092a864886f70d010108300d06096086480165030402020500a203020130", "e368362203355cd75460a538678c1c7ede2ec180327b33def487a55c7d612e132560a873b1ca1b00588d7cdec52f8144"),
-        ("3034a00f300d06096086480165030402030500a11c301a06092a864886f70d010108300d06096086480165030402030500a203020140", "ab53a3e0fb69b02ec89503badd50207d14c400a71a287979bd4fe5cbcb1daab8bac34c18420f8246af70067831d906d2ac56c3bfffe11221e95afa75e04ffa38"),
+        (
+            "3000",
+            "bd8fc56de941595e5add84af5f3b59987d78c95b7b654c78b4b3f605ca648700",
+        ),
+        (
+            "3034a00f300d06096086480165030402040500a11c301a06092a864886f70d010108300d06096086480165030402040500a20302011c",
+            "24807cabef8655fa3602f9be52f1aa4fb20d4c65d4a471b711eab136",
+        ),
+        (
+            "3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120",
+            "abfb1836035c402260a1f0fab8700006307ece405c89d0bf3cda6a14669864b8",
+        ),
+        (
+            "3034a00f300d06096086480165030402020500a11c301a06092a864886f70d010108300d06096086480165030402020500a203020130",
+            "e368362203355cd75460a538678c1c7ede2ec180327b33def487a55c7d612e132560a873b1ca1b00588d7cdec52f8144",
+        ),
+        (
+            "3034a00f300d06096086480165030402030500a11c301a06092a864886f70d010108300d06096086480165030402030500a203020140",
+            "ab53a3e0fb69b02ec89503badd50207d14c400a71a287979bd4fe5cbcb1daab8bac34c18420f8246af70067831d906d2ac56c3bfffe11221e95afa75e04ffa38",
+        ),
     ] {
         let encoded = hex::decode(encoded).unwrap();
         let certificate = certificate_with_parameters(Some(&encoded), Some(&encoded));
         let binding = certificate.tls_server_end_point_channel_binding().unwrap();
         assert_eq!(binding, hex::decode(expected).unwrap());
-        assert_eq!(binding, certificate.tls_server_end_point_channel_binding().unwrap());
+        assert_eq!(
+            binding,
+            certificate.tls_server_end_point_channel_binding().unwrap()
+        );
     }
 }
 

@@ -1,11 +1,11 @@
-use super::*;
 use super::super::{prepare_native_directory_sync, scan_native_directory};
+use super::*;
 use crate::atp::sync::PathNormalizationRules;
 use crate::runtime::RuntimeBuilder;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::fs;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -18,10 +18,14 @@ where
         RuntimeBuilder::current_thread()
     } else {
         RuntimeBuilder::new().worker_threads(workers)
-    }.build().unwrap();
+    }
+    .build()
+    .unwrap();
     runtime.block_on(async move {
         let cx = Cx::current().unwrap();
-        crate::time::timeout(cx.now(), Duration::from_secs(15), test(cx)).await.unwrap();
+        crate::time::timeout(cx.now(), Duration::from_secs(15), test(cx))
+            .await
+            .unwrap();
     });
     assert!(runtime.shutdown_timeout(Duration::from_secs(15)));
 }
@@ -33,7 +37,8 @@ fn roots(label: &str) -> (PathBuf, PathBuf, PathBuf) {
     let base = loop {
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = parent.join(format!(
-            "asupersync-native-apply-{label}-{}-{sequence}", std::process::id(),
+            "asupersync-native-apply-{label}-{}-{sequence}",
+            std::process::id(),
         ));
         match fs::create_dir(&path) {
             Ok(()) => break path,
@@ -56,7 +61,10 @@ fn empty() -> DirectoryManifest {
 }
 
 fn create_authorization() -> DestructiveAuthorization {
-    DestructiveAuthorization { dry_run: false, ..DestructiveAuthorization::default() }
+    DestructiveAuthorization {
+        dry_run: false,
+        ..DestructiveAuthorization::default()
+    }
 }
 
 fn overwrite_authorization() -> DestructiveAuthorization {
@@ -68,16 +76,22 @@ fn overwrite_authorization() -> DestructiveAuthorization {
 }
 
 fn delete_authorization() -> DestructiveAuthorization {
-    DestructiveAuthorization { allow_delete: true, ..create_authorization() }
+    DestructiveAuthorization {
+        allow_delete: true,
+        ..create_authorization()
+    }
 }
 
 fn untouched(report: &NativeDirectorySyncReport, staging: &Path) {
     assert!(!report.complete);
     assert!(report.verified_baseline.is_none());
     assert!(report.staging_directory.is_none());
-    assert!(report.actions.iter().all(|receipt| {
-        receipt.state == NativeDirectoryActionState::NotStarted
-    }));
+    assert!(
+        report
+            .actions
+            .iter()
+            .all(|receipt| { receipt.state == NativeDirectoryActionState::NotStarted })
+    );
     assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
 }
 
@@ -92,12 +106,19 @@ fn native_apply_copies_nested_trees_both_ways_and_returns_verified_baseline() {
             let payload: Vec<_> = (0_u8..=255).cycle().take(1025).collect();
             fs::write(local.join("left/deep/payload"), &payload).unwrap();
             fs::write(remote.join("right/reply"), b"from remote").unwrap();
-            let limits = NativeDirectoryLimits { buffer_bytes: 7, ..NativeDirectoryLimits::default() };
-            let prepared = prepare_native_directory_sync(
-                &cx, empty(), local.clone(), remote.clone(), limits,
-            ).await.unwrap();
+            let limits = NativeDirectoryLimits {
+                buffer_bytes: 7,
+                ..NativeDirectoryLimits::default()
+            };
+            let prepared =
+                prepare_native_directory_sync(&cx, empty(), local.clone(), remote.clone(), limits)
+                    .await
+                    .unwrap();
             assert!(!prepared.preview().has_conflicts());
-            let report = prepared.apply(&cx, create_authorization(), staging.clone()).await.unwrap();
+            let report = prepared
+                .apply(&cx, create_authorization(), staging.clone())
+                .await
+                .unwrap();
             assert!(report.complete, "{:?}", report.failure);
             assert!(report.failure.is_none());
             assert!(report.actions.iter().all(|receipt| {
@@ -107,20 +128,30 @@ fn native_apply_copies_nested_trees_both_ways_and_returns_verified_baseline() {
             assert_eq!(fs::read(local.join("right/reply")).unwrap(), b"from remote");
             assert!(remote.join("empty").is_dir());
             let baseline = report.verified_baseline.unwrap();
-            let actual_local = scan_native_directory(&cx, local.clone(), limits).await.unwrap();
-            let actual_remote = scan_native_directory(&cx, remote.clone(), limits).await.unwrap();
+            let actual_local = scan_native_directory(&cx, local.clone(), limits)
+                .await
+                .unwrap();
+            let actual_remote = scan_native_directory(&cx, remote.clone(), limits)
+                .await
+                .unwrap();
             assert_eq!(actual_local.manifest(), &baseline);
             assert_eq!(actual_remote.manifest(), &baseline);
-            let prepared = prepare_native_directory_sync(
-                &cx, baseline, local, remote, limits,
-            ).await.unwrap();
+            let prepared = prepare_native_directory_sync(&cx, baseline, local, remote, limits)
+                .await
+                .unwrap();
             assert!(prepared.preview().is_noop());
-            let report = prepared.apply(&cx, create_authorization(), staging).await.unwrap();
+            let report = prepared
+                .apply(&cx, create_authorization(), staging)
+                .await
+                .unwrap();
             assert!(report.complete);
             assert!(report.staging_directory.is_none());
-            assert!(report.actions.iter().all(|receipt| {
-                receipt.state == NativeDirectoryActionState::Unchanged
-            }));
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|receipt| { receipt.state == NativeDirectoryActionState::Unchanged })
+            );
         });
     }
 }
@@ -131,11 +162,18 @@ fn native_apply_dry_run_keeps_roots_and_staging_untouched() {
         let (local, remote, staging) = roots("dry-run");
         fs::write(local.join("file"), b"only local").unwrap();
         let prepared = prepare_native_directory_sync(
-            &cx, empty(), local, remote.clone(), NativeDirectoryLimits::default(),
-        ).await.unwrap();
-        let report = prepared.apply(
-            &cx, DestructiveAuthorization::default(), staging.clone(),
-        ).await.unwrap();
+            &cx,
+            empty(),
+            local,
+            remote.clone(),
+            NativeDirectoryLimits::default(),
+        )
+        .await
+        .unwrap();
+        let report = prepared
+            .apply(&cx, DestructiveAuthorization::default(), staging.clone())
+            .await
+            .unwrap();
         assert!(report.dry_run);
         assert!(report.failure.is_none());
         untouched(&report, &staging);
@@ -150,27 +188,59 @@ fn native_apply_overwrite_needs_both_authorizations_and_retains_original_inode()
         fs::write(local.join("file"), b"original").unwrap();
         fs::write(remote.join("file"), b"original").unwrap();
         fs::set_permissions(remote.join("file"), Permissions::from_mode(0o640)).unwrap();
-        let limits = NativeDirectoryLimits { buffer_bytes: 3, ..NativeDirectoryLimits::default() };
+        let limits = NativeDirectoryLimits {
+            buffer_bytes: 3,
+            ..NativeDirectoryLimits::default()
+        };
         let baseline = scan_native_directory(&cx, local.clone(), limits)
-            .await.unwrap().manifest().clone();
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
         let original = fs::metadata(remote.join("file")).unwrap();
         fs::write(local.join("file"), b"updated file contents").unwrap();
-        for (allow_overwrite, allow_permission_change) in [(false, false), (true, false), (false, true)] {
+        for (allow_overwrite, allow_permission_change) in
+            [(false, false), (true, false), (false, true)]
+        {
             let prepared = prepare_native_directory_sync(
-                &cx, baseline.clone(), local.clone(), remote.clone(), limits,
-            ).await.unwrap();
-            let report = prepared.apply(&cx, DestructiveAuthorization {
-                allow_overwrite, allow_permission_change, ..create_authorization()
-            }, staging.clone()).await.unwrap();
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+                &cx,
+                baseline.clone(),
+                local.clone(),
+                remote.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let report = prepared
+                .apply(
+                    &cx,
+                    DestructiveAuthorization {
+                        allow_overwrite,
+                        allow_permission_change,
+                        ..create_authorization()
+                    },
+                    staging.clone(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Refused { .. })
+            ));
             untouched(&report, &staging);
             assert_eq!(fs::read(remote.join("file")).unwrap(), b"original");
-            assert_eq!(fs::metadata(remote.join("file")).unwrap().mode() & 0o777, 0o640);
+            assert_eq!(
+                fs::metadata(remote.join("file")).unwrap().mode() & 0o777,
+                0o640
+            );
         }
-        let prepared = prepare_native_directory_sync(
-            &cx, baseline, local, remote.clone(), limits,
-        ).await.unwrap();
-        let report = prepared.apply(&cx, overwrite_authorization(), staging).await.unwrap();
+        let prepared = prepare_native_directory_sync(&cx, baseline, local, remote.clone(), limits)
+            .await
+            .unwrap();
+        let report = prepared
+            .apply(&cx, overwrite_authorization(), staging)
+            .await
+            .unwrap();
         assert!(report.complete, "{:?}", report.failure);
         let receipt = &report.actions[0];
         assert_eq!(receipt.state, NativeDirectoryActionState::Published);
@@ -186,7 +256,10 @@ fn native_apply_overwrite_needs_both_authorizations_and_retains_original_inode()
         assert_eq!(published.mode() & 0o777, 0o640);
         assert_eq!(published.uid(), original.uid());
         assert_eq!(published.gid(), original.gid());
-        assert_eq!(fs::read(remote.join("file")).unwrap(), b"updated file contents");
+        assert_eq!(
+            fs::read(remote.join("file")).unwrap(),
+            b"updated file contents"
+        );
     });
 }
 
@@ -197,22 +270,35 @@ fn native_apply_stale_source_or_destination_refuses_before_effects() {
             let (local, remote, staging) = roots("stale");
             fs::write(local.join("file"), b"before").unwrap();
             let prepared = prepare_native_directory_sync(
-                &cx, empty(), local.clone(), remote.clone(), NativeDirectoryLimits::default(),
-            ).await.unwrap();
+                &cx,
+                empty(),
+                local.clone(),
+                remote.clone(),
+                NativeDirectoryLimits::default(),
+            )
+            .await
+            .unwrap();
             if change_source {
                 fs::write(local.join("file"), b"after!").unwrap();
             } else {
                 fs::write(remote.join("file"), b"concurrent destination").unwrap();
             }
-            let report = prepared.apply(
-                &cx, overwrite_authorization(), staging.clone(),
-            ).await.unwrap();
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Changed { .. })));
+            let report = prepared
+                .apply(&cx, overwrite_authorization(), staging.clone())
+                .await
+                .unwrap();
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Changed { .. })
+            ));
             untouched(&report, &staging);
             if change_source {
                 assert!(!remote.join("file").exists());
             } else {
-                assert_eq!(fs::read(remote.join("file")).unwrap(), b"concurrent destination");
+                assert_eq!(
+                    fs::read(remote.join("file")).unwrap(),
+                    b"concurrent destination"
+                );
             }
         });
     }
@@ -226,14 +312,24 @@ fn native_apply_conflict_blocks_an_earlier_independent_copy() {
         fs::write(local.join("z-conflict"), b"left").unwrap();
         fs::write(remote.join("z-conflict"), b"right").unwrap();
         let prepared = prepare_native_directory_sync(
-            &cx, empty(), local, remote.clone(), NativeDirectoryLimits::default(),
-        ).await.unwrap();
+            &cx,
+            empty(),
+            local,
+            remote.clone(),
+            NativeDirectoryLimits::default(),
+        )
+        .await
+        .unwrap();
         assert!(prepared.preview().has_conflicts());
-        let report = prepared.apply(
-            &cx, overwrite_authorization(), staging.clone(),
-        ).await.unwrap();
+        let report = prepared
+            .apply(&cx, overwrite_authorization(), staging.clone())
+            .await
+            .unwrap();
         untouched(&report, &staging);
-        assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+        assert!(matches!(
+            report.failure,
+            Some(NativeDirectoryError::Refused { .. })
+        ));
         assert!(!remote.join("a-copy").exists());
         assert_eq!(fs::read(remote.join("z-conflict")).unwrap(), b"right");
     });
@@ -248,7 +344,10 @@ fn native_apply_deletion_and_kind_change_refuse_even_with_broad_authorization() 
             fs::write(remote.join("z-existing"), b"keep original").unwrap();
             let limits = NativeDirectoryLimits::default();
             let baseline = scan_native_directory(&cx, local.clone(), limits)
-                .await.unwrap().manifest().clone();
+                .await
+                .unwrap()
+                .manifest()
+                .clone();
             // Model a missing entry by retaining it elsewhere, never deleting.
             if kind_change {
                 fs::rename(local.join("z-existing"), staging.join("retained-local")).unwrap();
@@ -257,25 +356,43 @@ fn native_apply_deletion_and_kind_change_refuse_even_with_broad_authorization() 
                 fs::rename(remote.join("z-existing"), staging.join("retained-remote")).unwrap();
             }
             fs::write(local.join("a-copy"), b"independent new file").unwrap();
-            let prepared = prepare_native_directory_sync(
-                &cx, baseline, local.clone(), remote.clone(), limits,
-            ).await.unwrap();
-            let report = prepared.apply(
-                &cx, DestructiveAuthorization::explicit_mirror_apply(), staging.clone(),
-            ).await.unwrap();
+            let prepared =
+                prepare_native_directory_sync(&cx, baseline, local.clone(), remote.clone(), limits)
+                    .await
+                    .unwrap();
+            let report = prepared
+                .apply(
+                    &cx,
+                    DestructiveAuthorization::explicit_mirror_apply(),
+                    staging.clone(),
+                )
+                .await
+                .unwrap();
             assert!(!report.complete);
             assert!(report.staging_directory.is_none());
             assert!(report.verified_baseline.is_none());
-            assert!(report.actions.iter().all(|receipt| {
-                receipt.state == NativeDirectoryActionState::NotStarted
-            }));
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|receipt| { receipt.state == NativeDirectoryActionState::NotStarted })
+            );
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Refused { .. })
+            ));
             assert!(!remote.join("a-copy").exists());
             if kind_change {
-                assert_eq!(fs::read(remote.join("z-existing")).unwrap(), b"keep original");
+                assert_eq!(
+                    fs::read(remote.join("z-existing")).unwrap(),
+                    b"keep original"
+                );
                 assert!(local.join("z-existing").is_dir());
             } else {
-                assert_eq!(fs::read(local.join("z-existing")).unwrap(), b"keep original");
+                assert_eq!(
+                    fs::read(local.join("z-existing")).unwrap(),
+                    b"keep original"
+                );
                 assert!(!remote.join("z-existing").exists());
             }
         });
@@ -294,37 +411,72 @@ fn native_quarantined_deletions_converge_both_directions_and_retain_every_inode(
                     fs::write(root.join("retire/deep/file"), b"retained original bytes").unwrap();
                     fs::write(root.join("keep"), b"common file").unwrap();
                 }
-                let limits = NativeDirectoryLimits { buffer_bytes: 7, ..NativeDirectoryLimits::default() };
+                let limits = NativeDirectoryLimits {
+                    buffer_bytes: 7,
+                    ..NativeDirectoryLimits::default()
+                };
                 let baseline = scan_native_directory(&cx, local.clone(), limits)
-                    .await.unwrap().manifest().clone();
-                let (missing, remaining) = if deleted_locally { (&local, &remote) } else { (&remote, &local) };
-                let retained: std::collections::BTreeMap<_, _> = [
-                    "retire", "retire/deep", "retire/deep/file", "retire/empty",
-                ].into_iter().map(|path| (path, fs::metadata(remaining.join(path)).unwrap().ino())).collect();
+                    .await
+                    .unwrap()
+                    .manifest()
+                    .clone();
+                let (missing, remaining) = if deleted_locally {
+                    (&local, &remote)
+                } else {
+                    (&remote, &local)
+                };
+                let retained: std::collections::BTreeMap<_, _> =
+                    ["retire", "retire/deep", "retire/deep/file", "retire/empty"]
+                        .into_iter()
+                        .map(|path| (path, fs::metadata(remaining.join(path)).unwrap().ino()))
+                        .collect();
                 // Simulate the user's deletion without erasing fixture data.
                 fs::rename(missing.join("retire"), staging.join("observed-deletion")).unwrap();
                 fs::write(remaining.join("a-new"), b"independent copy survives").unwrap();
                 let prepared = prepare_native_directory_sync(
-                    &cx, baseline, local.clone(), remote.clone(), limits,
-                ).await.unwrap();
+                    &cx,
+                    baseline,
+                    local.clone(),
+                    remote.clone(),
+                    limits,
+                )
+                .await
+                .unwrap();
                 assert!(!prepared.preview().has_conflicts());
-                let deletion = if deleted_locally { BidirectionalSyncAction::DeleteRemote }
-                    else { BidirectionalSyncAction::DeleteLocal };
-                assert_eq!(prepared.preview().decisions.iter().filter(|decision| decision.action == deletion).count(), 4);
-                let report = prepared.apply_with_quarantined_deletions(
-                    &cx, delete_authorization(), staging.clone(),
-                ).await.unwrap();
+                let deletion = if deleted_locally {
+                    BidirectionalSyncAction::DeleteRemote
+                } else {
+                    BidirectionalSyncAction::DeleteLocal
+                };
+                assert_eq!(
+                    prepared
+                        .preview()
+                        .decisions
+                        .iter()
+                        .filter(|decision| decision.action == deletion)
+                        .count(),
+                    4
+                );
+                let report = prepared
+                    .apply_with_quarantined_deletions(&cx, delete_authorization(), staging.clone())
+                    .await
+                    .unwrap();
                 assert!(report.complete, "{:?}", report.failure);
                 assert!(report.failure.is_none());
                 for root in [&local, &remote] {
                     assert!(!root.join("retire").exists());
-                    assert_eq!(fs::read(root.join("a-new")).unwrap(), b"independent copy survives");
+                    assert_eq!(
+                        fs::read(root.join("a-new")).unwrap(),
+                        b"independent copy survives"
+                    );
                     assert_eq!(fs::read(root.join("keep")).unwrap(), b"common file");
                 }
                 let recovery_root = report.staging_directory.as_ref().unwrap();
                 let mut deleted = 0;
                 for receipt in &report.actions {
-                    if receipt.action != deletion { continue; }
+                    if receipt.action != deletion {
+                        continue;
+                    }
                     deleted += 1;
                     assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
                     assert!(receipt.durable);
@@ -332,26 +484,37 @@ fn native_quarantined_deletions_converge_both_directions_and_retain_every_inode(
                     assert!(receipt.staged_path.is_none());
                     let recovered = receipt.quarantine_path.as_ref().unwrap();
                     assert_eq!(recovered.parent().unwrap(), recovery_root);
-                    assert_eq!(fs::metadata(recovered).unwrap().ino(), retained[receipt.path.as_str()]);
+                    assert_eq!(
+                        fs::metadata(recovered).unwrap().ino(),
+                        retained[receipt.path.as_str()]
+                    );
                     if receipt.path.as_str() == "retire/deep/file" {
                         assert_eq!(fs::read(recovered).unwrap(), b"retained original bytes");
                     } else {
                         assert!(recovered.is_dir());
-                        assert_eq!(fs::read_dir(recovered).unwrap().count(), 0,
-                            "each reviewed child must retire before its directory");
+                        assert_eq!(
+                            fs::read_dir(recovered).unwrap().count(),
+                            0,
+                            "each reviewed child must retire before its directory"
+                        );
                     }
                 }
                 assert_eq!(deleted, 4);
                 let baseline = report.verified_baseline.unwrap();
                 for root in [&local, &remote] {
-                    let actual = scan_native_directory(&cx, root.clone(), limits).await.unwrap();
+                    let actual = scan_native_directory(&cx, root.clone(), limits)
+                        .await
+                        .unwrap();
                     assert_eq!(actual.manifest(), &baseline);
                 }
-                let prepared = prepare_native_directory_sync(
-                    &cx, baseline, local, remote, limits,
-                ).await.unwrap();
+                let prepared = prepare_native_directory_sync(&cx, baseline, local, remote, limits)
+                    .await
+                    .unwrap();
                 assert!(prepared.preview().is_noop());
-                let report = prepared.apply(&cx, create_authorization(), staging).await.unwrap();
+                let report = prepared
+                    .apply(&cx, create_authorization(), staging)
+                    .await
+                    .unwrap();
                 assert!(report.complete);
                 assert!(report.staging_directory.is_none());
             });
@@ -367,32 +530,61 @@ fn native_quarantined_deletions_require_consent_and_keep_dry_runs_read_only() {
         fs::write(remote.join("file"), b"retained").unwrap();
         let limits = NativeDirectoryLimits::default();
         let baseline = scan_native_directory(&cx, local.clone(), limits)
-            .await.unwrap().manifest().clone();
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
         fs::rename(local.join("file"), staging.join("observed-deletion")).unwrap();
         let original = fs::metadata(remote.join("file")).unwrap().ino();
         for dry_run in [false, true] {
             let prepared = prepare_native_directory_sync(
-                &cx, baseline.clone(), local.clone(), remote.clone(), limits,
-            ).await.unwrap();
-            let report = prepared.apply_with_quarantined_deletions(
-                &cx, DestructiveAuthorization { dry_run, ..DestructiveAuthorization::default() },
-                staging.clone(),
-            ).await.unwrap();
+                &cx,
+                baseline.clone(),
+                local.clone(),
+                remote.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let report = prepared
+                .apply_with_quarantined_deletions(
+                    &cx,
+                    DestructiveAuthorization {
+                        dry_run,
+                        ..DestructiveAuthorization::default()
+                    },
+                    staging.clone(),
+                )
+                .await
+                .unwrap();
             assert_eq!(report.dry_run, dry_run);
             assert!(!report.complete);
             assert!(report.staging_directory.is_none());
             assert!(report.verified_baseline.is_none());
-            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted)
+            );
             if dry_run {
                 assert!(report.failure.is_none());
             } else {
-                assert!(matches!(report.failure, Some(NativeDirectoryError::Refused {
-                    reason: "deletion requires explicit delete authorization", ..
-                })));
+                assert!(matches!(
+                    report.failure,
+                    Some(NativeDirectoryError::Refused {
+                        reason: "deletion requires explicit delete authorization",
+                        ..
+                    })
+                ));
             }
             assert_eq!(fs::metadata(remote.join("file")).unwrap().ino(), original);
             assert_eq!(fs::read(remote.join("file")).unwrap(), b"retained");
-            assert_eq!(fs::read_dir(&staging).unwrap().count(), 1, "only the retained fixture exists");
+            assert_eq!(
+                fs::read_dir(&staging).unwrap().count(),
+                1,
+                "only the retained fixture exists"
+            );
         }
     });
 }
@@ -406,24 +598,48 @@ fn native_quarantined_delete_vs_edit_conflict_blocks_all_effects() {
             fs::write(remote.join("z-file"), b"common").unwrap();
             let limits = NativeDirectoryLimits::default();
             let baseline = scan_native_directory(&cx, local.clone(), limits)
-                .await.unwrap().manifest().clone();
-            let (missing, edited) = if deleted_locally { (&local, &remote) } else { (&remote, &local) };
+                .await
+                .unwrap()
+                .manifest()
+                .clone();
+            let (missing, edited) = if deleted_locally {
+                (&local, &remote)
+            } else {
+                (&remote, &local)
+            };
             fs::rename(missing.join("z-file"), staging.join("observed-deletion")).unwrap();
             fs::write(edited.join("z-file"), b"concurrent edit must remain").unwrap();
             fs::write(missing.join("a-copy"), b"independent copy").unwrap();
-            let prepared = prepare_native_directory_sync(
-                &cx, baseline, local.clone(), remote.clone(), limits,
-            ).await.unwrap();
+            let prepared =
+                prepare_native_directory_sync(&cx, baseline, local.clone(), remote.clone(), limits)
+                    .await
+                    .unwrap();
             assert!(prepared.preview().has_conflicts());
-            let report = prepared.apply_with_quarantined_deletions(
-                &cx, DestructiveAuthorization::explicit_mirror_apply(), staging.clone(),
-            ).await.unwrap();
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+            let report = prepared
+                .apply_with_quarantined_deletions(
+                    &cx,
+                    DestructiveAuthorization::explicit_mirror_apply(),
+                    staging.clone(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Refused { .. })
+            ));
             assert!(!report.complete);
             assert!(report.staging_directory.is_none());
-            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted)
+            );
             assert!(!edited.join("a-copy").exists());
-            assert_eq!(fs::read(edited.join("z-file")).unwrap(), b"concurrent edit must remain");
+            assert_eq!(
+                fs::read(edited.join("z-file")).unwrap(),
+                b"concurrent edit must remain"
+            );
             assert_eq!(fs::read_dir(staging).unwrap().count(), 1);
         });
     }
@@ -438,21 +654,38 @@ fn native_quarantined_deletions_revalidate_both_sides_before_effects() {
             fs::write(remote.join("z-file"), b"common").unwrap();
             let limits = NativeDirectoryLimits::default();
             let baseline = scan_native_directory(&cx, local.clone(), limits)
-                .await.unwrap().manifest().clone();
+                .await
+                .unwrap()
+                .manifest()
+                .clone();
             fs::rename(local.join("z-file"), staging.join("observed-deletion")).unwrap();
             fs::write(local.join("a-copy"), b"independent copy").unwrap();
-            let prepared = prepare_native_directory_sync(
-                &cx, baseline, local.clone(), remote.clone(), limits,
-            ).await.unwrap();
-            let changed_path = if recreate_absent { local.join("z-file") } else { remote.join("z-file") };
+            let prepared =
+                prepare_native_directory_sync(&cx, baseline, local.clone(), remote.clone(), limits)
+                    .await
+                    .unwrap();
+            let changed_path = if recreate_absent {
+                local.join("z-file")
+            } else {
+                remote.join("z-file")
+            };
             fs::write(&changed_path, b"new observation").unwrap();
-            let report = prepared.apply_with_quarantined_deletions(
-                &cx, delete_authorization(), staging.clone(),
-            ).await.unwrap();
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Changed { .. })));
+            let report = prepared
+                .apply_with_quarantined_deletions(&cx, delete_authorization(), staging.clone())
+                .await
+                .unwrap();
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Changed { .. })
+            ));
             assert!(!report.complete);
             assert!(report.staging_directory.is_none());
-            assert!(report.actions.iter().all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted));
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|receipt| receipt.state == NativeDirectoryActionState::NotStarted)
+            );
             assert!(!remote.join("a-copy").exists());
             assert_eq!(fs::read(changed_path).unwrap(), b"new observation");
             assert!(remote.join("z-file").exists());
@@ -472,19 +705,28 @@ fn native_quarantined_deletion_cancellation_returns_durable_partial_recovery() {
             fs::write(root.join("retire/z-first"), b"first retained inode").unwrap();
         }
         let limits = NativeDirectoryLimits {
-            buffer_bytes: 1, ..NativeDirectoryLimits::default()
+            buffer_bytes: 1,
+            ..NativeDirectoryLimits::default()
         };
         let baseline = scan_native_directory(&cx, local.clone(), limits)
-            .await.unwrap().manifest().clone();
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
         fs::rename(local.join("retire"), staging.join("observed-deletion")).unwrap();
         let original = fs::metadata(remote.join("retire/z-first")).unwrap().ino();
         let slow_original = fs::metadata(remote.join("retire/a-slow")).unwrap().ino();
-        let prepared = prepare_native_directory_sync(
-            &cx, baseline, local, remote.clone(), limits,
-        ).await.unwrap();
-        let first_index = prepared.preview().decisions.iter()
-            .position(|decision| decision.path.as_str() == "retire/z-first").unwrap();
-        let recovery = staging.join(format!("asupersync-sync-{}", prepared.plan_id()))
+        let prepared = prepare_native_directory_sync(&cx, baseline, local, remote.clone(), limits)
+            .await
+            .unwrap();
+        let first_index = prepared
+            .preview()
+            .decisions
+            .iter()
+            .position(|decision| decision.path.as_str() == "retire/z-first")
+            .unwrap();
+        let recovery = staging
+            .join(format!("asupersync-sync-{}", prepared.plan_id()))
             .join(format!("previous-{first_index:08x}"));
         let owner = cx.clone();
         let ready = Arc::new(Barrier::new(2));
@@ -501,34 +743,54 @@ fn native_quarantined_deletion_cancellation_returns_durable_partial_recovery() {
                     );
                     return metadata.ino();
                 }
-                assert!(Instant::now() < deadline, "no actual quarantine progress observed");
+                assert!(
+                    Instant::now() < deadline,
+                    "no actual quarantine progress observed"
+                );
                 std::thread::yield_now();
             }
         });
         ready.wait();
-        let report = prepared.apply_with_quarantined_deletions(
-            &cx, delete_authorization(), staging,
-        ).await.unwrap();
+        let report = prepared
+            .apply_with_quarantined_deletions(&cx, delete_authorization(), staging)
+            .await
+            .unwrap();
         assert_eq!(observer.join().unwrap(), original);
-        assert!(matches!(report.failure, Some(NativeDirectoryError::Checkpoint(_))));
+        assert!(matches!(
+            report.failure,
+            Some(NativeDirectoryError::Checkpoint(_))
+        ));
         assert!(!report.complete);
         assert!(report.verified_baseline.is_none());
         let receipt = &report.actions[first_index];
         assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
-        assert!(receipt.durable, "the in-flight rename and both directory syncs must retire");
+        assert!(
+            receipt.durable,
+            "the in-flight rename and both directory syncs must retire"
+        );
         assert_eq!(receipt.quarantine_path.as_ref(), Some(&recovery));
         assert_eq!(receipt.bytes_written, 0);
         assert!(receipt.staged_path.is_none());
         assert_eq!(fs::metadata(&recovery).unwrap().ino(), original);
         assert_eq!(fs::read(recovery).unwrap(), b"first retained inode");
         assert!(!remote.join("retire/z-first").exists());
-        assert_eq!(fs::metadata(remote.join("retire/a-slow")).unwrap().ino(), slow_original);
+        assert_eq!(
+            fs::metadata(remote.join("retire/a-slow")).unwrap().ino(),
+            slow_original
+        );
         assert_eq!(fs::read(remote.join("retire/a-slow")).unwrap(), payload);
         assert!(report.actions.iter().enumerate().all(|(index, receipt)| {
-            index == first_index || (receipt.state == NativeDirectoryActionState::NotStarted
-                && receipt.quarantine_path.is_none() && !receipt.durable)
+            index == first_index
+                || (receipt.state == NativeDirectoryActionState::NotStarted
+                    && receipt.quarantine_path.is_none()
+                    && !receipt.durable)
         }));
-        assert_eq!(fs::read_dir(report.staging_directory.unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(report.staging_directory.unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
     });
 }
 
@@ -539,14 +801,23 @@ fn native_apply_checks_projected_union_limits_before_creating_staging() {
         fs::write(local.join("left"), b"1234").unwrap();
         fs::write(remote.join("right"), b"5678").unwrap();
         let limits = NativeDirectoryLimits {
-            max_total_bytes: 4, ..NativeDirectoryLimits::default()
+            max_total_bytes: 4,
+            ..NativeDirectoryLimits::default()
         };
-        let prepared = prepare_native_directory_sync(
-            &cx, empty(), local.clone(), remote.clone(), limits,
-        ).await.unwrap();
-        let report = prepared.apply(&cx, create_authorization(), staging.clone()).await.unwrap();
+        let prepared =
+            prepare_native_directory_sync(&cx, empty(), local.clone(), remote.clone(), limits)
+                .await
+                .unwrap();
+        let report = prepared
+            .apply(&cx, create_authorization(), staging.clone())
+            .await
+            .unwrap();
         assert!(matches!(
-            report.failure, Some(NativeDirectoryError::Limit { limit: "max_total_bytes", .. })
+            report.failure,
+            Some(NativeDirectoryError::Limit {
+                limit: "max_total_bytes",
+                ..
+            })
         ));
         untouched(&report, &staging);
         assert!(!local.join("right").exists());
@@ -562,21 +833,31 @@ fn native_apply_rejects_special_permission_overwrite_before_any_copy() {
         fs::write(remote.join("z-existing"), b"old").unwrap();
         let limits = NativeDirectoryLimits::default();
         let baseline = scan_native_directory(&cx, local.clone(), limits)
-            .await.unwrap().manifest().clone();
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
         fs::set_permissions(remote.join("z-existing"), Permissions::from_mode(0o1640)).unwrap();
         fs::write(local.join("z-existing"), b"replacement").unwrap();
         fs::write(local.join("a-copy"), b"earlier decision").unwrap();
-        let prepared = prepare_native_directory_sync(
-            &cx, baseline, local, remote.clone(), limits,
-        ).await.unwrap();
-        let report = prepared.apply(
-            &cx, overwrite_authorization(), staging.clone(),
-        ).await.unwrap();
-        assert!(matches!(report.failure, Some(NativeDirectoryError::Refused { .. })));
+        let prepared = prepare_native_directory_sync(&cx, baseline, local, remote.clone(), limits)
+            .await
+            .unwrap();
+        let report = prepared
+            .apply(&cx, overwrite_authorization(), staging.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            report.failure,
+            Some(NativeDirectoryError::Refused { .. })
+        ));
         untouched(&report, &staging);
         assert!(!remote.join("a-copy").exists());
         assert_eq!(fs::read(remote.join("z-existing")).unwrap(), b"old");
-        assert_eq!(fs::metadata(remote.join("z-existing")).unwrap().mode() & 0o7777, 0o1640);
+        assert_eq!(
+            fs::metadata(remote.join("z-existing")).unwrap().mode() & 0o7777,
+            0o1640
+        );
     });
 }
 
@@ -603,22 +884,44 @@ fn native_publication_refusal_after_quarantine_retains_both_versions_and_concurr
     let staging = NativeRoot::open(&staging_path).unwrap();
     let staged = File::open(&staged_path).unwrap();
     let staged_stamp = metadata_stamp(&staged, &staged_path).unwrap();
-    let previous = stat_at(&destination.file, "file", &destination_path).unwrap().unwrap();
+    let previous = stat_at(&destination.file, "file", &destination_path)
+        .unwrap()
+        .unwrap();
     let mut receipt = staged_receipt("file", &staged_path);
     verify_staged(
-        &staging.file, &staging_path, &staged, "new-00000000", staged_stamp,
-    ).unwrap();
+        &staging.file,
+        &staging_path,
+        &staged,
+        "new-00000000",
+        staged_stamp,
+    )
+    .unwrap();
     quarantine_previous(
-        &destination.file, "file", &destination_path, previous,
-        &staging.file, &staging_path, 0, &mut receipt,
-    ).unwrap();
+        &destination.file,
+        "file",
+        &destination_path,
+        previous,
+        &staging.file,
+        &staging_path,
+        0,
+        &mut receipt,
+    )
+    .unwrap();
     // Real intervening creation at the destination, between the same two
     // publication phases used by apply. NOREPLACE must preserve it.
     fs::write(&destination_path, b"concurrent").unwrap();
     let error = publish_staged(
-        &staging.file, &staging_path, &staged, "new-00000000", staged_stamp,
-        &destination.file, "file", &destination_path, &mut receipt,
-    ).unwrap_err();
+        &staging.file,
+        &staging_path,
+        &staged,
+        "new-00000000",
+        staged_stamp,
+        &destination.file,
+        "file",
+        &destination_path,
+        &mut receipt,
+    )
+    .unwrap_err();
     assert!(matches!(error, NativeDirectoryError::Io { source, .. }
         if source.kind() == std::io::ErrorKind::AlreadyExists));
     assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
@@ -645,8 +948,15 @@ fn native_publication_rejects_a_substituted_staging_name() {
     fs::write(&staged_path, b"substituted").unwrap();
     let mut receipt = staged_receipt("file", &staged_path);
     let result = publish_staged(
-        &staging.file, &staging_path, &staged, "new-00000000", expected,
-        &destination.file, "file", &remote.join("file"), &mut receipt,
+        &staging.file,
+        &staging_path,
+        &staged,
+        "new-00000000",
+        expected,
+        &destination.file,
+        "file",
+        &remote.join("file"),
+        &mut receipt,
     );
     assert!(matches!(result, Err(NativeDirectoryError::Changed { .. })));
     assert_eq!(receipt.state, NativeDirectoryActionState::Staged);
@@ -662,12 +972,14 @@ fn native_apply_cancellation_after_actual_staging_progress_returns_drained_parti
         let payload = vec![0x5a; 1024 * 1024];
         fs::write(local.join("file"), &payload).unwrap();
         let limits = NativeDirectoryLimits {
-            buffer_bytes: 1, ..NativeDirectoryLimits::default()
+            buffer_bytes: 1,
+            ..NativeDirectoryLimits::default()
         };
-        let prepared = prepare_native_directory_sync(
-            &cx, empty(), local, remote.clone(), limits,
-        ).await.unwrap();
-        let staged_path = staging.join(format!("asupersync-sync-{}", prepared.plan_id()))
+        let prepared = prepare_native_directory_sync(&cx, empty(), local, remote.clone(), limits)
+            .await
+            .unwrap();
+        let staged_path = staging
+            .join(format!("asupersync-sync-{}", prepared.plan_id()))
             .join("new-00000000");
         let owner = cx.clone();
         let ready = Arc::new(Barrier::new(2));
@@ -687,22 +999,34 @@ fn native_apply_cancellation_after_actual_staging_progress_returns_drained_parti
                         return observed_bytes;
                     }
                 }
-                assert!(Instant::now() < deadline, "no actual staging progress observed");
+                assert!(
+                    Instant::now() < deadline,
+                    "no actual staging progress observed"
+                );
                 std::thread::yield_now();
             }
         });
         ready.wait();
-        let report = prepared.apply(&cx, create_authorization(), staging).await.unwrap();
+        let report = prepared
+            .apply(&cx, create_authorization(), staging)
+            .await
+            .unwrap();
         let observed_bytes = observer.join().unwrap();
         assert!(observed_bytes > 0 && observed_bytes < payload.len() as u64);
         assert!(!report.complete);
         assert!(report.verified_baseline.is_none());
-        assert!(matches!(report.failure, Some(NativeDirectoryError::Checkpoint(_))));
+        assert!(matches!(
+            report.failure,
+            Some(NativeDirectoryError::Checkpoint(_))
+        ));
         let receipt = &report.actions[0];
         assert_eq!(receipt.state, NativeDirectoryActionState::Staged);
         assert!(receipt.bytes_written > 0 && receipt.bytes_written < payload.len() as u64);
         assert_eq!(receipt.staged_path.as_ref(), Some(&staged_path));
-        assert_eq!(fs::metadata(staged_path).unwrap().len(), receipt.bytes_written);
+        assert_eq!(
+            fs::metadata(staged_path).unwrap().len(),
+            receipt.bytes_written
+        );
         assert!(!receipt.durable);
         assert!(receipt.quarantine_path.is_none());
         assert!(!remote.join("file").exists());

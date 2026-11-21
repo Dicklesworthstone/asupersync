@@ -444,7 +444,8 @@ impl SparseWriter {
         }
         if let Some(expected) = expected_commitment {
             if let Err(error) = expected.verify(expected_manifest) {
-                return self.fail_verification(format!("chunk commitment validation failed: {error}"));
+                return self
+                    .fail_verification(format!("chunk commitment validation failed: {error}"));
             }
         } else if let Err(error) = expected_manifest.validate() {
             return self.fail_verification(format!("manifest validation failed: {error}"));
@@ -547,10 +548,9 @@ impl SparseWriter {
                         .to_owned(),
                 );
             }
-            if let Err(reason) = Self::require_complete_manifest_chunks(
-                &manifest_object.chunk_boundaries,
-                file_len,
-            ) {
+            if let Err(reason) =
+                Self::require_complete_manifest_chunks(&manifest_object.chunk_boundaries, file_len)
+            {
                 return self.fail_verification(reason);
             }
         }
@@ -596,11 +596,15 @@ impl SparseWriter {
                         .fail_verification(format!("content hash verification failed: {error}"));
                 }
             };
-            if manifest_object.content_hash.is_some_and(|expected| actual_hash != expected) {
+            if manifest_object
+                .content_hash
+                .is_some_and(|expected| actual_hash != expected)
+            {
                 return self.fail_verification("manifest content hash mismatch".to_owned());
             }
             if object_id.is_content_addressed() && actual_hash != *object_id.hash_bytes() {
-                return self.fail_verification("content-addressed object identity mismatch".to_owned());
+                return self
+                    .fail_verification("content-addressed object identity mismatch".to_owned());
             }
         }
 
@@ -825,7 +829,9 @@ impl SparseWriter {
         // Own a newly created private inode, not merely an available-looking
         // pathname. The manager retries collisions without tracking or deleting
         // the pre-existing file, directory, or symlink that caused them.
-        let (temp_path, file) = self.path_manager.lock()
+        let (temp_path, file) = self
+            .path_manager
+            .lock()
             .create_temp_file(&state.object_id.to_string())
             .map_err(|error| match error {
                 super::temp_management::TempFileCreationError::Path(error) => {
@@ -1072,9 +1078,9 @@ impl SparseWriter {
                     chunk.byte_offset,
                 ));
             }
-            covered = covered.checked_add(chunk.size_bytes).ok_or_else(|| {
-                "manifest chunk coverage overflows u64".to_owned()
-            })?;
+            covered = covered
+                .checked_add(chunk.size_bytes)
+                .ok_or_else(|| "manifest chunk coverage overflows u64".to_owned())?;
             if covered > file_len {
                 return Err("manifest chunk coverage exceeds the local file length".to_owned());
             }

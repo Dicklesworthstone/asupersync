@@ -26,9 +26,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use proptest::prelude::*;
     use std::collections::{HashMap, VecDeque};
-    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Channel ordering conformance test infrastructure
     struct ChannelConformanceTester {

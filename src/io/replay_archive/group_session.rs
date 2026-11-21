@@ -1,6 +1,11 @@
 //! Authenticated, all-or-nothing joint multi-stream/clock/entropy archives.
-use super::{EncryptedReplayArchive, ReplayArchiveBinding, ReplayArchiveError, ReplayArchiveKey, ReplayArchiveSealer};
-use crate::io::replay_group_session::{GroupSessionDecodeLimits, GroupSessionTapeError, RecordedGroupSession};
+use super::{
+    EncryptedReplayArchive, ReplayArchiveBinding, ReplayArchiveError, ReplayArchiveKey,
+    ReplayArchiveSealer,
+};
+use crate::io::replay_group_session::{
+    GroupSessionDecodeLimits, GroupSessionTapeError, RecordedGroupSession,
+};
 
 // Profile four is distinct from independent sessions, ordered single-stream
 // sessions, and byte-only groups. The complete header is authenticated.
@@ -31,7 +36,12 @@ impl ReplayArchiveSealer {
     ) -> Result<EncryptedReplayArchive, GroupSessionArchiveError> {
         let limit = self.plaintext_limit(max_encrypted_bytes)?;
         let plaintext = session.to_canonical_bytes(limit)?;
-        Ok(self.seal_payload(plaintext.as_ref(), binding, GROUP_SESSION, max_encrypted_bytes)?)
+        Ok(self.seal_payload(
+            plaintext.as_ref(),
+            binding,
+            GROUP_SESSION,
+            max_encrypted_bytes,
+        )?)
     }
 }
 impl ReplayArchiveKey {
@@ -46,8 +56,16 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         limits: GroupSessionDecodeLimits,
     ) -> Result<RecordedGroupSession, GroupSessionArchiveError> {
-        let plaintext = self.open_payload(bytes, expected, GROUP_SESSION, max_encrypted_bytes, limits.max_encoded_bytes)?;
-        Ok(RecordedGroupSession::from_canonical_bytes(&plaintext, limits)?)
+        let plaintext = self.open_payload(
+            bytes,
+            expected,
+            GROUP_SESSION,
+            max_encrypted_bytes,
+            limits.max_encoded_bytes,
+        )?;
+        Ok(RecordedGroupSession::from_canonical_bytes(
+            &plaintext, limits,
+        )?)
     }
 }
 

@@ -34,12 +34,15 @@ impl ResponseHead {
         }
         let mut used = 0usize;
         for header in &headers {
-            used = used.checked_add(header.name.len())
+            used = used
+                .checked_add(header.name.len())
                 .and_then(|n| n.checked_add(header.value.len()))
                 .and_then(|n| n.checked_add(32))
                 .ok_or_else(|| Status::resource_exhausted("gRPC metadata size overflow"))?;
             if used > self.limit {
-                return Err(Status::resource_exhausted("gRPC metadata exceeds its byte limit"));
+                return Err(Status::resource_exhausted(
+                    "gRPC metadata exceeds its byte limit",
+                ));
             }
         }
         let first = self.initial.is_none();
@@ -54,13 +57,19 @@ impl ResponseHead {
         for Header { name, value } in headers {
             match name.as_str() {
                 ":status" if first => {
-                    if http_status.is_some() || value.len() != 3
+                    if http_status.is_some()
+                        || value.len() != 3
                         || !value.bytes().all(|byte| byte.is_ascii_digit())
                     {
-                        return Err(Status::internal("invalid or duplicate HTTP response status"));
+                        return Err(Status::internal(
+                            "invalid or duplicate HTTP response status",
+                        ));
                     }
-                    http_status = Some(value.parse::<u16>()
-                        .map_err(|_| Status::internal("invalid HTTP response status"))?);
+                    http_status = Some(
+                        value
+                            .parse::<u16>()
+                            .map_err(|_| Status::internal("invalid HTTP response status"))?,
+                    );
                 }
                 "content-type" if first => {
                     if content_type.replace(value).is_some() {
@@ -73,12 +82,14 @@ impl ResponseHead {
                     }
                 }
                 "grpc-status" => {
-                    if code.is_some() || value.is_empty()
+                    if code.is_some()
+                        || value.is_empty()
                         || !value.bytes().all(|byte| byte.is_ascii_digit())
                     {
                         return Err(Status::internal("invalid or duplicate grpc-status"));
                     }
-                    let raw = value.parse::<i32>()
+                    let raw = value
+                        .parse::<i32>()
                         .map_err(|_| Status::internal("invalid grpc-status"))?;
                     if !(0..=16).contains(&raw) {
                         return Err(Status::internal("unknown grpc-status"));
@@ -89,8 +100,10 @@ impl ResponseHead {
                     if message.is_some() {
                         return Err(Status::internal("duplicate grpc-message"));
                     }
-                    message = Some(crate::grpc::status::percent_decode_grpc_message(&value)
-                        .map_err(GrpcError::into_status)?);
+                    message = Some(
+                        crate::grpc::status::percent_decode_grpc_message(&value)
+                            .map_err(GrpcError::into_status)?,
+                    );
                 }
                 "grpc-status-details-bin" => {
                     if details.replace(decode_binary(&value)?).is_some() {
@@ -130,11 +143,15 @@ impl ResponseHead {
             }
         }
         if first {
-            let http_status = http_status
-                .ok_or_else(|| Status::internal("response is missing HTTP status"))?;
+            let http_status =
+                http_status.ok_or_else(|| Status::internal("response is missing HTTP status"))?;
             if (100..200).contains(&http_status) {
-                if end_stream || code.is_some() || message.is_some() || details.is_some()
-                    || http_status == 101 || self.informational == 16
+                if end_stream
+                    || code.is_some()
+                    || message.is_some()
+                    || details.is_some()
+                    || http_status == 101
+                    || self.informational == 16
                 {
                     return Err(Status::internal("invalid informational gRPC response"));
                 }
@@ -160,7 +177,9 @@ impl ResponseHead {
             return Err(Status::internal("gRPC trailers must end the stream"));
         }
         if !end_stream && (code.is_some() || message.is_some() || details.is_some()) {
-            return Err(Status::internal("gRPC status appeared before terminal trailers"));
+            return Err(Status::internal(
+                "gRPC status appeared before terminal trailers",
+            ));
         }
         if end_stream {
             let code = code.ok_or_else(|| http_fallback(200))?;
@@ -197,23 +216,29 @@ impl ResponseHead {
 }
 
 fn charge_metadata(total: &mut usize, name: &str, value: &str, limit: usize) -> Result<(), Status> {
-    *total = total.checked_add(name.len())
+    *total = total
+        .checked_add(name.len())
         .and_then(|n| n.checked_add(value.len()))
         .and_then(|n| n.checked_add(32))
         .filter(|n| *n <= limit)
-        .ok_or_else(|| Status::resource_exhausted("expanded gRPC metadata exceeds its byte limit"))?;
+        .ok_or_else(|| {
+            Status::resource_exhausted("expanded gRPC metadata exceeds its byte limit")
+        })?;
     Ok(())
 }
 
 fn valid_content_type(value: &str) -> bool {
     let value = value.split(';').next().unwrap_or_default().trim();
     value.eq_ignore_ascii_case("application/grpc")
-        || value.get(..17).is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/grpc+"))
+        || value
+            .get(..17)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("application/grpc+"))
             && value.len() > 17
 }
 
 fn decode_binary(value: &str) -> Result<Bytes, Status> {
-    base64::engine::general_purpose::STANDARD.decode(value)
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
         .map(Bytes::from)
         .map_err(|_| Status::internal("invalid base64 in gRPC response metadata"))

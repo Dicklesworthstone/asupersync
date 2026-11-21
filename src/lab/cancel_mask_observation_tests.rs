@@ -75,9 +75,15 @@ fn live_nested_masks_defer_ack_and_restore_after_caught_unwind() {
     lab.scheduler.lock().schedule(task, 0);
     lab.run_until_idle();
     assert_eq!(finished.load(Ordering::SeqCst), 1);
-    assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
+    assert_eq!(
+        lab.oracles.cancellation_protocol.task_mask_depth(task),
+        Some(0)
+    );
     assert!(
-        lab.oracles.cancellation_protocol.all_violations().is_empty(),
+        lab.oracles
+            .cancellation_protocol
+            .all_violations()
+            .is_empty(),
         "{:?}",
         lab.oracles.cancellation_protocol.all_violations()
     );
@@ -113,7 +119,10 @@ fn live_checkpoint_ack_before_same_poll_mask_exit_is_detected() {
             1,
             "the checkpoint is checked before its later exit: {violations:?}"
         );
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(0)
+        );
         assert!(lab.is_quiescent());
     }
 }
@@ -138,8 +147,16 @@ fn live_mask_observation_excludes_derived_and_foreign_same_id_contexts() {
         .unwrap();
     lab.scheduler.lock().schedule(task, 0);
     lab.run_until_idle();
-    assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
-    assert!(lab.oracles.cancellation_protocol.all_violations().is_empty());
+    assert_eq!(
+        lab.oracles.cancellation_protocol.task_mask_depth(task),
+        Some(0)
+    );
+    assert!(
+        lab.oracles
+            .cancellation_protocol
+            .all_violations()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -154,8 +171,16 @@ fn disabled_lab_mask_observer_does_not_record_planted_faults() {
         .unwrap();
     lab.scheduler.lock().schedule(task, 0);
     lab.run_until_idle();
-    assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), None);
-    assert!(lab.oracles.cancellation_protocol.all_violations().is_empty());
+    assert_eq!(
+        lab.oracles.cancellation_protocol.task_mask_depth(task),
+        None
+    );
+    assert!(
+        lab.oracles
+            .cancellation_protocol
+            .all_violations()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -189,15 +214,29 @@ fn host_mask_spanning_polls_is_seeded_then_cleared_before_ack() {
     cx.masked(|| {
         lab.step_for_test();
         assert_eq!(polls.load(Ordering::SeqCst), 1);
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(1));
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(1)
+        );
         lab.step_for_test();
         assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(1));
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(1)
+        );
     });
     lab.run_until_idle();
     assert_eq!(polls.load(Ordering::SeqCst), 3);
-    assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
-    assert!(lab.oracles.cancellation_protocol.all_violations().is_empty());
+    assert_eq!(
+        lab.oracles.cancellation_protocol.task_mask_depth(task),
+        Some(0)
+    );
+    assert!(
+        lab.oracles
+            .cancellation_protocol
+            .all_violations()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -214,11 +253,15 @@ fn live_poll_snapshot_checks_the_mask_depth_bound() {
     lab.scheduler.lock().schedule(task, 0);
     lab.run_until_idle();
     assert!(
-        lab.oracles.cancellation_protocol.all_violations().iter().any(|v| matches!(
-            v,
-            CancellationProtocolViolation::MaskDepthExceeded { task: observed, .. }
-                if *observed == task
-        ))
+        lab.oracles
+            .cancellation_protocol
+            .all_violations()
+            .iter()
+            .any(|v| matches!(
+                v,
+                CancellationProtocolViolation::MaskDepthExceeded { task: observed, .. }
+                    if *observed == task
+            ))
     );
 }
 
@@ -238,7 +281,10 @@ fn admitted_async_finalizer_masks_are_observed_across_poll_and_completion() {
             cx.cancel_with(CancelKind::User, Some("finalizer mask observation"));
             if broken {
                 cx.inner.write().mask_depth = 0;
-                assert!(cx.checkpoint_with("planted finalizer acknowledgement").is_err());
+                assert!(
+                    cx.checkpoint_with("planted finalizer acknowledgement")
+                        .is_err()
+                );
             } else {
                 assert!(cx.checkpoint().is_ok());
                 let mut pending = true;
@@ -264,19 +310,24 @@ fn admitted_async_finalizer_masks_are_observed_across_poll_and_completion() {
         lab.run_until_idle();
         let task = (*observed.lock()).expect("the finalizer really ran");
         assert_eq!(completed.load(Ordering::SeqCst), 1);
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(0)
+        );
         let masked_acks = lab
             .oracles
             .cancellation_protocol
             .all_violations()
             .into_iter()
-            .filter(|violation| matches!(
-                violation,
-                CancellationProtocolViolation::CancelAckWhileMasked {
-                    task: observed,
-                    ..
-                } if *observed == task
-            ))
+            .filter(|violation| {
+                matches!(
+                    violation,
+                    CancellationProtocolViolation::CancelAckWhileMasked {
+                        task: observed,
+                        ..
+                    } if *observed == task
+                )
+            })
             .count();
         assert_eq!(masked_acks, usize::from(broken));
         assert!(lab.is_quiescent());
@@ -335,24 +386,40 @@ fn acknowledgement_before_a_persistent_finalizer_mask_is_not_rechecked_at_receip
             }
             stored.poll(poll_cx)
         });
-        lab.state.store_spawned_task(
-            task,
-            crate::runtime::StoredTask::new_with_id(wrapped, task),
-        );
+        lab.state
+            .store_spawned_task(task, crate::runtime::StoredTask::new_with_id(wrapped, task));
         lab.scheduler.lock().schedule(task, priority);
         effects.dispatch();
         lab.step_for_test();
         assert_eq!(completed.load(Ordering::SeqCst), 0);
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(1));
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(1)
+        );
         assert!(
-            !lab.oracles.cancellation_protocol.all_violations().iter().any(|violation| {
-                matches!(violation, CancellationProtocolViolation::CancelAckWhileMasked { .. })
-            })
+            !lab.oracles
+                .cancellation_protocol
+                .all_violations()
+                .iter()
+                .any(|violation| {
+                    matches!(
+                        violation,
+                        CancellationProtocolViolation::CancelAckWhileMasked { .. }
+                    )
+                })
         );
         lab.run_until_idle();
         assert_eq!(completed.load(Ordering::SeqCst), 1);
-        assert_eq!(lab.oracles.cancellation_protocol.task_mask_depth(task), Some(0));
-        assert!(lab.oracles.cancellation_protocol.all_violations().is_empty());
+        assert_eq!(
+            lab.oracles.cancellation_protocol.task_mask_depth(task),
+            Some(0)
+        );
+        assert!(
+            lab.oracles
+                .cancellation_protocol
+                .all_violations()
+                .is_empty()
+        );
         assert!(lab.is_quiescent());
     }
 }

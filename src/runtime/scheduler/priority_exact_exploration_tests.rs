@@ -19,25 +19,41 @@ fn exact_inventory_preserves_priority_deadline_and_cancel_streak_policy() {
     scheduler.schedule_cancel(task(7), 0);
 
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 16).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 16)
+            .unwrap(),
         vec![(task(7), DispatchLane::Cancel)]
     );
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, false, 16).unwrap(),
-        vec![(task(1), DispatchLane::Ready), (task(2), DispatchLane::Ready)]
+        scheduler
+            .exact_exploration_choices(Time::ZERO, false, 16)
+            .unwrap(),
+        vec![
+            (task(1), DispatchLane::Ready),
+            (task(2), DispatchLane::Ready)
+        ]
     );
     assert_eq!(
         scheduler
             .exact_exploration_choices(Time::from_nanos(20), false, 16)
             .unwrap(),
-        vec![(task(4), DispatchLane::Timed), (task(5), DispatchLane::Timed)]
+        vec![
+            (task(4), DispatchLane::Timed),
+            (task(5), DispatchLane::Timed)
+        ]
     );
-    assert_eq!(scheduler.len(), 7, "inventory must not mutate scheduling state");
+    assert_eq!(
+        scheduler.len(),
+        7,
+        "inventory must not mutate scheduling state"
+    );
 
     let mut cancel_only = Scheduler::new();
     cancel_only.schedule_cancel(task(8), 1);
     assert_eq!(
-        cancel_only.exact_exploration_choices(Time::ZERO, false, 1).unwrap(),
+        cancel_only
+            .exact_exploration_choices(Time::ZERO, false, 1)
+            .unwrap(),
         vec![(task(8), DispatchLane::Cancel)],
         "exhausted streak still falls back to cancel when no other lane can run"
     );
@@ -72,7 +88,10 @@ fn exact_inventory_rejects_bounded_window_overflow() {
     for index in 0..=window {
         wide.schedule(task(index as u32), 0);
     }
-    assert!(wide.exact_exploration_choices(Time::ZERO, true, window + 1).is_err());
+    assert!(
+        wide.exact_exploration_choices(Time::ZERO, true, window + 1)
+            .is_err()
+    );
     assert!(wide.exact_exploration_choices(Time::ZERO, true, 1).is_err());
     assert_eq!(wide.len(), window + 1);
 }
@@ -93,9 +112,21 @@ fn exact_inventory_matches_normal_cancel_promotions_and_repeated_cancels() {
 
     let mut scheduler = build();
     let before = format!("{scheduler:?}");
-    let choices = scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap();
-    assert_eq!(choices, vec![(task(1), DispatchLane::Cancel), (task(2), DispatchLane::Cancel)]);
-    assert_eq!(format!("{scheduler:?}"), before, "inventory must not prune promotion copies");
+    let choices = scheduler
+        .exact_exploration_choices(Time::ZERO, true, 8)
+        .unwrap();
+    assert_eq!(
+        choices,
+        vec![
+            (task(1), DispatchLane::Cancel),
+            (task(2), DispatchLane::Cancel)
+        ]
+    );
+    assert_eq!(
+        format!("{scheduler:?}"),
+        before,
+        "inventory must not prune promotion copies"
+    );
 
     // Compare the admitted set with the actual ordinary selector, including
     // each duplicate's physical RNG slot and the lower-priority re-cancel.
@@ -111,17 +142,31 @@ fn exact_inventory_matches_normal_cancel_promotions_and_repeated_cancels() {
     for (selected, lane) in choices {
         scheduler = build();
         scheduler.take_exact(selected, lane, Time::ZERO).unwrap();
-        let remaining = if selected == task(1) { task(2) } else { task(1) };
+        let remaining = if selected == task(1) {
+            task(2)
+        } else {
+            task(1)
+        };
         assert_eq!(
-            scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap(),
+            scheduler
+                .exact_exploration_choices(Time::ZERO, true, 8)
+                .unwrap(),
             vec![(remaining, DispatchLane::Cancel)]
         );
-        scheduler.take_exact(remaining, DispatchLane::Cancel, Time::ZERO).unwrap();
+        scheduler
+            .take_exact(remaining, DispatchLane::Cancel, Time::ZERO)
+            .unwrap();
         assert_eq!(
-            scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap(),
+            scheduler
+                .exact_exploration_choices(Time::ZERO, true, 8)
+                .unwrap(),
             vec![(task(3), DispatchLane::Ready)]
         );
-        assert_eq!(scheduler.len(), 1, "retired promotion copies must not become fresh work");
+        assert_eq!(
+            scheduler.len(),
+            1,
+            "retired promotion copies must not become fresh work"
+        );
     }
 }
 
@@ -135,18 +180,30 @@ fn exact_inventory_preserves_cancel_promotion_refusal_boundaries() {
         promoted.exact_exploration_choices(Time::ZERO, false, 8),
         Err("cancel promotions in a non-cancel frontier are unsupported")
     );
-    assert_eq!(format!("{promoted:?}"), before, "streak refusal must not alter a queue");
+    assert_eq!(
+        format!("{promoted:?}"),
+        before,
+        "streak refusal must not alter a queue"
+    );
     assert_eq!(
         promoted.pop_non_cancel_with_rng_if_due(0, Time::ZERO),
         Some((task(1), DispatchLane::Ready)),
         "ordinary streak-limited selection really can claim the old lane"
     );
-    assert!(promoted.exact_exploration_choices(Time::ZERO, true, 8).is_err(),
-        "a stale post-dispatch cancel entry is still unsupported");
+    assert!(
+        promoted
+            .exact_exploration_choices(Time::ZERO, true, 8)
+            .is_err(),
+        "a stale post-dispatch cancel entry is still unsupported"
+    );
 
     let mut duplicate = Scheduler::new();
     duplicate.schedule(task(2), 0);
-    duplicate.ready_lane.push(SchedulerEntry { task: task(2), priority: 0, generation: 1 });
+    duplicate.ready_lane.push(SchedulerEntry {
+        task: task(2),
+        priority: 0,
+        generation: 1,
+    });
     duplicate.move_to_cancel_lane(task(2), 0);
     assert_eq!(
         duplicate.exact_exploration_choices(Time::ZERO, true, 8),
@@ -168,25 +225,42 @@ fn exact_inventory_counts_physical_cancel_entries_before_deduplication() {
         Err("scheduler tie group exceeds the legacy selection window"),
         "one distinct task does not authorize widening its physical tie group"
     );
-    assert!(scheduler.exact_exploration_choices(Time::ZERO, true, window + 1).is_err(),
-        "inventory also charges the lower-lane promotion copy");
+    assert!(
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, window + 1)
+            .is_err(),
+        "inventory also charges the lower-lane promotion copy"
+    );
     assert_eq!(format!("{scheduler:?}"), before);
 }
 
 #[test]
 fn exact_inventory_charges_discarded_copies_when_new_work_arrives() {
     let mut scheduler = Scheduler::with_capacity(1);
-    let window = scheduler.scratch_entries.capacity().min(scheduler.scratch_timed.capacity());
+    let window = scheduler
+        .scratch_entries
+        .capacity()
+        .min(scheduler.scratch_timed.capacity());
     scheduler.schedule(task(0), 0);
     scheduler.move_to_cancel_lane(task(0), 1);
-    scheduler.validate_exact_exploration_copy_bound(0, 2).unwrap();
+    scheduler
+        .validate_exact_exploration_copy_bound(0, 2)
+        .unwrap();
     let discarded = scheduler.exact_exploration_discarded_copies(task(0));
     assert_eq!(discarded, 1);
-    scheduler.take_exact(task(0), DispatchLane::Cancel, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(task(0), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     for index in 1..=window {
         scheduler.schedule(task(index as u32), 0);
     }
-    assert_eq!(scheduler.exact_exploration_choices(Time::ZERO, true, window).unwrap().len(), window);
+    assert_eq!(
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, window)
+            .unwrap()
+            .len(),
+        window
+    );
     assert_eq!(
         scheduler.validate_exact_exploration_copy_bound(discarded, window + 1),
         Err("cancel-copy inventory exceeds the legacy selection window"),
@@ -197,7 +271,9 @@ fn exact_inventory_charges_discarded_copies_when_new_work_arrives() {
         Err("discarded cancel copies exceed the inventory bound")
     );
     scheduler.remove(task(window as u32));
-    scheduler.validate_exact_exploration_copy_bound(discarded, window).unwrap();
+    scheduler
+        .validate_exact_exploration_copy_bound(discarded, window)
+        .unwrap();
 }
 
 #[test]
@@ -208,12 +284,18 @@ fn exact_inventory_keeps_full_task_generations_distinct() {
     scheduler.schedule(old, 0);
     scheduler.schedule(new, 0);
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 2).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 2)
+            .unwrap(),
         vec![(old, DispatchLane::Ready), (new, DispatchLane::Ready)]
     );
-    scheduler.take_exact(new, DispatchLane::Ready, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(new, DispatchLane::Ready, Time::ZERO)
+        .unwrap();
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 1).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 1)
+            .unwrap(),
         vec![(old, DispatchLane::Ready)]
     );
 
@@ -222,12 +304,18 @@ fn exact_inventory_keeps_full_task_generations_distinct() {
     scheduler.move_to_cancel_lane(new, 1);
     scheduler.move_to_cancel_lane(new, 1);
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 5).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 5)
+            .unwrap(),
         vec![(old, DispatchLane::Cancel), (new, DispatchLane::Cancel)]
     );
-    scheduler.take_exact(new, DispatchLane::Cancel, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(new, DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 2).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 2)
+            .unwrap(),
         vec![(old, DispatchLane::Cancel)],
         "retiring a new generation must retain the old generation's promotion"
     );
@@ -244,9 +332,13 @@ fn exact_inventory_retained_copies_preserve_multi_poll_cleanup_frontiers() {
     }
     let mut copies = Vec::new();
     for poll in 0..3 {
-        exact.validate_exact_exploration_copies(Time::ZERO, true, &copies, 16).unwrap();
+        exact
+            .validate_exact_exploration_copies(Time::ZERO, true, &copies, 16)
+            .unwrap();
         assert_eq!(
-            exact.exact_exploration_choices(Time::ZERO, true, 16).unwrap(),
+            exact
+                .exact_exploration_choices(Time::ZERO, true, 16)
+                .unwrap(),
             vec![(task(1), DispatchLane::Cancel)]
         );
         assert_eq!(
@@ -254,7 +346,9 @@ fn exact_inventory_retained_copies_preserve_multi_poll_cleanup_frontiers() {
             Some((task(1), DispatchLane::Cancel))
         );
         copies.extend(exact.exact_exploration_cancel_copies(task(1)));
-        exact.take_exact(task(1), DispatchLane::Cancel, Time::ZERO).unwrap();
+        exact
+            .take_exact(task(1), DispatchLane::Cancel, Time::ZERO)
+            .unwrap();
         if poll < 2 {
             // A real Pending cleanup poll wakes Ready and checkpoint
             // reconciliation promotes that fresh entry into Cancel.
@@ -265,9 +359,13 @@ fn exact_inventory_retained_copies_preserve_multi_poll_cleanup_frontiers() {
         }
     }
     assert_eq!(copies.len(), 3);
-    exact.validate_exact_exploration_copies(Time::ZERO, true, &copies, 16).unwrap();
+    exact
+        .validate_exact_exploration_copies(Time::ZERO, true, &copies, 16)
+        .unwrap();
     assert_eq!(
-        exact.exact_exploration_choices(Time::ZERO, true, 16).unwrap(),
+        exact
+            .exact_exploration_choices(Time::ZERO, true, 16)
+            .unwrap(),
         vec![(task(2), DispatchLane::Ready)]
     );
     assert_eq!(
@@ -283,15 +381,23 @@ fn exact_inventory_rejects_changed_copy_rank_even_for_the_same_task_set() {
     scheduler.schedule(task(1), 2);
     scheduler.move_to_cancel_lane(task(1), 9);
     let copies = scheduler.exact_exploration_cancel_copies(task(1));
-    scheduler.take_exact(task(1), DispatchLane::Cancel, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(task(1), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
 
     // A dormant task's stale copy may survive while another task is selected.
     scheduler.schedule(task(2), 3);
-    scheduler.validate_exact_exploration_copies(Time::ZERO, true, &copies, 8).unwrap();
-    scheduler.take_exact(task(2), DispatchLane::Ready, Time::ZERO).unwrap();
+    scheduler
+        .validate_exact_exploration_copies(Time::ZERO, true, &copies, 8)
+        .unwrap();
+    scheduler
+        .take_exact(task(2), DispatchLane::Ready, Time::ZERO)
+        .unwrap();
     scheduler.schedule(task(1), 1);
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 8)
+            .unwrap(),
         vec![(task(1), DispatchLane::Ready)]
     );
     let before = format!("{scheduler:?}");
@@ -309,7 +415,9 @@ fn exact_inventory_rejects_copy_frontiers_that_add_tasks_or_change_lanes() {
     scheduler.schedule(task(1), 3);
     scheduler.move_to_cancel_lane(task(1), 9);
     let copies = scheduler.exact_exploration_cancel_copies(task(1));
-    scheduler.take_exact(task(1), DispatchLane::Cancel, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(task(1), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     scheduler.schedule(task(1), 1);
     scheduler.schedule(task(2), 3);
     assert_eq!(
@@ -320,7 +428,12 @@ fn exact_inventory_rejects_copy_frontiers_that_add_tasks_or_change_lanes() {
     scheduler.remove(task(1));
     scheduler.remove(task(2));
     scheduler.schedule_timed(task(1), Time::from_nanos(20));
-    assert!(scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap().is_empty());
+    assert!(
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 8)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         scheduler.validate_exact_exploration_copies(Time::ZERO, true, &copies, 8),
         Err("retained cancel copies change the eligible scheduler frontier"),
@@ -334,7 +447,9 @@ fn exact_inventory_retained_timed_and_cancel_copies_preserve_their_ranks() {
     timed.schedule_timed(task(1), Time::from_nanos(10));
     timed.move_to_cancel_lane(task(1), 9);
     let copies = timed.exact_exploration_cancel_copies(task(1));
-    timed.take_exact(task(1), DispatchLane::Cancel, Time::ZERO).unwrap();
+    timed
+        .take_exact(task(1), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     timed.schedule_timed(task(1), Time::from_nanos(20));
     assert_eq!(
         timed.validate_exact_exploration_copies(Time::from_nanos(20), true, &copies, 8),
@@ -347,11 +462,21 @@ fn exact_inventory_retained_timed_and_cancel_copies_preserve_their_ranks() {
     cancel.move_to_cancel_lane(task(2), 9);
     cancel.move_to_cancel_lane(task(2), 9);
     let copies = cancel.exact_exploration_cancel_copies(task(2));
-    assert_eq!(copies.len(), 2, "only one highest-priority actual entry is consumed");
-    cancel.take_exact(task(2), DispatchLane::Cancel, Time::ZERO).unwrap();
+    assert_eq!(
+        copies.len(),
+        2,
+        "only one highest-priority actual entry is consumed"
+    );
+    cancel
+        .take_exact(task(2), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     cancel.schedule_cancel(task(2), 9);
-    cancel.validate_exact_exploration_copies(Time::ZERO, true, &copies, 8).unwrap();
-    cancel.take_exact(task(2), DispatchLane::Cancel, Time::ZERO).unwrap();
+    cancel
+        .validate_exact_exploration_copies(Time::ZERO, true, &copies, 8)
+        .unwrap();
+    cancel
+        .take_exact(task(2), DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     cancel.schedule_cancel(task(2), 3);
     assert_eq!(
         cancel.validate_exact_exploration_copies(Time::ZERO, true, &copies, 8),
@@ -367,11 +492,17 @@ fn exact_inventory_retained_copies_do_not_alias_reused_task_slots() {
     scheduler.schedule(old, 9);
     scheduler.move_to_cancel_lane(old, 10);
     let copies = scheduler.exact_exploration_cancel_copies(old);
-    scheduler.take_exact(old, DispatchLane::Cancel, Time::ZERO).unwrap();
+    scheduler
+        .take_exact(old, DispatchLane::Cancel, Time::ZERO)
+        .unwrap();
     scheduler.schedule(new, 0);
-    scheduler.validate_exact_exploration_copies(Time::ZERO, true, &copies, 8).unwrap();
+    scheduler
+        .validate_exact_exploration_copies(Time::ZERO, true, &copies, 8)
+        .unwrap();
     assert_eq!(
-        scheduler.exact_exploration_choices(Time::ZERO, true, 8).unwrap(),
+        scheduler
+            .exact_exploration_choices(Time::ZERO, true, 8)
+            .unwrap(),
         vec![(new, DispatchLane::Ready)]
     );
     scheduler.schedule(old, 0);

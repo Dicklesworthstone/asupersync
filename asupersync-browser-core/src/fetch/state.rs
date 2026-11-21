@@ -24,21 +24,40 @@ pub(super) fn prepare(
     limits: FetchBytesLimits,
     consumer_version: Option<WasmAbiVersion>,
 ) -> Result<(WasmFetchRequest, FetchLease), FetchBytesError> {
-    if request.body.as_ref().is_some_and(|body| body.len() > limits.max_request_bytes) {
-        return Err(FetchBytesError::RequestLimit { limit: limits.max_request_bytes });
+    if request
+        .body
+        .as_ref()
+        .is_some_and(|body| body.len() > limits.max_request_bytes)
+    {
+        return Err(FetchBytesError::RequestLimit {
+            limit: limits.max_request_bytes,
+        });
     }
-    let request = crate::normalize_fetch_request(request)
-        .map_err(|_| FetchBytesError::InvalidRequest)?;
+    let request =
+        crate::normalize_fetch_request(request).map_err(|_| FetchBytesError::InvalidRequest)?;
     // Only a runtime or region handle can own a fetch. The dispatcher reports
     // any other kind as an invalid request; this API documents it as
     // `OwnerUnavailable` ("wrong handle kind").
-    if !matches!(request.scope.kind, WasmHandleKind::Region | WasmHandleKind::Runtime) {
+    if !matches!(
+        request.scope.kind,
+        WasmHandleKind::Region | WasmHandleKind::Runtime
+    ) {
         return Err(FetchBytesError::OwnerUnavailable);
     }
-    let handle = crate::DISPATCHER.with(|dispatcher| {
-        dispatcher.borrow_mut().fetch_request(&request, consumer_version)
-    }).map_err(admission_error)?;
-    Ok((request, FetchLease { handle: Some(handle), _local: PhantomData }))
+    let handle = crate::DISPATCHER
+        .with(|dispatcher| {
+            dispatcher
+                .borrow_mut()
+                .fetch_request(&request, consumer_version)
+        })
+        .map_err(admission_error)?;
+    Ok((
+        request,
+        FetchLease {
+            handle: Some(handle),
+            _local: PhantomData,
+        },
+    ))
 }
 
 // A dispatcher handle belongs to this thread/JS realm. Even the host-free test
@@ -50,14 +69,19 @@ pub(super) struct FetchLease {
 
 impl FetchLease {
     pub(super) fn handle(&self) -> WasmHandleRef {
-        self.handle.expect("fetch lease exists until terminal publication")
+        self.handle
+            .expect("fetch lease exists until terminal publication")
     }
 
     pub(super) fn check_active(&self) -> Result<(), FetchBytesError> {
-        let Some(handle) = self.handle else { return Err(FetchBytesError::Cancelled); };
+        let Some(handle) = self.handle else {
+            return Err(FetchBytesError::Cancelled);
+        };
         crate::DISPATCHER.with(|dispatcher| {
             let dispatcher = dispatcher.borrow();
-            if dispatcher.handles().get(&handle)
+            if dispatcher
+                .handles()
+                .get(&handle)
                 .is_ok_and(|entry| entry.state == WasmBoundaryState::Active)
             {
                 Ok(())
@@ -67,8 +91,13 @@ impl FetchLease {
         })
     }
 
-    pub(super) fn publish(&mut self, outcome: WasmAbiOutcomeEnvelope) -> Result<(), FetchBytesError> {
-        let Some(handle) = self.handle else { return Err(FetchBytesError::Publication); };
+    pub(super) fn publish(
+        &mut self,
+        outcome: WasmAbiOutcomeEnvelope,
+    ) -> Result<(), FetchBytesError> {
+        let Some(handle) = self.handle else {
+            return Err(FetchBytesError::Publication);
+        };
         if !crate::dispatcher_handle_is_live(&handle) {
             self.handle = None;
             return Err(FetchBytesError::Cancelled);
@@ -76,13 +105,15 @@ impl FetchLease {
         if matches!(&outcome, WasmAbiOutcomeEnvelope::Ok { .. }) {
             self.check_active()?;
         }
-        crate::DISPATCHER.with(|dispatcher| {
-            let mut dispatcher = dispatcher.borrow_mut();
-            if matches!(&outcome, WasmAbiOutcomeEnvelope::Cancelled { .. }) {
-                let _ = dispatcher.apply_abort(&handle);
-            }
-            dispatcher.fetch_complete(&handle, outcome)
-        }).map_err(|_| FetchBytesError::Publication)?;
+        crate::DISPATCHER
+            .with(|dispatcher| {
+                let mut dispatcher = dispatcher.borrow_mut();
+                if matches!(&outcome, WasmAbiOutcomeEnvelope::Cancelled { .. }) {
+                    let _ = dispatcher.apply_abort(&handle);
+                }
+                dispatcher.fetch_complete(&handle, outcome)
+            })
+            .map_err(|_| FetchBytesError::Publication)?;
         self.handle = None;
         Ok(())
     }
@@ -90,7 +121,9 @@ impl FetchLease {
 
 impl Drop for FetchLease {
     fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else { return; };
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
         // Generation validation prevents a late destructor from releasing a
         // different request after owner close and slot reuse.
         if crate::dispatcher_handle_is_live(&handle) {
@@ -110,7 +143,9 @@ pub(super) fn error_outcome(error: FetchBytesError) -> WasmAbiOutcomeEnvelope {
         // Typed fixed-size errors cannot serialize credentials, URL queries,
         // host exception objects or arbitrary response bodies into diagnostics.
         let recoverability = match error {
-            FetchBytesError::Host { .. } | FetchBytesError::Allocation => WasmAbiRecoverability::Transient,
+            FetchBytesError::Host { .. } | FetchBytesError::Allocation => {
+                WasmAbiRecoverability::Transient
+            }
             _ => WasmAbiRecoverability::Permanent,
         };
         crate::fetch_error_outcome(error.to_string(), recoverability)
@@ -129,17 +164,27 @@ impl BodyBudget {
 
     pub(super) fn begin_read(&mut self) -> Result<(), FetchBytesError> {
         if self.reads >= self.limits.max_body_reads {
-            return Err(FetchBytesError::ReadLimit { limit: self.limits.max_body_reads });
+            return Err(FetchBytesError::ReadLimit {
+                limit: self.limits.max_body_reads,
+            });
         }
         // The comparison also makes the increment safe when the limit is MAX.
         self.reads += 1;
         Ok(())
     }
 
-    pub(super) fn checked_end(&self, current: usize, extra: usize) -> Result<usize, FetchBytesError> {
-        let end = current.checked_add(extra).ok_or(FetchBytesError::LengthOverflow)?;
+    pub(super) fn checked_end(
+        &self,
+        current: usize,
+        extra: usize,
+    ) -> Result<usize, FetchBytesError> {
+        let end = current
+            .checked_add(extra)
+            .ok_or(FetchBytesError::LengthOverflow)?;
         if end > self.limits.max_response_bytes {
-            Err(FetchBytesError::ResponseLimit { limit: self.limits.max_response_bytes })
+            Err(FetchBytesError::ResponseLimit {
+                limit: self.limits.max_response_bytes,
+            })
         } else {
             Ok(end)
         }
@@ -147,10 +192,15 @@ impl BodyBudget {
 
     // The caller obtains a checked destination before reading/copying the JS
     // chunk. On refusal the existing prefix is unchanged and never returned.
-    pub(super) fn reserve_chunk(&self, body: &mut Vec<u8>, extra: usize) -> Result<Range<usize>, FetchBytesError> {
+    pub(super) fn reserve_chunk(
+        &self,
+        body: &mut Vec<u8>,
+        extra: usize,
+    ) -> Result<Range<usize>, FetchBytesError> {
         let start = body.len();
         let end = self.checked_end(start, extra)?;
-        body.try_reserve_exact(extra).map_err(|_| FetchBytesError::Allocation)?;
+        body.try_reserve_exact(extra)
+            .map_err(|_| FetchBytesError::Allocation)?;
         body.resize(end, 0);
         Ok(start..end)
     }

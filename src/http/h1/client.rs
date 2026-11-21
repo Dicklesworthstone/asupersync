@@ -8,8 +8,8 @@ use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHin
 use crate::http::h1::codec::{
     CHUNK_METADATA_ALLOWANCE_BYTES, ChunkedBodyDecoder, HttpError, append_chunk_size_line,
     append_decimal, chunk_size_line_metadata_bytes, find_chunk_size_line_end, is_forbidden_trailer,
-    parse_chunk_size_line, parse_header_line,
-    require_transfer_encoding_chunked, trim_ows, unique_header_value, validate_header_field,
+    parse_chunk_size_line, parse_header_line, require_transfer_encoding_chunked, trim_ows,
+    unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -547,11 +547,10 @@ impl Http1ClientCodec {
         if src.is_empty() && matches!(self.state, ClientDecodeState::Head) {
             Ok(None)
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "incomplete frame at EOF",
+            Err(
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "incomplete frame at EOF")
+                    .into(),
             )
-            .into())
         }
     }
 }
@@ -776,10 +775,12 @@ impl Http1Client {
                         if (100..=199).contains(&response.status) && response.status != 101 {
                             informational_responses += 1;
                             if informational_responses > MAX_INFORMATIONAL_RESPONSES {
-                                return Poll::Ready(Err(HttpError::TooManyInformationalResponses {
-                                    actual: informational_responses,
-                                    limit: MAX_INFORMATIONAL_RESPONSES,
-                                }));
+                                return Poll::Ready(Err(
+                                    HttpError::TooManyInformationalResponses {
+                                        actual: informational_responses,
+                                        limit: MAX_INFORMATIONAL_RESPONSES,
+                                    },
+                                ));
                             }
                             if response.status == 100 {
                                 upload.allow_body();
@@ -1231,7 +1232,12 @@ fn streaming_request_head(
     } else {
         None
     };
-    if head.headers.len().saturating_add(usize::from(generated.is_some())) > MAX_HEADERS {
+    if head
+        .headers
+        .len()
+        .saturating_add(usize::from(generated.is_some()))
+        > MAX_HEADERS
+    {
         return Err(HttpError::TooManyHeaders);
     }
     let expect_continue = unique_header_value(&head.headers, "Expect")?
@@ -1395,7 +1401,10 @@ impl<D: Buf> RequestBodyUpload<D> {
             | UploadPhase::ChunkSuffix
             | UploadPhase::FinalBytes => {
                 if self.wire_offset < self.wire.len() {
-                    let end = self.wire.len().min(self.wire_offset.saturating_add(16 * 1024));
+                    let end = self
+                        .wire
+                        .len()
+                        .min(self.wire_offset.saturating_add(16 * 1024));
                     let remaining = &self.wire[self.wire_offset..end];
                     let written =
                         std::task::ready!(Pin::new(&mut *io).poll_write(task, remaining))?;
@@ -1460,7 +1469,8 @@ impl<D: Buf> RequestBodyUpload<D> {
                         }
                     }
                     Some(Ok(Frame::Trailers(trailers))) => {
-                        if !matches!(self.framing, UploadFraming::Chunked) || self.trailers.is_some()
+                        if !matches!(self.framing, UploadFraming::Chunked)
+                            || self.trailers.is_some()
                         {
                             return Poll::Ready(Err(HttpError::TrailersNotAllowed));
                         }

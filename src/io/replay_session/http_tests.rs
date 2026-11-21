@@ -50,7 +50,10 @@ impl AsyncRead for HttpTransport {
             return Poll::Pending;
         }
         this.pause_read = true;
-        let count = buf.remaining().min(5).min(this.response.len() - this.offset);
+        let count = buf
+            .remaining()
+            .min(5)
+            .min(this.response.len() - this.offset);
         buf.put_slice(&this.response[this.offset..this.offset + count]);
         this.offset += count;
         Poll::Ready(Ok(()))
@@ -120,7 +123,11 @@ where
 
 fn capture_http(
     response: &'static [u8],
-) -> (RecordedSession, Result<Response, HttpError>, Arc<AtomicUsize>) {
+) -> (
+    RecordedSession,
+    Result<Response, HttpError>,
+    Arc<AtomicUsize>,
+) {
     let transport = HttpTransport::new(response);
     let calls = Arc::clone(&transport.calls);
     let mut capture = RecordingSession::new(
@@ -136,7 +143,12 @@ fn capture_http(
     .unwrap();
     let entropy = capture.entropy();
     let clock = capture.clock();
-    let result = drive(request(capture.io(), entropy.as_ref(), clock.as_ref(), "/resource"));
+    let result = drive(request(
+        capture.io(),
+        entropy.as_ref(),
+        clock.as_ref(),
+        "/resource",
+    ));
     let (transport, session) = capture.into_parts();
     assert!(transport.writes.starts_with(b"GET /resource HTTP/1.1\r\n"));
     assert!(transport.writes.windows(7).any(|part| part == b"X-Nonce"));
@@ -154,7 +166,9 @@ fn restore(session: RecordedSession) -> ReplaySession {
         SessionDecodeLimits {
             max_encoded_bytes: 1_048_576,
             io: IoTapeDecodeLimits::new(
-                1_048_576, IoCaptureLimits::new(1000, 4096, 65_536, 8), 1_048_576,
+                1_048_576,
+                IoCaptureLimits::new(1000, 4096, 65_536, 8),
+                1_048_576,
             ),
             entropy: EntropyTapeDecodeLimits::new(1024, EntropyCaptureLimits::new(8, 64, 1), 4096),
             clock: TimeTapeDecodeLimits::new(1024, 8, 64),
@@ -173,10 +187,17 @@ fn real_http_client_chunked_body_and_trailers_replay_after_all_sources_are_gone(
     let original = original.unwrap();
     assert_eq!(original.status, 200);
     assert_eq!(original.body, b"yes");
-    assert!(original.trailers.iter().any(|(name, value)| name.eq_ignore_ascii_case("x-replay") && value == "kept"));
+    assert!(
+        original
+            .trailers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("x-replay") && value == "kept")
+    );
     let polls_before = calls.load(Ordering::Relaxed);
-    let response = drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/resource")))
-        .unwrap().unwrap();
+    let response =
+        drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/resource")))
+            .unwrap()
+            .unwrap();
     assert_eq!(response.status, original.status);
     assert_eq!(response.headers, original.headers);
     assert_eq!(response.body, original.body);
@@ -186,12 +207,11 @@ fn real_http_client_chunked_body_and_trailers_replay_after_all_sources_are_gone(
 
 #[test]
 fn real_http_client_malformed_framing_reproduces_the_original_parser_error() {
-    let (session, original, _) = capture_http(
-        b"HTTP/1.1 200 OK\r\nContent-Length: +3\r\n\r\nyes",
-    );
+    let (session, original, _) = capture_http(b"HTTP/1.1 200 OK\r\nContent-Length: +3\r\n\r\nyes");
     assert!(matches!(original, Err(HttpError::BadContentLength)));
-    let result = drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/resource")))
-        .unwrap();
+    let result =
+        drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/resource")))
+            .unwrap();
     assert!(matches!(result, Err(HttpError::BadContentLength)));
 }
 
@@ -199,11 +219,16 @@ fn real_http_client_malformed_framing_reproduces_the_original_parser_error() {
 fn real_http_client_different_request_cannot_be_accepted_as_recorded_network_error() {
     let (session, original, _) = capture_http(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nyes");
     assert_eq!(original.unwrap().body, b"yes");
-    let error = drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/modified")))
-        .unwrap_err();
+    let error =
+        drive(restore(session).run(1000, |p| request(p.io, p.entropy, p.clock, "/modified")))
+            .unwrap_err();
     // The HTTP client reports an I/O error, but the session rejects its output:
     // it was manufactured by divergence, not an error observed in production.
-    assert!(matches!(error, SessionRunError::Replay(SessionReplayError {
-        io: Some(IoReplayCompletionError::Diverged(_)), ..
-    })));
+    assert!(matches!(
+        error,
+        SessionRunError::Replay(SessionReplayError {
+            io: Some(IoReplayCompletionError::Diverged(_)),
+            ..
+        })
+    ));
 }

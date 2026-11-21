@@ -2115,7 +2115,8 @@ impl std::fmt::Debug for MySqlConnectOptions {
 
 /// SSL connection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SslMode {    /// Never use SSL.
+pub enum SslMode {
+    /// Never use SSL.
     #[default]
     Disabled,
     /// Use verified TLS and reject servers that do not advertise it.
@@ -2775,7 +2776,9 @@ impl MySqlPoolReset {
             };
             if bytes.is_empty()
                 || bytes.len() > 64
-                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                || !bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
             {
                 return Err(MySqlError::Protocol(
                     "invalid charset or collation in MySQL pool session baseline".to_string(),
@@ -3259,14 +3262,19 @@ impl MySqlConnection {
             options.connect_timeout.unwrap_or(MYSQL_CONNECT_TIMEOUT),
         );
         let capture_pool_session = capture_pool_session
-            && options.database.as_ref().is_some_and(|database| !database.is_empty());
+            && options
+                .database
+                .as_ref()
+                .is_some_and(|database| !database.is_empty());
         let mut connecting = std::pin::pin!(async {
             let mut conn = match Self::connect_inner(
                 options,
                 additional_capabilities,
                 #[cfg(feature = "tls")]
                 connector,
-            ).await {
+            )
+            .await
+            {
                 Outcome::Ok(conn) => conn,
                 other => return other,
             };
@@ -3296,10 +3304,10 @@ impl MySqlConnection {
             // TCP, TLS, and the existing packet helpers all see the caller's Cx.
             let _current = Cx::set_current(Some(cx.clone()));
             if Pin::new(&mut deadline).poll_deadline(task_cx).is_ready() {
-                    return Poll::Ready(Outcome::Err(MySqlError::Io(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "MySQL connection, TLS negotiation, authentication, or pool baseline timed out",
-                    ))));
+                return Poll::Ready(Outcome::Err(MySqlError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MySQL connection, TLS negotiation, authentication, or pool baseline timed out",
+                ))));
             }
             connecting.as_mut().poll(task_cx)
         })
@@ -6118,7 +6126,9 @@ impl MySqlConnection {
         // supported collations differ across MySQL and MariaDB versions.
         let original_row_limit = self.inner.max_result_rows;
         self.inner.max_result_rows = 1;
-        let baseline = self.query_unchecked_inner_impl(cx, POOL_SESSION_BASELINE_SQL).await;
+        let baseline = self
+            .query_unchecked_inner_impl(cx, POOL_SESSION_BASELINE_SQL)
+            .await;
         self.inner.max_result_rows = original_row_limit;
         let rows = match baseline {
             Outcome::Ok(rows) => rows,
@@ -6130,7 +6140,8 @@ impl MySqlConnection {
         if self.inner.status_flags & 0x0009 != 0 {
             self.mark_unusable_after_cleanup_failure();
             return Outcome::Err(MySqlError::Protocol(
-                "unexpected transaction or extra results in MySQL pool session baseline".to_string(),
+                "unexpected transaction or extra results in MySQL pool session baseline"
+                    .to_string(),
             ));
         }
         match MySqlPoolReset::from_rows(&rows, self.inner.connect_autocommit) {
@@ -6208,7 +6219,10 @@ impl MySqlConnection {
         self.inner.max_execution_time_uncertain = false;
         self.inner.session_isolation_restore = None;
         self.inner.needs_rollback = false;
-        self.pool_reset.as_mut().expect("reset baseline remains present").pending = false;
+        self.pool_reset
+            .as_mut()
+            .expect("reset baseline remains present")
+            .pending = false;
         self.inner.closed = false;
         Ok(())
     }
@@ -6221,7 +6235,8 @@ impl MySqlConnection {
     ) -> Result<(), MySqlError> {
         if cx.checkpoint().is_err() {
             return Err(MySqlError::Cancelled(
-                cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")),
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
             ));
         }
         self.pool_reset_command_expect_ok(cx, command::COM_RESET_CONNECTION, &[], "session reset")
@@ -6251,7 +6266,8 @@ impl MySqlConnection {
         // Refuse reuse if cancellation interrupted this ownership boundary.
         if cx.checkpoint().is_err() {
             return Err(MySqlError::Cancelled(
-                cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")),
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
             ));
         }
         Ok(())
@@ -6276,14 +6292,19 @@ impl MySqlConnection {
         match data.first() {
             Some(0x00) => {
                 let ok = Self::parse_ok_packet(&data)?;
-                if ok.affected_rows != 0 || ok.last_insert_id != 0 || ok.status_flags & 0x0009 != 0 {
-                    return Err(MySqlError::Protocol(format!("invalid OK response to {what}")));
+                if ok.affected_rows != 0 || ok.last_insert_id != 0 || ok.status_flags & 0x0009 != 0
+                {
+                    return Err(MySqlError::Protocol(format!(
+                        "invalid OK response to {what}"
+                    )));
                 }
                 self.inner.status_flags = ok.status_flags;
                 Ok(())
             }
             Some(0xFF) => Err(Self::parse_error(&data)),
-            _ => Err(MySqlError::Protocol(format!("unexpected response to {what}"))),
+            _ => Err(MySqlError::Protocol(format!(
+                "unexpected response to {what}"
+            ))),
         }
     }
 
@@ -6721,10 +6742,11 @@ impl MySqlConnection {
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (response_data, seq) = match self.read_packet_with_budget(Some(cx), response_bytes).await {
-            Ok((data, seq)) => (data, seq),
-            Err(e) => return outcome_from_error(e),
-        };
+        let (response_data, seq) =
+            match self.read_packet_with_budget(Some(cx), response_bytes).await {
+                Ok((data, seq)) => (data, seq),
+                Err(e) => return outcome_from_error(e),
+            };
         self.inner.sequence = seq.wrapping_add(1);
 
         if response_data.is_empty() {
@@ -8116,7 +8138,8 @@ impl crate::database::pool::AsyncConnectionManager for MySqlConnectionManager {
             self.reset_session_on_return,
             #[cfg(feature = "tls")]
             None,
-        ).await
+        )
+        .await
     }
 
     async fn is_valid(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {

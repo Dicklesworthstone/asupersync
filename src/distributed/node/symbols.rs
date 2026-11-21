@@ -121,9 +121,8 @@ impl<T> NativeDistributedSymbolReport<T> {
     pub fn is_success(&self) -> bool {
         self.retirement.is_ok()
             && self.work.as_ref().is_some_and(|work| {
-                work.as_ref().is_ok_and(|work| {
-                    work.is_success() && matches!(&work.task, Ok(Ok(_)))
-                })
+                work.as_ref()
+                    .is_ok_and(|work| work.is_success() && matches!(&work.task, Ok(Ok(_))))
             })
     }
 }
@@ -159,7 +158,11 @@ impl Shared {
         slots.retain(|slot| {
             let finished = slot.observed.load(Ordering::Acquire)
                 || (slot.dropped.load(Ordering::Acquire)
-                    && slot.task.lock().as_ref().is_some_and(TaskHandle::is_finished));
+                    && slot
+                        .task
+                        .lock()
+                        .as_ref()
+                        .is_some_and(TaskHandle::is_finished));
             if finished {
                 retired.push(Arc::clone(slot));
             }
@@ -262,9 +265,9 @@ impl Drop for Reservation {
                 // Submission may have become visible before a callback panic.
                 // Retain the unknown slot and seal the entire owner, never
                 // misreporting an unobserved task as retired.
-                self.shared.controls.stop(
-                    NativeDistributedNodeStopCause::OwnerDropped, &mut panics,
-                );
+                self.shared
+                    .controls
+                    .stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
                 panics.run(|| {
                     if let Some(gateway) = self.shared.principal.spawn_gateway_handle() {
                         let _ = gateway.enqueue_region_command(RegionCommand::Cancel {
@@ -320,7 +323,10 @@ impl NativeDistributedNode {
         if self.controls.cause().is_some() {
             return Err(NativeDistributedSymbolError::Closed);
         }
-        let principal = self.principal.as_ref().ok_or(NativeDistributedSymbolError::Closed)?;
+        let principal = self
+            .principal
+            .as_ref()
+            .ok_or(NativeDistributedSymbolError::Closed)?;
         if !principal.capabilities().remote {
             return Err(NativeDistributedSymbolError::MissingRemote);
         }
@@ -340,7 +346,11 @@ impl NativeDistributedNode {
             {
                 return Err(NativeDistributedSymbolError::Configuration);
             }
-            if !self.controls.membership.permits_native_route(&route.node, route.incarnation) {
+            if !self
+                .controls
+                .membership
+                .permits_native_route(&route.node, route.incarnation)
+            {
                 return Err(NativeDistributedSymbolError::Membership);
             }
             // Reuse the canonical explicit identity-binding validator without
@@ -351,16 +361,30 @@ impl NativeDistributedNode {
                     NativeDistributedSymbolError::Symbol(RemoteSymbolError::Client(error))
                 })?;
             let label = route.replica_id.into_boxed_str().into_string();
-            bindings.insert(label.clone(), (NodeId::new(route.node.as_str()), route.incarnation));
+            bindings.insert(
+                label.clone(),
+                (NodeId::new(route.node.as_str()), route.incarnation),
+            );
             clients.push((label, route.client));
         }
         let transport = if let Some(chunk) = config.max_chunk_bytes {
             RemoteSymbolTransport::new_chunked_bounded(
-                principal.clone(), hello, clients, auth_key, limits, config.max_in_flight, chunk,
+                principal.clone(),
+                hello,
+                clients,
+                auth_key,
+                limits,
+                config.max_in_flight,
+                chunk,
             )?
         } else {
             RemoteSymbolTransport::new_bounded(
-                principal.clone(), hello, clients, auth_key, limits, config.max_in_flight,
+                principal.clone(),
+                hello,
+                clients,
+                auth_key,
+                limits,
+                config.max_in_flight,
             )?
         };
         Ok(NativeDistributedSymbolTransport {
@@ -395,9 +419,17 @@ impl NativeDistributedSymbolTransport {
 
     fn peer(&self, replica: &str) -> Result<(NodeId, u64), NativeDistributedSymbolError> {
         self.shared.check_open()?;
-        let peer = self.shared.routes.get(replica)
+        let peer = self
+            .shared
+            .routes
+            .get(replica)
             .ok_or(NativeDistributedSymbolError::UnknownReplica)?;
-        if !self.shared.controls.membership.permits_native_route(&peer.0, peer.1) {
+        if !self
+            .shared
+            .controls
+            .membership
+            .permits_native_route(&peer.0, peer.1)
+        {
             return Err(NativeDistributedSymbolError::Membership);
         }
         Ok(peer.clone())
@@ -425,23 +457,28 @@ impl NativeDistributedSymbolTransport {
             let result = if let Err(error) = shared.check_open() {
                 Err(error)
             } else if now >= deadline {
-                Err(NativeDistributedSymbolError::Timing(RemoteRunError::Timeout))
+                Err(NativeDistributedSymbolError::Timing(
+                    RemoteRunError::Timeout,
+                ))
             } else {
                 let transport = shared.transport.clone();
-                shared.controls.membership.run_scoped(
-                    &owner,
-                    &peer.0,
-                    peer.1,
-                    Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos())),
-                    shared.config.work.child.clone(),
-                    move |body| async move {
-                        let result = factory(transport.for_owner(body.clone())).await;
-                        let _ = body.checkpoint();
-                        result
-                    },
-                )
-                .await
-                .map_err(NativeDistributedSymbolError::Work)
+                shared
+                    .controls
+                    .membership
+                    .run_scoped(
+                        &owner,
+                        &peer.0,
+                        peer.1,
+                        Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos())),
+                        shared.config.work.child.clone(),
+                        move |body| async move {
+                            let result = factory(transport.for_owner(body.clone())).await;
+                            let _ = body.checkpoint();
+                            result
+                        },
+                    )
+                    .await
+                    .map_err(NativeDistributedSymbolError::Work)
             };
             // Preserve a useful receipt independently of late cancellation.
             *retained.lock() = Some(result);
@@ -457,9 +494,8 @@ impl NativeDistributedSymbolTransport {
                 return Err(error.into());
             }
         }
-        let retirement = poll_fn(|task| {
-            TaskAccess::new(&reservation.slot.task).poll_join(task)
-        }).await;
+        let retirement =
+            poll_fn(|task| TaskAccess::new(&reservation.slot.task).poll_join(task)).await;
         let work = outcome.lock().take();
         reservation.phase = Phase::Observed;
         Ok(NativeDistributedSymbolReport { work, retirement })
@@ -489,7 +525,8 @@ impl NativeDistributedSymbolTransport {
         &self,
         replica: &str,
         key: SymbolBatchKey,
-    ) -> Result<NativeDistributedSymbolReport<Vec<AuthenticatedSymbol>>, NativeDistributedSymbolError> {
+    ) -> Result<NativeDistributedSymbolReport<Vec<AuthenticatedSymbol>>, NativeDistributedSymbolError>
+    {
         let peer = self.peer(replica)?;
         let timing = prepare_owned_timing(&self.shared.principal, &self.shared.config.work)?;
         let reservation = self.shared.reserve()?;
@@ -513,19 +550,24 @@ fn compact_symbols(
     let mut total = 0usize;
     for symbol in &symbols {
         let size = symbol.symbol().data().len();
-        total = total.checked_add(size).ok_or(NativeDistributedSymbolError::Configuration)?;
+        total = total
+            .checked_add(size)
+            .ok_or(NativeDistributedSymbolError::Configuration)?;
         if total > limits.max_payload_bytes {
             return Err(NativeDistributedSymbolError::Configuration);
         }
     }
-    let storage = symbols.len().checked_mul(std::mem::size_of::<AuthenticatedSymbol>())
+    let storage = symbols
+        .len()
+        .checked_mul(std::mem::size_of::<AuthenticatedSymbol>())
         .and_then(|overhead| overhead.checked_add(total))
         .ok_or(NativeDistributedSymbolError::Configuration)?;
     if storage > limits.max_decoded_bytes {
         return Err(NativeDistributedSymbolError::Configuration);
     }
     let mut bounded = Vec::new();
-    bounded.try_reserve_exact(symbols.len())
+    bounded
+        .try_reserve_exact(symbols.len())
         .map_err(|_| NativeDistributedSymbolError::Configuration)?;
     for symbol in symbols {
         let tag = *symbol.tag();
@@ -533,7 +575,10 @@ fn compact_symbols(
         let id = symbol.id();
         let kind = symbol.kind();
         let payload = symbol.into_data().into_boxed_slice().into_vec();
-        bounded.push(AuthenticatedSymbol::from_parts(Symbol::new(id, payload, kind), tag));
+        bounded.push(AuthenticatedSymbol::from_parts(
+            Symbol::new(id, payload, kind),
+            tag,
+        ));
     }
     Ok(bounded)
 }
@@ -544,12 +589,16 @@ impl DistributorTransport for NativeDistributedSymbolTransport {
         replica_id: &str,
         symbols: Vec<AuthenticatedSymbol>,
     ) -> Result<ReplicaAck, ReplicaFailure> {
-        let failure = |error_kind| ReplicaFailure {
+        let failure = |error_kind| {
+            ReplicaFailure {
             replica_id: replica_id.to_owned(),
             error: "node-owned symbol transfer did not complete with valid membership and storage receipts".into(),
             error_kind,
+        }
         };
-        let report = self.store_symbols(replica_id, symbols).await
+        let report = self
+            .store_symbols(replica_id, symbols)
+            .await
             .map_err(|error| failure(admission_error_kind(&error)))?;
         let error_kind = report_error_kind(&report);
         if report.is_success() {
@@ -569,7 +618,9 @@ fn admission_error_kind(error: &NativeDistributedSymbolError) -> ErrorKind {
         NativeDistributedSymbolError::UnknownReplica => ErrorKind::NodeUnavailable,
         NativeDistributedSymbolError::Closed
         | NativeDistributedSymbolError::Timing(RemoteRunError::Cancelled) => ErrorKind::Cancelled,
-        NativeDistributedSymbolError::Timing(RemoteRunError::Timeout) => ErrorKind::DeadlineExceeded,
+        NativeDistributedSymbolError::Timing(RemoteRunError::Timeout) => {
+            ErrorKind::DeadlineExceeded
+        }
         NativeDistributedSymbolError::Symbol(error) => symbol_error_kind(error),
         _ => ErrorKind::AdmissionDenied,
     }
@@ -597,7 +648,9 @@ fn report_error_kind<T>(report: &NativeDistributedSymbolReport<T>) -> ErrorKind 
         Some(Err(error)) => admission_error_kind(error),
         Some(Ok(work)) => match &work.trigger {
             MembershipWorkTrigger::ParentCancelled(_) => ErrorKind::Cancelled,
-            MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Expired) => ErrorKind::DeadlineExceeded,
+            MembershipWorkTrigger::LeaseEnded(OwnedLeaseStatus::Expired) => {
+                ErrorKind::DeadlineExceeded
+            }
             MembershipWorkTrigger::LeaseEnded(_) => ErrorKind::AdmissionDenied,
             MembershipWorkTrigger::ControlFailed(_) => ErrorKind::Internal,
             MembershipWorkTrigger::TaskFinished => match &work.task {

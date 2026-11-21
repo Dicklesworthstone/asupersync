@@ -14,7 +14,8 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Separate capability; registering the original symbol service does not grant this one.
-pub const SYMBOL_CHUNKED_SERVICE_COMPUTATION: &str = "asupersync.distributed.symbol-store.chunked.v1";
+pub const SYMBOL_CHUNKED_SERVICE_COMPUTATION: &str =
+    "asupersync.distributed.symbol-store.chunked.v1";
 const MAGIC: &[u8; 8] = b"ASUPCHN\0";
 pub(crate) const BEGIN: u8 = 1;
 pub(crate) const CHUNK: u8 = 2;
@@ -42,25 +43,41 @@ pub struct SymbolChunkedLimits {
 impl SymbolChunkedLimits {
     /// Zero staging counts/bytes deny new uploads. Chunks and expiry must be nonzero.
     pub fn new(
-        max_chunk_bytes: usize, max_uploads: usize, max_reserved_bytes: usize,
-        max_uploads_per_peer: usize, max_reserved_bytes_per_peer: usize,
+        max_chunk_bytes: usize,
+        max_uploads: usize,
+        max_reserved_bytes: usize,
+        max_uploads_per_peer: usize,
+        max_reserved_bytes_per_peer: usize,
         upload_ttl: Duration,
     ) -> Result<Self, SymbolStoreError> {
         if max_chunk_bytes == 0 || u32::try_from(max_chunk_bytes).is_err() {
             return Err(SymbolStoreError::Limit("chunk bytes"));
         }
-        let ttl_nanos = u64::try_from(upload_ttl.as_nanos()).map_err(|_| SymbolStoreError::Overflow)?;
-        if ttl_nanos == 0 { return Err(SymbolStoreError::Limit("upload lifetime")); }
-        Ok(Self { max_chunk_bytes, max_uploads, max_reserved_bytes,
-            max_uploads_per_peer, max_reserved_bytes_per_peer, ttl_nanos })
+        let ttl_nanos =
+            u64::try_from(upload_ttl.as_nanos()).map_err(|_| SymbolStoreError::Overflow)?;
+        if ttl_nanos == 0 {
+            return Err(SymbolStoreError::Limit("upload lifetime"));
+        }
+        Ok(Self {
+            max_chunk_bytes,
+            max_uploads,
+            max_reserved_bytes,
+            max_uploads_per_peer,
+            max_reserved_bytes_per_peer,
+            ttl_nanos,
+        })
     }
 
     /// Maximum binary payload in one upload chunk or range response.
     #[must_use]
-    pub const fn max_chunk_bytes(self) -> usize { self.max_chunk_bytes }
+    pub const fn max_chunk_bytes(self) -> usize {
+        self.max_chunk_bytes
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) const fn max_uploads(self) -> usize { self.max_uploads }
+    pub(super) const fn max_uploads(self) -> usize {
+        self.max_uploads
+    }
 }
 
 /// Staged bytes only; successful immutable batches belong to the backing store.
@@ -91,7 +108,11 @@ struct Stage {
 
 impl Stage {
     fn received_bytes(&self) -> usize {
-        if self.commit.is_some() { self.upload.total } else { self.bytes.len() }
+        if self.commit.is_some() {
+            self.upload.total
+        } else {
+            self.bytes.len()
+        }
     }
 }
 
@@ -104,7 +125,9 @@ struct CommitCompletion {
 impl CommitCompletion {
     fn wait(&self) {
         let mut done = self.done.lock();
-        while !*done { self.changed.wait(&mut done); }
+        while !*done {
+            self.changed.wait(&mut done);
+        }
     }
 
     fn finish(&self) {
@@ -126,13 +149,16 @@ struct Staging {
 impl Staging {
     fn reap(&mut self, now: Time) -> usize {
         let before = self.entries.len();
-        self.entries.retain(|_, stage| stage.commit.is_some() || now < stage.expires);
+        self.entries
+            .retain(|_, stage| stage.commit.is_some() || now < stage.expires);
         self.reserved = self.entries.values().map(|stage| stage.upload.total).sum();
         before - self.entries.len()
     }
 
     fn remove(&mut self, id: &(NodeId, u64)) {
-        if let Some(stage) = self.entries.remove(id) { self.reserved -= stage.upload.total; }
+        if let Some(stage) = self.entries.remove(id) {
+            self.reserved -= stage.upload.total;
+        }
     }
 }
 
@@ -148,7 +174,10 @@ struct StagedCommit<'a> {
 
 impl StagedCommit<'_> {
     fn bytes(&self) -> &[u8] {
-        self.bytes.as_ref().expect("commit owns its staged bytes").as_slice()
+        self.bytes
+            .as_ref()
+            .expect("commit owns its staged bytes")
+            .as_slice()
     }
 }
 
@@ -160,7 +189,10 @@ impl Drop for StagedCommit<'_> {
         {
             let mut state = self.staging.lock();
             if state.entries.get(&self.id).is_some_and(|stage| {
-                stage.commit.as_ref().is_some_and(|commit| Arc::ptr_eq(commit, &self.completion))
+                stage
+                    .commit
+                    .as_ref()
+                    .is_some_and(|commit| Arc::ptr_eq(commit, &self.completion))
             }) {
                 state.remove(&self.id);
                 state.commit_generation = Arc::new(());
@@ -196,7 +228,11 @@ impl ChunkedBackend {
         }
     }
 
-    fn get(&self, peer: &NodeId, key: SymbolBatchKey) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+    fn get(
+        &self,
+        peer: &NodeId,
+        key: SymbolBatchKey,
+    ) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
         match self {
             Self::Memory(store) => store.get(peer, key),
             #[cfg(not(target_arch = "wasm32"))]
@@ -216,7 +252,11 @@ impl ChunkedBackend {
         }
     }
 
-    fn put(&self, peer: &NodeId, bytes: &[u8]) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+    fn put(
+        &self,
+        peer: &NodeId,
+        bytes: &[u8],
+    ) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
         match self {
             Self::Memory(store) => store.put(peer, bytes),
             #[cfg(not(target_arch = "wasm32"))]
@@ -271,7 +311,9 @@ pub struct ChunkedSymbolService {
 
 impl std::fmt::Debug for ChunkedSymbolService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChunkedSymbolService").field("stats", &self.stats()).finish_non_exhaustive()
+        f.debug_struct("ChunkedSymbolService")
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
     }
 }
 
@@ -284,13 +326,17 @@ impl ChunkedSymbolService {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn new_durable(
-        store: Arc<super::super::durable::DurableSymbolReplicaStore>, limits: SymbolChunkedLimits,
+        store: Arc<super::super::durable::DurableSymbolReplicaStore>,
+        limits: SymbolChunkedLimits,
     ) -> Self {
         Self::with_backend(ChunkedBackend::Durable(store), limits)
     }
 
     fn with_backend(store: ChunkedBackend, limits: SymbolChunkedLimits) -> Self {
-        Self { store, limits, staging: Mutex::new(Staging::default()),
+        Self {
+            store,
+            limits,
+            staging: Mutex::new(Staging::default()),
             #[cfg(test)]
             commit_hook: Mutex::new(None),
             #[cfg(test)]
@@ -302,13 +348,18 @@ impl ChunkedSymbolService {
     #[must_use]
     pub fn stats(&self) -> SymbolStagingStats {
         let state = self.staging.lock();
-        SymbolStagingStats { uploads: state.entries.len(), reserved_bytes: state.reserved,
-            received_bytes: state.entries.values().map(Stage::received_bytes).sum() }
+        SymbolStagingStats {
+            uploads: state.entries.len(),
+            reserved_bytes: state.reserved,
+            received_bytes: state.entries.values().map(Stage::received_bytes).sum(),
+        }
     }
 
     /// Retire expired allocations using the same clock as the registered handler.
     /// Returns the number removed. Retained immutable batches are unaffected.
-    pub fn reap_expired(&self, now: Time) -> usize { self.staging.lock().reap(now) }
+    pub fn reap_expired(&self, now: Time) -> usize {
+        self.staging.lock().reap(now)
+    }
 
     // A legitimate CHUNK has the target header, 68-byte upload identity,
     // 8-byte offset, and at most the smaller chunk/batch allowance. BEGIN,
@@ -316,13 +367,25 @@ impl ChunkedSymbolService {
     // ceiling is conservative: no Rust slice can exceed that ceiling.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn request_byte_ceiling(&self) -> usize {
-        14usize.saturating_add(self.store.replica_id().len())
+        14usize
+            .saturating_add(self.store.replica_id().len())
             .saturating_add(76)
-            .saturating_add(self.limits.max_chunk_bytes.min(self.store.batch_limits().max_encoded_bytes))
+            .saturating_add(
+                self.limits
+                    .max_chunk_bytes
+                    .min(self.store.batch_limits().max_encoded_bytes),
+            )
     }
 
-    pub(super) fn handle(&self, peer: &NodeId, now: Time, input: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
-        if !super::super::valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
+    pub(super) fn handle(
+        &self,
+        peer: &NodeId,
+        now: Time,
+        input: &[u8],
+    ) -> Result<Vec<u8>, SymbolStoreError> {
+        if !super::super::valid_identity(peer.as_str()) {
+            return Err(SymbolStoreError::InvalidIdentity);
+        }
         let (operation, body) = split_request(input, self.store.replica_id())?;
         let mut state = self.staging.lock();
         state.reap(now);
@@ -330,12 +393,18 @@ impl ChunkedSymbolService {
             drop(state);
             return self.read(peer, body);
         }
-        if body.len() < 68 { return Err(SymbolStoreError::Truncated); }
+        if body.len() < 68 {
+            return Err(SymbolStoreError::Truncated);
+        }
         let upload = read_upload(&body[..68])?;
         let id = (peer.clone(), upload.attempt);
         let mut committed = None;
         loop {
-            if let Some(completion) = state.entries.get(&id).and_then(|stage| stage.commit.clone()) {
+            if let Some(completion) = state
+                .entries
+                .get(&id)
+                .and_then(|stage| stage.commit.clone())
+            {
                 // Preserve the original per-attempt ordering without holding up
                 // every origin. In-memory owners are bounded synchronous work;
                 // durable owners and their waiters run on blocking workers.
@@ -349,10 +418,14 @@ impl ChunkedSymbolService {
             }
             return match operation {
                 BEGIN => {
-                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
+                    if body.len() != 68 {
+                        return Err(SymbolStoreError::TrailingData);
+                    }
                     self.validate_upload(upload)?;
                     if let Some(stage) = state.entries.get(&id) {
-                        if stage.upload != upload { return Err(SymbolStoreError::Conflict); }
+                        if stage.upload != upload {
+                            return Err(SymbolStoreError::Conflict);
+                        }
                         return progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes);
                     }
                     if committed.is_none() {
@@ -367,7 +440,9 @@ impl ChunkedSymbolService {
                         #[cfg(test)]
                         {
                             let hook = self.lookup_hook.lock().clone();
-                            if let Some(hook) = hook { hook(); }
+                            if let Some(hook) = hook {
+                                hook();
+                            }
                         }
                         state = self.staging.lock();
                         state.reap(now);
@@ -376,9 +451,14 @@ impl ChunkedSymbolService {
                         }
                         continue;
                     }
-                    match committed.take().expect("committed lookup precedes new staging") {
+                    match committed
+                        .take()
+                        .expect("committed lookup precedes new staging")
+                    {
                         Ok(batch) => {
-                            if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
+                            if batch.as_ref().as_ref().len() != upload.total
+                                || batch.symbol_count() != upload.count
+                            {
                                 return Err(SymbolStoreError::Identity);
                             }
                             return progress(upload, upload.total, self.limits.max_chunk_bytes);
@@ -386,30 +466,71 @@ impl ChunkedSymbolService {
                         Err(SymbolStoreError::NotFound) => {}
                         Err(error) => return Err(error),
                     }
-                    if state.entries.len() >= self.limits.max_uploads { return Err(SymbolStoreError::Limit("staged uploads")); }
-                    let reserved = state.reserved.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)?;
-                    if reserved > self.limits.max_reserved_bytes { return Err(SymbolStoreError::Limit("staged bytes")); }
-                    let (count, bytes) = state.entries.iter().filter(|((origin, _), _)| origin == peer)
-                        .fold((0usize, 0usize), |(count, bytes), (_, stage)| (count + 1, bytes + stage.upload.total));
-                    if count >= self.limits.max_uploads_per_peer { return Err(SymbolStoreError::Limit("peer staged uploads")); }
-                    if bytes.checked_add(upload.total).ok_or(SymbolStoreError::Overflow)? > self.limits.max_reserved_bytes_per_peer {
+                    if state.entries.len() >= self.limits.max_uploads {
+                        return Err(SymbolStoreError::Limit("staged uploads"));
+                    }
+                    let reserved = state
+                        .reserved
+                        .checked_add(upload.total)
+                        .ok_or(SymbolStoreError::Overflow)?;
+                    if reserved > self.limits.max_reserved_bytes {
+                        return Err(SymbolStoreError::Limit("staged bytes"));
+                    }
+                    let (count, bytes) = state
+                        .entries
+                        .iter()
+                        .filter(|((origin, _), _)| origin == peer)
+                        .fold((0usize, 0usize), |(count, bytes), (_, stage)| {
+                            (count + 1, bytes + stage.upload.total)
+                        });
+                    if count >= self.limits.max_uploads_per_peer {
+                        return Err(SymbolStoreError::Limit("peer staged uploads"));
+                    }
+                    if bytes
+                        .checked_add(upload.total)
+                        .ok_or(SymbolStoreError::Overflow)?
+                        > self.limits.max_reserved_bytes_per_peer
+                    {
                         return Err(SymbolStoreError::Limit("peer staged bytes"));
                     }
-                    let expires = now.as_nanos().checked_add(self.limits.ttl_nanos).ok_or(SymbolStoreError::Overflow)?;
-                    state.entries.insert(id, Stage { upload, expires: Time::from_nanos(expires),
-                        bytes: Zeroizing::new(Vec::new()), commit: None });
+                    let expires = now
+                        .as_nanos()
+                        .checked_add(self.limits.ttl_nanos)
+                        .ok_or(SymbolStoreError::Overflow)?;
+                    state.entries.insert(
+                        id,
+                        Stage {
+                            upload,
+                            expires: Time::from_nanos(expires),
+                            bytes: Zeroizing::new(Vec::new()),
+                            commit: None,
+                        },
+                    );
                     state.reserved = reserved;
                     progress(upload, 0, self.limits.max_chunk_bytes)
                 }
                 CHUNK => {
-                    if body.len() < 77 { return Err(SymbolStoreError::Truncated); }
+                    if body.len() < 77 {
+                        return Err(SymbolStoreError::Truncated);
+                    }
                     let offset = read_usize(&body[68..76])?;
                     let bytes = &body[76..];
-                    if bytes.len() > self.limits.max_chunk_bytes { return Err(SymbolStoreError::Limit("chunk bytes")); }
-                    let stage = state.entries.get_mut(&id).ok_or(SymbolStoreError::NotFound)?;
-                    if stage.upload != upload { return Err(SymbolStoreError::Identity); }
-                    let end = offset.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
-                    if end > upload.total { return Err(SymbolStoreError::Limit("declared upload bytes")); }
+                    if bytes.len() > self.limits.max_chunk_bytes {
+                        return Err(SymbolStoreError::Limit("chunk bytes"));
+                    }
+                    let stage = state
+                        .entries
+                        .get_mut(&id)
+                        .ok_or(SymbolStoreError::NotFound)?;
+                    if stage.upload != upload {
+                        return Err(SymbolStoreError::Identity);
+                    }
+                    let end = offset
+                        .checked_add(bytes.len())
+                        .ok_or(SymbolStoreError::Overflow)?;
+                    if end > upload.total {
+                        return Err(SymbolStoreError::Limit("declared upload bytes"));
+                    }
                     if offset == stage.bytes.len() {
                         // Allocate the whole declared upload once (BEGIN already charged it to the
                         // staging quota). Growing by each chunk let small chunks copy everything
@@ -426,13 +547,21 @@ impl ChunkedSymbolService {
                     progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes)
                 }
                 COMMIT => {
-                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
+                    if body.len() != 68 {
+                        return Err(SymbolStoreError::TrailingData);
+                    }
                     let result = if let Some(stage) = state.entries.get_mut(&id) {
-                        if stage.upload != upload { return Err(SymbolStoreError::Identity); }
-                        if stage.bytes.len() != upload.total { return Err(SymbolStoreError::Truncated); }
+                        if stage.upload != upload {
+                            return Err(SymbolStoreError::Identity);
+                        }
+                        if stage.bytes.len() != upload.total {
+                            return Err(SymbolStoreError::Truncated);
+                        }
                         let completion = Arc::new(CommitCompletion::default());
                         let staged = StagedCommit {
-                            staging: &self.staging, id, completion: Arc::clone(&completion),
+                            staging: &self.staging,
+                            id,
+                            completion: Arc::clone(&completion),
                             bytes: Some(std::mem::take(&mut stage.bytes)),
                         };
                         stage.commit = Some(completion);
@@ -440,10 +569,13 @@ impl ChunkedSymbolService {
                         #[cfg(test)]
                         {
                             let hook = self.commit_hook.lock().clone();
-                            if let Some(hook) = hook { hook(); }
+                            if let Some(hook) = hook {
+                                hook();
+                            }
                         }
                         let bytes = staged.bytes();
-                        if bytes.get(12..28) != Some(upload.key.object_id.as_u128().to_le_bytes().as_slice())
+                        if bytes.get(12..28)
+                            != Some(upload.key.object_id.as_u128().to_le_bytes().as_slice())
                             || bytes.get(28..32) != Some(upload.count.to_le_bytes().as_slice())
                             || super::super::batch::key(upload.key.object_id, bytes) != upload.key
                         {
@@ -456,7 +588,9 @@ impl ChunkedSymbolService {
                     } else {
                         drop(state);
                         self.store.get(peer, upload.key).and_then(|batch| {
-                            if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
+                            if batch.as_ref().as_ref().len() != upload.total
+                                || batch.symbol_count() != upload.count
+                            {
                                 return Err(SymbolStoreError::Identity);
                             }
                             Ok(batch)
@@ -468,8 +602,16 @@ impl ChunkedSymbolService {
                     Ok(bytes)
                 }
                 ABORT => {
-                    if body.len() != 68 { return Err(SymbolStoreError::TrailingData); }
-                    if state.entries.get(&id).is_some_and(|stage| stage.upload != upload) { return Err(SymbolStoreError::Identity); }
+                    if body.len() != 68 {
+                        return Err(SymbolStoreError::TrailingData);
+                    }
+                    if state
+                        .entries
+                        .get(&id)
+                        .is_some_and(|stage| stage.upload != upload)
+                    {
+                        return Err(SymbolStoreError::Identity);
+                    }
                     state.remove(&id);
                     progress(upload, 0, self.limits.max_chunk_bytes)
                 }
@@ -479,29 +621,48 @@ impl ChunkedSymbolService {
     }
 
     fn validate_upload(&self, upload: Upload) -> Result<(), SymbolStoreError> {
-        if upload.count == 0 { return Err(SymbolStoreError::Empty); }
+        if upload.count == 0 {
+            return Err(SymbolStoreError::Empty);
+        }
         let limits = self.store.batch_limits();
         if upload.total > limits.max_encoded_bytes || upload.count as usize > limits.max_symbols {
             return Err(SymbolStoreError::Limit("batch bytes or symbols"));
         }
-        let minimum = (upload.count as usize).checked_mul(42).and_then(|bytes| bytes.checked_add(32))
+        let minimum = (upload.count as usize)
+            .checked_mul(42)
+            .and_then(|bytes| bytes.checked_add(32))
             .ok_or(SymbolStoreError::Overflow)?;
-        if upload.total < minimum { return Err(SymbolStoreError::Format); }
+        if upload.total < minimum {
+            return Err(SymbolStoreError::Format);
+        }
         Ok(())
     }
 
     fn read(&self, peer: &NodeId, body: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
-        if body.len() != 60 { return Err(SymbolStoreError::Format); }
+        if body.len() != 60 {
+            return Err(SymbolStoreError::Format);
+        }
         let key = read_key(&body[..48])?;
         let offset = read_usize(&body[48..56])?;
         let requested = u32::from_le_bytes(body[56..60].try_into().expect("range bytes")) as usize;
-        if requested == 0 { return Err(SymbolStoreError::Limit("range bytes")); }
+        if requested == 0 {
+            return Err(SymbolStoreError::Limit("range bytes"));
+        }
         let batch = self.store.get(peer, key)?;
         let source = batch.as_ref().as_ref();
-        if offset >= source.len() { return Err(SymbolStoreError::Format); }
-        let length = requested.min(self.limits.max_chunk_bytes).min(source.len() - offset);
+        if offset >= source.len() {
+            return Err(SymbolStoreError::Format);
+        }
+        let length = requested
+            .min(self.limits.max_chunk_bytes)
+            .min(source.len() - offset);
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(80usize.checked_add(length).ok_or(SymbolStoreError::Overflow)?)
+        bytes
+            .try_reserve_exact(
+                80usize
+                    .checked_add(length)
+                    .ok_or(SymbolStoreError::Overflow)?,
+            )
             .map_err(|_| SymbolStoreError::Allocation)?;
         bytes.extend_from_slice(RANGE);
         bytes.extend_from_slice(&1_u32.to_le_bytes());
@@ -517,16 +678,21 @@ impl ChunkedSymbolService {
 pub(super) struct RequestSchema;
 pub(super) struct ResponseSchema;
 impl HasSchema for RequestSchema {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.symbol-service.chunked.request.v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("asupersync.symbol-service.chunked.request.v1")
+    }
 }
 impl HasSchema for ResponseSchema {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.symbol-service.chunked.response.v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("asupersync.symbol-service.chunked.response.v1")
+    }
 }
 
 /// Register a separately granted multi-frame capability in the existing V1 mTLS service.
 /// The peer namespace is supplied only by authenticated invocation admission.
 pub fn register_chunked_symbol_service(
-    registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
+    registry: &mut RemoteComputationRegistry,
+    service: Arc<ChunkedSymbolService>,
 ) -> Result<(), ComputationSchemaRegistryError> {
     register_chunked_symbol_service_inner(registry, service, None)
 }
@@ -544,33 +710,54 @@ pub fn register_chunked_symbol_service(
 /// drain and shared-budget behavior. The memory handler remains synchronous once
 /// admitted, so cancellation cannot preempt a verification poll already running.
 pub fn register_chunked_symbol_service_with_admission(
-    registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
+    registry: &mut RemoteComputationRegistry,
+    service: Arc<ChunkedSymbolService>,
     admission: &crate::distributed::remote_owned::RemoteServiceAdmission,
-    child: crate::cx::ChildRegionSpec, wait_timeout: Option<Duration>,
+    child: crate::cx::ChildRegionSpec,
+    wait_timeout: Option<Duration>,
 ) -> Result<(), ComputationSchemaRegistryError> {
-    register_chunked_symbol_service_inner(registry, service,
-        Some(super::Admission { limiter: admission, child, wait_timeout }))
+    register_chunked_symbol_service_inner(
+        registry,
+        service,
+        Some(super::Admission {
+            limiter: admission,
+            child,
+            wait_timeout,
+        }),
+    )
 }
 
 fn register_chunked_symbol_service_inner(
-    registry: &mut RemoteComputationRegistry, service: Arc<ChunkedSymbolService>,
+    registry: &mut RemoteComputationRegistry,
+    service: Arc<ChunkedSymbolService>,
     admission: Option<super::Admission<'_>>,
 ) -> Result<(), ComputationSchemaRegistryError> {
     super::register_handler::<RequestSchema, ResponseSchema, _, _>(
-        registry, SYMBOL_CHUNKED_SERVICE_COMPUTATION, admission, move |cx, invocation| {
-        let service = Arc::clone(&service);
-        async move {
-            if cx.checkpoint().is_err() {
-                return Ok(cx.cancel_reason().map_or_else(
-                    || RemoteOutcome::Failed("chunked symbol checkpoint refused".to_owned()), RemoteOutcome::Cancelled,
-                ));
+        registry,
+        SYMBOL_CHUNKED_SERVICE_COMPUTATION,
+        admission,
+        move |cx, invocation| {
+            let service = Arc::clone(&service);
+            async move {
+                if cx.checkpoint().is_err() {
+                    return Ok(cx.cancel_reason().map_or_else(
+                        || RemoteOutcome::Failed("chunked symbol checkpoint refused".to_owned()),
+                        RemoteOutcome::Cancelled,
+                    ));
+                }
+                Ok(
+                    match service.handle(
+                        invocation.peer_node(),
+                        cx.now(),
+                        invocation.request().input.data(),
+                    ) {
+                        Ok(bytes) => RemoteOutcome::Success(bytes),
+                        Err(error) => RemoteOutcome::Failed(error.to_string()),
+                    },
+                )
             }
-            Ok(match service.handle(invocation.peer_node(), cx.now(), invocation.request().input.data()) {
-                Ok(bytes) => RemoteOutcome::Success(bytes),
-                Err(error) => RemoteOutcome::Failed(error.to_string()),
-            })
-        }
-    })
+        },
+    )
 }
 
 fn split_request<'a>(bytes: &'a [u8], replica: &str) -> Result<(u8, &'a [u8]), SymbolStoreError> {
@@ -578,17 +765,32 @@ fn split_request<'a>(bytes: &'a [u8], replica: &str) -> Result<(u8, &'a [u8]), S
         return Err(SymbolStoreError::Format);
     }
     let n = usize::from(bytes[13]);
-    if n == 0 || bytes.len() < 14 + n { return Err(SymbolStoreError::Truncated); }
-    if &bytes[14..14+n] != replica.as_bytes() { return Err(SymbolStoreError::Identity); }
-    Ok((bytes[12], &bytes[14+n..]))
+    if n == 0 || bytes.len() < 14 + n {
+        return Err(SymbolStoreError::Truncated);
+    }
+    if &bytes[14..14 + n] != replica.as_bytes() {
+        return Err(SymbolStoreError::Identity);
+    }
+    Ok((bytes[12], &bytes[14 + n..]))
 }
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
-pub(crate) fn request(operation: u8, replica: &str, body: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
-    if !super::super::valid_identity(replica) { return Err(SymbolStoreError::InvalidIdentity); }
-    let size = body.len().checked_add(14 + replica.len()).ok_or(SymbolStoreError::Overflow)?;
+pub(crate) fn request(
+    operation: u8,
+    replica: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, SymbolStoreError> {
+    if !super::super::valid_identity(replica) {
+        return Err(SymbolStoreError::InvalidIdentity);
+    }
+    let size = body
+        .len()
+        .checked_add(14 + replica.len())
+        .ok_or(SymbolStoreError::Overflow)?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| SymbolStoreError::Allocation)?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| SymbolStoreError::Allocation)?;
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&1_u32.to_le_bytes());
     bytes.push(operation);
@@ -608,9 +810,15 @@ pub(crate) fn upload_body(upload: Upload) -> Vec<u8> {
 }
 
 fn read_upload(bytes: &[u8]) -> Result<Upload, SymbolStoreError> {
-    if bytes.len() != 68 { return Err(SymbolStoreError::Format); }
-    Ok(Upload { key: read_key(&bytes[..48])?, attempt: u64::from_le_bytes(bytes[48..56].try_into().expect("attempt bytes")),
-        total: read_usize(&bytes[56..64])?, count: u32::from_le_bytes(bytes[64..68].try_into().expect("count bytes")) })
+    if bytes.len() != 68 {
+        return Err(SymbolStoreError::Format);
+    }
+    Ok(Upload {
+        key: read_key(&bytes[..48])?,
+        attempt: u64::from_le_bytes(bytes[48..56].try_into().expect("attempt bytes")),
+        total: read_usize(&bytes[56..64])?,
+        count: u32::from_le_bytes(bytes[64..68].try_into().expect("count bytes")),
+    })
 }
 
 pub(crate) fn read_usize(bytes: &[u8]) -> Result<usize, SymbolStoreError> {
@@ -620,7 +828,9 @@ pub(crate) fn read_usize(bytes: &[u8]) -> Result<usize, SymbolStoreError> {
 
 fn progress(upload: Upload, received: usize, maximum: usize) -> Result<Vec<u8>, SymbolStoreError> {
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(92).map_err(|_| SymbolStoreError::Allocation)?;
+    bytes
+        .try_reserve_exact(92)
+        .map_err(|_| SymbolStoreError::Allocation)?;
     bytes.extend_from_slice(PROGRESS);
     bytes.extend_from_slice(&1_u32.to_le_bytes());
     bytes.extend_from_slice(&upload_body(upload));
@@ -630,29 +840,48 @@ fn progress(upload: Upload, received: usize, maximum: usize) -> Result<Vec<u8>, 
 }
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
-pub(crate) fn read_progress(bytes: &[u8], upload: Upload) -> Result<(usize, usize), SymbolStoreError> {
+pub(crate) fn read_progress(
+    bytes: &[u8],
+    upload: Upload,
+) -> Result<(usize, usize), SymbolStoreError> {
     if bytes.len() != 92 || &bytes[..8] != PROGRESS || bytes[8..12] != 1_u32.to_le_bytes() {
         return Err(SymbolStoreError::Format);
     }
-    if read_upload(&bytes[12..80])? != upload { return Err(SymbolStoreError::Identity); }
+    if read_upload(&bytes[12..80])? != upload {
+        return Err(SymbolStoreError::Identity);
+    }
     let received = read_usize(&bytes[80..88])?;
     let maximum = u32::from_le_bytes(bytes[88..92].try_into().expect("chunk limit bytes")) as usize;
-    if received > upload.total || maximum == 0 { return Err(SymbolStoreError::Format); }
+    if received > upload.total || maximum == 0 {
+        return Err(SymbolStoreError::Format);
+    }
     Ok((received, maximum))
 }
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
-pub(crate) fn range_request(replica: &str, key: SymbolBatchKey, offset: usize, maximum: usize) -> Result<Vec<u8>, SymbolStoreError> {
+pub(crate) fn range_request(
+    replica: &str,
+    key: SymbolBatchKey,
+    offset: usize,
+    maximum: usize,
+) -> Result<Vec<u8>, SymbolStoreError> {
     let mut body = Vec::with_capacity(60);
     put_key(&mut body, key);
     body.extend_from_slice(&(offset as u64).to_le_bytes());
-    body.extend_from_slice(&u32::try_from(maximum).map_err(|_| SymbolStoreError::Overflow)?.to_le_bytes());
+    body.extend_from_slice(
+        &u32::try_from(maximum)
+            .map_err(|_| SymbolStoreError::Overflow)?
+            .to_le_bytes(),
+    );
     request(READ, replica, &body)
 }
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
 pub(crate) fn read_range(
-    bytes: &[u8], key: SymbolBatchKey, offset: usize, maximum: usize,
+    bytes: &[u8],
+    key: SymbolBatchKey,
+    offset: usize,
+    maximum: usize,
 ) -> Result<(usize, u32, &[u8]), SymbolStoreError> {
     if bytes.len() <= 80 || &bytes[..8] != RANGE || bytes[8..12] != 1_u32.to_le_bytes() {
         return Err(SymbolStoreError::Format);
@@ -663,7 +892,10 @@ pub(crate) fn read_range(
     let total = read_usize(&bytes[60..68])?;
     let count = u32::from_le_bytes(bytes[68..72].try_into().expect("count bytes"));
     let data = &bytes[80..];
-    if data.len() > maximum || offset.checked_add(data.len()).is_none_or(|end| end > total) || count == 0 {
+    if data.len() > maximum
+        || offset.checked_add(data.len()).is_none_or(|end| end > total)
+        || count == 0
+    {
         return Err(SymbolStoreError::Format);
     }
     Ok((total, count, data))

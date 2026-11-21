@@ -53,8 +53,7 @@ impl<T> NativeDistributedTypedRemoteReport<T> {
     /// invocation. This is not a distributed exactly-once guarantee.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.work.is_success()
-            && matches!(&self.work.task, Ok(Ok(remote)) if remote.is_success())
+        self.work.is_success() && matches!(&self.work.task, Ok(Ok(remote)) if remote.is_success())
     }
 }
 
@@ -68,7 +67,10 @@ impl NativeDistributedClient {
     // again after arbitrary user serialization, including reentrant changes to
     // node admission, route generation, membership authority and owner capacity.
     fn typed_preflight(
-        &self, node: &NodeId, incarnation: u64, config: &RemoteRunConfig,
+        &self,
+        node: &NodeId,
+        incarnation: u64,
+        config: &RemoteRunConfig,
     ) -> Result<usize, NativeDistributedOutboundError> {
         let frame_limit = self.route_frame_limit(node, incarnation)?;
         let _ = prepare_run(&self.principal, config)?;
@@ -94,12 +96,17 @@ impl NativeDistributedClient {
     /// both child-close receipts. Dropping the handle cancels through the same
     /// owner; node close still drains it. No remote authority or retry is added.
     pub fn spawn_remote_typed<C: TypedRemoteComputation>(
-        &self, node: NodeId, incarnation: u64, input: &C::Input,
-        limits: TypedRemoteLimits, config: RemoteRunConfig,
+        &self,
+        node: NodeId,
+        incarnation: u64,
+        input: &C::Input,
+        limits: TypedRemoteLimits,
+        config: RemoteRunConfig,
     ) -> Result<NativeDistributedTypedRemoteHandle<C>, NativeDistributedTypedRemoteError> {
         let frame_limit = self.typed_preflight(&node, incarnation, &config)?;
         let limits = TypedRemoteLimits::new(
-            limits.max_request_bytes().min(frame_limit), limits.max_response_bytes(),
+            limits.max_request_bytes().min(frame_limit),
+            limits.max_response_bytes(),
         );
         let prepared = PreparedTypedRemoteCall::<C>::encode(input, limits)?;
         self.spawn_prepared_remote_typed(node, incarnation, prepared, config)
@@ -114,7 +121,10 @@ impl NativeDistributedClient {
     /// Completed unread handles retain the ordinary node operation credit until
     /// observation, or until a dropped handle's owner actually retires.
     pub fn spawn_prepared_remote_typed<C: TypedRemoteComputation>(
-        &self, node: NodeId, incarnation: u64, prepared: PreparedTypedRemoteCall<C>,
+        &self,
+        node: NodeId,
+        incarnation: u64,
+        prepared: PreparedTypedRemoteCall<C>,
         config: RemoteRunConfig,
     ) -> Result<NativeDistributedTypedRemoteHandle<C>, NativeDistributedTypedRemoteError> {
         let frame_limit = self.typed_preflight(&node, incarnation, &config)?;
@@ -123,7 +133,11 @@ impl NativeDistributedClient {
         }
         let (input, decoder) = prepared.into_owned_parts();
         let inner = self.spawn_remote(
-            node, incarnation, ComputationName::new(C::NAME), input, config,
+            node,
+            incarnation,
+            ComputationName::new(C::NAME),
+            input,
+            config,
         )?;
         Ok(NativeDistributedTypedRemoteHandle { inner, decoder })
     }
@@ -153,18 +167,26 @@ impl<C: TypedRemoteComputation> fmt::Debug for NativeDistributedTypedRemoteHandl
 impl<C: TypedRemoteComputation> NativeDistributedTypedRemoteHandle<C> {
     /// Existing submission deadline; encoding precedes this deadline's start.
     #[must_use]
-    pub const fn deadline(&self) -> Time { self.inner.deadline() }
+    pub const fn deadline(&self) -> Time {
+        self.inner.deadline()
+    }
 
     /// The real node-owned task, provisional until spawn admission completes.
     #[must_use]
-    pub fn task_id(&self) -> TaskId { self.inner.task_id() }
+    pub fn task_id(&self) -> TaskId {
+        self.inner.task_id()
+    }
 
     /// True only after the runtime has opened the owner retirement barrier.
     #[must_use]
-    pub fn is_finished(&self) -> bool { self.inner.is_finished() }
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
 
     /// Request the existing operation cancellation without discarding its report.
-    pub fn abort(&self) { self.inner.abort(); }
+    pub fn abort(&self) {
+        self.inner.abort();
+    }
 
     /// Wait for retirement and decode the retained remote result exactly once.
     pub async fn join(&mut self) -> NativeDistributedTypedRemoteResult<C::Output> {
@@ -173,12 +195,17 @@ impl<C: TypedRemoteComputation> NativeDistributedTypedRemoteHandle<C> {
 
     /// Cancellation-independent observation of the existing retirement barrier.
     pub fn poll_join(
-        &mut self, cx: &mut Context<'_>,
+        &mut self,
+        cx: &mut Context<'_>,
     ) -> Poll<NativeDistributedTypedRemoteResult<C::Output>> {
-        self.inner.poll_join(cx).map(|result| NativeDistributedComponentResult {
-            outcome: result.outcome.map(|outcome| outcome.map(|report| self.decode(report))),
-            retirement: result.retirement,
-        })
+        self.inner
+            .poll_join(cx)
+            .map(|result| NativeDistributedComponentResult {
+                outcome: result
+                    .outcome
+                    .map(|outcome| outcome.map(|report| self.decode(report))),
+                retirement: result.retirement,
+            })
     }
 
     /// Request cancellation and collect actual protocol and local drain receipts.
@@ -187,8 +214,16 @@ impl<C: TypedRemoteComputation> NativeDistributedTypedRemoteHandle<C> {
         self.join().await
     }
 
-    fn decode(&self, report: MembershipRemoteReport) -> NativeDistributedTypedRemoteReport<C::Output> {
-        let MembershipWorkReport { trigger, task, close, lease } = report.work;
+    fn decode(
+        &self,
+        report: MembershipRemoteReport,
+    ) -> NativeDistributedTypedRemoteReport<C::Output> {
+        let MembershipWorkReport {
+            trigger,
+            task,
+            close,
+            lease,
+        } = report.work;
         NativeDistributedTypedRemoteReport {
             work: MembershipWorkReport {
                 trigger,

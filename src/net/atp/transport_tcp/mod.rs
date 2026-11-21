@@ -31,12 +31,12 @@
 //! entry, unreachable peer, or rejected handshake is a hard error — there is no
 //! success path that moves zero bytes.
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(windows))]
 use std::sync::{
     Arc,
@@ -56,6 +56,8 @@ use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
     validate_portable_relative_path,
 };
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::apply_entry_metadata_sync;
 use crate::net::atp::transport_common::codec::{
     self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
@@ -65,19 +67,16 @@ use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
     commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
-    path_is_link_or_reparse_sync,
-    validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
-    write_sparse_zero_runs,
-};
-#[cfg(not(windows))]
-use crate::net::atp::transport_common::apply_entry_metadata_sync;
-#[cfg(not(windows))]
-use crate::net::atp::transport_common::metadata::{
-    SyncedStagedFile, sync_staged_regular_file_sync,
+    path_is_link_or_reparse_sync, validate_entry_metadata_for_receive,
+    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
 };
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+};
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::metadata::{
+    SyncedStagedFile, sync_staged_regular_file_sync,
 };
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
@@ -2656,7 +2655,8 @@ async fn build_receiver_delta_baseline(
             &mut planner_chunks,
             max_chunks,
         )
-        .await? {
+        .await?
+        {
             return Ok(None);
         }
     }
@@ -2726,7 +2726,9 @@ async fn append_receiver_delta_chunks(
 ) -> Result<bool, TransportError> {
     let max_chunk_size = usize::try_from(MAX_COMPRESSED_CHUNK_RAW).unwrap_or(usize::MAX);
     if chunk_size == 0 || chunk_size > max_chunk_size {
-        return Err(TransportError::Frame("invalid delta baseline chunk size".into()));
+        return Err(TransportError::Frame(
+            "invalid delta baseline chunk size".into(),
+        ));
     }
     let mut file = crate::fs::File::open(path)
         .await
@@ -3981,8 +3983,9 @@ pub async fn send_path_with_options(
     // Manifest.
     let mut manifest_frame = json_frame(FrameType::ObjectManifest, &manifest)?;
     let expected_merkle_v2 = if merkle_v2 {
-        let root =
-            crate::net::atp::transport_common::streaming::flat_merkle_root_v2_from_digests(&digests)?;
+        let root = crate::net::atp::transport_common::streaming::flat_merkle_root_v2_from_digests(
+            &digests,
+        )?;
         merkle::attach_root_v2(&mut manifest_frame, &root)
             .map_err(|error| TransportError::Frame(error.to_string()))?;
         Some(root)

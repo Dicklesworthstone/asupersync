@@ -9,8 +9,8 @@ use crate::distributed::remote_owned::RemoteRunError;
 use crate::remote::{
     NativeRemoteDiscoveryBuildError, NativeRemoteDiscoveryConfig, NativeRemoteDiscoveryDriver,
     NativeRemoteDiscoveryError, NativeRemoteDiscoveryReport, NativeRemoteDiscoveryRoutes,
-    NativeRemoteDiscoveryStop, NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError,
-    NodeId, RemoteComputationClientError,
+    NativeRemoteDiscoveryStop, NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError, NodeId,
+    RemoteComputationClientError,
 };
 use crate::runtime::JoinError;
 use crate::service::Discover;
@@ -65,7 +65,9 @@ impl Outbound {
             if operation.reclaimable(region_retired) {
                 retired.push(Arc::clone(operation));
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         let count = discoveries.len();
         drop(discoveries);
@@ -76,7 +78,8 @@ impl Outbound {
     }
 
     fn reserve_discovery(
-        &self, node: &NodeId,
+        &self,
+        node: &NodeId,
     ) -> Result<Arc<Operation<DiscoveryOutcome>>, NativeDistributedDiscoveryStartError> {
         self.check_open()?;
         let _ = self.retained_discoveries();
@@ -118,26 +121,40 @@ impl NodeDiscoveryRoutes {
 }
 
 impl NativeRemoteDiscoveryRoutes for NodeDiscoveryRoutes {
-    fn route_generation(&self) -> u64 { self.shared.remote.route_generation() }
+    fn route_generation(&self) -> u64 {
+        self.shared.remote.route_generation()
+    }
 
     fn stop_reason(&self, destination: &NodeId) -> Option<NativeRemoteDiscoveryStop> {
-        if self.stopped() { return Some(NativeRemoteDiscoveryStop::Cancelled); }
+        if self.stopped() {
+            return Some(NativeRemoteDiscoveryStop::Cancelled);
+        }
         let peers = self.shared.peers.lock();
-        if self.stopped() { return Some(NativeRemoteDiscoveryStop::Cancelled); }
+        if self.stopped() {
+            return Some(NativeRemoteDiscoveryStop::Cancelled);
+        }
         let current = peers.get(destination);
         if current.is_none_or(|(_, incarnation, token)| {
             *incarnation != self.incarnation || !Arc::ptr_eq(token, &self.provisioning)
-        }) || !self.shared.membership.permits_native_route(destination, self.incarnation) {
+        }) || !self
+            .shared
+            .membership
+            .permits_native_route(destination, self.incarnation)
+        {
             return Some(NativeRemoteDiscoveryStop::DestinationRemoved);
         }
         None
     }
 
     fn refresh_discovered_route(
-        &self, destination: &NodeId, endpoints: Vec<SocketAddr>,
+        &self,
+        destination: &NodeId,
+        endpoints: Vec<SocketAddr>,
     ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError> {
         let mut peers = self.shared.peers.lock();
-        if self.stopped() { return Err(NativeRemoteRouteRefreshError::Stopped); }
+        if self.stopped() {
+            return Err(NativeRemoteRouteRefreshError::Stopped);
+        }
         let Some((route, incarnation, token)) = peers.get(destination) else {
             return Err(NativeRemoteRouteRefreshError::DestinationRemoved);
         };
@@ -146,33 +163,62 @@ impl NativeRemoteDiscoveryRoutes for NodeDiscoveryRoutes {
         }
         if endpoints.len() > self.max_endpoints {
             return Err(NativeRemoteRouteRefreshError::InvalidSnapshot(
-                RemoteComputationClientError::InvalidConfig("node discovery endpoint bound exceeded"),
+                RemoteComputationClientError::InvalidConfig(
+                    "node discovery endpoint bound exceeded",
+                ),
             ));
         }
         // A source owns its transient allocations. Retain only its bounded
         // endpoint values, never a large spare capacity in a returned Vec.
         let endpoints = endpoints.into_boxed_slice().into_vec();
-        let replacement = route.with_bootstrap_endpoints(endpoints)
+        let replacement = route
+            .with_bootstrap_endpoints(endpoints)
             .map_err(NativeRemoteRouteRefreshError::InvalidSnapshot)?;
         if replacement.client().bootstrap_endpoints() == route.client().bootstrap_endpoints() {
-            let result = self.shared.membership.publish_native_route(destination, self.incarnation, || {
-                if self.stopped() { return Err(NativeRemoteRouteRefreshError::Stopped); }
-                Ok(NativeRemoteRouteRefresh::Unchanged(self.shared.remote.route_generation()))
-            }).unwrap_or(Err(NativeRemoteRouteRefreshError::DestinationRemoved));
+            let result = self
+                .shared
+                .membership
+                .publish_native_route(destination, self.incarnation, || {
+                    if self.stopped() {
+                        return Err(NativeRemoteRouteRefreshError::Stopped);
+                    }
+                    Ok(NativeRemoteRouteRefresh::Unchanged(
+                        self.shared.remote.route_generation(),
+                    ))
+                })
+                .unwrap_or(Err(NativeRemoteRouteRefreshError::DestinationRemoved));
             drop(peers);
             drop(replacement);
             return result;
         }
         let mut candidate = peers.clone();
-        candidate.insert(destination.clone(), (replacement, self.incarnation, Arc::clone(&self.provisioning)));
-        let publication = self.shared.membership.publish_native_route(destination, self.incarnation, || {
-            if self.stopped() { return Err(NativeRemoteRouteRefreshError::Stopped); }
-            self.shared.remote.replace_routes(candidate.values().map(|(route, _, _)| route.clone()))
-                .map_err(NativeRemoteRouteRefreshError::Publication)
-        }).unwrap_or(Err(NativeRemoteRouteRefreshError::DestinationRemoved));
+        candidate.insert(
+            destination.clone(),
+            (
+                replacement,
+                self.incarnation,
+                Arc::clone(&self.provisioning),
+            ),
+        );
+        let publication = self
+            .shared
+            .membership
+            .publish_native_route(destination, self.incarnation, || {
+                if self.stopped() {
+                    return Err(NativeRemoteRouteRefreshError::Stopped);
+                }
+                self.shared
+                    .remote
+                    .replace_routes(candidate.values().map(|(route, _, _)| route.clone()))
+                    .map_err(NativeRemoteRouteRefreshError::Publication)
+            })
+            .unwrap_or(Err(NativeRemoteRouteRefreshError::DestinationRemoved));
         let generation = match publication {
             Ok(generation) => generation,
-            Err(error) => { drop(peers); return Err(error); }
+            Err(error) => {
+                drop(peers);
+                return Err(error);
+            }
         };
         let old = std::mem::replace(&mut *peers, candidate);
         drop(peers);
@@ -185,7 +231,9 @@ impl NativeDistributedClient {
     /// Discovery owners and unread reports retained separately from computation
     /// credits. At most one slot per peer and `max_peers` total can be retained.
     #[must_use]
-    pub fn retained_discoveries(&self) -> usize { self.shared.retained_discoveries() }
+    pub fn retained_discoveries(&self) -> usize {
+        self.shared.retained_discoveries()
+    }
 
     /// Start periodic endpoint discovery owned by this node's child region.
     ///
@@ -211,25 +259,37 @@ impl NativeDistributedClient {
     /// leaves the handle usable. Submission unwind uses the same seal and
     /// region-cancellation backstop as named computation submission.
     pub fn spawn_peer_discovery<D>(
-        &self, node: NodeId, incarnation: u64, discovery: Arc<D>,
-        config: NativeRemoteDiscoveryConfig, max_endpoints: usize,
+        &self,
+        node: NodeId,
+        incarnation: u64,
+        discovery: Arc<D>,
+        config: NativeRemoteDiscoveryConfig,
+        max_endpoints: usize,
     ) -> Result<NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryStartError>
     where
         D: Discover<Key = SocketAddr> + Send + Sync + 'static,
     {
         self.shared.check_open()?;
         config.validate()?;
-        if max_endpoints == 0 { return Err(NativeDistributedDiscoveryStartError::ZeroEndpointLimit); }
+        if max_endpoints == 0 {
+            return Err(NativeDistributedDiscoveryStartError::ZeroEndpointLimit);
+        }
         if self.principal.is_cancel_requested() {
             return Err(NativeDistributedOutboundError::Timing(RemoteRunError::Cancelled).into());
         }
         if self.principal.remote().is_none() {
-            return Err(NativeDistributedOutboundError::Timing(RemoteRunError::NoCapability).into());
+            return Err(
+                NativeDistributedOutboundError::Timing(RemoteRunError::NoCapability).into(),
+            );
         }
         if self.principal.timer_driver().is_none() {
             return Err(NativeDistributedOutboundError::Timing(RemoteRunError::NoTimer).into());
         }
-        if self.principal.blocking_pool_handle().is_none_or(|pool| pool.forbids_blocking()) {
+        if self
+            .principal
+            .blocking_pool_handle()
+            .is_none_or(|pool| pool.forbids_blocking())
+        {
             return Err(NativeDistributedDiscoveryStartError::BlockingPoolUnavailable);
         }
         let provisioning = {
@@ -237,7 +297,12 @@ impl NativeDistributedClient {
             let Some((_, current, token)) = peers.get(&node) else {
                 return Err(NativeDistributedOutboundError::Membership.into());
             };
-            if *current != incarnation || !self.shared.membership.permits_native_route(&node, incarnation) {
+            if *current != incarnation
+                || !self
+                    .shared
+                    .membership
+                    .permits_native_route(&node, incarnation)
+            {
                 return Err(NativeDistributedOutboundError::Membership.into());
             }
             Arc::clone(token)
@@ -245,14 +310,20 @@ impl NativeDistributedClient {
         let node = NodeId::new(node.as_str());
         let operation = self.shared.reserve_discovery(&node)?;
         let mut admission = SubmissionGuard {
-            client: self, operation: Arc::clone(&operation), armed: true,
+            client: self,
+            operation: Arc::clone(&operation),
+            armed: true,
         };
         let destination = node.clone();
         let shared = Arc::clone(&self.shared);
         let returned = Arc::clone(&operation);
         let submitted = self.principal.spawn(move |body| async move {
             let routes = Arc::new(NodeDiscoveryRoutes {
-                shared, owner: body.clone(), incarnation, provisioning, max_endpoints,
+                shared,
+                owner: body.clone(),
+                incarnation,
+                provisioning,
+                max_endpoints,
             });
             let driver = NativeRemoteDiscoveryDriver::with_routes(routes, node, discovery, config)
                 .expect("discovery configuration validated before owner admission");
@@ -264,7 +335,10 @@ impl NativeDistributedClient {
             Ok(task) => {
                 *operation.task.lock() = Some(task);
                 let handle = NativeDistributedDiscoveryHandle {
-                    operation, destination, incarnation, not_sync: PhantomData,
+                    operation,
+                    destination,
+                    incarnation,
+                    not_sync: PhantomData,
                 };
                 admission.armed = false;
                 Ok(handle)
@@ -301,22 +375,36 @@ impl fmt::Debug for NativeDistributedDiscoveryHandle {
 impl NativeDistributedDiscoveryHandle {
     /// Logical peer whose explicitly provisioned endpoints this owner may refresh.
     #[must_use]
-    pub fn destination(&self) -> &NodeId { &self.destination }
+    pub fn destination(&self) -> &NodeId {
+        &self.destination
+    }
 
     /// Authenticated membership incarnation captured before submission.
     #[must_use]
-    pub const fn incarnation(&self) -> u64 { self.incarnation }
+    pub const fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
 
     /// Actual node-owned task, provisional until spawn admission completes.
     #[must_use]
     pub fn task_id(&self) -> TaskId {
-        self.operation.task.lock().as_ref().expect("submitted discovery owner").task_id()
+        self.operation
+            .task
+            .lock()
+            .as_ref()
+            .expect("submitted discovery owner")
+            .task_id()
     }
 
     /// True only once the runtime has opened the owner retirement barrier.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.operation.task.lock().as_ref().expect("submitted discovery owner").is_finished()
+        self.operation
+            .task
+            .lock()
+            .as_ref()
+            .expect("submitted discovery owner")
+            .is_finished()
     }
 
     /// Request cancellation; a currently executing source poll must still retire.
@@ -336,14 +424,18 @@ impl NativeDistributedDiscoveryHandle {
     pub fn poll_join(&mut self, cx: &mut Context<'_>) -> Poll<NativeDistributedDiscoveryResult> {
         if self.operation.observed.load(Ordering::Acquire) {
             return Poll::Ready(NativeDistributedComponentResult {
-                outcome: None, retirement: Err(JoinError::PolledAfterCompletion),
+                outcome: None,
+                retirement: Err(JoinError::PolledAfterCompletion),
             });
         }
         let terminal = TaskAccess::new(&self.operation.task).poll_join(cx);
         terminal.map(|retirement| {
             let outcome = self.operation.outcome.lock().take();
             self.operation.observed.store(true, Ordering::Release);
-            NativeDistributedComponentResult { outcome, retirement }
+            NativeDistributedComponentResult {
+                outcome,
+                retirement,
+            }
         })
     }
 

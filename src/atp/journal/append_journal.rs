@@ -11,9 +11,9 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-mod storage;
 mod compaction;
 mod resume;
+mod storage;
 
 // The writer must not acknowledge a frame that its own recovery reader refuses.
 const MAX_JOURNAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -1473,8 +1473,9 @@ impl AppendJournal {
             .and_then(|path| std::fs::metadata(path).ok())
             .map_or(0, |meta| meta.len());
 
-        Outcome::Ok(current_size.saturating_sub(self.generation_base_bytes)
-            >= self.config.max_journal_size)
+        Outcome::Ok(
+            current_size.saturating_sub(self.generation_base_bytes) >= self.config.max_journal_size,
+        )
     }
 
     fn trigger_compaction(&mut self) -> Outcome<(), JournalError> {

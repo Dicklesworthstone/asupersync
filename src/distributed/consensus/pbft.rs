@@ -1008,7 +1008,12 @@ impl<T: PbftTransport, S: PbftStateMachine> PbftExecution<T, S> {
         } else {
             let primary = {
                 let state = self.node.state.lock().unwrap();
-                ReplicaId::new(state.view.primary(self.node.config.replica_count).to_string())
+                ReplicaId::new(
+                    state
+                        .view
+                        .primary(self.node.config.replica_count)
+                        .to_string(),
+                )
             };
             timeout(
                 cx.now(),
@@ -1059,8 +1064,11 @@ impl<T: PbftTransport, S: PbftStateMachine> PbftExecution<T, S> {
         batch.timestamp = cx.now();
         let digest = MessageDigest::of(&batch)?;
         if state.log.contains_key(&sequence) {
-            return Err(Error::new(ErrorKind::InvalidStateTransition)
-                .with_message(format!("PBFT proposal sequence {sequence} is already reserved")));
+            return Err(
+                Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                    "PBFT proposal sequence {sequence} is already reserved"
+                )),
+            );
         }
         state.log.insert(
             sequence,
@@ -1144,7 +1152,8 @@ impl<T: PbftTransport, S: PbftStateMachine> PbftExecution<T, S> {
                     identities,
                     ..
                 } = &mut *application;
-                let std::collections::hash_map::Entry::Vacant(slot) = responses.entry(digest) else {
+                let std::collections::hash_map::Entry::Vacant(slot) = responses.entry(digest)
+                else {
                     continue;
                 };
                 let result = if identities.insert(identity) {

@@ -65,7 +65,9 @@ pub struct DirectoryLimitsArgs {
 
 pub fn parse_review_id(value: &str) -> Result<String, String> {
     if value.len() == 64
-        && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         Ok(value.to_owned())
     } else {
@@ -216,13 +218,21 @@ pub mod native {
                 } else {
                     ""
                 };
-                let _ = writeln!(text, "  {:?}: {}{authorization}", decision.action, decision.path.as_str());
+                let _ = writeln!(
+                    text,
+                    "  {:?}: {}{authorization}",
+                    decision.action,
+                    decision.path.as_str()
+                );
             }
             if let Some(result) = &self.result {
                 let _ = writeln!(text, "  Complete and verified: {}", result.complete);
                 for action in &result.actions {
-                    let _ = writeln!(text, "  {}: {} ({} bytes written, durable: {})",
-                        action.path, action.state, action.bytes_written, action.durable);
+                    let _ = writeln!(
+                        text,
+                        "  {}: {} ({} bytes written, durable: {})",
+                        action.path, action.state, action.bytes_written, action.durable
+                    );
                     if let Some(path) = &action.staged_path {
                         let _ = writeln!(text, "    Staged bytes: {}", path.display());
                     }
@@ -264,14 +274,24 @@ pub mod native {
                 result.complete && !result.dry_run && result.failure.is_none()
             })
         {
-            let detail = report.application_error.as_deref()
-                .or_else(|| report.result.as_ref().and_then(|result| result.failure.as_deref()))
+            let detail = report
+                .application_error
+                .as_deref()
+                .or_else(|| {
+                    report
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.failure.as_deref())
+                })
                 .unwrap_or("The mirror did not return a complete verified application receipt");
-            return Err(CliError::new("atp_local_mirror_incomplete", "Local mirroring did not complete")
-                .detail(detail)
-                .context("review_id", &report.review_id)
-                .context("plan_id", &report.plan_id)
-                .exit_code(ExitCode::USER_ERROR));
+            return Err(CliError::new(
+                "atp_local_mirror_incomplete",
+                "Local mirroring did not complete",
+            )
+            .detail(detail)
+            .context("review_id", &report.review_id)
+            .context("plan_id", &report.plan_id)
+            .exit_code(ExitCode::USER_ERROR));
         }
         require_shutdown(quiescent, stopped)
     }
@@ -279,18 +299,28 @@ pub mod native {
     async fn prepare_and_apply_mirror(args: &MirrorArgs) -> Result<MirrorOutput, CliError> {
         let cx = current_cx()?;
         let prepared = prepare_native_directory_mirror(
-            &cx, &args.source, &args.destination, args.limits.native(),
-        ).await.map_err(|error| native_error("mirror_prepare", error))?;
+            &cx,
+            &args.source,
+            &args.destination,
+            args.limits.native(),
+        )
+        .await
+        .map_err(|error| native_error("mirror_prepare", error))?;
         // The content/root identity is stable for cross-process review. Each
         // attempt gets a separate recovery job so retained originals never
         // prevent a later mirror of the same contents after explicit recovery.
         let review_id = prepared.plan_id().to_owned();
-        let prepared = prepared.with_fresh_plan_id(&cx)
+        let prepared = prepared
+            .with_fresh_plan_id(&cx)
             .map_err(|error| native_error("mirror_identity", error))?;
         let mut report = MirrorOutput {
             schema_version: 1,
             command: "atp.local-mirror",
-            mode: if args.apply.is_some() { "apply" } else { "plan" },
+            mode: if args.apply.is_some() {
+                "apply"
+            } else {
+                "plan"
+            },
             content_profile: CONTENT_PROFILE,
             review_id,
             plan_id: prepared.plan_id().to_owned(),
@@ -314,9 +344,13 @@ pub mod native {
                 ));
                 return Ok(report);
             }
-            let staging = args.staging_dir.as_ref().ok_or_else(|| CliError::new(
-                "atp_local_mirror_staging", "Applying a local mirror requires --staging-dir",
-            ).exit_code(ExitCode::USER_ERROR))?;
+            let staging = args.staging_dir.as_ref().ok_or_else(|| {
+                CliError::new(
+                    "atp_local_mirror_staging",
+                    "Applying a local mirror requires --staging-dir",
+                )
+                .exit_code(ExitCode::USER_ERROR)
+            })?;
             let authorization = DestructiveAuthorization {
                 dry_run: false,
                 allow_overwrite: args.allow_overwrite,
@@ -324,7 +358,10 @@ pub mod native {
                 allow_delete: args.allow_delete,
                 ..DestructiveAuthorization::default()
             };
-            match prepared.apply_with_quarantined_deletions(&cx, authorization, staging).await {
+            match prepared
+                .apply_with_quarantined_deletions(&cx, authorization, staging)
+                .await
+            {
                 Ok(result) => report.result = Some(result.into()),
                 Err(error) => report.application_error = Some(error.to_string()),
             }
@@ -333,25 +370,41 @@ pub mod native {
     }
 
     pub fn current_cx() -> Result<Cx, CliError> {
-        Cx::current().ok_or_else(|| CliError::new(
-            "atp_local_operation_context", "Local directory operation has no runtime context",
-        ).exit_code(ExitCode::RUNTIME_ERROR))
+        Cx::current().ok_or_else(|| {
+            CliError::new(
+                "atp_local_operation_context",
+                "Local directory operation has no runtime context",
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })
     }
 
     pub fn run_owned<T, F>(operation: F) -> Result<(T, bool, bool), CliError>
     where
         F: Future<Output = Result<T, CliError>>,
     {
-        let runtime = RuntimeBuilder::current_thread().blocking_threads(0, 4).build()
-            .map_err(|error| CliError::new(
-                "atp_local_operation_runtime", "Cannot start local directory runtime",
-            ).detail(error.to_string()).exit_code(ExitCode::RUNTIME_ERROR))?;
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(0, 4)
+            .build()
+            .map_err(|error| {
+                CliError::new(
+                    "atp_local_operation_runtime",
+                    "Cannot start local directory runtime",
+                )
+                .detail(error.to_string())
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
         let result = runtime.block_on(operation);
         let quiescent = runtime.shutdown_drained(Duration::from_secs(30)).outcome
             == RootDrainOutcome::Quiescent;
         let stopped = runtime.shutdown_timeout(Duration::from_secs(30));
-        result.map(|value| (value, quiescent, stopped)).map_err(|error| error
-            .context("runtime_quiescent", quiescent).context("runtime_stopped", stopped))
+        result
+            .map(|value| (value, quiescent, stopped))
+            .map_err(|error| {
+                error
+                    .context("runtime_quiescent", quiescent)
+                    .context("runtime_stopped", stopped)
+            })
     }
 
     pub fn require_shutdown(quiescent: bool, stopped: bool) -> Result<(), CliError> {
@@ -359,29 +412,42 @@ pub mod native {
             Ok(())
         } else {
             Err(CliError::new(
-                "atp_local_operation_shutdown", "Local directory runtime cleanup was not confirmed",
-            ).exit_code(ExitCode::RUNTIME_ERROR))
+                "atp_local_operation_shutdown",
+                "Local directory runtime cleanup was not confirmed",
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR))
         }
     }
 
     pub fn write_receipt<T: Outputtable>(output: &mut Output, report: &T) -> Result<(), CliError> {
-        let failed = |error| super::super::output_write_error("local directory receipt")(error)
+        let failed = |error| {
+            super::super::output_write_error("local directory receipt")(error)
             .context("receipt", report)
-            .suggestion("Inspect the observed receipt and retained recovery paths before retrying; output failure does not roll back filesystem effects");
+            .suggestion("Inspect the observed receipt and retained recovery paths before retrying; output failure does not roll back filesystem effects")
+        };
         output.write(report).map_err(&failed)?;
         output.flush().map_err(failed)
     }
 
     pub fn native_error(stage: &str, error: NativeDirectoryError) -> CliError {
-        CliError::new("atp_local_operation_refused", "Local directory operation was refused")
-            .detail(error.to_string()).context("stage", stage).exit_code(ExitCode::USER_ERROR)
+        CliError::new(
+            "atp_local_operation_refused",
+            "Local directory operation was refused",
+        )
+        .detail(error.to_string())
+        .context("stage", stage)
+        .exit_code(ExitCode::USER_ERROR)
     }
 
     pub fn validate_path(label: &str, path: &Path) -> Result<(), CliError> {
         if path.is_absolute() && path.to_str().is_some() {
             return Ok(());
         }
-        Err(CliError::new("atp_local_operation_path", "Local directory operations require absolute UTF-8 paths")
-            .detail(format!("{label}: {}", path.display())).exit_code(ExitCode::USER_ERROR))
+        Err(CliError::new(
+            "atp_local_operation_path",
+            "Local directory operations require absolute UTF-8 paths",
+        )
+        .detail(format!("{label}: {}", path.display()))
+        .exit_code(ExitCode::USER_ERROR))
     }
 }

@@ -1768,9 +1768,7 @@ impl Server {
     fn registered_unary_handler_with_scope(
         self: &Arc<Self>,
         drain_grace: Option<Duration>,
-    ) -> io::Result<
-        impl Fn(HttpRequest) -> GrpcHttp2Future + Clone + Send + Sync + 'static,
-    > {
+    ) -> io::Result<impl Fn(HttpRequest) -> GrpcHttp2Future + Clone + Send + Sync + 'static> {
         if self.services.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1934,13 +1932,8 @@ impl Server {
                 .await
             }
             None => {
-                self.dispatch_registered_unary_with_trailers(
-                    &cx,
-                    &path,
-                    request,
-                    trailing_metadata,
-                )
-                .await
+                self.dispatch_registered_unary_with_trailers(&cx, &path, request, trailing_metadata)
+                    .await
             }
         };
         match result {
@@ -2422,12 +2415,8 @@ impl Server {
                     inner.budget = deadline.budget(inner.budget);
                 }
                 let dispatched = if preserve_cancel_causes {
-                    Self::poll_scoped_unary(
-                        &cx,
-                        async move { handler(request).await },
-                        &deadline,
-                    )
-                    .await
+                    Self::poll_scoped_unary(&cx, async move { handler(request).await }, &deadline)
+                        .await
                 } else {
                     server_streaming::poll_cancellable(
                         &cx,
@@ -2824,7 +2813,8 @@ impl Server {
         use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion};
 
         let polling_cx = Cx::current();
-        let deadline = server_streaming::StreamDeadline::capture(cx, request.metadata(), &self.config);
+        let deadline =
+            server_streaming::StreamDeadline::capture(cx, request.metadata(), &self.config);
         let server = Arc::clone(self);
         let path = path.to_owned();
         let result = ServerRequestRegion::run_scoped(
@@ -2889,9 +2879,9 @@ impl Server {
         {
             Status::deadline_exceeded("gRPC request deadline exceeded")
         } else if reason.as_ref().is_some_and(|reason| {
-            reason.chain().any(|cause| {
-                matches!(cause.kind, CancelKind::PollQuota | CancelKind::CostBudget)
-            })
+            reason
+                .chain()
+                .any(|cause| matches!(cause.kind, CancelKind::PollQuota | CancelKind::CostBudget))
         }) {
             Status::resource_exhausted("gRPC request budget exhausted")
         } else {

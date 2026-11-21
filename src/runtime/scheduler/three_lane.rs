@@ -147,6 +147,7 @@ use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use crate::time::TimerDriverHandle;
 use crate::trace::capture::ScheduleCaptureRecorder;
 use crate::trace::{TraceBufferHandle, TraceData, TraceEvent, TraceEventKind};
@@ -159,7 +160,6 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -6627,8 +6627,8 @@ impl ThreeLaneWorker {
                 self.drive_io_phase(return_when_idle, lifo_idle.wait_cap(lifo_watch_nanos()));
             // Include a successful zero-timeout miss: runnable work can race
             // the idle probe. Only a follower knows another poller owns I/O.
-            left_reactor = self.io_driver.is_some()
-                && !matches!(io_phase, IoPhaseOutcome::Follower);
+            left_reactor =
+                self.io_driver.is_some() && !matches!(io_phase, IoPhaseOutcome::Follower);
             // Election ran: a turn of its own, or another poller owns I/O.
             carried_reactor = false;
             if matches!(io_phase, IoPhaseOutcome::Progress) {
@@ -9948,7 +9948,8 @@ impl ThreeLaneWorker {
                 artifacts.dispatch_post_lock(self);
             }
             Ok(Poll::Pending) => {
-                if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
+                if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region)
+                {
                     let now = self.capture_now();
                     capture.record(Some(self.id), |seq| {
                         TraceEvent::yield_task(seq, now, task_id, region)
@@ -10552,7 +10553,11 @@ impl ThreeLaneWorker {
         let retirement_cx_inner = detached_record
             .as_ref()
             .and_then(|record| record.cx_inner.clone())
-            .or_else(|| state.task(task_id).and_then(|record| record.cx_inner.clone()));
+            .or_else(|| {
+                state
+                    .task(task_id)
+                    .and_then(|record| record.cx_inner.clone())
+            });
         let completion = match detached_record.as_mut() {
             Some(record) => state.task_completed_from_external_record_resuming_with_observers(
                 record,

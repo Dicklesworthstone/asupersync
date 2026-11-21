@@ -66,11 +66,11 @@
 #![allow(clippy::empty_enums)]
 
 use crate::record::{ObligationKind, ObligationState};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // Panic-Safe Leak Tracker

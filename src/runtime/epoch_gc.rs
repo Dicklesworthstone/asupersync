@@ -39,10 +39,10 @@
 //! - Memory safety is maintained during cleanup deferral
 
 use crate::sync::ContendedMutex;
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::types::{RegionId, TaskId};
 use crossbeam_queue::SegQueue;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 

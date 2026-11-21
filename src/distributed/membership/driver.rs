@@ -179,7 +179,9 @@ impl fmt::Display for SwimDriverError {
             Self::Protocol(error) => write!(f, "SWIM configuration: {error}"),
             Self::Configuration(reason) => write!(f, "SWIM driver configuration: {reason}"),
             Self::MissingTimer => f.write_str("SWIM driver requires an explicit runtime timer"),
-            Self::MissingIoDriver => f.write_str("SWIM driver requires an active runtime I/O context"),
+            Self::MissingIoDriver => {
+                f.write_str("SWIM driver requires an active runtime I/O context")
+            }
             Self::Clock => f.write_str("SWIM driver clock regressed or exhausted"),
             Self::ObservationExhausted => f.write_str("SWIM observation sequence exhausted"),
             Self::OutboxFull => f.write_str("SWIM encoded outbox capacity exhausted"),
@@ -202,7 +204,9 @@ impl std::error::Error for SwimDriverError {
     }
 }
 impl From<WireError> for SwimDriverError {
-    fn from(error: WireError) -> Self { Self::Wire(error) }
+    fn from(error: WireError) -> Self {
+        Self::Wire(error)
+    }
 }
 
 /// Terminal result after the owned transport was retired.
@@ -263,20 +267,30 @@ impl UdpSwimDriver {
         validate(&local, &protocol, &peers, &transport, config)?;
         protocol.max_members = protocol.max_members.min(config.max_peers);
         let mut swim = Swim::new(local, protocol, seed);
-        for peer in peers.keys() { swim.add_peer(0, peer.clone()); }
+        for peer in peers.keys() {
+            swim.add_peer(0, peer.clone());
+        }
         let observation = Arc::new(ObservationState::new(config.retained_events));
         let mut engine = Engine::new(swim, peers, transport.mtu(), config);
         observation.publish(
-            engine.swim.drain_events(), engine.contacts.drain(..),
-            SwimDriverStatus::Prepared, engine.stats,
+            engine.swim.drain_events(),
+            engine.contacts.drain(..),
+            SwimDriverStatus::Prepared,
+            engine.stats,
         )?;
-        Ok(Self { engine, transport: Some(transport), observation })
+        Ok(Self {
+            engine,
+            transport: Some(transport),
+            observation,
+        })
     }
 
     /// Clone bounded observation access without retaining the native transport.
     #[must_use]
     pub fn observer(&self) -> SwimObserver {
-        SwimObserver { shared: Arc::clone(&self.observation) }
+        SwimObserver {
+            shared: Arc::clone(&self.observation),
+        }
     }
 
     /// Run until context cancellation or a typed failure. No task is spawned here.
@@ -313,7 +327,10 @@ impl UdpSwimDriver {
             _ => SwimDriverStatus::Failed,
         };
         self.observation.finish(status, self.engine.stats);
-        SwimDriverReport { outcome, observation: self.observer().snapshot() }
+        SwimDriverReport {
+            outcome,
+            observation: self.observer().snapshot(),
+        }
     }
 
     async fn run_inner<F>(&mut self, cx: &Cx, stop: F) -> Outcome<(), SwimDriverError>
@@ -323,7 +340,10 @@ impl UdpSwimDriver {
         let Some(timer) = cx.timer_driver() else {
             return Outcome::Err(SwimDriverError::MissingTimer);
         };
-        if Cx::current().and_then(|current| current.io_driver_handle()).is_none() {
+        if Cx::current()
+            .and_then(|current| current.io_driver_handle())
+            .is_none()
+        {
             return Outcome::Err(SwimDriverError::MissingIoDriver);
         }
         let first = timer.now();
@@ -338,12 +358,23 @@ impl UdpSwimDriver {
         let mut first_tick = true;
         let observation = &self.observation;
         let engine = &mut self.engine;
-        let transport = self.transport.as_mut().expect("owned transport before terminal");
-        if let Err(error) = observation.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Running, engine.stats) {
+        let transport = self
+            .transport
+            .as_mut()
+            .expect("owned transport before terminal");
+        if let Err(error) = observation.publish(
+            Vec::new(),
+            std::iter::empty(),
+            SwimDriverStatus::Running,
+            engine.stats,
+        ) {
             return Outcome::Err(error);
         }
         poll_fn(|task| {
-            if Cx::current().and_then(|current| current.io_driver_handle()).is_none() {
+            if Cx::current()
+                .and_then(|current| current.io_driver_handle())
+                .is_none()
+            {
                 return Poll::Ready(Outcome::Err(SwimDriverError::MissingIoDriver));
             }
             if cancelled.as_mut().poll(task).is_ready() {
@@ -353,7 +384,9 @@ impl UdpSwimDriver {
                 ));
             }
             let now = timer.now();
-            if now < last { return Poll::Ready(Outcome::Err(SwimDriverError::Clock)); }
+            if now < last {
+                return Poll::Ready(Outcome::Err(SwimDriverError::Clock));
+            }
             last = now;
             let now_ms = now.as_nanos() / 1_000_000;
             if !engine.is_leaving() && stop.as_mut().poll(task).is_ready() {
@@ -364,8 +397,17 @@ impl UdpSwimDriver {
             let timer_due = tick_timer.poll_due(task);
             let tick = std::mem::take(&mut first_tick) || timer_due;
             let turn = engine.turn(transport, task, now_ms, tick);
-            let status = if engine.is_leaving() { SwimDriverStatus::Leaving } else { SwimDriverStatus::Running };
-            if let Err(error) = observation.publish(engine.swim.drain_events(), engine.contacts.drain(..), status, engine.stats) {
+            let status = if engine.is_leaving() {
+                SwimDriverStatus::Leaving
+            } else {
+                SwimDriverStatus::Running
+            };
+            if let Err(error) = observation.publish(
+                engine.swim.drain_events(),
+                engine.contacts.drain(..),
+                status,
+                engine.stats,
+            ) {
                 return Poll::Ready(Outcome::Err(error));
             }
             match turn {
@@ -381,7 +423,8 @@ impl UdpSwimDriver {
                 tick_timer.rearm(Time::from_nanos(deadline), timer.clone(), task);
             }
             Poll::Pending
-        }).await
+        })
+        .await
     }
 }
 
@@ -389,7 +432,8 @@ impl Drop for UdpSwimDriver {
     fn drop(&mut self) {
         self.engine.discard_outbox();
         drop(self.transport.take());
-        self.observation.finish_if_active(SwimDriverStatus::Dropped, self.engine.stats);
+        self.observation
+            .finish_if_active(SwimDriverStatus::Dropped, self.engine.stats);
     }
 }
 
@@ -402,56 +446,89 @@ fn validate(
 ) -> Result<(), SwimDriverError> {
     protocol.validate().map_err(SwimDriverError::Protocol)?;
     if transport.is_connected() {
-        return Err(SwimDriverError::Configuration("transport must be an unconnected UDP socket"));
+        return Err(SwimDriverError::Configuration(
+            "transport must be an unconnected UDP socket",
+        ));
     }
-    if config.max_peers == 0 || config.max_queued_datagrams == 0 || config.retained_events == 0
-        || config.io_batch == 0 || config.tick_ms == 0 || config.max_datagram_age_ms == 0
+    if config.max_peers == 0
+        || config.max_queued_datagrams == 0
+        || config.retained_events == 0
+        || config.io_batch == 0
+        || config.tick_ms == 0
+        || config.max_datagram_age_ms == 0
         || config.leave_timeout_ms == 0
     {
         return Err(SwimDriverError::Configuration("all bounds must be nonzero"));
     }
-    if peers.len() > config.max_peers || peers.len() > protocol.max_members
+    if peers.len() > config.max_peers
+        || peers.len() > protocol.max_members
         || peers.len() > config.max_queued_datagrams
     {
-        return Err(SwimDriverError::Configuration("topology exceeds member or Leave-outbox capacity"));
+        return Err(SwimDriverError::Configuration(
+            "topology exceeds member or Leave-outbox capacity",
+        ));
     }
     if config.tick_ms > protocol.probe_timeout_ms {
-        return Err(SwimDriverError::Configuration("tick exceeds direct-probe timeout"));
+        return Err(SwimDriverError::Configuration(
+            "tick exceeds direct-probe timeout",
+        ));
     }
     const MAX_MS: u64 = u64::MAX / 1_000_000;
-    if [config.tick_ms, config.max_datagram_age_ms, config.leave_timeout_ms].into_iter().any(|n| n > MAX_MS)
-        || u64::try_from(protocol.awareness_max).ok()
+    if [
+        config.tick_ms,
+        config.max_datagram_age_ms,
+        config.leave_timeout_ms,
+    ]
+    .into_iter()
+    .any(|n| n > MAX_MS)
+        || u64::try_from(protocol.awareness_max)
+            .ok()
             .and_then(|n| n.checked_add(1))
             .and_then(|n| protocol.probe_interval_ms.checked_mul(n))
             .is_none_or(|n| n > MAX_MS)
-        || protocol.probe_interval_ms.checked_mul(u64::from(protocol.suspicion_mult))
+        || protocol
+            .probe_interval_ms
+            .checked_mul(u64::from(protocol.suspicion_mult))
             .and_then(|n| n.checked_mul(u64::from(protocol.suspicion_max_timeout_mult)))
             .and_then(|n| n.checked_mul(u64::try_from(peers.len()).ok()?.checked_add(1)?))
             .is_none_or(|n| n > MAX_MS)
     {
-        return Err(SwimDriverError::Configuration("duration arithmetic exceeds supported clock range"));
+        return Err(SwimDriverError::Configuration(
+            "duration arithmetic exceeds supported clock range",
+        ));
     }
     let mut addresses = std::collections::BTreeSet::new();
     let local_addr = transport.local_addr().map_err(SwimDriverError::Io)?;
     let mut longest = local.as_str().len();
     for (id, address) in peers {
         longest = longest.max(id.as_str().len());
-        if id == local || id.as_str().is_empty() || !addresses.insert(*address)
-            || *address == local_addr || address.port() == 0 || address.ip().is_unspecified()
+        if id == local
+            || id.as_str().is_empty()
+            || !addresses.insert(*address)
+            || *address == local_addr
+            || address.port() == 0
+            || address.ip().is_unspecified()
             || address.ip().is_multicast()
             || address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST)
         {
-            return Err(SwimDriverError::Configuration("invalid or duplicate peer identity/address"));
+            return Err(SwimDriverError::Configuration(
+                "invalid or duplicate peer identity/address",
+            ));
         }
     }
     if local.as_str().is_empty() || longest > 255 {
-        return Err(SwimDriverError::Configuration("identities require 1..=255 UTF-8 bytes"));
+        return Err(SwimDriverError::Configuration(
+            "identities require 1..=255 UTF-8 bytes",
+        ));
     }
     let mtu = transport.mtu();
-    if mtu < 27 + 3 * longest || mtu > 65_507
+    if mtu < 27 + 3 * longest
+        || mtu > 65_507
         || mtu.checked_mul(config.max_queued_datagrams).is_none()
     {
-        return Err(SwimDriverError::Configuration("MTU must fit an indirect probe plus one rumor and UDP"));
+        return Err(SwimDriverError::Configuration(
+            "MTU must fit an indirect probe plus one rumor and UDP",
+        ));
     }
     Ok(())
 }
@@ -460,13 +537,23 @@ fn validate(
 // No public transport alternative or mock-only execution path is introduced.
 trait DatagramIo {
     fn poll_datagram(&mut self, task: &mut Context<'_>) -> Poll<io::Result<(SocketAddr, &[u8])>>;
-    fn poll_send_datagram(&mut self, task: &mut Context<'_>, target: SocketAddr, bytes: &[u8]) -> Poll<io::Result<usize>>;
+    fn poll_send_datagram(
+        &mut self,
+        task: &mut Context<'_>,
+        target: SocketAddr,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>>;
 }
 impl DatagramIo for UdpMembershipTransport {
     fn poll_datagram(&mut self, task: &mut Context<'_>) -> Poll<io::Result<(SocketAddr, &[u8])>> {
         self.poll_raw_recv(task)
     }
-    fn poll_send_datagram(&mut self, task: &mut Context<'_>, target: SocketAddr, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_send_datagram(
+        &mut self,
+        task: &mut Context<'_>,
+        target: SocketAddr,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.poll_raw_send(task, target, bytes)
     }
 }

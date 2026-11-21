@@ -1,932 +1,931 @@
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::expect_fun_call,
-        clippy::map_unwrap_or,
-        clippy::cast_possible_wrap,
-        clippy::future_not_send
-    )]
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::expect_fun_call,
+    clippy::map_unwrap_or,
+    clippy::cast_possible_wrap,
+    clippy::future_not_send
+)]
+use super::*;
+use crate::cx::Cx;
+use crate::io::AsyncReadExt;
+use crate::runtime::{IoDriverHandle, LabReactor};
+use crate::types::{Budget, RegionId, TaskId};
+use std::io::Write;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
+
+/// A fresh directory for a test socket, under `/tmp` rather than `TMPDIR`.
+///
+/// `sun_path` holds 108 bytes on Linux (104 on macOS) including the
+/// terminating NUL. rch workers set `TMPDIR` to `<project root>/.rch-tmp`,
+/// 70 or more bytes, and `tempdir()` appends `/.tmpXXXXXX`, so a 26-byte
+/// socket name no longer fit there.
+fn socket_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("asu")
+        .tempdir_in("/tmp")
+        .expect("create socket dir")
+}
+
+fn init_test(name: &str) {
+    crate::test_utils::init_test_logging();
+    crate::test_phase!(name);
+}
+
+/// GH#67 follow-up (asupersync-tx9j0f): a `UnixListener` polled for a
+/// connection with no I/O driver on the current `Cx` parks on the
+/// process-global fallback driver instead of re-waking its accept
+/// waiters into a hot loop.
+mod gh67_fallback_io_driver {
     use super::*;
-    use crate::cx::Cx;
-    use crate::io::AsyncReadExt;
-    use crate::runtime::{IoDriverHandle, LabReactor};
-    use crate::types::{Budget, RegionId, TaskId};
-    use std::io::Write;
-    use std::pin::Pin;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Waker};
+    use crate::net::udp::fallback_io_test_support::signal_waker;
+    use std::time::Duration;
 
-    /// A fresh directory for a test socket, under `/tmp` rather than `TMPDIR`.
-    ///
-    /// `sun_path` holds 108 bytes on Linux (104 on macOS) including the
-    /// terminating NUL. rch workers set `TMPDIR` to `<project root>/.rch-tmp`,
-    /// 70 or more bytes, and `tempdir()` appends `/.tmpXXXXXX`, so a 26-byte
-    /// socket name no longer fit there.
-    fn socket_dir() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("asu")
-            .tempdir_in("/tmp")
-            .expect("create socket dir")
+    #[test]
+    fn poll_accept_without_io_driver_parks_until_a_peer_connects() {
+        assert!(
+            Cx::current().is_none(),
+            "test must run without an ambient Cx"
+        );
+        let dir = socket_dir();
+        let path = dir.path().join("driverless_accept.sock");
+        let std_listener = net::UnixListener::bind(&path).expect("bind listener");
+        std_listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let listener = UnixListener::from_std(std_listener).expect("wrap listener");
+        let (signal, waker, rx) = signal_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(listener.poll_accept(&mut task_cx), Poll::Pending));
+        assert_eq!(
+            signal.hits.load(Ordering::SeqCst),
+            0,
+            "driverless accept poll must park, not self-wake (GH#67)"
+        );
+        assert!(
+            listener.registration.lock().on_fallback(),
+            "driverless accept registers with the process-global fallback I/O driver"
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no wake may arrive while nobody connects"
+        );
+
+        let _peer = net::UnixStream::connect(&path).expect("peer connect");
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("fallback reactor pump delivers the readiness wake");
+        assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+        match listener.poll_accept(&mut task_cx) {
+            Poll::Ready(Ok((_stream, _addr))) => {}
+            other => panic!("expected the connection after the wake, got {other:?}"),
+        }
+    }
+}
+
+fn noop_waker() -> Waker {
+    std::task::Waker::noop().clone()
+}
+
+struct CountingWaker {
+    hits: Arc<AtomicUsize>,
+}
+
+impl Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
     }
 
-    fn init_test(name: &str) {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!(name);
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn replacing_accept_waker_allows_drop_to_reenter_registration() {
+    struct Retired {
+        waiters: std::sync::Weak<AcceptWaiters>,
+        dropped: Arc<AtomicUsize>,
+        reentered: Arc<AtomicUsize>,
+    }
+    impl Wake for Retired {
+        fn wake(self: Arc<Self>) {
+            panic!("replacing a waker must not wake the previous task");
+        }
+    }
+    impl Drop for Retired {
+        fn drop(&mut self) {
+            let waiters = self.waiters.upgrade().expect("live waiter list");
+            let unlocked = waiters.waiters.try_lock().is_some();
+            if unlocked {
+                waiters.register(Some(100), Waker::noop());
+                self.reentered.fetch_add(1, Ordering::SeqCst);
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
-    /// GH#67 follow-up (asupersync-tx9j0f): a `UnixListener` polled for a
-    /// connection with no I/O driver on the current `Cx` parks on the
-    /// process-global fallback driver instead of re-waking its accept
-    /// waiters into a hot loop.
-    mod gh67_fallback_io_driver {
-        use super::*;
-        use crate::net::udp::fallback_io_test_support::signal_waker;
-        use std::time::Duration;
+    let waiters = Arc::new(AcceptWaiters::default());
+    let owner = waiters.next_owner();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let reentered = Arc::new(AtomicUsize::new(0));
+    let retired = Waker::from(Arc::new(Retired {
+        waiters: Arc::downgrade(&waiters),
+        dropped: Arc::clone(&dropped),
+        reentered: Arc::clone(&reentered),
+    }));
+    waiters.register(Some(owner), &retired);
+    waiters.register(Some(owner), &retired);
+    assert_eq!(waiters.waiters.lock().len(), 1);
+    drop(retired);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let replacement = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&hits),
+    }));
 
-        #[test]
-        fn poll_accept_without_io_driver_parks_until_a_peer_connects() {
-            assert!(
-                Cx::current().is_none(),
-                "test must run without an ambient Cx"
-            );
-            let dir = socket_dir();
-            let path = dir.path().join("driverless_accept.sock");
-            let std_listener = net::UnixListener::bind(&path).expect("bind listener");
-            std_listener
-                .set_nonblocking(true)
-                .expect("nonblocking listener");
-            let listener = UnixListener::from_std(std_listener).expect("wrap listener");
-            let (signal, waker, rx) = signal_waker();
-            let mut task_cx = Context::from_waker(&waker);
+    waiters.register(Some(owner), &replacement);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        reentered.load(Ordering::SeqCst),
+        1,
+        "the old waker's final drop must run outside the waiter lock"
+    );
+    waiters.register(Some(owner), &replacement);
+    {
+        let registered = waiters.waiters.lock();
+        assert_eq!(registered.len(), 2);
+        assert!(
+            registered
+                .iter()
+                .any(|entry| { entry.owner == Some(owner) && entry.waker.will_wake(&replacement) })
+        );
+        assert!(registered.iter().any(|entry| entry.owner == Some(100)));
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    waiters.wake_all();
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(waiters.waiters.lock().is_empty());
+}
 
-            assert!(matches!(listener.poll_accept(&mut task_cx), Poll::Pending));
-            assert_eq!(
-                signal.hits.load(Ordering::SeqCst),
-                0,
-                "driverless accept poll must park, not self-wake (GH#67)"
-            );
-            assert!(
-                listener.registration.lock().on_fallback(),
-                "driverless accept registers with the process-global fallback I/O driver"
-            );
-            assert!(
-                rx.recv_timeout(Duration::from_millis(200)).is_err(),
-                "no wake may arrive while nobody connects"
-            );
-
-            let _peer = net::UnixStream::connect(&path).expect("peer connect");
-            rx.recv_timeout(Duration::from_secs(5))
-                .expect("fallback reactor pump delivers the readiness wake");
-            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
-            match listener.poll_accept(&mut task_cx) {
-                Poll::Ready(Ok((_stream, _addr))) => {}
-                other => panic!("expected the connection after the wake, got {other:?}"),
+#[test]
+fn evicting_anonymous_accept_waker_reenters_after_atomic_replacement() {
+    struct Evicted {
+        waiters: std::sync::Weak<AcceptWaiters>,
+        incoming: Waker,
+        reentered: Arc<AtomicUsize>,
+        dropped_unlocked: Arc<AtomicUsize>,
+    }
+    impl Wake for Evicted {
+        fn wake(self: Arc<Self>) {
+            let waiters = self.waiters.upgrade().expect("live waiter list");
+            let published = waiters.waiters.try_lock().is_some_and(|registered| {
+                registered
+                    .iter()
+                    .filter(|entry| entry.owner.is_none())
+                    .count()
+                    == 32
+                    && registered
+                        .iter()
+                        .any(|entry| entry.owner.is_none() && entry.waker.will_wake(&self.incoming))
+            });
+            if published {
+                // This is the newest anonymous entry. Reentry must see
+                // it already installed, deduplicate, and evict nobody.
+                waiters.register(None, &self.incoming);
+                self.reentered.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+    impl Drop for Evicted {
+        fn drop(&mut self) {
+            let waiters = self.waiters.upgrade().expect("live waiter list");
+            if waiters.waiters.try_lock().is_some() {
+                self.dropped_unlocked.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
 
-    fn noop_waker() -> Waker {
-        std::task::Waker::noop().clone()
+    let waiters = Arc::new(AcceptWaiters::default());
+    for owner in 0..40 {
+        waiters.register(Some(owner), Waker::noop());
     }
+    let hits = Arc::new(AtomicUsize::new(0));
+    let incoming = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&hits),
+    }));
+    let reentered = Arc::new(AtomicUsize::new(0));
+    let dropped_unlocked = Arc::new(AtomicUsize::new(0));
+    let evicted = Waker::from(Arc::new(Evicted {
+        waiters: Arc::downgrade(&waiters),
+        incoming: incoming.clone(),
+        reentered: Arc::clone(&reentered),
+        dropped_unlocked: Arc::clone(&dropped_unlocked),
+    }));
+    waiters.register(None, &evicted);
+    drop(evicted);
+    for _ in 0..31 {
+        let parked = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        waiters.register(None, &parked);
+    }
+    assert_eq!(reentered.load(Ordering::SeqCst), 0);
+    waiters.register(None, &incoming);
+    assert_eq!(
+        reentered.load(Ordering::SeqCst),
+        1,
+        "eviction must wake after unlocking and publishing the newcomer"
+    );
+    assert_eq!(dropped_unlocked.load(Ordering::SeqCst), 1);
+    waiters.register(None, &incoming);
+    {
+        let registered = waiters.waiters.lock();
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|entry| entry.owner.is_none())
+                .count(),
+            32
+        );
+        assert_eq!(
+            registered
+                .iter()
+                .filter(|entry| entry.owner.is_some())
+                .count(),
+            40
+        );
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "other waiters stayed parked"
+    );
+    waiters.wake_all();
+    assert_eq!(hits.load(Ordering::SeqCst), 32);
+    assert!(waiters.waiters.lock().is_empty());
+}
 
-    struct CountingWaker {
+#[test]
+fn owner_departure_wakes_survivors_outside_the_waiter_lock() {
+    struct Retired {
+        waiters: std::sync::Weak<AcceptWaiters>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Wake for Retired {
+        fn wake(self: Arc<Self>) {
+            panic!("a departed accept owner must not be woken");
+        }
+    }
+    impl Drop for Retired {
+        fn drop(&mut self) {
+            if let Some(waiters) = self.waiters.upgrade() {
+                assert!(waiters.waiters.try_lock().is_some(), "drop outside gate");
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Survivor {
+        waiters: std::sync::Weak<AcceptWaiters>,
         hits: Arc<AtomicUsize>,
     }
-
-    impl Wake for CountingWaker {
+    impl Wake for Survivor {
         fn wake(self: Arc<Self>) {
-            self.wake_by_ref();
-        }
-
-        fn wake_by_ref(self: &Arc<Self>) {
+            let waiters = self.waiters.upgrade().expect("live waiter list");
+            assert!(waiters.waiters.try_lock().is_some(), "wake outside gate");
+            waiters.register(Some(100), Waker::noop());
             self.hits.fetch_add(1, Ordering::SeqCst);
         }
     }
 
-    #[test]
-    fn replacing_accept_waker_allows_drop_to_reenter_registration() {
-        struct Retired {
-            waiters: std::sync::Weak<AcceptWaiters>,
-            dropped: Arc<AtomicUsize>,
-            reentered: Arc<AtomicUsize>,
-        }
-        impl Wake for Retired {
-            fn wake(self: Arc<Self>) {
-                panic!("replacing a waker must not wake the previous task");
-            }
-        }
-        impl Drop for Retired {
-            fn drop(&mut self) {
-                let waiters = self.waiters.upgrade().expect("live waiter list");
-                let unlocked = waiters.waiters.try_lock().is_some();
-                if unlocked {
-                    waiters.register(Some(100), Waker::noop());
-                    self.reentered.fetch_add(1, Ordering::SeqCst);
-                }
-                self.dropped.fetch_add(1, Ordering::SeqCst);
-            }
-        }
+    let waiters = Arc::new(AcceptWaiters::default());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let retired_owner = waiters.next_owner();
+    let survivor_owner = waiters.next_owner();
+    let retired = Waker::from(Arc::new(Retired {
+        waiters: Arc::downgrade(&waiters),
+        dropped: Arc::clone(&dropped),
+    }));
+    let survivor = Waker::from(Arc::new(Survivor {
+        waiters: Arc::downgrade(&waiters),
+        hits: Arc::clone(&hits),
+    }));
+    waiters.register(Some(retired_owner), &retired);
+    waiters.register(Some(survivor_owner), &survivor);
+    drop(retired);
+    waiters.remove(retired_owner);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(waiters.waiters.lock()[0].owner, Some(100));
 
-        let waiters = Arc::new(AcceptWaiters::default());
-        let owner = waiters.next_owner();
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let reentered = Arc::new(AtomicUsize::new(0));
-        let retired = Waker::from(Arc::new(Retired {
-            waiters: Arc::downgrade(&waiters),
-            dropped: Arc::clone(&dropped),
-            reentered: Arc::clone(&reentered),
-        }));
-        waiters.register(Some(owner), &retired);
-        waiters.register(Some(owner), &retired);
-        assert_eq!(waiters.waiters.lock().len(), 1);
-        drop(retired);
-        assert_eq!(dropped.load(Ordering::SeqCst), 0);
-        let hits = Arc::new(AtomicUsize::new(0));
-        let replacement = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&hits),
-        }));
+    waiters.remove(retired_owner);
+    waiters.remove(survivor_owner);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "stale departures do not wake"
+    );
+    assert_eq!(waiters.waiters.lock().len(), 1);
+    waiters.wake_all();
+    let late_hits = Arc::new(AtomicUsize::new(0));
+    let late = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&late_hits),
+    }));
+    waiters.register(Some(101), &late);
+    waiters.remove(100);
+    assert_eq!(
+        late_hits.load(Ordering::SeqCst),
+        0,
+        "fired ticket is a no-op"
+    );
+    assert_eq!(waiters.waiters.lock()[0].owner, Some(101));
+}
 
-        waiters.register(Some(owner), &replacement);
-        assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            reentered.load(Ordering::SeqCst),
-            1,
-            "the old waker's final drop must run outside the waiter lock"
-        );
-        waiters.register(Some(owner), &replacement);
-        {
-            let registered = waiters.waiters.lock();
-            assert_eq!(registered.len(), 2);
-            assert!(registered.iter().any(|entry| {
-                entry.owner == Some(owner) && entry.waker.will_wake(&replacement)
-            }));
-            assert!(registered.iter().any(|entry| entry.owner == Some(100)));
-        }
-        assert_eq!(hits.load(Ordering::SeqCst), 0);
-        waiters.wake_all();
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert!(waiters.waiters.lock().is_empty());
-    }
-
-    #[test]
-    fn evicting_anonymous_accept_waker_reenters_after_atomic_replacement() {
-        struct Evicted {
-            waiters: std::sync::Weak<AcceptWaiters>,
-            incoming: Waker,
-            reentered: Arc<AtomicUsize>,
-            dropped_unlocked: Arc<AtomicUsize>,
-        }
-        impl Wake for Evicted {
-            fn wake(self: Arc<Self>) {
-                let waiters = self.waiters.upgrade().expect("live waiter list");
-                let published = waiters.waiters.try_lock().is_some_and(|registered| {
-                    registered
-                        .iter()
-                        .filter(|entry| entry.owner.is_none())
-                        .count()
-                        == 32
-                        && registered.iter().any(|entry| {
-                            entry.owner.is_none() && entry.waker.will_wake(&self.incoming)
-                        })
-                });
-                if published {
-                    // This is the newest anonymous entry. Reentry must see
-                    // it already installed, deduplicate, and evict nobody.
-                    waiters.register(None, &self.incoming);
-                    self.reentered.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }
-        impl Drop for Evicted {
-            fn drop(&mut self) {
-                let waiters = self.waiters.upgrade().expect("live waiter list");
-                if waiters.waiters.try_lock().is_some() {
-                    self.dropped_unlocked.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }
-
-        let waiters = Arc::new(AcceptWaiters::default());
-        for owner in 0..40 {
-            waiters.register(Some(owner), Waker::noop());
-        }
-        let hits = Arc::new(AtomicUsize::new(0));
-        let incoming = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&hits),
-        }));
-        let reentered = Arc::new(AtomicUsize::new(0));
-        let dropped_unlocked = Arc::new(AtomicUsize::new(0));
-        let evicted = Waker::from(Arc::new(Evicted {
-            waiters: Arc::downgrade(&waiters),
-            incoming: incoming.clone(),
-            reentered: Arc::clone(&reentered),
-            dropped_unlocked: Arc::clone(&dropped_unlocked),
-        }));
-        waiters.register(None, &evicted);
-        drop(evicted);
-        for _ in 0..31 {
-            let parked = Waker::from(Arc::new(CountingWaker {
-                hits: Arc::clone(&hits),
-            }));
-            waiters.register(None, &parked);
-        }
-        assert_eq!(reentered.load(Ordering::SeqCst), 0);
-        waiters.register(None, &incoming);
-        assert_eq!(
-            reentered.load(Ordering::SeqCst),
-            1,
-            "eviction must wake after unlocking and publishing the newcomer"
-        );
-        assert_eq!(dropped_unlocked.load(Ordering::SeqCst), 1);
-        waiters.register(None, &incoming);
-        {
-            let registered = waiters.waiters.lock();
-            assert_eq!(
-                registered
-                    .iter()
-                    .filter(|entry| entry.owner.is_none())
-                    .count(),
-                32
-            );
-            assert_eq!(
-                registered
-                    .iter()
-                    .filter(|entry| entry.owner.is_some())
-                    .count(),
-                40
-            );
-        }
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            0,
-            "other waiters stayed parked"
-        );
-        waiters.wake_all();
-        assert_eq!(hits.load(Ordering::SeqCst), 32);
-        assert!(waiters.waiters.lock().is_empty());
-    }
-
-    #[test]
-    fn owner_departure_wakes_survivors_outside_the_waiter_lock() {
-        struct Retired {
-            waiters: std::sync::Weak<AcceptWaiters>,
-            dropped: Arc<AtomicUsize>,
-        }
-        impl Wake for Retired {
-            fn wake(self: Arc<Self>) {
-                panic!("a departed accept owner must not be woken");
-            }
-        }
-        impl Drop for Retired {
-            fn drop(&mut self) {
-                if let Some(waiters) = self.waiters.upgrade() {
-                    assert!(waiters.waiters.try_lock().is_some(), "drop outside gate");
-                }
-                self.dropped.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        struct Survivor {
-            waiters: std::sync::Weak<AcceptWaiters>,
-            hits: Arc<AtomicUsize>,
-        }
-        impl Wake for Survivor {
-            fn wake(self: Arc<Self>) {
-                let waiters = self.waiters.upgrade().expect("live waiter list");
-                assert!(waiters.waiters.try_lock().is_some(), "wake outside gate");
-                waiters.register(Some(100), Waker::noop());
-                self.hits.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let waiters = Arc::new(AcceptWaiters::default());
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let hits = Arc::new(AtomicUsize::new(0));
-        let retired_owner = waiters.next_owner();
-        let survivor_owner = waiters.next_owner();
-        let retired = Waker::from(Arc::new(Retired {
-            waiters: Arc::downgrade(&waiters),
-            dropped: Arc::clone(&dropped),
-        }));
-        let survivor = Waker::from(Arc::new(Survivor {
-            waiters: Arc::downgrade(&waiters),
-            hits: Arc::clone(&hits),
-        }));
-        waiters.register(Some(retired_owner), &retired);
-        waiters.register(Some(survivor_owner), &survivor);
-        drop(retired);
-        waiters.remove(retired_owner);
-        assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert_eq!(waiters.waiters.lock()[0].owner, Some(100));
-
-        waiters.remove(retired_owner);
-        waiters.remove(survivor_owner);
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "stale departures do not wake"
-        );
-        assert_eq!(waiters.waiters.lock().len(), 1);
-        waiters.wake_all();
-        let late_hits = Arc::new(AtomicUsize::new(0));
-        let late = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&late_hits),
-        }));
-        waiters.register(Some(101), &late);
-        waiters.remove(100);
-        assert_eq!(
-            late_hits.load(Ordering::SeqCst),
-            0,
-            "fired ticket is a no-op"
-        );
-        assert_eq!(waiters.waiters.lock()[0].owner, Some(101));
-    }
-
-    #[test]
-    fn test_bind_and_local_addr() {
-        init_test("test_bind_and_local_addr");
-        futures_lite::future::block_on(async {
-            let dir = socket_dir();
-            let path = dir.path().join("test.sock");
-
-            let listener = UnixListener::bind(&path).await.expect("bind failed");
-            let addr = listener.local_addr().expect("local_addr failed");
-
-            // Should be a pathname socket
-            let pathname = addr.as_pathname();
-            crate::assert_with_log!(
-                pathname.is_some(),
-                "pathname exists",
-                true,
-                pathname.is_some()
-            );
-            let pathname = pathname.unwrap();
-            crate::assert_with_log!(pathname == path, "pathname", path, pathname);
-        });
-        crate::test_complete!("test_bind_and_local_addr");
-    }
-
-    #[test]
-    fn test_bind_refuses_non_socket_path() {
-        init_test("test_bind_refuses_non_socket_path");
-        futures_lite::future::block_on(async {
-            let dir = socket_dir();
-            let path = dir.path().join("non_socket_target");
-            std::fs::write(&path, b"not a socket").expect("write file");
-
-            let err = UnixListener::bind(&path)
-                .await
-                .expect_err("bind should reject non-socket path");
-            crate::assert_with_log!(
-                err.kind() == std::io::ErrorKind::AlreadyExists,
-                "error kind",
-                std::io::ErrorKind::AlreadyExists,
-                err.kind()
-            );
-
-            let contents = std::fs::read(&path).expect("read file");
-            let unchanged = contents == b"not a socket";
-            crate::assert_with_log!(unchanged, "file unchanged", true, unchanged);
-        });
-        crate::test_complete!("test_bind_refuses_non_socket_path");
-    }
-
-    #[test]
-    fn test_bind_refuses_stale_socket_file() {
-        init_test("test_bind_refuses_stale_socket_file");
-        futures_lite::future::block_on(async {
-            let dir = socket_dir();
-            let path = dir.path().join("stale_socket.sock");
-
-            let stale = net::UnixListener::bind(&path).expect("create stale socket");
-            drop(stale);
-
-            let exists = path.exists();
-            crate::assert_with_log!(exists, "stale socket exists", true, exists);
-
-            let err = UnixListener::bind(&path)
-                .await
-                .expect_err("bind should refuse stale socket path");
-            crate::assert_with_log!(
-                err.kind() == io::ErrorKind::AddrInUse,
-                "bind error kind",
-                io::ErrorKind::AddrInUse,
-                err.kind()
-            );
-
-            let exists = path.exists();
-            crate::assert_with_log!(exists, "stale socket preserved", true, exists);
-        });
-        crate::test_complete!("test_bind_refuses_stale_socket_file");
-    }
-
-    #[test]
-    fn test_bind_refuses_live_socket_file() {
-        init_test("test_bind_refuses_live_socket_file");
-        futures_lite::future::block_on(async {
-            let dir = socket_dir();
-            let path = dir.path().join("live_socket.sock");
-
-            let original = net::UnixListener::bind(&path).expect("create live socket");
-
-            let err = UnixListener::bind(&path)
-                .await
-                .expect_err("bind should refuse live socket path");
-            crate::assert_with_log!(
-                err.kind() == io::ErrorKind::AddrInUse,
-                "bind error kind",
-                io::ErrorKind::AddrInUse,
-                err.kind()
-            );
-            crate::assert_with_log!(path.exists(), "live socket preserved", true, path.exists());
-
-            drop(original);
-            std::fs::remove_file(&path).ok();
-        });
-        crate::test_complete!("test_bind_refuses_live_socket_file");
-    }
-
-    #[test]
-    fn test_accept() {
-        init_test("test_accept");
-        futures_lite::future::block_on(async {
-            let dir = socket_dir();
-            let path = dir.path().join("accept_test.sock");
-
-            let listener = UnixListener::bind(&path).await.expect("bind failed");
-
-            // Connect from another thread
-            let path_clone = path.clone();
-            let handle = std::thread::spawn(move || {
-                let mut stream = net::UnixStream::connect(&path_clone).expect("connect failed");
-                stream.write_all(b"hello").expect("write failed");
-            });
-
-            // Accept the connection
-            let (mut stream, _addr) = listener.accept().await.expect("accept failed");
-
-            // Read the data using async read
-            let mut buf = [0u8; 5];
-            stream.read_exact(&mut buf).await.expect("read failed");
-            crate::assert_with_log!(&buf == b"hello", "buf", b"hello", buf);
-
-            handle.join().expect("thread failed");
-        });
-        crate::test_complete!("test_accept");
-    }
-
-    #[test]
-    fn incoming_registers_on_wouldblock() {
-        init_test("incoming_registers_on_wouldblock");
+#[test]
+fn test_bind_and_local_addr() {
+    init_test("test_bind_and_local_addr");
+    futures_lite::future::block_on(async {
         let dir = socket_dir();
-        let path = dir.path().join("incoming_register.sock");
+        let path = dir.path().join("test.sock");
 
-        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
-        std_listener
-            .set_nonblocking(true)
-            .expect("nonblocking failed");
+        let listener = UnixListener::bind(&path).await.expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
 
-        let reactor = Arc::new(LabReactor::new());
-        let driver = IoDriverHandle::new(reactor);
-        let cx = Cx::new_with_observability(
-            RegionId::new_for_test(0, 1),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-            None,
-            Some(driver),
-            None,
-        );
-        let _guard = Cx::set_current(Some(cx));
-
-        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        let mut incoming = listener.incoming();
-
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let poll = Pin::new(&mut incoming).poll_next(&mut cx);
-        assert!(matches!(poll, Poll::Pending));
-
-        assert!(
-            listener.registration.lock().is_some(),
-            "incoming should register interest"
-        );
-        crate::test_complete!("incoming_registers_on_wouldblock");
-    }
-
-    #[test]
-    fn listener_fanout_wakes_all_pending_accept_waiters() {
-        init_test("listener_fanout_wakes_all_pending_accept_waiters");
-        let dir = socket_dir();
-        let path = dir.path().join("listener_fanout.sock");
-
-        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
-        std_listener
-            .set_nonblocking(true)
-            .expect("nonblocking failed");
-
-        let reactor = Arc::new(LabReactor::new());
-        let driver = IoDriverHandle::new(reactor);
-        let cx_cap = Cx::new_with_observability(
-            RegionId::new_for_test(0, 1),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-            None,
-            Some(driver),
-            None,
-        );
-        let _guard = Cx::set_current(Some(cx_cap));
-
-        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        let hits1 = Arc::new(AtomicUsize::new(0));
-        let hits2 = Arc::new(AtomicUsize::new(0));
-        let waker1 = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&hits1),
-        }));
-        let waker2 = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&hits2),
-        }));
-        let mut cx1 = Context::from_waker(&waker1);
-        let mut cx2 = Context::from_waker(&waker2);
-
-        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
-        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Pending));
-
-        let _client1 = net::UnixStream::connect(&path).expect("connect first client");
-        listener.accept_waiters.wake_all();
-
-        assert_eq!(hits1.load(Ordering::SeqCst), 1);
-        assert_eq!(hits2.load(Ordering::SeqCst), 1);
-
-        assert!(matches!(listener.poll_accept(&mut cx2), Poll::Ready(Ok(_))));
-        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
-
-        let _client2 = net::UnixStream::connect(&path).expect("connect second client");
-        listener.accept_waiters.wake_all();
-
-        assert_eq!(hits1.load(Ordering::SeqCst), 2);
-        assert!(matches!(listener.poll_accept(&mut cx1), Poll::Ready(Ok(_))));
-
-        crate::test_complete!("listener_fanout_wakes_all_pending_accept_waiters");
-    }
-
-    /// More accept() futures than the 32-entry cap the waiter list used to
-    /// evict from: registering one must not wake another (the 33rd used to
-    /// evict and wake the first, which evicted the next, forever), and a
-    /// dropped accept() future must take its waiter with it.
-    #[test]
-    fn many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures() {
-        init_test("many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures");
-        let dir = socket_dir();
-        let path = dir.path().join("many_accepts.sock");
-        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
-        std_listener
-            .set_nonblocking(true)
-            .expect("nonblocking failed");
-        let reactor = Arc::new(LabReactor::new());
-        let driver = IoDriverHandle::new(reactor);
-        let cx_cap = Cx::new_with_observability(
-            RegionId::new_for_test(0, 1),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-            None,
-            Some(driver),
-            None,
-        );
-        let _guard = Cx::set_current(Some(cx_cap));
-        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        let hits: Vec<Arc<AtomicUsize>> = (0..40).map(|_| Arc::new(AtomicUsize::new(0))).collect();
-        let wakers: Vec<Waker> = hits
-            .iter()
-            .map(|hits| {
-                Waker::from(Arc::new(CountingWaker {
-                    hits: Arc::clone(hits),
-                }))
-            })
-            .collect();
-        let mut accepts: Vec<_> = (0..40).map(|_| Box::pin(listener.accept())).collect();
-        for (accept, waker) in accepts.iter_mut().zip(&wakers) {
-            let mut task_cx = Context::from_waker(waker);
-            assert!(accept.as_mut().poll(&mut task_cx).is_pending());
-        }
-        let woken: usize = hits.iter().map(|hits| hits.load(Ordering::SeqCst)).sum();
-        assert_eq!(woken, 0, "a pending accept must not wake another");
-        assert_eq!(listener.accept_waiters.waiters.lock().len(), 40);
-
-        drop(accepts);
-        assert!(
-            listener.accept_waiters.waiters.lock().is_empty(),
-            "a dropped accept() future must remove its waiter"
-        );
-    }
-
-    #[test]
-    fn incoming_recovers_after_registration_lock_panic() {
-        init_test("incoming_recovers_after_registration_lock_panic");
-        let dir = socket_dir();
-        let path = dir.path().join("incoming_poisoned_lock.sock");
-
-        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
-        std_listener
-            .set_nonblocking(true)
-            .expect("nonblocking failed");
-
-        let reactor = Arc::new(LabReactor::new());
-        let driver = IoDriverHandle::new(reactor);
-        let cx_cap = Cx::new_with_observability(
-            RegionId::new_for_test(0, 1),
-            TaskId::new_for_test(0, 0),
-            Budget::INFINITE,
-            None,
-            Some(driver),
-            None,
-        );
-        let _guard = Cx::set_current(Some(cx_cap));
-
-        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = listener.registration.lock();
-            panic!("panic while holding registration lock"); // ubs:ignore - test helper
-        }));
-
-        let mut incoming = listener.incoming();
-        let waker = noop_waker();
-        let mut poll_cx = Context::from_waker(&waker);
-
-        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Pin::new(&mut incoming).poll_next(&mut poll_cx)
-        }));
-        assert!(
-            poll_result.is_ok(),
-            "poll_next should not panic after a registration-lock panic"
-        );
-
-        match poll_result.expect("poll result available") {
-            Poll::Pending => {}
-            other @ Poll::Ready(_) => {
-                panic!("expected Poll::Pending after re-registration path, got {other:?}") // ubs:ignore - test helper
-            }
-        }
-
-        crate::test_complete!("incoming_recovers_after_registration_lock_panic");
-    }
-
-    #[test]
-    fn test_socket_cleanup_on_drop() {
-        init_test("test_socket_cleanup_on_drop");
-        let dir = socket_dir();
-        let path = dir.path().join("cleanup_test.sock");
-
-        futures_lite::future::block_on(async {
-            let listener = UnixListener::bind(&path).await.expect("bind failed");
-            let exists = path.exists();
-            crate::assert_with_log!(exists, "socket exists", true, exists);
-            drop(listener);
-        });
-
-        let exists = path.exists();
-        crate::assert_with_log!(!exists, "socket cleaned up", false, exists);
-        crate::test_complete!("test_socket_cleanup_on_drop");
-    }
-
-    #[test]
-    fn test_from_std_no_cleanup() {
-        init_test("test_from_std_no_cleanup");
-        let dir = socket_dir();
-        let path = dir.path().join("from_std_test.sock");
-
-        // Create with std
-        let std_listener = net::UnixListener::bind(&path).expect("bind failed");
-
-        // Wrap in async version
-        let listener = UnixListener::from_std(std_listener).expect("from_std failed");
-        let exists = path.exists();
-        crate::assert_with_log!(exists, "socket exists", true, exists);
-
-        // Drop async listener
-        drop(listener);
-
-        // Socket file should still exist (from_std doesn't clean up)
-        let exists = path.exists();
-        crate::assert_with_log!(exists, "socket remains", true, exists);
-
-        // Clean up manually
-        std::fs::remove_file(&path).ok();
-        crate::test_complete!("test_from_std_no_cleanup");
-    }
-
-    #[test]
-    fn test_take_path_prevents_cleanup() {
-        init_test("test_take_path_prevents_cleanup");
-        let dir = socket_dir();
-        let path = dir.path().join("take_path_test.sock");
-
-        futures_lite::future::block_on(async {
-            let mut listener = UnixListener::bind(&path).await.expect("bind failed");
-
-            // Take the path
-            let taken = listener.take_path();
-            crate::assert_with_log!(taken.is_some(), "taken some", true, taken.is_some());
-            let taken = taken.unwrap();
-            crate::assert_with_log!(taken == path, "taken path", path, taken);
-
-            drop(listener);
-        });
-
-        // Socket should still exist
-        let exists = path.exists();
-        crate::assert_with_log!(exists, "socket remains", true, exists);
-
-        // Clean up manually
-        std::fs::remove_file(&path).ok();
-        crate::test_complete!("test_take_path_prevents_cleanup");
-    }
-
-    #[test]
-    fn replacement_socket_path_survives_old_listener_drop() {
-        init_test("replacement_socket_path_survives_old_listener_drop");
-        let dir = socket_dir();
-        let path = dir.path().join("listener_rebind.sock");
-
-        let original =
-            futures_lite::future::block_on(UnixListener::bind(&path)).expect("bind failed");
-        crate::assert_with_log!(path.exists(), "socket exists", true, path.exists());
-
-        std::fs::remove_file(&path).expect("unlink original path");
-        let replacement = net::UnixListener::bind(&path).expect("bind replacement failed");
-        crate::assert_with_log!(path.exists(), "replacement exists", true, path.exists());
-
-        drop(original);
-
+        // Should be a pathname socket
+        let pathname = addr.as_pathname();
         crate::assert_with_log!(
-            path.exists(),
-            "old listener drop preserved replacement path",
+            pathname.is_some(),
+            "pathname exists",
             true,
-            path.exists()
+            pathname.is_some()
         );
+        let pathname = pathname.unwrap();
+        crate::assert_with_log!(pathname == path, "pathname", path, pathname);
+    });
+    crate::test_complete!("test_bind_and_local_addr");
+}
 
-        drop(replacement);
-        std::fs::remove_file(&path).ok();
-        crate::test_complete!("replacement_socket_path_survives_old_listener_drop");
-    }
-
-    #[test]
-    fn test_bind_cleanup_on_post_bind_init_failure() {
-        init_test("test_listener_bind_cleanup_on_post_bind_init_failure");
+#[test]
+fn test_bind_refuses_non_socket_path() {
+    init_test("test_bind_refuses_non_socket_path");
+    futures_lite::future::block_on(async {
         let dir = socket_dir();
-        let path = dir.path().join("listener_init_failure.sock");
+        let path = dir.path().join("non_socket_target");
+        std::fs::write(&path, b"not a socket").expect("write file");
 
-        remove_stale_socket_file(&path).expect("clear stale socket");
-        let inner = net::UnixListener::bind(&path).expect("bind failed");
-        let err = UnixListener::from_bound_with(&path, inner, |_socket| {
-            Err(io::Error::other("injected listener init failure"))
-        })
-        .expect_err("post-bind init should fail");
-
+        let err = UnixListener::bind(&path)
+            .await
+            .expect_err("bind should reject non-socket path");
         crate::assert_with_log!(
-            err.kind() == io::ErrorKind::Other,
-            "init error kind",
-            io::ErrorKind::Other,
+            err.kind() == std::io::ErrorKind::AlreadyExists,
+            "error kind",
+            std::io::ErrorKind::AlreadyExists,
             err.kind()
         );
+
+        let contents = std::fs::read(&path).expect("read file");
+        let unchanged = contents == b"not a socket";
+        crate::assert_with_log!(unchanged, "file unchanged", true, unchanged);
+    });
+    crate::test_complete!("test_bind_refuses_non_socket_path");
+}
+
+#[test]
+fn test_bind_refuses_stale_socket_file() {
+    init_test("test_bind_refuses_stale_socket_file");
+    futures_lite::future::block_on(async {
+        let dir = socket_dir();
+        let path = dir.path().join("stale_socket.sock");
+
+        let stale = net::UnixListener::bind(&path).expect("create stale socket");
+        drop(stale);
+
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "stale socket exists", true, exists);
+
+        let err = UnixListener::bind(&path)
+            .await
+            .expect_err("bind should refuse stale socket path");
         crate::assert_with_log!(
-            !path.exists(),
-            "socket path cleaned after init failure",
-            false,
-            path.exists()
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
         );
 
-        crate::test_complete!("test_listener_bind_cleanup_on_post_bind_init_failure");
-    }
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "stale socket preserved", true, exists);
+    });
+    crate::test_complete!("test_bind_refuses_stale_socket_file");
+}
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_abstract_socket() {
-        init_test("test_abstract_socket");
-        futures_lite::future::block_on(async {
-            let name = b"asupersync_test_abstract_socket";
-            let listener = UnixListener::bind_abstract(name)
-                .await
-                .expect("bind failed");
-            let addr = listener.local_addr().expect("local_addr failed");
+#[test]
+fn test_bind_refuses_live_socket_file() {
+    init_test("test_bind_refuses_live_socket_file");
+    futures_lite::future::block_on(async {
+        let dir = socket_dir();
+        let path = dir.path().join("live_socket.sock");
 
-            // Should be an abstract socket
-            let pathname = addr.as_pathname();
-            crate::assert_with_log!(
-                pathname.is_none(),
-                "no pathname",
-                "None",
-                format!("{:?}", pathname)
-            );
+        let original = net::UnixListener::bind(&path).expect("create live socket");
+
+        let err = UnixListener::bind(&path)
+            .await
+            .expect_err("bind should refuse live socket path");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
+        );
+        crate::assert_with_log!(path.exists(), "live socket preserved", true, path.exists());
+
+        drop(original);
+        std::fs::remove_file(&path).ok();
+    });
+    crate::test_complete!("test_bind_refuses_live_socket_file");
+}
+
+#[test]
+fn test_accept() {
+    init_test("test_accept");
+    futures_lite::future::block_on(async {
+        let dir = socket_dir();
+        let path = dir.path().join("accept_test.sock");
+
+        let listener = UnixListener::bind(&path).await.expect("bind failed");
+
+        // Connect from another thread
+        let path_clone = path.clone();
+        let handle = std::thread::spawn(move || {
+            let mut stream = net::UnixStream::connect(&path_clone).expect("connect failed");
+            stream.write_all(b"hello").expect("write failed");
         });
-        crate::test_complete!("test_abstract_socket");
-    }
 
-    #[test]
-    fn panicking_accept_waker_keeps_every_detached_sibling_runnable() {
-        struct PanicWake(std::sync::Weak<AcceptWaiters>);
-        impl Wake for PanicWake {
-            fn wake(self: Arc<Self>) {
-                let waiters = self.0.upgrade().expect("live waiter list");
-                assert!(waiters.waiters.try_lock().is_some(), "wake outside lock");
-                // A reentrant registration belongs to the next event and
-                // must survive completion of the detached batch.
-                waiters.register(Some(100), Waker::noop());
-                panic!("accept wake failed");
-            }
-        }
+        // Accept the connection
+        let (mut stream, _addr) = listener.accept().await.expect("accept failed");
 
-        for mode in ["readiness", "retry", "departure"] {
-            let waiters = Arc::new(AcceptWaiters::default());
-            let current_hits = Arc::new(AtomicUsize::new(0));
-            let current = Waker::from(Arc::new(CountingWaker {
-                hits: Arc::clone(&current_hits),
-            }));
-            let sibling_hits = Arc::new(AtomicUsize::new(0));
-            let sibling = Waker::from(Arc::new(CountingWaker {
-                hits: Arc::clone(&sibling_hits),
-            }));
-            waiters.register(Some(0), &current);
-            waiters.register(
-                Some(1),
-                &Waker::from(Arc::new(PanicWake(Arc::downgrade(&waiters)))),
-            );
-            waiters.register(Some(2), &sibling);
-            waiters.register(
-                Some(3),
-                &Waker::from(Arc::new(CountingWaker {
-                    hits: Arc::clone(&sibling_hits),
-                })),
-            );
-            assert_eq!(waiters.waiters.lock().len(), 4);
-            assert_eq!(sibling_hits.load(Ordering::SeqCst), 0);
+        // Read the data using async read
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await.expect("read failed");
+        crate::assert_with_log!(&buf == b"hello", "buf", b"hello", buf);
 
-            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match mode {
-                    "readiness" => waiters.wake_all(),
-                    "retry" => waiters.wake_others(&current),
-                    "departure" => waiters.remove(0),
-                    _ => unreachable!(),
-                }
+        handle.join().expect("thread failed");
+    });
+    crate::test_complete!("test_accept");
+}
+
+#[test]
+fn incoming_registers_on_wouldblock() {
+    init_test("incoming_registers_on_wouldblock");
+    let dir = socket_dir();
+    let path = dir.path().join("incoming_register.sock");
+
+    let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+    std_listener
+        .set_nonblocking(true)
+        .expect("nonblocking failed");
+
+    let reactor = Arc::new(LabReactor::new());
+    let driver = IoDriverHandle::new(reactor);
+    let cx = Cx::new_with_observability(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(driver),
+        None,
+    );
+    let _guard = Cx::set_current(Some(cx));
+
+    let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+    let mut incoming = listener.incoming();
+
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let poll = Pin::new(&mut incoming).poll_next(&mut cx);
+    assert!(matches!(poll, Poll::Pending));
+
+    assert!(
+        listener.registration.lock().is_some(),
+        "incoming should register interest"
+    );
+    crate::test_complete!("incoming_registers_on_wouldblock");
+}
+
+#[test]
+fn listener_fanout_wakes_all_pending_accept_waiters() {
+    init_test("listener_fanout_wakes_all_pending_accept_waiters");
+    let dir = socket_dir();
+    let path = dir.path().join("listener_fanout.sock");
+
+    let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+    std_listener
+        .set_nonblocking(true)
+        .expect("nonblocking failed");
+
+    let reactor = Arc::new(LabReactor::new());
+    let driver = IoDriverHandle::new(reactor);
+    let cx_cap = Cx::new_with_observability(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(driver),
+        None,
+    );
+    let _guard = Cx::set_current(Some(cx_cap));
+
+    let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+    let hits1 = Arc::new(AtomicUsize::new(0));
+    let hits2 = Arc::new(AtomicUsize::new(0));
+    let waker1 = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&hits1),
+    }));
+    let waker2 = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&hits2),
+    }));
+    let mut cx1 = Context::from_waker(&waker1);
+    let mut cx2 = Context::from_waker(&waker2);
+
+    assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+    assert!(matches!(listener.poll_accept(&mut cx2), Poll::Pending));
+
+    let _client1 = net::UnixStream::connect(&path).expect("connect first client");
+    listener.accept_waiters.wake_all();
+
+    assert_eq!(hits1.load(Ordering::SeqCst), 1);
+    assert_eq!(hits2.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(listener.poll_accept(&mut cx2), Poll::Ready(Ok(_))));
+    assert!(matches!(listener.poll_accept(&mut cx1), Poll::Pending));
+
+    let _client2 = net::UnixStream::connect(&path).expect("connect second client");
+    listener.accept_waiters.wake_all();
+
+    assert_eq!(hits1.load(Ordering::SeqCst), 2);
+    assert!(matches!(listener.poll_accept(&mut cx1), Poll::Ready(Ok(_))));
+
+    crate::test_complete!("listener_fanout_wakes_all_pending_accept_waiters");
+}
+
+/// More accept() futures than the 32-entry cap the waiter list used to
+/// evict from: registering one must not wake another (the 33rd used to
+/// evict and wake the first, which evicted the next, forever), and a
+/// dropped accept() future must take its waiter with it.
+#[test]
+fn many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures() {
+    init_test("many_pending_accepts_neither_wake_each_other_nor_outlive_their_futures");
+    let dir = socket_dir();
+    let path = dir.path().join("many_accepts.sock");
+    let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+    std_listener
+        .set_nonblocking(true)
+        .expect("nonblocking failed");
+    let reactor = Arc::new(LabReactor::new());
+    let driver = IoDriverHandle::new(reactor);
+    let cx_cap = Cx::new_with_observability(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(driver),
+        None,
+    );
+    let _guard = Cx::set_current(Some(cx_cap));
+    let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+    let hits: Vec<Arc<AtomicUsize>> = (0..40).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+    let wakers: Vec<Waker> = hits
+        .iter()
+        .map(|hits| {
+            Waker::from(Arc::new(CountingWaker {
+                hits: Arc::clone(hits),
             }))
-            .expect_err("the failing callback must still propagate");
-            assert_eq!(panic.downcast_ref::<&str>(), Some(&"accept wake failed"));
-            assert_eq!(
-                sibling_hits.load(Ordering::SeqCst),
-                2,
-                "every detached sibling must wake in {mode}"
-            );
-            assert_eq!(
-                current_hits.load(Ordering::SeqCst),
-                usize::from(mode == "readiness")
-            );
-            let registered = waiters.waiters.lock();
-            assert_eq!(registered.len(), 1, "reentrant waiter must remain");
-            assert_eq!(registered[0].owner, Some(100));
+        })
+        .collect();
+    let mut accepts: Vec<_> = (0..40).map(|_| Box::pin(listener.accept())).collect();
+    for (accept, waker) in accepts.iter_mut().zip(&wakers) {
+        let mut task_cx = Context::from_waker(waker);
+        assert!(accept.as_mut().poll(&mut task_cx).is_pending());
+    }
+    let woken: usize = hits.iter().map(|hits| hits.load(Ordering::SeqCst)).sum();
+    assert_eq!(woken, 0, "a pending accept must not wake another");
+    assert_eq!(listener.accept_waiters.waiters.lock().len(), 40);
+
+    drop(accepts);
+    assert!(
+        listener.accept_waiters.waiters.lock().is_empty(),
+        "a dropped accept() future must remove its waiter"
+    );
+}
+
+#[test]
+fn incoming_recovers_after_registration_lock_panic() {
+    init_test("incoming_recovers_after_registration_lock_panic");
+    let dir = socket_dir();
+    let path = dir.path().join("incoming_poisoned_lock.sock");
+
+    let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+    std_listener
+        .set_nonblocking(true)
+        .expect("nonblocking failed");
+
+    let reactor = Arc::new(LabReactor::new());
+    let driver = IoDriverHandle::new(reactor);
+    let cx_cap = Cx::new_with_observability(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(driver),
+        None,
+    );
+    let _guard = Cx::set_current(Some(cx_cap));
+
+    let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = listener.registration.lock();
+        panic!("panic while holding registration lock"); // ubs:ignore - test helper
+    }));
+
+    let mut incoming = listener.incoming();
+    let waker = noop_waker();
+    let mut poll_cx = Context::from_waker(&waker);
+
+    let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Pin::new(&mut incoming).poll_next(&mut poll_cx)
+    }));
+    assert!(
+        poll_result.is_ok(),
+        "poll_next should not panic after a registration-lock panic"
+    );
+
+    match poll_result.expect("poll result available") {
+        Poll::Pending => {}
+        other @ Poll::Ready(_) => {
+            panic!("expected Poll::Pending after re-registration path, got {other:?}") // ubs:ignore - test helper
         }
     }
 
-    #[test]
-    fn departing_accept_waker_drop_panic_still_wakes_siblings() {
-        struct PanicDrop(std::sync::Weak<AcceptWaiters>);
-        impl Wake for PanicDrop {
-            fn wake(self: Arc<Self>) {
-                panic!("departing owner must be retired without waking");
-            }
-        }
-        impl Drop for PanicDrop {
-            fn drop(&mut self) {
-                let waiters = self.0.upgrade().expect("live waiter list");
-                assert!(waiters.waiters.try_lock().is_some(), "drop outside lock");
-                panic!("accept retirement failed");
-            }
-        }
+    crate::test_complete!("incoming_recovers_after_registration_lock_panic");
+}
 
+#[test]
+fn test_socket_cleanup_on_drop() {
+    init_test("test_socket_cleanup_on_drop");
+    let dir = socket_dir();
+    let path = dir.path().join("cleanup_test.sock");
+
+    futures_lite::future::block_on(async {
+        let listener = UnixListener::bind(&path).await.expect("bind failed");
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket exists", true, exists);
+        drop(listener);
+    });
+
+    let exists = path.exists();
+    crate::assert_with_log!(!exists, "socket cleaned up", false, exists);
+    crate::test_complete!("test_socket_cleanup_on_drop");
+}
+
+#[test]
+fn test_from_std_no_cleanup() {
+    init_test("test_from_std_no_cleanup");
+    let dir = socket_dir();
+    let path = dir.path().join("from_std_test.sock");
+
+    // Create with std
+    let std_listener = net::UnixListener::bind(&path).expect("bind failed");
+
+    // Wrap in async version
+    let listener = UnixListener::from_std(std_listener).expect("from_std failed");
+    let exists = path.exists();
+    crate::assert_with_log!(exists, "socket exists", true, exists);
+
+    // Drop async listener
+    drop(listener);
+
+    // Socket file should still exist (from_std doesn't clean up)
+    let exists = path.exists();
+    crate::assert_with_log!(exists, "socket remains", true, exists);
+
+    // Clean up manually
+    std::fs::remove_file(&path).ok();
+    crate::test_complete!("test_from_std_no_cleanup");
+}
+
+#[test]
+fn test_take_path_prevents_cleanup() {
+    init_test("test_take_path_prevents_cleanup");
+    let dir = socket_dir();
+    let path = dir.path().join("take_path_test.sock");
+
+    futures_lite::future::block_on(async {
+        let mut listener = UnixListener::bind(&path).await.expect("bind failed");
+
+        // Take the path
+        let taken = listener.take_path();
+        crate::assert_with_log!(taken.is_some(), "taken some", true, taken.is_some());
+        let taken = taken.unwrap();
+        crate::assert_with_log!(taken == path, "taken path", path, taken);
+
+        drop(listener);
+    });
+
+    // Socket should still exist
+    let exists = path.exists();
+    crate::assert_with_log!(exists, "socket remains", true, exists);
+
+    // Clean up manually
+    std::fs::remove_file(&path).ok();
+    crate::test_complete!("test_take_path_prevents_cleanup");
+}
+
+#[test]
+fn replacement_socket_path_survives_old_listener_drop() {
+    init_test("replacement_socket_path_survives_old_listener_drop");
+    let dir = socket_dir();
+    let path = dir.path().join("listener_rebind.sock");
+
+    let original = futures_lite::future::block_on(UnixListener::bind(&path)).expect("bind failed");
+    crate::assert_with_log!(path.exists(), "socket exists", true, path.exists());
+
+    std::fs::remove_file(&path).expect("unlink original path");
+    let replacement = net::UnixListener::bind(&path).expect("bind replacement failed");
+    crate::assert_with_log!(path.exists(), "replacement exists", true, path.exists());
+
+    drop(original);
+
+    crate::assert_with_log!(
+        path.exists(),
+        "old listener drop preserved replacement path",
+        true,
+        path.exists()
+    );
+
+    drop(replacement);
+    std::fs::remove_file(&path).ok();
+    crate::test_complete!("replacement_socket_path_survives_old_listener_drop");
+}
+
+#[test]
+fn test_bind_cleanup_on_post_bind_init_failure() {
+    init_test("test_listener_bind_cleanup_on_post_bind_init_failure");
+    let dir = socket_dir();
+    let path = dir.path().join("listener_init_failure.sock");
+
+    remove_stale_socket_file(&path).expect("clear stale socket");
+    let inner = net::UnixListener::bind(&path).expect("bind failed");
+    let err = UnixListener::from_bound_with(&path, inner, |_socket| {
+        Err(io::Error::other("injected listener init failure"))
+    })
+    .expect_err("post-bind init should fail");
+
+    crate::assert_with_log!(
+        err.kind() == io::ErrorKind::Other,
+        "init error kind",
+        io::ErrorKind::Other,
+        err.kind()
+    );
+    crate::assert_with_log!(
+        !path.exists(),
+        "socket path cleaned after init failure",
+        false,
+        path.exists()
+    );
+
+    crate::test_complete!("test_listener_bind_cleanup_on_post_bind_init_failure");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_abstract_socket() {
+    init_test("test_abstract_socket");
+    futures_lite::future::block_on(async {
+        let name = b"asupersync_test_abstract_socket";
+        let listener = UnixListener::bind_abstract(name)
+            .await
+            .expect("bind failed");
+        let addr = listener.local_addr().expect("local_addr failed");
+
+        // Should be an abstract socket
+        let pathname = addr.as_pathname();
+        crate::assert_with_log!(
+            pathname.is_none(),
+            "no pathname",
+            "None",
+            format!("{:?}", pathname)
+        );
+    });
+    crate::test_complete!("test_abstract_socket");
+}
+
+#[test]
+fn panicking_accept_waker_keeps_every_detached_sibling_runnable() {
+    struct PanicWake(std::sync::Weak<AcceptWaiters>);
+    impl Wake for PanicWake {
+        fn wake(self: Arc<Self>) {
+            let waiters = self.0.upgrade().expect("live waiter list");
+            assert!(waiters.waiters.try_lock().is_some(), "wake outside lock");
+            // A reentrant registration belongs to the next event and
+            // must survive completion of the detached batch.
+            waiters.register(Some(100), Waker::noop());
+            panic!("accept wake failed");
+        }
+    }
+
+    for mode in ["readiness", "retry", "departure"] {
         let waiters = Arc::new(AcceptWaiters::default());
-        let retired = Waker::from(Arc::new(PanicDrop(Arc::downgrade(&waiters))));
-        waiters.register(Some(0), &retired);
-        drop(retired);
-        let hits = Arc::new(AtomicUsize::new(0));
-        let sibling = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&hits),
+        let current_hits = Arc::new(AtomicUsize::new(0));
+        let current = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&current_hits),
         }));
-        waiters.register(Some(1), &sibling);
+        let sibling_hits = Arc::new(AtomicUsize::new(0));
+        let sibling = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&sibling_hits),
+        }));
+        waiters.register(Some(0), &current);
         waiters.register(
-            Some(2),
+            Some(1),
+            &Waker::from(Arc::new(PanicWake(Arc::downgrade(&waiters)))),
+        );
+        waiters.register(Some(2), &sibling);
+        waiters.register(
+            Some(3),
             &Waker::from(Arc::new(CountingWaker {
-                hits: Arc::clone(&hits),
+                hits: Arc::clone(&sibling_hits),
             })),
         );
+        assert_eq!(waiters.waiters.lock().len(), 4);
+        assert_eq!(sibling_hits.load(Ordering::SeqCst), 0);
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            waiters.remove(0);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match mode {
+            "readiness" => waiters.wake_all(),
+            "retry" => waiters.wake_others(&current),
+            "departure" => waiters.remove(0),
+            _ => unreachable!(),
         }))
-        .expect_err("the retirement panic must still propagate");
+        .expect_err("the failing callback must still propagate");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"accept wake failed"));
         assert_eq!(
-            panic.downcast_ref::<&str>(),
-            Some(&"accept retirement failed")
+            sibling_hits.load(Ordering::SeqCst),
+            2,
+            "every detached sibling must wake in {mode}"
         );
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(waiters.waiters.lock().is_empty());
+        assert_eq!(
+            current_hits.load(Ordering::SeqCst),
+            usize::from(mode == "readiness")
+        );
+        let registered = waiters.waiters.lock();
+        assert_eq!(registered.len(), 1, "reentrant waiter must remain");
+        assert_eq!(registered[0].owner, Some(100));
     }
+}
+
+#[test]
+fn departing_accept_waker_drop_panic_still_wakes_siblings() {
+    struct PanicDrop(std::sync::Weak<AcceptWaiters>);
+    impl Wake for PanicDrop {
+        fn wake(self: Arc<Self>) {
+            panic!("departing owner must be retired without waking");
+        }
+    }
+    impl Drop for PanicDrop {
+        fn drop(&mut self) {
+            let waiters = self.0.upgrade().expect("live waiter list");
+            assert!(waiters.waiters.try_lock().is_some(), "drop outside lock");
+            panic!("accept retirement failed");
+        }
+    }
+
+    let waiters = Arc::new(AcceptWaiters::default());
+    let retired = Waker::from(Arc::new(PanicDrop(Arc::downgrade(&waiters))));
+    waiters.register(Some(0), &retired);
+    drop(retired);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let sibling = Waker::from(Arc::new(CountingWaker {
+        hits: Arc::clone(&hits),
+    }));
+    waiters.register(Some(1), &sibling);
+    waiters.register(
+        Some(2),
+        &Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        })),
+    );
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        waiters.remove(0);
+    }))
+    .expect_err("the retirement panic must still propagate");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"accept retirement failed")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert!(waiters.waiters.lock().is_empty());
+}

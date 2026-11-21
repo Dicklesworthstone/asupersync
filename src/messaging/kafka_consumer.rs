@@ -30,6 +30,7 @@ use crate::messaging::kafka::{
     deterministic_broker_end_offset, deterministic_broker_fetch, deterministic_broker_notify,
 };
 use crate::sync::Notify;
+use crate::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "kafka",
     all(not(feature = "kafka"), any(test, feature = "test-internals"))
@@ -49,7 +50,6 @@ use std::future::Future;
 ))]
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
-use crate::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(
     feature = "kafka",
     all(not(feature = "kafka"), any(test, feature = "test-internals"))
@@ -623,7 +623,9 @@ impl ConsumerGroupMetadata {
                 .get(&key)
                 .is_some_and(|previous| offset.offset < *previous)
             {
-                return Err(KafkaError::Config("offset commit regression is not allowed".into()));
+                return Err(KafkaError::Config(
+                    "offset commit regression is not allowed".into(),
+                ));
             }
             if normalized.insert(key, offset.offset).is_some() {
                 return Err(KafkaError::Config(
@@ -657,7 +659,10 @@ impl ConsumerGroupMetadata {
 
     #[cfg(feature = "kafka")]
     pub(crate) fn native(&self) -> Result<&rdkafka::consumer::ConsumerGroupMetadata, KafkaError> {
-        self.inner.native.as_ref().ok_or(KafkaError::FeatureDisabled)
+        self.inner
+            .native
+            .as_ref()
+            .ok_or(KafkaError::FeatureDisabled)
     }
 }
 
@@ -679,7 +684,11 @@ impl PreparedTransactionOffsets {
         }
         let mut merged = self.clone();
         for (key, offset) in &next.offsets {
-            if merged.offsets.get(key).is_some_and(|previous| offset < previous) {
+            if merged
+                .offsets
+                .get(key)
+                .is_some_and(|previous| offset < previous)
+            {
                 return Err(KafkaError::Config(
                     "transactional offset regression is not allowed".into(),
                 ));
@@ -702,9 +711,14 @@ impl PreparedTransactionOffsets {
         let state = state.lock();
         self.metadata.validate_membership(&state, &closed)?;
         if self.offsets.iter().any(|(key, offset)| {
-            state.committed_offsets.get(key).is_some_and(|previous| offset < previous)
+            state
+                .committed_offsets
+                .get(key)
+                .is_some_and(|previous| offset < previous)
         }) {
-            return Err(KafkaError::Config("offset commit regression is not allowed".into()));
+            return Err(KafkaError::Config(
+                "offset commit regression is not allowed".into(),
+            ));
         }
         Ok(())
     }
@@ -1075,7 +1089,10 @@ impl BrokerConsumerLease {
         if state.retiring {
             return None;
         }
-        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        state.leases = state
+            .leases
+            .checked_add(1)
+            .expect("native consumer lease count overflow");
         Some(Self {
             consumer: Some(Arc::clone(consumer)),
             operations: Arc::clone(operations),
@@ -1089,9 +1106,14 @@ impl Clone for BrokerConsumerLease {
         let mut state = self.operations.lifetime.lock();
         // An existing operation may make another attempt after retirement has
         // begun. Its own lease keeps the count nonzero throughout that handoff.
-        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        state.leases = state
+            .leases
+            .checked_add(1)
+            .expect("native consumer lease count overflow");
         Self {
-            consumer: Some(Arc::clone(self.consumer.as_ref().expect("live native consumer lease"))),
+            consumer: Some(Arc::clone(
+                self.consumer.as_ref().expect("live native consumer lease"),
+            )),
             operations: Arc::clone(&self.operations),
         }
     }
@@ -1102,7 +1124,9 @@ impl std::ops::Deref for BrokerConsumerLease {
     type Target = BaseConsumer<BrokerConsumerContext>;
 
     fn deref(&self) -> &Self::Target {
-        self.consumer.as_deref().expect("live native consumer lease")
+        self.consumer
+            .as_deref()
+            .expect("live native consumer lease")
     }
 }
 
@@ -1411,7 +1435,10 @@ impl<'a> ConsumerWait<'a> {
         let _ambient = self.cx.clone().set_current_restricted();
         // Register before checking, closing the cancel/check/park race. Keep
         // the token while cancellation is masked so unmasking also wakes us.
-        self.cancel_token = Some(self.cx.refresh_cancel_waker(self.cancel_token, task.waker()));
+        self.cancel_token = Some(
+            self.cx
+                .refresh_cancel_waker(self.cancel_token, task.waker()),
+        );
         if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(KafkaError::Cancelled));
         }
@@ -1647,7 +1674,9 @@ impl KafkaConsumer {
             None => (None, None),
         };
         #[cfg(feature = "kafka")]
-        let broker_ops = consumer.as_ref().map(|_| Arc::new(BrokerOperations::default()));
+        let broker_ops = consumer
+            .as_ref()
+            .map(|_| Arc::new(BrokerOperations::default()));
         Ok(Self {
             config,
             state: Arc::new(Mutex::new(ConsumerState::default())),
@@ -2369,7 +2398,8 @@ impl KafkaConsumer {
 
         #[cfg(feature = "kafka")]
         {
-            let (consumer, broker_ops) = self.broker_backend().ok_or(KafkaError::FeatureDisabled)?;
+            let (consumer, broker_ops) =
+                self.broker_backend().ok_or(KafkaError::FeatureDisabled)?;
             let state = Arc::clone(&self.state);
             let closed = Arc::clone(&self.closed);
             let group_id = self.config.group_id.clone();
@@ -2388,7 +2418,8 @@ impl KafkaConsumer {
                 apply_broker_snapshot(&mut state, snapshot);
                 if state.assigned_partitions.is_empty() {
                     return Err(KafkaError::Transaction(
-                        "consumer has no assigned partitions; poll before capturing metadata".into(),
+                        "consumer has no assigned partitions; poll before capturing metadata"
+                            .into(),
                     ));
                 }
                 Ok(ConsumerGroupMetadata {

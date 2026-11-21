@@ -38,9 +38,9 @@
 //! let fault_tx = FaultSender::new(tx, config, sink);
 //! ```
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;

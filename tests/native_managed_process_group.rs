@@ -91,7 +91,11 @@ async fn recruit(
     cx: &Cx,
     client: ProcessGroupClient<u32>,
     panic_on_release: bool,
-) -> (ManagedGroupMembership<u32>, TaskHandle<()>, oneshot::Sender<()>) {
+) -> (
+    ManagedGroupMembership<u32>,
+    TaskHandle<()>,
+    oneshot::Sender<()>,
+) {
     let (registered, mut registration) = oneshot::channel();
     let (release, mut released) = oneshot::channel();
     let task = cx
@@ -122,11 +126,8 @@ fn parked_broadcast(
     let task = cx
         .spawn(move |sender| async move {
             let mut ready = Some(ready);
-            let mut sending = Box::pin(client.broadcast(
-                &sender,
-                &message,
-                BroadcastBackpressurePolicy::Wait,
-            ));
+            let mut sending =
+                Box::pin(client.broadcast(&sender, &message, BroadcastBackpressurePolicy::Wait));
             let result = poll_fn(|task| match sending.as_mut().poll(task) {
                 Poll::Ready(result) => Poll::Ready(result),
                 Poll::Pending => {
@@ -170,7 +171,10 @@ async fn actual_member_death(cx: Cx) {
     assert!(!membership.is_active());
     assert!(client.members(&cx).unwrap().is_empty());
     let after = client.events(&cx, events.batch.next_cursor()).unwrap();
-    assert!(after.batch.is_empty(), "the same DOWN must not be emitted twice");
+    assert!(
+        after.batch.is_empty(),
+        "the same DOWN must not be emitted twice"
+    );
     drop(membership);
 
     let exit = owner.shutdown().await;
@@ -208,14 +212,20 @@ async fn stale_guard_and_capacity(cx: Cx) {
     let other_client = client.clone();
     let mut other = cx
         .spawn(move |other| async move {
-            matches!(other_client.join(&other).await, Err(ManagedGroupError::Capacity))
+            matches!(
+                other_client.join(&other).await,
+                Err(ManagedGroupError::Capacity)
+            )
         })
         .unwrap();
     assert!(other.join(&cx).await.unwrap());
     let snapshot = client.members(&cx).unwrap();
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot.members()[0].join_sequence(), current.generation());
-    let sent = client.broadcast(&cx, &17, BroadcastBackpressurePolicy::Wait).await.unwrap();
+    let sent = client
+        .broadcast(&cx, &17, BroadcastBackpressurePolicy::Wait)
+        .await
+        .unwrap();
     assert!(sent.is_all_delivered());
     assert_eq!(current.recv(&cx).await.unwrap(), 17);
     current.leave(&cx).await.unwrap();
@@ -235,18 +245,49 @@ async fn cancellation_preserves_delivery_prefix(cx: Cx) {
     let (mut last, mut last_task, last_release) = recruit(&cx, client.clone(), false).await;
     let ids = [first.id().clone(), slow.id().clone(), last.id().clone()];
     assert_eq!(
-        client.members(&cx).unwrap().member_ids().cloned().collect::<Vec<_>>(),
+        client
+            .members(&cx)
+            .unwrap()
+            .member_ids()
+            .cloned()
+            .collect::<Vec<_>>(),
         ids.to_vec()
     );
 
-    assert!(client.broadcast(&cx, &10, BroadcastBackpressurePolicy::Wait).await.unwrap().is_all_delivered());
-    let skipped = client.broadcast(&cx, &11, BroadcastBackpressurePolicy::Skip).await.unwrap();
+    assert!(
+        client
+            .broadcast(&cx, &10, BroadcastBackpressurePolicy::Wait)
+            .await
+            .unwrap()
+            .is_all_delivered()
+    );
+    let skipped = client
+        .broadcast(&cx, &11, BroadcastBackpressurePolicy::Skip)
+        .await
+        .unwrap();
     assert_eq!(skipped.recipients.len(), 3);
-    assert!(skipped.recipients.iter().all(|r| r.status == ManagedGroupRecipientStatus::Skipped));
-    let full = client.broadcast(&cx, &12, BroadcastBackpressurePolicy::Error).await.unwrap();
-    assert_eq!(full.recipients[0].status, ManagedGroupRecipientStatus::Backpressured);
-    assert_eq!(full.recipients[1].status, ManagedGroupRecipientStatus::NotAttempted);
-    assert_eq!(full.recipients[2].status, ManagedGroupRecipientStatus::NotAttempted);
+    assert!(
+        skipped
+            .recipients
+            .iter()
+            .all(|r| r.status == ManagedGroupRecipientStatus::Skipped)
+    );
+    let full = client
+        .broadcast(&cx, &12, BroadcastBackpressurePolicy::Error)
+        .await
+        .unwrap();
+    assert_eq!(
+        full.recipients[0].status,
+        ManagedGroupRecipientStatus::Backpressured
+    );
+    assert_eq!(
+        full.recipients[1].status,
+        ManagedGroupRecipientStatus::NotAttempted
+    );
+    assert_eq!(
+        full.recipients[2].status,
+        ManagedGroupRecipientStatus::NotAttempted
+    );
     assert_eq!(first.recv(&cx).await.unwrap(), 10);
     assert_eq!(last.recv(&cx).await.unwrap(), 10);
 
@@ -260,25 +301,59 @@ async fn cancellation_preserves_delivery_prefix(cx: Cx) {
     let result = completion.recv(&cx).await.unwrap().unwrap();
     sender_monitor.down(&cx).await.unwrap();
     let _terminal = sender.join(&cx).await;
-    assert_eq!(result.cancellation.as_ref().unwrap().kind, CancelKind::RaceLost);
+    assert_eq!(
+        result.cancellation.as_ref().unwrap().kind,
+        CancelKind::RaceLost
+    );
     assert_eq!(result.recipients.len(), 3);
     assert_eq!(result.recipients[0].member, ids[0]);
-    assert_eq!(result.recipients[0].status, ManagedGroupRecipientStatus::Delivered);
+    assert_eq!(
+        result.recipients[0].status,
+        ManagedGroupRecipientStatus::Delivered
+    );
     assert_eq!(result.recipients[1].member, ids[1]);
-    assert_eq!(result.recipients[1].status, ManagedGroupRecipientStatus::Cancelled);
+    assert_eq!(
+        result.recipients[1].status,
+        ManagedGroupRecipientStatus::Cancelled
+    );
     assert_eq!(result.recipients[2].member, ids[2]);
-    assert_eq!(result.recipients[2].status, ManagedGroupRecipientStatus::NotAttempted);
+    assert_eq!(
+        result.recipients[2].status,
+        ManagedGroupRecipientStatus::NotAttempted
+    );
 
-    let continued = client.broadcast(&cx, &30, BroadcastBackpressurePolicy::Error).await.unwrap();
-    assert_eq!(continued.recipients[0].status, ManagedGroupRecipientStatus::Delivered);
-    assert_eq!(continued.recipients[1].status, ManagedGroupRecipientStatus::Backpressured);
-    assert_eq!(continued.recipients[2].status, ManagedGroupRecipientStatus::NotAttempted);
+    let continued = client
+        .broadcast(&cx, &30, BroadcastBackpressurePolicy::Error)
+        .await
+        .unwrap();
+    assert_eq!(
+        continued.recipients[0].status,
+        ManagedGroupRecipientStatus::Delivered
+    );
+    assert_eq!(
+        continued.recipients[1].status,
+        ManagedGroupRecipientStatus::Backpressured
+    );
+    assert_eq!(
+        continued.recipients[2].status,
+        ManagedGroupRecipientStatus::NotAttempted
+    );
     assert_eq!(first.recv(&cx).await.unwrap(), 30);
     assert_eq!(slow.recv(&cx).await.unwrap(), 10);
-    assert!(client.broadcast(&cx, &31, BroadcastBackpressurePolicy::Wait).await.unwrap().is_all_delivered());
+    assert!(
+        client
+            .broadcast(&cx, &31, BroadcastBackpressurePolicy::Wait)
+            .await
+            .unwrap()
+            .is_all_delivered()
+    );
     assert_eq!(first.recv(&cx).await.unwrap(), 31);
     assert_eq!(slow.recv(&cx).await.unwrap(), 31);
-    assert_eq!(last.recv(&cx).await.unwrap(), 31, "both stopped suffixes must remain untouched");
+    assert_eq!(
+        last.recv(&cx).await.unwrap(),
+        31,
+        "both stopped suffixes must remain untouched"
+    );
 
     first.leave(&cx).await.unwrap();
     slow.leave(&cx).await.unwrap();
@@ -300,7 +375,13 @@ async fn death_wakes_full_mailbox(cx: Cx) {
     let client = owner.client();
     let (membership, mut member, release) = recruit(&cx, client.clone(), false).await;
     let monitor = cx.monitor(&member).await.unwrap();
-    assert!(client.broadcast(&cx, &1, BroadcastBackpressurePolicy::Wait).await.unwrap().is_all_delivered());
+    assert!(
+        client
+            .broadcast(&cx, &1, BroadcastBackpressurePolicy::Wait)
+            .await
+            .unwrap()
+            .is_all_delivered()
+    );
     let (mut sender, mut parked, mut completion) = parked_broadcast(&cx, client.clone(), 2);
     parked.recv(&cx).await.unwrap();
 
@@ -312,7 +393,10 @@ async fn death_wakes_full_mailbox(cx: Cx) {
     let report = completion.recv(&cx).await.unwrap().unwrap();
     sender.join(&cx).await.unwrap();
     assert_eq!(report.recipients.len(), 1);
-    assert_eq!(report.recipients[0].status, ManagedGroupRecipientStatus::Departed);
+    assert_eq!(
+        report.recipients[0].status,
+        ManagedGroupRecipientStatus::Departed
+    );
     assert!(report.cancellation.is_none());
     assert!(!membership.is_active());
     assert!(client.members(&cx).unwrap().is_empty());
@@ -362,10 +446,21 @@ async fn bounded_event_history(cx: Cx) {
     assert_eq!(events.first_retained.next_sequence(), 13);
     assert_eq!(events.batch.next_cursor().next_sequence(), 16);
     assert_eq!(
-        events.batch.events().iter().map(|event| event.sequence()).collect::<Vec<_>>(),
+        events
+            .batch
+            .events()
+            .iter()
+            .map(|event| event.sequence())
+            .collect::<Vec<_>>(),
         vec![13, 14, 15]
     );
-    assert!(client.events(&cx, events.batch.next_cursor()).unwrap().batch.is_empty());
+    assert!(
+        client
+            .events(&cx, events.batch.next_cursor())
+            .unwrap()
+            .batch
+            .is_empty()
+    );
     let exit = owner.shutdown().await;
     assert_eq!(exit.task_outcome.as_ref().unwrap().joined, 8);
     assert_eq!(exit.task_outcome.as_ref().unwrap().left, 8);
@@ -391,18 +486,30 @@ async fn shutdown_and_abandonment(cx: Cx) {
     closed(owner.shutdown().await);
     assert!(!membership.is_active());
     assert!(waiting.await.unwrap().closed);
-    assert!(!cx.is_cancel_requested(), "member task is outside the group owner region");
-    assert!(matches!(client.join(&cx).await, Err(ManagedGroupError::Closed)));
+    assert!(
+        !cx.is_cancel_requested(),
+        "member task is outside the group owner region"
+    );
+    assert!(matches!(
+        client.join(&cx).await,
+        Err(ManagedGroupError::Closed)
+    ));
     drop(membership);
 
-    let outer = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let outer = cx
+        .open_child_region(ChildRegionSpec::inherit())
+        .await
+        .unwrap();
     // A child region's Cx is a spawn principal. Admit a real setup task to
     // obtain the checked holder authority required to open a managed group.
     let (prepared, mut preparation) = oneshot::channel();
-    let mut setup = outer.cx().spawn(move |setup| async move {
-        let owner = open(&setup, 1, 2, 8).await;
-        assert!(prepared.send_blocking(owner).is_ok());
-    }).unwrap();
+    let mut setup = outer
+        .cx()
+        .spawn(move |setup| async move {
+            let owner = open(&setup, 1, 2, 8).await;
+            assert!(prepared.send_blocking(owner).is_ok());
+        })
+        .unwrap();
     let abandoned = preparation.recv(&cx).await.unwrap();
     setup.join(&cx).await.unwrap();
     let client = abandoned.client();

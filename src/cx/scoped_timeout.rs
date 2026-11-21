@@ -231,7 +231,9 @@ where
         T: Send + 'static,
     {
         // Capability preflight comes before region reservations or user code.
-        let driver = self.timer_driver().ok_or(ScopedTimeoutError::TimerUnavailable)?;
+        let driver = self
+            .timer_driver()
+            .ok_or(ScopedTimeoutError::TimerUnavailable)?;
         let gateway = self
             .spawn_gateway_handle()
             .ok_or(ScopedTimeoutError::Spawn(SpawnError::RuntimeUnavailable))?;
@@ -325,8 +327,14 @@ where
         // on its own child can therefore finish once that child drains.
         if result.is_none() {
             result = Some(
-                poll_fn(|task| owned.handle.as_mut().expect("operation submitted").poll_join(task))
-                    .await,
+                poll_fn(|task| {
+                    owned
+                        .handle
+                        .as_mut()
+                        .expect("operation submitted")
+                        .poll_join(task)
+                })
+                .await,
             );
         }
         let task = match result.expect("operation joined") {
@@ -359,7 +367,13 @@ where
             (None, None)
         };
         owned.armed = false;
-        Ok(ScopedTimeoutReport { stop, task, region_id, close, deadline })
+        Ok(ScopedTimeoutReport {
+            stop,
+            task,
+            region_id,
+            close,
+            deadline,
+        })
     }
 }
 

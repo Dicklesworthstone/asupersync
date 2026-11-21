@@ -771,8 +771,13 @@ impl ProxyEnvironment {
             let key = key.as_ref();
             if matches!(
                 key,
-                "http_proxy" | "https_proxy" | "HTTPS_PROXY" | "all_proxy"
-                    | "ALL_PROXY" | "no_proxy" | "NO_PROXY"
+                "http_proxy"
+                    | "https_proxy"
+                    | "HTTPS_PROXY"
+                    | "all_proxy"
+                    | "ALL_PROXY"
+                    | "no_proxy"
+                    | "NO_PROXY"
             ) {
                 values.insert(key.to_owned(), value.as_ref().trim().to_owned());
             }
@@ -780,9 +785,8 @@ impl ProxyEnvironment {
         // Presence wins over casing, even for an empty value. An empty
         // scheme setting then falls through to ALL_PROXY; empty no_proxy
         // deliberately suppresses an uppercase NO_PROXY.
-        let preferred = |lower: &str, upper: &str| {
-            values.get(lower).or_else(|| values.get(upper)).cloned()
-        };
+        let preferred =
+            |lower: &str, upper: &str| values.get(lower).or_else(|| values.get(upper)).cloned();
         let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
         Self {
             // HTTP_PROXY can be injected by a CGI request header.
@@ -792,23 +796,35 @@ impl ProxyEnvironment {
             bypass: preferred("no_proxy", "NO_PROXY")
                 .into_iter()
                 .flat_map(|value| {
-                    value.split(',').filter_map(NoProxyRule::parse).collect::<Vec<_>>()
+                    value
+                        .split(',')
+                        .filter_map(NoProxyRule::parse)
+                        .collect::<Vec<_>>()
                 })
                 .collect(),
         }
     }
 
     fn proxy_for(&self, url: &ParsedUrl) -> Option<&str> {
-        let host = url.host.trim_start_matches('[').trim_end_matches(']')
-            .trim_end_matches('.').to_ascii_lowercase();
+        let host = url
+            .host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         let ip = host.parse::<IpAddr>().ok();
-        if self.bypass.iter().any(|rule| rule.matches(&host, ip, url.port)) {
+        if self
+            .bypass
+            .iter()
+            .any(|rule| rule.matches(&host, ip, url.port))
+        {
             return None;
         }
         match url.scheme {
             Scheme::Http => self.http.as_deref(),
             Scheme::Https => self.https.as_deref(),
-        }.or(self.all.as_deref())
+        }
+        .or(self.all.as_deref())
     }
 }
 
@@ -829,9 +845,12 @@ impl NoProxyRule {
             return None;
         }
         if let Some((network, prefix)) = value.split_once('/') {
-            let network = network.strip_prefix('[')
-                .and_then(|value| value.strip_suffix(']')).unwrap_or(network)
-                .parse::<IpAddr>().ok()?;
+            let network = network
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(network)
+                .parse::<IpAddr>()
+                .ok()?;
             if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
@@ -862,8 +881,11 @@ impl NoProxyRule {
         } else {
             (value, None)
         };
-        let host = host.strip_prefix('.').unwrap_or(host)
-            .trim_end_matches('.').to_ascii_lowercase();
+        let host = host
+            .strip_prefix('.')
+            .unwrap_or(host)
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         if host.is_empty()
             || host.starts_with('.')
             || host.parse::<IpAddr>().is_err()
@@ -877,7 +899,10 @@ impl NoProxyRule {
     fn matches(&self, host: &str, ip: Option<IpAddr>, port: u16) -> bool {
         match self {
             Self::All => true,
-            Self::Host { host: expected, port: required } => {
+            Self::Host {
+                host: expected,
+                port: required,
+            } => {
                 if required.is_some_and(|required| required != port) {
                     return false;
                 }
@@ -1598,14 +1623,7 @@ impl<'a> ClientRequestBuilder<'a> {
             )));
         }
         self.client
-            .request_with_body_timeout(
-                cx,
-                self.method,
-                &self.url,
-                self.headers,
-                body,
-                self.timeout,
-            )
+            .request_with_body_timeout(cx, self.method, &self.url, self.headers, body, self.timeout)
             .await
     }
 
@@ -2160,13 +2178,8 @@ impl HttpClient {
         let parsed = ParsedUrl::parse(url)?;
         let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
         let mut exchange = std::pin::pin!(async {
-            let (request, route) = self.build_pooled_streaming_request(
-                &method,
-                &parsed,
-                &extra_headers,
-                &[],
-                None,
-            )?;
+            let (request, route) =
+                self.build_pooled_streaming_request(&method, &parsed, &extra_headers, &[], None)?;
             let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
             let head = crate::http::h1::stream::RequestHead {
                 method: request.method,
@@ -2386,8 +2399,7 @@ impl HttpClient {
                         // Buffered responses can be large. Release each hop before
                         // continuing instead of retaining it in a recursive future.
                         drop(resp);
-                        extra_headers =
-                            self.redirect_headers(&parsed, &next_parsed, extra_headers);
+                        extra_headers = self.redirect_headers(&parsed, &next_parsed, extra_headers);
                         if drops_body {
                             body = Vec::new();
                             extra_headers = strip_content_headers(extra_headers);
@@ -2509,8 +2521,15 @@ impl HttpClient {
         deadline: &PooledStreamDeadline,
     ) -> Result<PooledClientStreamingResponse, ClientError> {
         self.execute_with_redirects_pooled_streaming_method(
-            cx, method, parsed, extra_headers, body, deadline,
-        ).await.map(|(_, response)| response)
+            cx,
+            method,
+            parsed,
+            extra_headers,
+            body,
+            deadline,
+        )
+        .await
+        .map(|(_, response)| response)
     }
 
     /// Keep the final method authoritative for response representation policy:
@@ -2593,13 +2612,8 @@ impl HttpClient {
         let mut retry_fresh = false;
         loop {
             check_cx(cx)?;
-            let (request, route) = self.build_pooled_streaming_request(
-                method,
-                parsed,
-                extra_headers,
-                body,
-                origin,
-            )?;
+            let (request, route) =
+                self.build_pooled_streaming_request(method, parsed, extra_headers, body, origin)?;
             let request_forbids_reuse = request_forbids_connection_reuse(&request.headers);
             let key = parsed.pool_key();
             let acquired = if retry_fresh && route.proxy.is_none() {
@@ -2621,12 +2635,7 @@ impl HttpClient {
             let io = acquired.io;
             check_cx(cx)?;
             let result = if let Some(max_body_size) = self.config.max_body_size {
-                Http1Client::request_streaming_with_max_body_size(
-                    io,
-                    request,
-                    max_body_size,
-                )
-                .await
+                Http1Client::request_streaming_with_max_body_size(io, request, max_body_size).await
             } else {
                 Http1Client::request_streaming(io, request).await
             };
@@ -2700,7 +2709,15 @@ impl HttpClient {
         check_cx(cx)?;
         if let Some(proxy_url) = self.proxy_url_for(parsed) {
             return self
-                .execute_single_with_proxy(cx, method, parsed, extra_headers, body, proxy_url, origin)
+                .execute_single_with_proxy(
+                    cx,
+                    method,
+                    parsed,
+                    extra_headers,
+                    body,
+                    proxy_url,
+                    origin,
+                )
                 .await;
         }
 
@@ -2956,7 +2973,8 @@ impl HttpClient {
         body: &[u8],
         origin: Option<&ParsedUrl>,
     ) -> Result<(Request, PooledStreamRoute), ClientError> {
-        let proxy = self.proxy_url_for(parsed)
+        let proxy = self
+            .proxy_url_for(parsed)
             .map(|url| self.parse_selected_proxy(url))
             .transpose()?;
         let proxy_authorization = proxy.as_ref().and_then(|proxy| {
@@ -2985,10 +3003,13 @@ impl HttpClient {
             // negotiation. Neither may forward this header to the origin.
             strip_proxy_authorization(&mut request.headers);
         }
-        Ok((request, PooledStreamRoute {
-            proxy,
-            proxy_authorization,
-        }))
+        Ok((
+            request,
+            PooledStreamRoute {
+                proxy,
+                proxy_authorization,
+            },
+        ))
     }
 
     fn uses_environment_proxy(&self) -> bool {
@@ -2997,7 +3018,9 @@ impl HttpClient {
 
     fn proxy_url_for(&self, parsed: &ParsedUrl) -> Option<&str> {
         self.config.proxy_url.as_deref().or_else(|| {
-            self.config.proxy_environment.as_ref()
+            self.config
+                .proxy_environment
+                .as_ref()
                 .and_then(|environment| environment.proxy_for(parsed))
         })
     }
@@ -3025,8 +3048,7 @@ impl HttpClient {
             return true;
         }
         let selected = self.proxy_url_for(parsed);
-        selected.is_some()
-            && origin.is_none_or(|origin| self.proxy_url_for(origin) == selected)
+        selected.is_some() && origin.is_none_or(|origin| self.proxy_url_for(origin) == selected)
     }
 
     /// The caller's proxy credentials, scoped separately from origin credentials.
@@ -3138,8 +3160,8 @@ impl HttpClient {
                 }
             }
             ProxyScheme::Socks5 => {
-                let tcp =
-                    connect_via_socks5(proxy, parsed, cx, self.config.dns_resolver.as_ref()).await?;
+                let tcp = connect_via_socks5(proxy, parsed, cx, self.config.dns_resolver.as_ref())
+                    .await?;
                 if parsed.scheme == Scheme::Http {
                     return Ok(ProxyConnection {
                         io: ClientIo::Plain(tcp),
@@ -3274,12 +3296,13 @@ impl HttpClient {
         // stripped default Cookie/Proxy-Authorization must not suppress the jar/proxy
         // fallback path below.
         let default_cookie_applies = has_header(default_headers, "cookie") && !cross_origin;
-        let default_proxy_auth_applies =
-            has_header(default_headers, "proxy-authorization") && !cross_origin && proxy_auth_applies;
+        let default_proxy_auth_applies = has_header(default_headers, "proxy-authorization")
+            && !cross_origin
+            && proxy_auth_applies;
         let has_cookie_header = has_header(extra_headers, "cookie") || default_cookie_applies;
-        let has_proxy_authorization =
-            has_header(extra_headers, "proxy-authorization") && proxy_auth_applies
-                || default_proxy_auth_applies;
+        let has_proxy_authorization = has_header(extra_headers, "proxy-authorization")
+            && proxy_auth_applies
+            || default_proxy_auth_applies;
         let has_user_agent_header =
             has_header(extra_headers, "user-agent") || has_header(default_headers, "user-agent");
         let request_target = request_target.unwrap_or_else(|| parsed.path.clone());
@@ -3308,7 +3331,8 @@ impl HttpClient {
                         !(name.eq_ignore_ascii_case("host")
                             || has_header(extra_headers, name)
                             || cross_origin && is_sensitive_redirect_header(name)
-                            || !proxy_auth_applies && name.eq_ignore_ascii_case("proxy-authorization"))
+                            || !proxy_auth_applies
+                                && name.eq_ignore_ascii_case("proxy-authorization"))
                     })
                     .cloned(),
             )
@@ -3317,7 +3341,8 @@ impl HttpClient {
                     .iter()
                     .filter(|(name, _)| {
                         !name.eq_ignore_ascii_case("host")
-                            && (proxy_auth_applies || !name.eq_ignore_ascii_case("proxy-authorization"))
+                            && (proxy_auth_applies
+                                || !name.eq_ignore_ascii_case("proxy-authorization"))
                     })
                     .cloned(),
             )
@@ -3884,7 +3909,8 @@ struct PooledStreamRoute {
 
 impl PooledStreamRoute {
     fn proxy_transport(&self) -> Option<(&ProxyEndpoint, Option<&str>)> {
-        self.proxy.as_ref()
+        self.proxy
+            .as_ref()
             .map(|proxy| (proxy, self.proxy_authorization.as_deref()))
     }
 }
@@ -3982,7 +4008,10 @@ impl PooledStreamOwner {
         if let Err(error) = permission {
             return Some(ClientError::Io(error));
         }
-        self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
+        self.cancel_waker = Some(
+            self.cx
+                .refresh_cancel_waker(self.cancel_waker, task.waker()),
+        );
         // Install the actual driverless owner: set_current(None) installs no
         // frame and cannot hide a foreign polling task's timer driver. Keep it
         // installed through `check_cx` too: a driverless owner's checkpoint
@@ -4441,13 +4470,7 @@ async fn connect_via_socks5(
     dns_resolver: Option<&crate::net::dns::Resolver>,
 ) -> Result<TcpStream, ClientError> {
     check_cx(cx)?;
-    let mut stream = dial_tcp_with_resolver(
-        &proxy.host,
-        proxy.port,
-        None,
-        dns_resolver,
-    )
-    .await?;
+    let mut stream = dial_tcp_with_resolver(&proxy.host, proxy.port, None, dns_resolver).await?;
 
     check_cx(cx)?;
     socks5_negotiate_auth(&mut stream, proxy.socks5_credentials()).await?;
@@ -4626,7 +4649,12 @@ fn socks5_reply_message(code: u8) -> &'static str {
 }
 
 fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
-    response_head_can_be_reused(response.status, response.version, &response.headers, req_method)
+    response_head_can_be_reused(
+        response.status,
+        response.version,
+        &response.headers,
+        req_method,
+    )
 }
 
 fn response_head_can_be_reused(
@@ -4654,8 +4682,7 @@ fn response_head_can_be_reused(
     let has_transfer_encoding = headers
         .iter()
         .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
-    let is_bodyless =
-        matches!(status, 100..=199 | 204 | 304) || matches!(req_method, Method::Head);
+    let is_bodyless = matches!(status, 100..=199 | 204 | 304) || matches!(req_method, Method::Head);
 
     if !has_content_length && !has_transfer_encoding && !is_bodyless {
         return false;
@@ -4666,8 +4693,7 @@ fn response_head_can_be_reused(
         // RFC 9112 §6.1: Transfer-Encoding in an HTTP/1.0 message means its
         // framing is faulty; close the connection after this response.
         Version::Http10 => {
-            !has_transfer_encoding
-                && header_has_token(headers, "connection", "keep-alive")
+            !has_transfer_encoding && header_has_token(headers, "connection", "keep-alive")
         }
         // Unreachable for this h1 client (responses are parsed from h1 wire
         // text), but HTTP/2 connections are persistent by default and carry

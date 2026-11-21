@@ -36,6 +36,7 @@
 //! ```
 
 use crate::epoch::EpochId;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
@@ -43,7 +44,6 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 type TimeGetter = Arc<dyn Fn() -> Time + Send + Sync>;
 

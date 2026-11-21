@@ -12,8 +12,8 @@ use crate::error::Error;
 use crate::observability::metrics::{Counter, Gauge, Metrics, Summary};
 use crate::runtime::Runtime;
 use crate::runtime::resource_monitor::ResourceType;
-use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 pub use std::time::Instant;

@@ -238,7 +238,10 @@ fn poll_pipe<T>(
             return Poll::Ready(result);
         }
         let slot = direction.waiter(&mut pipe);
-        if slot.as_ref().is_some_and(|waker| waker.will_wake(cx.waker())) {
+        if slot
+            .as_ref()
+            .is_some_and(|waker| waker.will_wake(cx.waker()))
+        {
             drop(pipe);
             finish_callbacks([None, None], [incoming.take(), None]);
             return Poll::Pending;
@@ -307,7 +310,10 @@ impl AsyncReadVectored for DuplexStream {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        let start = bufs.iter().position(|buf| !buf.is_empty()).unwrap_or(bufs.len());
+        let start = bufs
+            .iter()
+            .position(|buf| !buf.is_empty())
+            .unwrap_or(bufs.len());
         let end = start.saturating_add(MAX_VECTORED_BUFFERS).min(bufs.len());
         poll_pipe(&self.read, cx, Direction::Read, |pipe| {
             pipe.try_read_vectored(&mut bufs[start..end])
@@ -321,7 +327,9 @@ impl AsyncWrite for DuplexStream {
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        poll_pipe(&self.write, cx, Direction::Write, |pipe| pipe.try_write(data))
+        poll_pipe(&self.write, cx, Direction::Write, |pipe| {
+            pipe.try_write(data)
+        })
     }
 
     fn poll_write_vectored(
@@ -329,7 +337,10 @@ impl AsyncWrite for DuplexStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        let start = bufs.iter().position(|buf| !buf.is_empty()).unwrap_or(bufs.len());
+        let start = bufs
+            .iter()
+            .position(|buf| !buf.is_empty())
+            .unwrap_or(bufs.len());
         let end = start.saturating_add(MAX_VECTORED_BUFFERS).min(bufs.len());
         poll_pipe(&self.write, cx, Direction::Write, |pipe| {
             pipe.try_write_vectored(&bufs[start..end])

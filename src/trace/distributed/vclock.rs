@@ -30,6 +30,7 @@
 //! ```
 
 use crate::remote::NodeId;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
 use parking_lot::Mutex;
@@ -37,7 +38,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Logical clock trait for causally ordering distributed events.
 ///

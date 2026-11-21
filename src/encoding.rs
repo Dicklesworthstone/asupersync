@@ -596,10 +596,11 @@ impl EncodingCursor {
                 continue;
             }
 
-            let repair = u32::try_from(self.repair_override.unwrap_or_else(|| {
-                compute_repair_count(block.k, pipeline.config.repair_overhead)
-            }))
-            .unwrap_or(u32::MAX);
+            let repair =
+                u32::try_from(self.repair_override.unwrap_or_else(|| {
+                    compute_repair_count(block.k, pipeline.config.repair_overhead)
+                }))
+                .unwrap_or(u32::MAX);
             let total = k.saturating_add(repair);
 
             if self.esi >= total {

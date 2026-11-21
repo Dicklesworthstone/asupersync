@@ -370,7 +370,8 @@ fn a_dependency_preflight_refusal_is_no_evidence_not_a_retry() {
     let head = sha(9);
     let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n[RCH] remote required; refusing local fallback (dependency preflight failed: policy_violation selected_cargo_sources)\n";
     let admission = "[RCH] remote required; refusing local fallback ([RCH-I001] requested worker set refused (selection error: queue_timeout))\n";
-    let lane = |id: &str| json!({"id": id, "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let lane =
+        |id: &str| json!({"id": id, "kind": "build", "argv": ["cargo"], "expected_targets": []});
     let scenario = json!({
         "plan": {
             "commits": [commit(9, "dev@example.com", "nine")],
@@ -385,11 +386,18 @@ fn a_dependency_preflight_refusal_is_no_evidence_not_a_retry() {
     let refused = receipt(&result, "preflight-refused");
     assert_eq!(refused["verdict"], "no-evidence", "{result:#}");
     assert!(
-        refused["reason"].as_str().expect("reason").contains("RCH-E413"),
+        refused["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("RCH-E413"),
         "{refused:#}"
     );
     // An ordinary admission refusal is still deferred for a later run.
-    assert_eq!(receipt(&result, "admission-refused")["verdict"], "deferred", "{result:#}");
+    assert_eq!(
+        receipt(&result, "admission-refused")["verdict"],
+        "deferred",
+        "{result:#}"
+    );
 }
 
 #[test]
@@ -398,14 +406,22 @@ fn a_preflight_refused_head_moves_the_next_batch_past_it() {
     // covers anything again (09-27: stuck on 1d9799819 for a day).
     let head = sha(9);
     let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n";
-    let lane = json!({"id": "check-default", "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let lane =
+        json!({"id": "check-default", "kind": "build", "argv": ["cargo"], "expected_targets": []});
     let refused = evaluate(&json!({
         "plan": {"commits": [commit(9, "dev@example.com", "nine")], "lanes": [lane.clone()]},
         "lane_logs": {"check-default": {head.clone(): {"log": refusal, "client_exit": 103}}},
         "state": {"known_reds": {}, "last_covered": sha(8)},
     }));
-    assert_eq!(refused["state"]["preflight_refused_head"], head, "{refused:#}");
-    assert_eq!(refused["state"]["last_covered"], sha(8), "nothing was covered: {refused:#}");
+    assert_eq!(
+        refused["state"]["preflight_refused_head"], head,
+        "{refused:#}"
+    );
+    assert_eq!(
+        refused["state"]["last_covered"],
+        sha(8),
+        "nothing was covered: {refused:#}"
+    );
 
     // The next batch runs a full batch past the refused head; without a refusal, or
     // once the refused head is already covered, it is the ordinary batch.
@@ -420,7 +436,9 @@ fn a_preflight_refused_head_moves_the_next_batch_past_it() {
             {"shas": shas[25..].to_vec(), "max_batch": 20, "state": refused_state},
         ]},
     }));
-    let batches = probed["probe_results"]["select_batch"].as_array().expect("batches");
+    let batches = probed["probe_results"]["select_batch"]
+        .as_array()
+        .expect("batches");
     assert_eq!(batches[0], json!(shas[..40]), "{probed:#}");
     assert_eq!(batches[1], json!(shas[..20]), "{probed:#}");
     assert_eq!(batches[2], json!(shas[25..45]), "{probed:#}");
@@ -431,7 +449,10 @@ fn a_preflight_refused_head_moves_the_next_batch_past_it() {
         "lane_logs": {"check-default": {head.clone(): {"log": build_green()}}},
         "state": {"known_reds": {}, "preflight_refused_head": sha(7)},
     }));
-    assert!(released["state"].get("preflight_refused_head").is_none(), "{released:#}");
+    assert!(
+        released["state"].get("preflight_refused_head").is_none(),
+        "{released:#}"
+    );
     assert_eq!(released["state"]["last_covered"], head, "{released:#}");
 }
 
@@ -604,7 +625,11 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "{lane}: {outcome:#}"
         );
     }
-    for lane in ["fault-beside-workspace-error", "fault-beside-member-error", "dependency-error"] {
+    for lane in [
+        "fault-beside-workspace-error",
+        "fault-beside-member-error",
+        "dependency-error",
+    ] {
         assert_eq!(
             receipt(&result, lane)["verdict"],
             "red",
@@ -625,7 +650,10 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         "fault-missing-target-short",
         "fault-dep-info-only",
     ] {
-        assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
+        assert!(
+            !filed.contains(&lane),
+            "a worker fault must never file a bead: {filed:?}"
+        );
     }
     assert!(
         result["state"].get("last_covered").is_none(),
@@ -1185,7 +1213,10 @@ fn doctests_run_for_source_or_readme_changes_and_a_failure_names_the_doctest() {
         let doc = receipt(&result, "doctests");
         assert_eq!(doc["verdict"], verdict, "{doc:#}");
         assert_eq!(
-            doc["failing_targets"].as_array().cloned().unwrap_or_default(),
+            doc["failing_targets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
             failing.as_array().cloned().unwrap_or_default(),
             "{doc:#}"
         );
@@ -1327,7 +1358,9 @@ fn rotation_walks_default_targets_and_files_each_new_red_once() {
 fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
     let nested = "atp_per_module_logging_redaction_contract";
     let ok = |n: usize| {
-        format!("running {n} tests\ntest result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+        format!(
+            "running {n} tests\ntest result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        )
     };
     let headers = format!(
         "     Running tests/alpha.rs (target/debug/deps/alpha-0123abcd)\n     Running tests/atp/per_module/logging_redaction_contract.rs (target/debug/deps/{nested}-4567ef01)\n     Running tests/beta.rs (target/debug/deps/beta-89abcdef)\n"
@@ -1337,7 +1370,9 @@ fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
         + "running 1 test\ntest pins ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
         + &ok(2)
         + &headers
-        + &format!("error: 1 target failed:\n    `-p asupersync --test {nested}`\n  Remote command finished: exit=101 in 1ms\n");
+        + &format!(
+            "error: 1 target failed:\n    `-p asupersync --test {nested}`\n  Remote command finished: exit=101 in 1ms\n"
+        );
     // A failing test's captured output echoes a libtest header: four blocks, three
     // headers. cargo names two failed binaries, so neither test can be placed.
     let unpaired = String::from(
@@ -1396,7 +1431,8 @@ fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
 fn node_suites_are_keyed_by_suite_and_test_and_a_missing_reference_proves_nothing() {
     let head = sha(9);
     let node = |id: &str| json!({"id": id, "kind": "node", "argv": ["node"], "suites": ["scripts/test_browser_a.mjs", "scripts/test_browser_b.mjs"]});
-    let stats = |pass: u32, fail: u32| format!("ℹ tests {}\nℹ pass {pass}\nℹ fail {fail}\n", pass + fail);
+    let stats =
+        |pass: u32, fail: u32| format!("ℹ tests {}\nℹ pass {pass}\nℹ fail {fail}\n", pass + fail);
     let green = format!(
         "✔ one (1.0ms)\n{}=== node-suite scripts/test_browser_a.mjs exit=0\n{}=== node-suite scripts/test_browser_b.mjs exit=0\n",
         stats(3, 0),
@@ -1407,7 +1443,10 @@ fn node_suites_are_keyed_by_suite_and_test_and_a_missing_reference_proves_nothin
         stats(3, 0),
         stats(1, 1)
     );
-    let timed_out = format!("{}=== node-suite scripts/test_browser_a.mjs exit=0\n=== node-suite scripts/test_browser_b.mjs exit=timeout\n", stats(3, 0));
+    let timed_out = format!(
+        "{}=== node-suite scripts/test_browser_a.mjs exit=0\n=== node-suite scripts/test_browser_b.mjs exit=timeout\n",
+        stats(3, 0)
+    );
     let no_reference = format!(
         "{}=== node-suite scripts/test_browser_a.mjs exit=0\nError: Artifact transaction tests require fake-indexeddb 6.2.5.\n{}=== node-suite scripts/test_browser_b.mjs exit=1\n",
         stats(3, 0),

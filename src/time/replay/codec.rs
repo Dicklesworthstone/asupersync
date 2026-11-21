@@ -162,7 +162,10 @@ impl TimeTape {
     /// replay.verify_complete()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn to_canonical_bytes(&self, max_encoded_bytes: usize) -> Result<TimeTapeBytes, TimeTapeError> {
+    pub fn to_canonical_bytes(
+        &self,
+        max_encoded_bytes: usize,
+    ) -> Result<TimeTapeBytes, TimeTapeError> {
         let count = u64::try_from(self.samples.len()).map_err(|_| TimeTapeError::Overflow)?;
         let sample_bytes = self
             .samples

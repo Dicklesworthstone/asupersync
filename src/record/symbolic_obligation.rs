@@ -12,12 +12,12 @@
 //! - Cannot be cloned (each obligation is unique)
 //! - Dropping without resolution triggers leak detection
 
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::util::DetHashMap;
 use core::fmt;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, ObjectParams, SymbolId};
 use crate::types::{ObligationId, RegionId, TaskId, Time};

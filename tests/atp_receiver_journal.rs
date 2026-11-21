@@ -826,12 +826,7 @@ fn explicitly_resolved_file_commit_recovers_only_proof_in_a_new_receiver_process
         let root = directory();
         let journal = root.join("receiver.wal");
         let data = root.join("receiver.data");
-        let mut original = Process::spawn(
-            &root,
-            "commit",
-            workers,
-            "127.0.0.1:0".parse().unwrap(),
-        );
+        let mut original = Process::spawn(&root, "commit", workers, "127.0.0.1:0".parse().unwrap());
         let address = original.ready();
         let mut peer = Peer::connect(address);
         let state = peer.hello();
@@ -1081,7 +1076,10 @@ fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
                     let mut task = cx
                         .spawn_in(&scope, move |child| {
                             let future: Pin<
-                                Box<dyn Future<Output = (JournaledFileReceiver, ResumeReport)> + Send>,
+                                Box<
+                                    dyn Future<Output = (JournaledFileReceiver, ResumeReport)>
+                                        + Send,
+                                >,
                             > = Box::pin(async move {
                                 let report = incoming.receive(&child).await;
                                 (incoming, report)
@@ -1090,9 +1088,7 @@ fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
                         })
                         .unwrap();
                     let send = sender();
-                    let mut outgoing = send
-                        .resumable_reader(&cx, address, &DATA[..8], 4)
-                        .unwrap();
+                    let mut outgoing = send.resumable_reader(&cx, address, &DATA[..8], 4).unwrap();
                     let sent = outgoing.send(&cx).await;
                     let (incoming, received) = poll_fn(|ctx| task.poll_join(ctx)).await.unwrap();
                     assert_eq!(received.sink_written_bytes, 8);
@@ -1130,7 +1126,10 @@ fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
                     records(&journal)
                 };
                 assert_eq!(saved.len(), if snapshots == 4 { 3 } else { 5 });
-                assert_eq!(saved.last().unwrap()[280], if snapshots == 4 { 0 } else { 2 });
+                assert_eq!(
+                    saved.last().unwrap()[280],
+                    if snapshots == 4 { 0 } else { 2 }
+                );
                 let reopened = if compact {
                     ReceiverJournalFile::open_existing_compact(&journal, &data, &intent)
                 } else {
@@ -1178,9 +1177,7 @@ fn compact_journal_reuses_slots_across_native_partial_kill_and_proof_only_restar
         assert_eq!(u64::from_be_bytes(saved[168..176].try_into().unwrap()), 24);
         assert_eq!(u32::from_be_bytes(saved[281..285].try_into().unwrap()), 88);
         assert_eq!(saved[280], 0);
-        assert!(
-            ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).is_err()
-        );
+        assert!(ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).is_err());
         let inodes: Vec<_> = [&journal, &data, &intent]
             .iter()
             .map(|path| std::fs::metadata(path).unwrap().ino())
@@ -1333,7 +1330,10 @@ fn compact_native_file_transfer_exceeds_its_wal_budget_and_reopens_exact_content
             ReceiverJournalFile::open_existing_compact(&journal, &data, &intent).unwrap();
         let receipt = reopened.checkpoint().unwrap().committed_receipt().unwrap();
         assert_eq!(receipt.prefix.bytes, 524_288);
-        assert_eq!(receipt.source_sha256.as_slice(), Sha256::digest(&expected).as_slice());
+        assert_eq!(
+            receipt.source_sha256.as_slice(),
+            Sha256::digest(&expected).as_slice()
+        );
         assert_eq!(reopened.checkpoint().unwrap().attempts(), 1);
     }
 }

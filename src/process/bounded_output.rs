@@ -361,7 +361,8 @@ async fn capture(
                     Err(ProcessError::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(error.into()),
                 }
-                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(backoff_ms)).await;
+                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(backoff_ms))
+                    .await;
                 backoff_ms = (backoff_ms * 2).min(50);
             }
         }

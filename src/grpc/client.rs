@@ -26,7 +26,9 @@ use crate::codec::Decoder as _;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h2::{Connection, ConnectionState, ErrorCode, FrameCodec, Header, SettingsBuilder};
+use crate::http::h2::{
+    Connection, ConnectionState, ErrorCode, FrameCodec, Header, SettingsBuilder,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,13 +61,13 @@ pub use proxy::HttpConnectProxy;
 #[cfg(not(target_arch = "wasm32"))]
 mod unary_admission;
 #[cfg(not(target_arch = "wasm32"))]
-pub use unary_admission::UnaryAdmissionLimits;
-#[cfg(not(target_arch = "wasm32"))]
-use unary_admission::{AdmittedUnary, UnaryAdmission};
-#[cfg(not(target_arch = "wasm32"))]
 use legacy_native::{
     LegacyNativeCall, LegacyResponseHandle, LegacyShape, downcast_native_response,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use unary_admission::UnaryAdmissionLimits;
+#[cfg(not(target_arch = "wasm32"))]
+use unary_admission::{AdmittedUnary, UnaryAdmission};
 
 /// The client's codec, shared with the native calls started by the legacy
 /// `&mut self` streaming methods. Each call owns a clone for its lifetime; the
@@ -691,7 +693,8 @@ impl ChannelBuilder {
                 channel = channel.with_keepalive_backoff();
             }
             if self.reuse_connections > 0 {
-                channel.unary_pool = Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
+                channel.unary_pool =
+                    Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
             }
         }
         Ok(channel)
@@ -854,7 +857,9 @@ impl Channel {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn unary_admission_limits(&self) -> Option<UnaryAdmissionLimits> {
-        self.unary_admission.as_ref().map(|admission| admission.limits())
+        self.unary_admission
+            .as_ref()
+            .map(|admission| admission.limits())
     }
 
     /// Opt into peer-directed backoff for future native streaming connections.
@@ -871,7 +876,9 @@ impl Channel {
     #[must_use]
     pub fn with_keepalive_backoff(mut self) -> Self {
         if self.keepalive_backoff.is_none() {
-            self.keepalive_backoff = self.config.keepalive_interval
+            self.keepalive_backoff = self
+                .config
+                .keepalive_interval
                 .map(|interval| Arc::new(KeepaliveBackoff::new(interval)));
         }
         self
@@ -898,9 +905,11 @@ impl Channel {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn effective_keepalive_interval(&self) -> Option<Duration> {
-        self.keepalive_backoff.as_ref().map_or(self.config.keepalive_interval, |backoff| {
-            Some(backoff.interval())
-        })
+        self.keepalive_backoff
+            .as_ref()
+            .map_or(self.config.keepalive_interval, |backoff| {
+                Some(backoff.interval())
+            })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -908,10 +917,14 @@ impl Channel {
         &self,
         cx: &crate::cx::Cx,
     ) -> Result<Option<NativeStreamKeepalive>, Status> {
-        match (self.effective_keepalive_interval(), self.config.keepalive_timeout) {
+        match (
+            self.effective_keepalive_interval(),
+            self.config.keepalive_timeout,
+        ) {
             (Some(interval), timeout) => {
                 let policy = NativeStreamKeepalive::new(
-                    interval, timeout.unwrap_or(Duration::from_secs(20)),
+                    interval,
+                    timeout.unwrap_or(Duration::from_secs(20)),
                 )?;
                 if cx.timer_driver().is_none() {
                     return Err(Status::failed_precondition(
@@ -1098,7 +1111,9 @@ impl<C: Codec> GrpcClient<C> {
         let mut metadata = metadata_request.metadata().clone();
         #[cfg(not(target_arch = "wasm32"))]
         if self.channel.http_connect_proxy.is_some()
-            && metadata.iter().any(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+            && metadata
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
         {
             return Err(Status::invalid_argument(
                 "configure gRPC proxy authorization on HttpConnectProxy, not RPC metadata",
@@ -1289,17 +1304,20 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream_admitted(cx, path, &request, admitted)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata(request.into_inner(), setup.metadata);
-        let stream = setup.endpoint.connect_with_dial(
-            cx,
-            path,
-            request,
-            self.codec.into_inner().into_owned()?,
-            setup.config,
-            setup.windows,
-            Some(setup.deadline),
-            |remaining| setup.target.connect(remaining),
-            |dialed| native_h2_transport(dialed, &setup.target, connector),
-        ).await?;
+        let stream = setup
+            .endpoint
+            .connect_with_dial(
+                cx,
+                path,
+                request,
+                self.codec.into_inner().into_owned()?,
+                setup.config,
+                setup.windows,
+                Some(setup.deadline),
+                |remaining| setup.target.connect(remaining),
+                |dialed| native_h2_transport(dialed, &setup.target, connector),
+            )
+            .await?;
         match setup.keepalive {
             Some(keepalive) => stream.with_keepalive(keepalive),
             None => Ok(stream),
@@ -1382,17 +1400,20 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream_admitted(cx, path, &request, admitted)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata((), setup.metadata);
-        let stream = setup.endpoint.connect_duplex_with_dial(
-            cx,
-            path,
-            request,
-            self.codec.into_inner().into_owned()?,
-            setup.config,
-            setup.windows,
-            Some(setup.deadline),
-            |remaining| setup.target.connect(remaining),
-            |dialed| native_h2_transport(dialed, &setup.target, connector),
-        ).await?;
+        let stream = setup
+            .endpoint
+            .connect_duplex_with_dial(
+                cx,
+                path,
+                request,
+                self.codec.into_inner().into_owned()?,
+                setup.config,
+                setup.windows,
+                Some(setup.deadline),
+                |remaining| setup.target.connect(remaining),
+                |dialed| native_h2_transport(dialed, &setup.target, connector),
+            )
+            .await?;
         match setup.keepalive {
             Some(keepalive) => stream.with_keepalive(keepalive),
             None => Ok(stream),
@@ -1443,11 +1464,16 @@ impl<C: Codec> GrpcClient<C> {
             ));
         }
         let endpoint = match &target.destination {
-            NativeH2Destination::Address(address) => {
-                NativeStreamEndpoint::new(*address, target.authority.clone(), config.connect_timeout)?
-            }
+            NativeH2Destination::Address(address) => NativeStreamEndpoint::new(
+                *address,
+                target.authority.clone(),
+                config.connect_timeout,
+            )?,
             NativeH2Destination::Host(host, port) => NativeStreamEndpoint::from_host(
-                host.clone(), *port, target.authority.clone(), config.connect_timeout,
+                host.clone(),
+                *port,
+                target.authority.clone(),
+                config.connect_timeout,
             )?,
             #[cfg(unix)]
             NativeH2Destination::Unix(path) => NativeStreamEndpoint::unix(
@@ -1463,8 +1489,12 @@ impl<C: Codec> GrpcClient<C> {
             max_recv_message_size: config.max_recv_message_size,
             timeout: config.timeout,
             scheme: target.scheme,
-            send_compression: config.send_compression.unwrap_or(CompressionEncoding::Identity),
-            accept_gzip: config.accept_compression.contains(&CompressionEncoding::Gzip),
+            send_compression: config
+                .send_compression
+                .unwrap_or(CompressionEncoding::Identity),
+            accept_gzip: config
+                .accept_compression
+                .contains(&CompressionEncoding::Gzip),
             ..NativeStreamConfig::default()
         };
         let mut metadata = if previously_admitted {
@@ -1480,8 +1510,8 @@ impl<C: Codec> GrpcClient<C> {
         // Admit the channel's exact defaults, then remove only those fields so
         // they are emitted once. A request/interceptor may not select a codec
         // policy different from the one used to encode/decode message bytes.
-        let send_encoding = effective_send_compression(config)
-            .map(CompressionEncoding::as_header_value);
+        let send_encoding =
+            effective_send_compression(config).map(CompressionEncoding::as_header_value);
         let accept_encoding = effective_accept_compressions(config)
             .into_iter()
             .map(CompressionEncoding::as_header_value)
@@ -1719,7 +1749,10 @@ impl<C: Codec> GrpcClient<C> {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let (call, metadata) = self.start_legacy_server_stream(path, request).await?;
-                return Ok(Response::with_metadata(ResponseStream::native(call), metadata));
+                return Ok(Response::with_metadata(
+                    ResponseStream::native(call),
+                    metadata,
+                ));
             }
         }
 
@@ -1949,9 +1982,8 @@ impl<C: Codec> GrpcClient<C> {
     ) -> Result<(Arc<LegacyNativeCall>, Metadata), Status> {
         let cx = legacy_native_cx()?;
         let metadata = request.metadata().clone();
-        let message = legacy_native::downcast_native_request::<C::Encode>(Box::new(
-            request.into_inner(),
-        ))?;
+        let message =
+            legacy_native::downcast_native_request::<C::Encode>(Box::new(request.into_inner()))?;
         let request = Request::with_metadata(message, metadata);
         let setup = self.prepare_native_stream(&cx, path, &request)?;
         let connector = self.channel.tls_connector().cloned();
@@ -2094,8 +2126,9 @@ impl NativeH2Target {
         tls_server_name: Option<&str>,
         dial_addr: Option<SocketAddr>,
     ) -> Result<Self, Status> {
-        let target = parse_channel_uri(uri)
-            .map_err(|error| Status::unavailable(format!("invalid gRPC channel target: {error}")))?;
+        let target = parse_channel_uri(uri).map_err(|error| {
+            Status::unavailable(format!("invalid gRPC channel target: {error}"))
+        })?;
         if let Some(path) = target.unix_path {
             return Self::unix(&path, use_tls, dial_addr);
         }
@@ -2167,12 +2200,17 @@ impl NativeH2Target {
                 NativeH2Destination::Address(address) => address.to_string(),
                 NativeH2Destination::Host(host, port) => format!("{host}:{port}"),
                 #[cfg(unix)]
-                NativeH2Destination::Unix(_) => return Err(Status::invalid_argument(
-                    "HTTP CONNECT proxies cannot route Unix-domain channels",
-                )),
+                NativeH2Destination::Unix(_) => {
+                    return Err(Status::invalid_argument(
+                        "HTTP CONNECT proxies cannot route Unix-domain channels",
+                    ));
+                }
             };
             let cx = legacy_native_cx()?;
-            return proxy.connect(&cx, &authority).await.map(NativeChannelDial::Tunnel);
+            return proxy
+                .connect(&cx, &authority)
+                .await
+                .map(NativeChannelDial::Tunnel);
         }
         // Share the same offloaded, cancellation-aware system resolver used by
         // NativeStreamEndpoint. The caller's outer setup timeout also covers
@@ -2181,12 +2219,11 @@ impl NativeH2Target {
             NativeH2Destination::Address(address) => TcpStream::connect_timeout(*address, timeout)
                 .await
                 .map(DialedStream::Tcp),
-            NativeH2Destination::Host(host, port) => {
-                self.connect_policy
-                    .connect_host(host.clone(), *port, timeout)
-                    .await
-                    .map(DialedStream::Tcp)
-            }
+            NativeH2Destination::Host(host, port) => self
+                .connect_policy
+                .connect_host(host.clone(), *port, timeout)
+                .await
+                .map(DialedStream::Tcp),
             #[cfg(unix)]
             NativeH2Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
                 .await
@@ -2202,9 +2239,11 @@ impl NativeH2Target {
 #[cfg(not(target_arch = "wasm32"))]
 enum NativeChannelDial {
     Direct(DialedStream),
-    Tunnel(Box<crate::http::h1::http_client::HttpConnectTunnel<
-        crate::http::h1::http_client::ClientIo,
-    >>),
+    Tunnel(
+        Box<
+            crate::http::h1::http_client::HttpConnectTunnel<crate::http::h1::http_client::ClientIo>,
+        >,
+    ),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2215,13 +2254,21 @@ enum NativeH2Io {
     Unix(crate::net::unix::UnixStream),
     #[cfg(feature = "tls")]
     Tls(TlsStream<TcpStream>),
-    Tunnel(Box<crate::http::h1::http_client::HttpConnectTunnel<
-        crate::http::h1::http_client::ClientIo,
-    >>),
+    Tunnel(
+        Box<
+            crate::http::h1::http_client::HttpConnectTunnel<crate::http::h1::http_client::ClientIo>,
+        >,
+    ),
     #[cfg(feature = "tls")]
-    TlsTunnel(Box<TlsStream<crate::http::h1::http_client::HttpConnectTunnel<
-        crate::http::h1::http_client::ClientIo,
-    >>>),
+    TlsTunnel(
+        Box<
+            TlsStream<
+                crate::http::h1::http_client::HttpConnectTunnel<
+                    crate::http::h1::http_client::ClientIo,
+                >,
+            >,
+        >,
+    ),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2353,9 +2400,7 @@ async fn native_h2_unary(
                 }
                 let _ = metadata.insert_or_replace("grpc-timeout", encode_grpc_timeout(remaining));
             }
-            let io = native_h2_unary_io(
-                target, config, tls_connector, pool, path, &metadata, body,
-            );
+            let io = native_h2_unary_io(target, config, tls_connector, pool, path, &metadata, body);
             AdmittedUnary::new(io, permit).await
         } else {
             let mut metadata = metadata;
@@ -2610,11 +2655,14 @@ impl NativeH2Conn {
     ) -> Result<(Result<NativeUnaryWireResponse, Status>, u32), UnaryFailure> {
         // A stream refused locally (GOAWAY seen, identifiers exhausted) never
         // reached the server.
-        let stream_id = self.connection.open_stream(headers, false).map_err(|error| {
-            UnaryFailure::unprocessed(Status::unavailable(format!(
-                "open HTTP/2 request stream: {error}"
-            )))
-        })?;
+        let stream_id = self
+            .connection
+            .open_stream(headers, false)
+            .map_err(|error| {
+                UnaryFailure::unprocessed(Status::unavailable(format!(
+                    "open HTTP/2 request stream: {error}"
+                )))
+            })?;
         self.connection
             .send_data(stream_id, request_body, true)
             .map_err(|error| {
@@ -2631,15 +2679,9 @@ impl NativeH2Conn {
         let mut accumulator = NativeUnaryAccumulator::new(max_recv_message_size);
         let mut chunk = [0_u8; 16 * 1024];
         loop {
-            while let Some(frame) = self
-                .codec
-                .decode(&mut self.inbound)
-                .map_err(|error| {
-                    UnaryFailure::processed(Status::internal(format!(
-                        "decode HTTP/2 frame: {error}"
-                    )))
-                })?
-            {
+            while let Some(frame) = self.codec.decode(&mut self.inbound).map_err(|error| {
+                UnaryFailure::processed(Status::internal(format!("decode HTTP/2 frame: {error}")))
+            })? {
                 let received = self.connection.process_frame(frame).map_err(|error| {
                     UnaryFailure::processed(Status::internal(format!(
                         "process HTTP/2 frame: {error}"
@@ -2651,9 +2693,7 @@ impl NativeH2Conn {
                             stream_id: reset,
                             error_code,
                         } => *reset == stream_id && *error_code == ErrorCode::RefusedStream,
-                        ReceivedFrame::GoAway { last_stream_id, .. } => {
-                            *last_stream_id < stream_id
-                        }
+                        ReceivedFrame::GoAway { last_stream_id, .. } => *last_stream_id < stream_id,
                         _ => false,
                     };
                     accumulator.observe(stream_id, received).map_err(|status| {
@@ -2778,7 +2818,9 @@ async fn native_h2_transport(
         NativeChannelDial::Direct(DialedStream::Tcp(stream)) => stream,
         // `unix:` targets never use TLS (NativeH2Target::unix).
         #[cfg(unix)]
-        NativeChannelDial::Direct(DialedStream::Unix(stream)) => return Ok(NativeH2Io::Unix(stream)),
+        NativeChannelDial::Direct(DialedStream::Unix(stream)) => {
+            return Ok(NativeH2Io::Unix(stream));
+        }
     };
     if !target.use_tls {
         return Ok(NativeH2Io::Plain(stream));
@@ -2786,7 +2828,9 @@ async fn native_h2_transport(
 
     #[cfg(feature = "tls")]
     {
-        native_h2_tls(stream, target, tls_connector).await.map(NativeH2Io::Tls)
+        native_h2_tls(stream, target, tls_connector)
+            .await
+            .map(NativeH2Io::Tls)
     }
 
     #[cfg(not(feature = "tls"))]
@@ -3016,7 +3060,9 @@ impl NativeUnaryAccumulator {
         // accounting, including an allowance for each retained field.
         let metadata_bytes = headers
             .iter()
-            .try_fold(self.metadata_bytes, |used, header| used.checked_add(header.size()))
+            .try_fold(self.metadata_bytes, |used, header| {
+                used.checked_add(header.size())
+            })
             .filter(|used| *used <= MAX_NATIVE_UNARY_METADATA_BYTES)
             .ok_or_else(|| {
                 Status::resource_exhausted("gRPC unary response metadata exceeds its byte limit")
@@ -3036,8 +3082,7 @@ impl NativeUnaryAccumulator {
                     .parse::<u16>()
                     .is_ok_and(|status| (100..200).contains(&status))
         });
-        if informational
-            && self.informational_responses >= MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES
+        if informational && self.informational_responses >= MAX_NATIVE_UNARY_INFORMATIONAL_RESPONSES
         {
             return Err(Status::resource_exhausted(
                 "gRPC unary response exceeds its informational-header limit",
@@ -3310,8 +3355,7 @@ fn parse_channel_uri(uri: &str) -> Result<ChannelUri<'_>, GrpcError> {
         .map(|port| {
             // Retain the legacy integer syntax for deterministic loopback;
             // native authorities must use the HTTP port grammar on the wire.
-            if !is_loopback
-                && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
+            if !is_loopback && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
             {
                 return Err(GrpcError::transport_kind(
                     TransportErrorKind::ConnectFailed,
@@ -3664,11 +3708,16 @@ impl<T> ResponseStreamState<T> {
 
     fn register_waiter(&mut self, candidate: &mut Option<Waker>) -> Option<Waker> {
         let waker = candidate.as_ref().expect("prepared response waiter");
-        if self.waiters.iter().any(|existing| existing.will_wake(waker)) {
+        if self
+            .waiters
+            .iter()
+            .any(|existing| existing.will_wake(waker))
+        {
             return None;
         }
         let evicted = (self.waiters.len() >= 32).then(|| self.waiters.remove(0));
-        self.waiters.push(candidate.take().expect("prepared response waiter"));
+        self.waiters
+            .push(candidate.take().expect("prepared response waiter"));
         evicted
     }
 
@@ -3678,12 +3727,16 @@ impl<T> ResponseStreamState<T> {
 
     fn register_producer_waiter(&mut self, candidate: &mut Option<Waker>) -> Option<Waker> {
         let waker = candidate.as_ref().expect("prepared response producer");
-        if self.producer_waiters.iter().any(|existing| existing.will_wake(waker)) {
+        if self
+            .producer_waiters
+            .iter()
+            .any(|existing| existing.will_wake(waker))
+        {
             return None;
         }
-        let evicted = (self.producer_waiters.len() >= 32)
-            .then(|| self.producer_waiters.remove(0));
-        self.producer_waiters.push(candidate.take().expect("prepared response producer"));
+        let evicted = (self.producer_waiters.len() >= 32).then(|| self.producer_waiters.remove(0));
+        self.producer_waiters
+            .push(candidate.take().expect("prepared response producer"));
         evicted
     }
 }
@@ -3692,10 +3745,7 @@ impl<T> ResponseStreamState<T> {
 // panicking task must not strand the other consumers/producers or skip the
 // transport cancellation hook. Arbitrary secondary panic payloads may themselves
 // panic on Drop, so use the same containment policy as the I/O duplex boundary.
-fn capture_response_callback(
-    first: &mut Option<Box<dyn Any + Send>>,
-    callback: impl FnOnce(),
-) {
+fn capture_response_callback(first: &mut Option<Box<dyn Any + Send>>, callback: impl FnOnce()) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
         if first.is_none() {
             *first = Some(payload);
@@ -3950,12 +4000,7 @@ impl<T> ResponseStream<T> {
         self.cancel_with_metadata(status, Metadata::new());
     }
 
-    fn set_terminal_status(
-        &self,
-        status: Status,
-        metadata: Metadata,
-        discard_buffered: bool,
-    ) {
+    fn set_terminal_status(&self, status: Status, metadata: Metadata, discard_buffered: bool) {
         let (waiters, producers, retired, inserted) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
@@ -3990,7 +4035,8 @@ impl<T> ResponseStream<T> {
         if let Some(native) = &self.native {
             capture_response_callback(&mut first, || native.handle.call().wake_responses());
         }
-        if inserted && discard_buffered
+        if inserted
+            && discard_buffered
             && let Some(on_cancel) = &self.on_cancel
         {
             capture_response_callback(&mut first, || {

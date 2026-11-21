@@ -1,8 +1,8 @@
 //! Poll-level regressions for retry fairness and cancellation-safe admission.
 
 use super::{
-    AlwaysRetry, MAX_READY_ATTEMPTS_PER_POLL, NeverRetry, RetryBudget, RetryPolicy,
-    RetryResult, RetryTokenBucket, retry,
+    AlwaysRetry, MAX_READY_ATTEMPTS_PER_POLL, NeverRetry, RetryBudget, RetryPolicy, RetryResult,
+    RetryTokenBucket, retry,
 };
 use crate::types::{Outcome, Time};
 use std::future::{Future, ready};
@@ -51,7 +51,10 @@ fn ready_failures_yield_before_starting_another_attempt() {
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
 
     assert!(operation.as_mut().poll(&mut task).is_pending());
-    assert_eq!(calls.load(Ordering::Relaxed), MAX_READY_ATTEMPTS_PER_POLL * 2);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        MAX_READY_ATTEMPTS_PER_POLL * 2
+    );
     assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
 }
 
@@ -179,7 +182,12 @@ impl Future for PinnedAttempt {
     type Output = Outcome<u32, &'static str>;
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.as_ref().get_ref().polls.fetch_add(1, Ordering::Relaxed) {
+        match self
+            .as_ref()
+            .get_ref()
+            .polls
+            .fetch_add(1, Ordering::Relaxed)
+        {
             0 => Poll::Pending,
             1 => Poll::Ready(Outcome::Ok(42)),
             _ => panic!("a completed attempt must never be polled again"),
@@ -287,7 +295,9 @@ fn cancellation_from_a_predicate_does_not_spend_a_retry_token() {
         );
 
         assert!(matches!(
-            operation.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            operation
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
             Poll::Ready(RetryResult::Cancelled(_))
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -341,7 +351,9 @@ impl Future for DrainingAttempt {
                 assert!(this.context.checkpoint().is_err());
                 this.terminal.store(true, Ordering::Relaxed);
                 Poll::Ready(Outcome::Cancelled(
-                    this.context.cancel_reason().expect("cancellation was published"),
+                    this.context
+                        .cancel_reason()
+                        .expect("cancellation was published"),
                 ))
             }
             _ => panic!("drained future was polled after completion"),
@@ -401,7 +413,9 @@ fn a_successful_attempt_still_wins_its_race_with_cancellation() {
     }));
 
     assert!(matches!(
-        operation.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        operation
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(RetryResult::Ok(42))
     ));
 }
@@ -460,12 +474,17 @@ fn a_bounded_mask_defers_cancellation_at_retry_admission() {
     );
     context.cancel_fast(CancelKind::User);
     let result = context.masked(|| {
-        operation.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+        operation
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
     });
     assert!(matches!(result, Poll::Ready(RetryResult::Ok(42))));
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(budget.available(), 0);
-    assert!(context.checkpoint().is_err(), "the mask did not erase cancellation");
+    assert!(
+        context.checkpoint().is_err(),
+        "the mask did not erase cancellation"
+    );
 }
 
 #[test]

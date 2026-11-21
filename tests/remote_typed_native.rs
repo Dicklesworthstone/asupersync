@@ -1,7 +1,11 @@
 //! Typed computation journeys over actual V3 mTLS sessions and native admission.
 //! Pending polls witness cancellation and withheld cleanup; no sleeps establish
 //! readiness. Every journey runs on current-thread/two-worker, unified/sharded.
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 #![recursion_limit = "256"]
 
 use asupersync::channel::oneshot;
@@ -11,13 +15,14 @@ use asupersync::distributed::remote_owned::{
 };
 use asupersync::remote::{
     AdmittedNativeRemoteRuntime, ComputationName, IdempotencyKey, NativeRemoteAdmissionLimits,
-    NativeRemotePeerAdmissionLimits, NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig,
-    NodeId, PreparedTypedRemoteCall, RemoteCap, RemoteComputationClient, RemoteComputationClientConfig,
-    RemoteComputationListenerError, RemoteComputationRegistry, RemoteComputationService,
-    RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteComputationServiceReport,
-    RemoteError, RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy, RemoteProtocolVersion,
-    RemoteServiceWireLimits, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId,
-    SpawnRequest, TypedRemoteComputation, TypedRemoteError, TypedRemoteLimits, TypedRemoteOutcome,
+    NativeRemotePeerAdmissionLimits, NativeRemoteRoute, NativeRemoteRuntime,
+    NativeRemoteRuntimeConfig, NodeId, PreparedTypedRemoteCall, RemoteCap, RemoteComputationClient,
+    RemoteComputationClientConfig, RemoteComputationListenerError, RemoteComputationRegistry,
+    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
+    RemoteComputationServiceReport, RemoteError, RemoteInput, RemoteOutcome,
+    RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteServiceWireLimits,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest,
+    TypedRemoteComputation, TypedRemoteError, TypedRemoteLimits, TypedRemoteOutcome,
     TypedRemoteStage, spawn_remote, spawn_remote_typed, spawn_remote_typed_owned,
 };
 use asupersync::runtime::{JoinError, RootDrainOutcome, RuntimeBuilder, RuntimeHandle, TaskHandle};
@@ -26,8 +31,8 @@ use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
     RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
 };
-use asupersync::{Cx, Outcome};
 use asupersync::types::{CancelKind, CancelReason};
+use asupersync::{Cx, Outcome};
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::pin;
@@ -75,7 +80,9 @@ impl Gate {
         self.changed.notify_waiters();
     }
     async fn wait(&self, field: &AtomicBool) {
-        self.changed.wait_until(|| field.load(Ordering::Acquire)).await;
+        self.changed
+            .wait_until(|| field.load(Ordering::Acquire))
+            .await;
     }
 }
 struct Retirement(Arc<Gate>);
@@ -170,7 +177,9 @@ impl Fixture {
             .unwrap();
         registry
             .register::<Vec<u8>, Vec<u8>, _, _>("raw.echo", |_, invocation| async move {
-                Ok(RemoteOutcome::Success(invocation.request().input.data().to_vec()))
+                Ok(RemoteOutcome::Success(
+                    invocation.request().input.data().to_vec(),
+                ))
             })
             .unwrap();
         let mut policy = RemotePeerAdmissionPolicy::new(
@@ -178,7 +187,11 @@ impl Fixture {
             registry.schema_registry().clone(),
         );
         policy
-            .grant_tls_peer(NodeId::new("origin"), pins, [Add::NAME, Wait::NAME, Large::NAME, "raw.echo"])
+            .grant_tls_peer(
+                NodeId::new("origin"),
+                pins,
+                [Add::NAME, Wait::NAME, Large::NAME, "raw.echo"],
+            )
             .unwrap();
         let hello = policy.hello_for(NodeId::new("origin"));
         let service = RemoteComputationService::bind(
@@ -194,7 +207,9 @@ impl Fixture {
         .unwrap();
         let endpoint = service.local_addr().unwrap();
         let operator = service.handle();
-        let serving = cx.spawn(move |cx| async move { service.run(&cx).await }).unwrap();
+        let serving = cx
+            .spawn(move |cx| async move { service.run(&cx).await })
+            .unwrap();
         let client = RemoteComputationClient::new(
             endpoint,
             "localhost",
@@ -207,21 +222,29 @@ impl Fixture {
         )
         .unwrap();
         let route = NativeRemoteRoute::new(NodeId::new("worker"), hello, client);
-        let native = NativeRemoteRuntimeConfig::new().with_max_in_flight(4).with_drain_timeout(WAIT);
+        let native = NativeRemoteRuntimeConfig::new()
+            .with_max_in_flight(4)
+            .with_drain_timeout(WAIT);
         let legacy = Arc::new(
             NativeRemoteRuntime::with_config(
-                runtime.clone(), NodeId::new("origin"), [route.clone()], native,
+                runtime.clone(),
+                NodeId::new("origin"),
+                [route.clone()],
+                native,
             )
             .unwrap(),
         );
         let admitted = AdmittedNativeRemoteRuntime::new(
             runtime,
             NodeId::new("origin"),
-            [(route.clone(), NativeRemotePeerAdmissionLimits {
-                max_in_flight: 1,
-                max_buffer_bytes: CHARGE,
-                max_input_bytes: 1024,
-            })],
+            [(
+                route.clone(),
+                NativeRemotePeerAdmissionLimits {
+                    max_in_flight: 1,
+                    max_buffer_bytes: CHARGE,
+                    max_input_bytes: 1024,
+                },
+            )],
             NativeRemoteAdmissionLimits {
                 max_routes: 1,
                 max_in_flight: 1,
@@ -232,7 +255,15 @@ impl Fixture {
             native,
         )
         .unwrap();
-        Self { route, service: operator, serving, admitted, legacy, gate, calls }
+        Self {
+            route,
+            service: operator,
+            serving,
+            admitted,
+            legacy,
+            gate,
+            calls,
+        }
     }
 
     fn remote_cx(&self, cx: &Cx) -> Cx {
@@ -302,7 +333,8 @@ where
             let _ = sent.send(result);
         })
         .unwrap();
-    let result = received.recv_timeout(Duration::from_secs(60))
+    let result = received
+        .recv_timeout(Duration::from_secs(60))
         .expect("typed remote journey must finish and drain");
     worker.join().unwrap();
     if let Err(payload) = result {
@@ -315,26 +347,35 @@ fn typed_native_round_trip_failure_output_limit_and_legacy_coexistence() {
     native(|cx, runtime| async move {
         let mut fixture = Fixture::new(&cx, runtime).await;
         let remote = fixture.remote_cx(&cx);
-        let mut typed = spawn_remote_typed::<Add>(&remote, NodeId::new("worker"), &(19, 23), limits())
-            .unwrap();
-        assert!(matches!(typed.join(&cx).await, Outcome::Ok(TypedRemoteOutcome::Success(42))));
-        assert!(matches!(typed.try_join(),
-            Err(TypedRemoteError::Remote(RemoteError::PolledAfterCompletion))));
-        let mut failed = spawn_remote_typed::<Add>(
-            &remote, NodeId::new("worker"), &(u64::MAX, 0), limits(),
-        )
-        .unwrap();
+        let mut typed =
+            spawn_remote_typed::<Add>(&remote, NodeId::new("worker"), &(19, 23), limits()).unwrap();
+        assert!(matches!(
+            typed.join(&cx).await,
+            Outcome::Ok(TypedRemoteOutcome::Success(42))
+        ));
+        assert!(matches!(
+            typed.try_join(),
+            Err(TypedRemoteError::Remote(RemoteError::PolledAfterCompletion))
+        ));
+        let mut failed =
+            spawn_remote_typed::<Add>(&remote, NodeId::new("worker"), &(u64::MAX, 0), limits())
+                .unwrap();
         assert!(matches!(failed.join(&cx).await,
             Outcome::Ok(TypedRemoteOutcome::Failed(message)) if message == "declared application failure"));
-        let mut large = spawn_remote_typed::<Large>(&remote, NodeId::new("worker"), &(), limits())
-            .unwrap();
-        assert!(matches!(large.join(&cx).await,
+        let mut large =
+            spawn_remote_typed::<Large>(&remote, NodeId::new("worker"), &(), limits()).unwrap();
+        assert!(
+            matches!(large.join(&cx).await,
             Outcome::Err(TypedRemoteError::Remote(RemoteError::TransportError(message)))
                 if message.contains("ExecutionFailed")
                     && message.contains("typed remote response exceeds its 256-byte envelope limit")),
-            "the typed output cap must be the exact remote refusal cause");
+            "the typed output cap must be the exact remote refusal cause"
+        );
         let mut raw = spawn_remote(
-            &remote, NodeId::new("worker"), ComputationName::new("raw.echo"), RemoteInput::new(vec![4, 2]),
+            &remote,
+            NodeId::new("worker"),
+            ComputationName::new("raw.echo"),
+            RemoteInput::new(vec![4, 2]),
         )
         .unwrap();
         assert!(matches!(raw.join(&cx).await,
@@ -361,8 +402,9 @@ fn typed_v3_idempotency_replays_without_reexecuting_the_handler() {
             origin_region: cx.region_id(),
             origin_task: cx.task_id(),
         };
-        let wire = RemoteServiceWireRequest::from_spawn_request(fixture.route.hello().clone(), &request)
-            .unwrap();
+        let wire =
+            RemoteServiceWireRequest::from_spawn_request(fixture.route.hello().clone(), &request)
+                .unwrap();
         let first = fixture.route.client().call(&cx, &wire).await.unwrap();
         let second = fixture.route.client().call(&cx, &wire).await.unwrap();
         assert!(matches!(first, RemoteServiceWireResponse::Outcome { .. }));
@@ -377,26 +419,34 @@ fn typed_charged_handle_keeps_cancelled_observation_separate_from_remote_close()
     native(|cx, runtime| async move {
         let mut fixture = Fixture::new(&cx, runtime).await;
         let call = PreparedTypedRemoteCall::<Wait>::encode(&(), limits()).unwrap();
-        let reservation = fixture.admitted.reserve(&cx, &NodeId::new("worker"), call.encoded_len(), WAIT)
-            .await.unwrap();
+        let reservation = fixture
+            .admitted
+            .reserve(&cx, &NodeId::new("worker"), call.encoded_len(), WAIT)
+            .await
+            .unwrap();
         let mut handle = call.commit(&cx, reservation, LEASE).unwrap();
         fixture.gate.wait(&fixture.gate.parked).await;
         assert_eq!(fixture.admitted.usage().buffer_bytes, CHARGE);
         let (parked, mut witnessed) = oneshot::channel();
-        let mut observer = cx.spawn(move |observer_cx| async move {
-            let mut parked = Some(parked);
-            let result = {
-                let mut joining = pin!(handle.join(&observer_cx));
-                poll_fn(|task| {
-                    let result = joining.as_mut().poll(task);
-                    if result.is_pending() && let Some(parked) = parked.take() {
-                        parked.send_blocking(()).unwrap();
-                    }
-                    result
-                }).await
-            };
-            (handle, result)
-        }).unwrap();
+        let mut observer = cx
+            .spawn(move |observer_cx| async move {
+                let mut parked = Some(parked);
+                let result = {
+                    let mut joining = pin!(handle.join(&observer_cx));
+                    poll_fn(|task| {
+                        let result = joining.as_mut().poll(task);
+                        if result.is_pending()
+                            && let Some(parked) = parked.take()
+                        {
+                            parked.send_blocking(()).unwrap();
+                        }
+                        result
+                    })
+                    .await
+                };
+                (handle, result)
+            })
+            .unwrap();
         witnessed.recv(&cx).await.unwrap();
         let reason = CancelReason::user("cancel only typed join observation");
         observer.abort_with_reason(reason.clone());
@@ -409,11 +459,15 @@ fn typed_charged_handle_keeps_cancelled_observation_separate_from_remote_close()
         poll_fn(|task| {
             assert!(closing.as_mut().poll(task).is_pending());
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         fixture.gate.wait(&fixture.gate.cancelled).await;
         assert!(!fixture.gate.retired.load(Ordering::Acquire));
-        assert_eq!(fixture.admitted.usage().buffer_bytes, CHARGE,
-            "withheld remote cleanup must retain native buffer admission");
+        assert_eq!(
+            fixture.admitted.usage().buffer_bytes,
+            CHARGE,
+            "withheld remote cleanup must retain native buffer admission"
+        );
         fixture.gate.release();
         assert!(matches!(closing.await,
             Outcome::Ok(TypedRemoteOutcome::Cancelled(actual))
@@ -428,8 +482,11 @@ fn dropping_typed_native_work_retains_credit_until_remote_cleanup_finishes() {
     native(|cx, runtime| async move {
         let mut fixture = Fixture::new(&cx, runtime).await;
         let call = PreparedTypedRemoteCall::<Wait>::encode(&(), limits()).unwrap();
-        let reservation = fixture.admitted.reserve(&cx, &NodeId::new("worker"), call.encoded_len(), WAIT)
-            .await.unwrap();
+        let reservation = fixture
+            .admitted
+            .reserve(&cx, &NodeId::new("worker"), call.encoded_len(), WAIT)
+            .await
+            .unwrap();
         let handle = call.commit(&cx, reservation, LEASE).unwrap();
         fixture.gate.wait(&fixture.gate.parked).await;
         drop(handle);
@@ -439,11 +496,17 @@ fn dropping_typed_native_work_retains_credit_until_remote_cleanup_finishes() {
         assert_eq!(fixture.admitted.usage().buffer_bytes, CHARGE);
         fixture.gate.release();
         let next = PreparedTypedRemoteCall::<Add>::encode(&(6, 7), limits()).unwrap();
-        let reservation = fixture.admitted.reserve(&cx, &NodeId::new("worker"), next.encoded_len(), WAIT)
-            .await.unwrap();
+        let reservation = fixture
+            .admitted
+            .reserve(&cx, &NodeId::new("worker"), next.encoded_len(), WAIT)
+            .await
+            .unwrap();
         assert!(fixture.gate.retired.load(Ordering::Acquire));
         let mut healthy = next.commit(&cx, reservation, LEASE).unwrap();
-        assert!(matches!(healthy.join(&cx).await, Outcome::Ok(TypedRemoteOutcome::Success(13))));
+        assert!(matches!(
+            healthy.join(&cx).await,
+            Outcome::Ok(TypedRemoteOutcome::Success(13))
+        ));
         fixture.finish(&cx).await;
     });
 }
@@ -461,23 +524,38 @@ fn typed_owned_native_success_and_application_failure_retain_actual_close_receip
         let mut fixture = Fixture::new(&cx, runtime).await;
         let remote = fixture.remote_cx(&cx);
         let prepared = PreparedTypedRemoteCall::<Add>::encode(&(20, 22), limits()).unwrap();
-        let mut call = prepared.spawn_owned(&remote, NodeId::new("worker"), owned_config()).unwrap();
+        let mut call = prepared
+            .spawn_owned(&remote, NodeId::new("worker"), owned_config())
+            .unwrap();
         assert_ne!(call.local_task_id(), cx.task_id());
         let report = call.join(&cx).await.unwrap();
         assert!(call.is_finished());
         assert!(report.is_success(), "{report:?}");
         assert_ne!(report.close.as_ref().unwrap().region_id, cx.region_id());
-        assert!(matches!(report.close.as_ref().unwrap().outcome, Outcome::Ok(())));
+        assert!(matches!(
+            report.close.as_ref().unwrap().outcome,
+            Outcome::Ok(())
+        ));
         let reply = report.task.unwrap();
         assert_eq!(reply.settlement, RemoteLeaseSettlement::Committed);
         assert!(reply.cancellation.is_none());
-        assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Success(42))));
-        assert!(matches!(call.try_join(),
-            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok(TypedRemoteOutcome::Success(42))
+        ));
+        assert!(matches!(
+            call.try_join(),
+            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))
+        ));
 
         let mut failed = spawn_remote_typed_owned::<Add>(
-            &remote, NodeId::new("worker"), &(u64::MAX, 0), limits(), owned_config(),
-        ).unwrap();
+            &remote,
+            NodeId::new("worker"),
+            &(u64::MAX, 0),
+            limits(),
+            owned_config(),
+        )
+        .unwrap();
         let report = failed.join(&cx).await.unwrap();
         assert!(failed.is_finished());
         assert!(!report.is_success());
@@ -502,28 +580,51 @@ fn typed_owned_response_limit_refuses_decoding_after_retirement_and_preserves_pr
             &(21, 21),
             TypedRemoteLimits::new(1024, 1),
             owned_config(),
-        ).unwrap();
+        )
+        .unwrap();
         let report = call.join(&cx).await.unwrap();
-        assert!(call.is_finished(), "codec failure cannot discard the owner retirement barrier");
+        assert!(
+            call.is_finished(),
+            "codec failure cannot discard the owner retirement barrier"
+        );
         assert!(!report.is_success());
         assert!(matches!(report.trigger, RemoteRunTrigger::Finished));
         assert!(report.cancel_error.is_none());
         let close = report.close.unwrap();
         assert_ne!(close.region_id, cx.region_id());
         assert!(matches!(close.outcome, Outcome::Ok(())));
-        assert!(close.cleanup_outcome.as_ref().is_none_or(|value| matches!(value, Outcome::Ok(()))));
+        assert!(
+            close
+                .cleanup_outcome
+                .as_ref()
+                .is_none_or(|value| matches!(value, Outcome::Ok(())))
+        );
         let reply = report.task.unwrap();
-        assert_eq!(reply.settlement, RemoteLeaseSettlement::Committed,
-            "application decoding must not rewrite acknowledged remote execution");
+        assert_eq!(
+            reply.settlement,
+            RemoteLeaseSettlement::Committed,
+            "application decoding must not rewrite acknowledged remote execution"
+        );
         assert!(reply.cancellation.is_none());
-        assert!(matches!(reply.outcome, Outcome::Err(TypedRemoteError::LimitExceeded {
-            stage: TypedRemoteStage::Response, limit: 1,
-        })));
-        assert!(matches!(call.try_join(),
-            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Err(TypedRemoteError::LimitExceeded {
+                stage: TypedRemoteStage::Response,
+                limit: 1,
+            })
+        ));
+        assert!(matches!(
+            call.try_join(),
+            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))
+        ));
         let mut healthy = spawn_remote_typed_owned::<Add>(
-            &remote, NodeId::new("worker"), &(6, 7), limits(), owned_config(),
-        ).unwrap();
+            &remote,
+            NodeId::new("worker"),
+            &(6, 7),
+            limits(),
+            owned_config(),
+        )
+        .unwrap();
         assert!(healthy.join(&cx).await.unwrap().is_success());
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
         fixture.finish(&cx).await;
@@ -536,10 +637,20 @@ fn typed_owned_parent_close_and_handle_drop_wait_for_inflight_remote_cleanup() {
         for drop_handle in [false, true] {
             let mut fixture = Fixture::new(&cx, runtime.clone()).await;
             let remote = fixture.remote_cx(&cx);
-            let boundary = remote.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
-            let mut call = Some(spawn_remote_typed_owned::<Wait>(
-                boundary.cx(), NodeId::new("worker"), &(), limits(), owned_config(),
-            ).unwrap());
+            let boundary = remote
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let mut call = Some(
+                spawn_remote_typed_owned::<Wait>(
+                    boundary.cx(),
+                    NodeId::new("worker"),
+                    &(),
+                    limits(),
+                    owned_config(),
+                )
+                .unwrap(),
+            );
             // The typed result handle has never been polled. The production
             // remote handler's actual Pending poll proves the work is live.
             fixture.gate.wait(&fixture.gate.parked).await;
@@ -551,10 +662,13 @@ fn typed_owned_parent_close_and_handle_drop_wait_for_inflight_remote_cleanup() {
             {
                 let mut cancelled = pin!(fixture.gate.wait(&fixture.gate.cancelled));
                 poll_fn(|task| {
-                    assert!(closing.as_mut().poll(task).is_pending(),
-                        "the region cannot close before the peer retires its handler");
+                    assert!(
+                        closing.as_mut().poll(task).is_pending(),
+                        "the region cannot close before the peer retires its handler"
+                    );
                     cancelled.as_mut().poll(task)
-                }).await;
+                })
+                .await;
             }
             assert!(!fixture.gate.retired.load(Ordering::Acquire));
             assert_eq!(fixture.legacy.active_operations(), 1);
@@ -571,11 +685,17 @@ fn typed_owned_parent_close_and_handle_drop_wait_for_inflight_remote_cleanup() {
                 let reply = report.task.unwrap();
                 assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
                 assert!(reply.cancellation.is_some());
-                assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Cancelled(_))));
+                assert!(matches!(
+                    reply.outcome,
+                    Outcome::Ok(TypedRemoteOutcome::Cancelled(_))
+                ));
             }
             closing.await.unwrap();
             assert!(fixture.gate.retired.load(Ordering::Acquire));
-            assert!(!cx.is_cancel_requested(), "the enclosing test owner remains live");
+            assert!(
+                !cx.is_cancel_requested(),
+                "the enclosing test owner remains live"
+            );
             fixture.finish(&cx).await;
         }
     });
@@ -587,18 +707,29 @@ fn typed_owned_cancelled_and_dropped_observations_preserve_the_later_cleanup_rep
         let mut fixture = Fixture::new(&cx, runtime).await;
         let remote = fixture.remote_cx(&cx);
         let mut call = spawn_remote_typed_owned::<Wait>(
-            &remote, NodeId::new("worker"), &(), limits(), owned_config(),
-        ).unwrap();
+            &remote,
+            NodeId::new("worker"),
+            &(),
+            limits(),
+            owned_config(),
+        )
+        .unwrap();
         fixture.gate.wait(&fixture.gate.parked).await;
         let observer = Cx::for_testing();
-        observer.cancel_with(CancelKind::User, Some("cancel only owned typed observation"));
+        observer.cancel_with(
+            CancelKind::User,
+            Some("cancel only owned typed observation"),
+        );
         {
             let mut observation = pin!(call.join(&observer));
             poll_fn(|task| {
-                assert!(observation.as_mut().poll(task).is_pending(),
-                    "owned join is an uninterruptible observation of retained cleanup");
+                assert!(
+                    observation.as_mut().poll(task).is_pending(),
+                    "owned join is an uninterruptible observation of retained cleanup"
+                );
                 Poll::Ready(())
-            }).await;
+            })
+            .await;
         }
         assert!(!fixture.gate.cancelled.load(Ordering::Acquire));
         assert!(!call.is_finished());
@@ -607,7 +738,8 @@ fn typed_owned_cancelled_and_dropped_observations_preserve_the_later_cleanup_rep
             poll_fn(|task| {
                 assert!(closing.as_mut().poll(task).is_pending());
                 Poll::Ready(())
-            }).await;
+            })
+            .await;
         }
         // Dropping the close observation keeps its requested cancellation and
         // the actual owner; it cannot turn unfinished remote cleanup terminal.
@@ -622,7 +754,10 @@ fn typed_owned_cancelled_and_dropped_observations_preserve_the_later_cleanup_rep
         assert!(!report.is_success());
         let reply = report.task.unwrap();
         assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
-        assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Cancelled(_))));
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok(TypedRemoteOutcome::Cancelled(_))
+        ));
         assert!(fixture.gate.retired.load(Ordering::Acquire));
         fixture.finish(&cx).await;
     });

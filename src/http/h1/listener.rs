@@ -25,6 +25,7 @@ use crate::server::shutdown::{
     DrainStep, GracefulDrainReport, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal,
     ShutdownStats,
 };
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
 use crate::tracing_compat::error;
@@ -38,7 +39,6 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -683,8 +683,8 @@ where
     /// entry point retains its established execution contract.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run_streaming_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -720,8 +720,8 @@ where
         cx: &Cx,
         acceptor: TlsAcceptor,
     ) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -788,8 +788,8 @@ where
     /// policy of [`Http1StreamingServer::serve_sse_owned`].
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run_sse_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -825,8 +825,8 @@ where
         cx: &Cx,
         acceptor: TlsAcceptor,
     ) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -857,9 +857,8 @@ where
                             .serve_sse_owned_with_peer_addr(&connection_cx, stream, peer_addr)
                             .await
                         {
-                            connection_cx.trace(&format!(
-                                "h1_owned_sse_tls_connection_failed: {error}"
-                            ));
+                            connection_cx
+                                .trace(&format!("h1_owned_sse_tls_connection_failed: {error}"));
                         }
                         let _ = connection_cx.checkpoint();
                     })
@@ -994,7 +993,13 @@ where
             runtime,
             |stream, guard, handler, config, shutdown, in_flight, runtime| {
                 spawn_stream_connection::<F, Fut, R>(
-                    stream, guard, handler, config.connection, shutdown, in_flight, runtime,
+                    stream,
+                    guard,
+                    handler,
+                    config.connection,
+                    shutdown,
+                    in_flight,
+                    runtime,
                 )
             },
         )
@@ -1050,8 +1055,8 @@ where
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
         // Refuse a detached owner before accepting a connection.
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -1144,8 +1149,8 @@ where
         cx: &Cx,
         acceptor: TlsAcceptor,
     ) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -1193,8 +1198,8 @@ where
     /// the listener's TCP, Unix, and handed-off transports.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run_produced_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -1229,8 +1234,8 @@ where
         cx: &Cx,
         acceptor: TlsAcceptor,
     ) -> io::Result<ShutdownStats> {
-        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
-            .map_err(io::Error::other)?;
+        let _ =
+            crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
@@ -1258,11 +1263,7 @@ where
                         .with_shutdown_signal(shutdown)
                         .with_in_flight_requests(in_flight);
                         if let Err(error) = server
-                            .serve_produced_owned_with_peer_addr(
-                                &connection_cx,
-                                stream,
-                                peer_addr,
-                            )
+                            .serve_produced_owned_with_peer_addr(&connection_cx, stream, peer_addr)
                             .await
                         {
                             connection_cx.trace(&format!(
@@ -1369,10 +1370,7 @@ impl<F> Http1Listener<F> {
         let accept_result = loop {
             let owner_cancelled = owner_cancel.is_requested();
             let coordinator_cancelled = coordinator_cancel.is_requested();
-            if self.shutdown_signal.is_shutting_down()
-                || owner_cancelled
-                || coordinator_cancelled
-            {
+            if self.shutdown_signal.is_shutting_down() || owner_cancelled || coordinator_cancelled {
                 break Ok(());
             }
 
@@ -1867,19 +1865,21 @@ async fn serve_owned_stream_connection<F, Fut, R>(
         .await
     {
         Ok(Http1ServeOutcome::Closed(_)) => {}
-        Ok(Http1ServeOutcome::Upgraded { io, read_ahead, upgrade }) => {
-            match io {
-                H1Stream::Tcp(stream) => {
-                    let session = upgrade.run(cx.clone(), stream, read_ahead);
+        Ok(Http1ServeOutcome::Upgraded {
+            io,
+            read_ahead,
+            upgrade,
+        }) => match io {
+            H1Stream::Tcp(stream) => {
+                let session = upgrade.run(cx.clone(), stream, read_ahead);
+                run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+            }
+            stream => {
+                if let Some(session) = upgrade.run_on(cx.clone(), stream, read_ahead) {
                     run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
                 }
-                stream => {
-                    if let Some(session) = upgrade.run_on(cx.clone(), stream, read_ahead) {
-                        run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
-                    }
-                }
             }
-        }
+        },
         Err(error) => cx.trace(&format!("h1_owned_connection_failed: {error}")),
     }
     // Preserve terminal bookkeeping through ordinary Cx::spawn after the
@@ -2252,7 +2252,10 @@ async fn serve_owned_streaming_connection<F, Fut>(
     )
     .with_shutdown_signal(shutdown_signal)
     .with_in_flight_requests(in_flight_requests);
-    if let Err(error) = server.serve_owned_with_peer_addr(&cx, stream, peer_addr).await {
+    if let Err(error) = server
+        .serve_owned_with_peer_addr(&cx, stream, peer_addr)
+        .await
+    {
         cx.trace(&format!("h1_owned_streaming_connection_failed: {error}"));
     }
     let _ = cx.checkpoint();

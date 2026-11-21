@@ -11,10 +11,10 @@ use crate::remote::{
 use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
 use crate::security::AuthKey;
 use crate::sync::Notify;
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::types::{Budget, CancelReason};
 use std::future::poll_fn;
 use std::path::PathBuf;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex};
 use std::task::Poll;
 use std::time::Duration;
@@ -79,16 +79,34 @@ impl JournalFile {
             .open(&path)
             .unwrap();
         let journal = DurableRemoteJournal::create::<Input, Output>(
-            file, NAME, VERSION, AuthKey::from_seed(99), limits(),
+            file,
+            NAME,
+            VERSION,
+            AuthKey::from_seed(99),
+            limits(),
         )
         .unwrap();
-        (Self { _directory: directory, path }, journal)
+        (
+            Self {
+                _directory: directory,
+                path,
+            },
+            journal,
+        )
     }
 
     fn reopen(&self) -> Result<DurableRemoteJournal, DurableRemoteError> {
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&self.path).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .unwrap();
         DurableRemoteJournal::open::<Input, Output>(
-            file, NAME, VERSION, AuthKey::from_seed(99), limits(),
+            file,
+            NAME,
+            VERSION,
+            AuthKey::from_seed(99),
+            limits(),
         )
     }
 }
@@ -149,7 +167,12 @@ fn invocation(cx: &Cx, key: u128) -> RemoteComputationInvocation {
 }
 
 fn records(owner: &DurableRemoteComputation) -> u64 {
-    owner.journal.lock().as_ref().expect("journal returned to its owner").records()
+    owner
+        .journal
+        .lock()
+        .as_ref()
+        .expect("journal returned to its owner")
+        .records()
 }
 
 fn success(outcome: RemoteOutcome, expected: &[u8]) {
@@ -180,12 +203,17 @@ impl WorkerGate {
     }
 
     fn release(&self) {
-        *self.released.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         self.release_changed.notify_all();
     }
 
     async fn entered(&self) {
-        self.changed.wait_until(|| self.entered.load(Ordering::Acquire)).await;
+        self.changed
+            .wait_until(|| self.entered.load(Ordering::Acquire))
+            .await;
     }
 }
 
@@ -246,7 +274,10 @@ fn native_compaction_retains_publication_and_file_ownership_after_waiter_drop() 
             }
             let old_bytes = owner.journal.lock().as_ref().unwrap().committed_bytes();
             now.store(21_000, Ordering::Release);
-            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let region = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             let mut compacting = Box::pin(owner.compact(region.cx(), replacement, move || {
                 // This witness occurs after the entire candidate was synced and
                 // before either the pathname or active owner can be replaced.
@@ -288,7 +319,10 @@ fn native_compaction_retains_publication_and_file_ownership_after_waiter_drop() 
             closing.await.unwrap();
             assert!(!owner.in_flight());
             assert_eq!(published.load(Ordering::SeqCst), 1);
-            assert_eq!(owner.journal_status(), Some(DurableRemoteJournalStatus::Writable));
+            assert_eq!(
+                owner.journal_status(),
+                Some(DurableRemoteJournalStatus::Writable)
+            );
             assert!(owner.journal.lock().as_ref().unwrap().committed_bytes() < old_bytes);
             assert_eq!(records(&owner), 3, "one retained pair and the clock floor");
             success(
@@ -305,12 +339,27 @@ fn native_compaction_retains_publication_and_file_ownership_after_waiter_drop() 
         drained(&runtime);
         let mut restored = file.reopen().unwrap();
         assert!(matches!(
-            restored.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(2), INPUT, 20_999),
+            restored.admit(
+                &NodeId::new(PEER),
+                IdempotencyKey::from_raw(2),
+                INPUT,
+                20_999
+            ),
             Err(DurableRemoteError::ClockRegression)
         ));
-        match restored.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(2), INPUT, 21_000).unwrap() {
+        match restored
+            .admit(
+                &NodeId::new(PEER),
+                IdempotencyKey::from_raw(2),
+                INPUT,
+                21_000,
+            )
+            .unwrap()
+        {
             DurableRemoteAdmission::Replay(outcome) => success(outcome, INPUT),
-            DurableRemoteAdmission::Execute(_) => panic!("reopen must not re-execute retained work"),
+            DurableRemoteAdmission::Execute(_) => {
+                panic!("reopen must not re-execute retained work")
+            }
         }
     }
 }
@@ -342,7 +391,10 @@ fn queued_compaction_cancellation_leaves_both_files_unchanged_and_drains() {
         run(&runtime, async {
             let cx = Cx::current().unwrap();
             gate.entered().await;
-            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let region = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             let mut compacting = Box::pin(owner.compact(region.cx(), replacement, || {
                 panic!("a cancelled queued compaction cannot publish")
             }));
@@ -367,7 +419,10 @@ fn queued_compaction_cancellation_leaves_both_files_unchanged_and_drains() {
             gate.release();
             closing.await.unwrap();
             assert!(!owner.in_flight());
-            assert_eq!(owner.journal_status(), Some(DurableRemoteJournalStatus::Writable));
+            assert_eq!(
+                owner.journal_status(),
+                Some(DurableRemoteJournalStatus::Writable)
+            );
         });
         assert!(blocker.wait_timeout(Duration::from_secs(5)));
         assert_eq!(clocks.load(Ordering::SeqCst), 0);
@@ -390,9 +445,11 @@ fn registration_rejects_mismatched_schema_and_duplicate_without_replacing_handle
     });
     assert!(matches!(wrong, Err(DurableRemoteError::Configuration)));
     assert!(registry.is_empty());
-    owner.register::<Input, Output, _, _>(&mut registry, |_, _| async {
-        RemoteOutcome::Success(INPUT.to_vec())
-    }).unwrap();
+    owner
+        .register::<Input, Output, _, _>(&mut registry, |_, _| async {
+            RemoteOutcome::Success(INPUT.to_vec())
+        })
+        .unwrap();
     assert_eq!(registry.schema_registry().fingerprint(), fingerprint);
     let duplicate = owner.register::<Input, Output, _, _>(&mut registry, |_, _| async {
         panic!("duplicate registration must not replace the first handler")
@@ -406,11 +463,18 @@ fn registration_rejects_mismatched_schema_and_duplicate_without_replacing_handle
     run(&runtime, async {
         let cx = Cx::current().unwrap();
         let mut policy = RemotePeerAdmissionPolicy::new(
-            RemoteProtocolVersion::V3, registry.schema_registry().clone(),
+            RemoteProtocolVersion::V3,
+            registry.schema_registry().clone(),
         );
         policy.grant_peer(NodeId::new(PEER), [NAME]).unwrap();
         let session = policy.admit(&policy.hello_for(NodeId::new(PEER))).unwrap();
-        success(registry.dispatch(&cx, &session, request(&cx, 1)).await.unwrap(), INPUT);
+        success(
+            registry
+                .dispatch(&cx, &session, request(&cx, 1))
+                .await
+                .unwrap(),
+            INPUT,
+        );
     });
     assert_eq!(records(&owner), 2);
     drained(&runtime);
@@ -418,38 +482,44 @@ fn registration_rejects_mismatched_schema_and_duplicate_without_replacing_handle
 
 #[test]
 fn missing_blocking_pool_refuses_before_reservation_or_handler() {
-        for workers in [1, 2] {
-            let (_file, journal) = JournalFile::create();
-            let owner = Arc::new(DurableRemoteComputation::new(journal, || 1000));
-            let runtime = native_runtime(workers, false);
-            run(&runtime, async {
-                let cx = Cx::current().unwrap();
-                assert!(cx.blocking_pool_handle().is_none());
-                let result = owner.call(&cx, invocation(&cx, 2), |_, _| async {
+    for workers in [1, 2] {
+        let (_file, journal) = JournalFile::create();
+        let owner = Arc::new(DurableRemoteComputation::new(journal, || 1000));
+        let runtime = native_runtime(workers, false);
+        run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            assert!(cx.blocking_pool_handle().is_none());
+            let result = owner
+                .call(&cx, invocation(&cx, 2), |_, _| async {
                     panic!("a missing blocking capability cannot fall back to handler execution")
-                }).await;
-                assert!(matches!(result, Err(DurableRemoteError::Unavailable)));
-                assert!(!owner.in_flight());
-                assert_eq!(owner.journal_status(), Some(DurableRemoteJournalStatus::Writable));
-                assert_eq!(records(&owner), 0);
-            });
-            drained(&runtime);
-        }
+                })
+                .await;
+            assert!(matches!(result, Err(DurableRemoteError::Unavailable)));
+            assert!(!owner.in_flight());
+            assert_eq!(
+                owner.journal_status(),
+                Some(DurableRemoteJournalStatus::Writable)
+            );
+            assert_eq!(records(&owner), 0);
+        });
+        drained(&runtime);
+    }
 }
 
 #[test]
 fn registered_native_execution_persists_before_return_and_replays_after_restart() {
-        for workers in [1, 2] {
-            let (file, journal) = JournalFile::create();
-            let owner = Arc::new(DurableRemoteComputation::new(journal, || 1000));
-            let calls = Arc::new(AtomicUsize::new(0));
-            let (release, release_rx) = oneshot::channel::<()>();
-            let release_rx = Arc::new(Mutex::new(Some(release_rx)));
-            let (parked, mut parked_rx) = oneshot::channel();
-            let parked = Arc::new(Mutex::new(Some(parked)));
-            let mut registry = RemoteComputationRegistry::new();
-            let handler_calls = Arc::clone(&calls);
-            owner.register::<Input, Output, _, _>(&mut registry, move |body, invocation| {
+    for workers in [1, 2] {
+        let (file, journal) = JournalFile::create();
+        let owner = Arc::new(DurableRemoteComputation::new(journal, || 1000));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (release, release_rx) = oneshot::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let (parked, mut parked_rx) = oneshot::channel();
+        let parked = Arc::new(Mutex::new(Some(parked)));
+        let mut registry = RemoteComputationRegistry::new();
+        let handler_calls = Arc::clone(&calls);
+        owner
+            .register::<Input, Output, _, _>(&mut registry, move |body, invocation| {
                 handler_calls.fetch_add(1, Ordering::SeqCst);
                 let mut release = release_rx.lock().take().expect("one execution");
                 let mut parked = parked.lock().take();
@@ -458,287 +528,400 @@ fn registered_native_execution_persists_before_return_and_replays_after_restart(
                     assert_ne!(invocation.peer_node(), &invocation.request().origin_node);
                     poll_fn(|task| {
                         let poll = release.poll_recv_uninterruptible(task);
-                        if poll.is_pending() && let Some(parked) = parked.take() {
+                        if poll.is_pending()
+                            && let Some(parked) = parked.take()
+                        {
                             parked.send_blocking(body.clone()).unwrap();
                         }
                         poll
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     RemoteOutcome::Success(invocation.into_request().input.into_data())
                 }
-            }).unwrap();
-            let runtime = native_runtime(workers, true);
-            run(&runtime, async {
-                let cx = Cx::current().unwrap();
-                let mut policy = RemotePeerAdmissionPolicy::new(
-                    RemoteProtocolVersion::V3, registry.schema_registry().clone(),
-                );
-                policy.grant_peer(NodeId::new(PEER), [NAME]).unwrap();
-                let session = policy.admit(&policy.hello_for(NodeId::new(PEER))).unwrap();
-                let task_registry = registry.clone();
-                let task_session = session.clone();
-                let first = request(&cx, 3);
-                let mut running = cx.spawn(move |body| async move {
+            })
+            .unwrap();
+        let runtime = native_runtime(workers, true);
+        run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            let mut policy = RemotePeerAdmissionPolicy::new(
+                RemoteProtocolVersion::V3,
+                registry.schema_registry().clone(),
+            );
+            policy.grant_peer(NodeId::new(PEER), [NAME]).unwrap();
+            let session = policy.admit(&policy.hello_for(NodeId::new(PEER))).unwrap();
+            let task_registry = registry.clone();
+            let task_session = session.clone();
+            let first = request(&cx, 3);
+            let mut running = cx
+                .spawn(move |body| async move {
                     task_registry.dispatch(&body, &task_session, first).await
-                }).unwrap();
-                let body: Cx = parked_rx.recv(&cx).await.unwrap();
-                assert!(!body.is_cancel_requested());
-                assert!(!running.is_finished());
-                assert!(owner.in_flight());
-                assert_eq!(owner.journal_status(), None);
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
-                let busy = owner.call(&cx, invocation(&cx, 4), |_, _| async {
+                })
+                .unwrap();
+            let body: Cx = parked_rx.recv(&cx).await.unwrap();
+            assert!(!body.is_cancel_requested());
+            assert!(!running.is_finished());
+            assert!(owner.in_flight());
+            assert_eq!(owner.journal_status(), None);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let busy = owner
+                .call(&cx, invocation(&cx, 4), |_, _| async {
                     panic!("the one journal slot cannot admit concurrent effects")
-                }).await;
-                assert!(matches!(busy, Err(DurableRemoteError::Busy)));
-                release.send(&cx, ()).unwrap();
-                success(running.join(&cx).await.unwrap().unwrap(), INPUT);
-                assert!(!owner.in_flight());
-                assert_eq!(records(&owner), 2, "reservation and terminal precede the receipt");
+                })
+                .await;
+            assert!(matches!(busy, Err(DurableRemoteError::Busy)));
+            release.send(&cx, ()).unwrap();
+            success(running.join(&cx).await.unwrap().unwrap(), INPUT);
+            assert!(!owner.in_flight());
+            assert_eq!(
+                records(&owner),
+                2,
+                "reservation and terminal precede the receipt"
+            );
 
-                let mut retry = request(&cx, 3);
-                retry.origin_node = NodeId::new("changed-untrusted-origin");
-                retry.lease = Duration::from_secs(1);
-                retry.budget = Some(Budget::INFINITE.with_poll_quota(1));
-                success(registry.dispatch(&cx, &session, retry).await.unwrap(), INPUT);
-                assert_eq!(calls.load(Ordering::SeqCst), 1);
-                assert_eq!(records(&owner), 2, "an exact retry writes no second reservation");
-            });
-            drop(registry);
-            drop(owner);
-            drained(&runtime);
+            let mut retry = request(&cx, 3);
+            retry.origin_node = NodeId::new("changed-untrusted-origin");
+            retry.lease = Duration::from_secs(1);
+            retry.budget = Some(Budget::INFINITE.with_poll_quota(1));
+            success(
+                registry.dispatch(&cx, &session, retry).await.unwrap(),
+                INPUT,
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                records(&owner),
+                2,
+                "an exact retry writes no second reservation"
+            );
+        });
+        drop(registry);
+        drop(owner);
+        drained(&runtime);
 
-            let journal = file.reopen().unwrap();
-            assert_eq!(journal.records(), 2);
-            let owner = Arc::new(DurableRemoteComputation::new(journal, || 1001));
-            let restarted = native_runtime(workers, true);
-            run(&restarted, async {
-                let cx = Cx::current().unwrap();
-                success(owner.call(&cx, invocation(&cx, 3), |_, _| async {
-                    panic!("a recovered terminal result must not execute the handler")
-                }).await.unwrap(), INPUT);
-                assert_eq!(records(&owner), 2);
-            });
-            drained(&restarted);
-        }
+        let journal = file.reopen().unwrap();
+        assert_eq!(journal.records(), 2);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, || 1001));
+        let restarted = native_runtime(workers, true);
+        run(&restarted, async {
+            let cx = Cx::current().unwrap();
+            success(
+                owner
+                    .call(&cx, invocation(&cx, 3), |_, _| async {
+                        panic!("a recovered terminal result must not execute the handler")
+                    })
+                    .await
+                    .unwrap(),
+                INPUT,
+            );
+            assert_eq!(records(&owner), 2);
+        });
+        drained(&restarted);
+    }
 }
 
 #[test]
 #[allow(clippy::async_yields_async)]
 fn queued_admission_drop_retains_journal_and_file_lock_until_worker_retirement() {
-        for workers in [1, 2] {
-            let (file, journal) = JournalFile::create();
-            let header_bytes = journal.committed_bytes();
-            let clocks = Arc::new(AtomicUsize::new(0));
-            let clock_calls = Arc::clone(&clocks);
-            let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
-                clock_calls.fetch_add(1, Ordering::SeqCst);
-                1000
-            }));
-            let retained = Arc::downgrade(&owner);
-            let runtime = native_runtime(workers, true);
-            let pool = runtime.blocking_handle().unwrap();
-            let gate = Arc::new(WorkerGate::default());
-            let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
-            let worker_gate = Arc::clone(&gate);
-            let blocker = pool.spawn(move || worker_gate.block());
-            let closing = run(&runtime, async {
-                let cx = Cx::current().unwrap();
-                gate.entered().await;
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
-                let mut call = Box::pin(owner.call(region.cx(), invocation(region.cx(), 5), |_, _| async {
-                    panic!("cancelled queued admission must never invoke the handler")
-                }));
-                poll_fn(|task| {
-                    assert!(call.as_mut().poll(task).is_pending(), "the disk worker is occupied");
-                    if pool.pending_count() == 1 {
-                        Poll::Ready(())
-                    } else {
-                        task.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                }).await;
-                drop(call);
-                assert!(owner.in_flight());
-                assert_eq!(owner.journal_status(), None);
-                drop(owner);
-                let mut closing = Box::pin(region.close());
-                poll_fn(|task| {
-                    assert!(closing.as_mut().poll(task).is_pending(),
-                        "region close must retain the cancelled pool envelope");
+    for workers in [1, 2] {
+        let (file, journal) = JournalFile::create();
+        let header_bytes = journal.committed_bytes();
+        let clocks = Arc::new(AtomicUsize::new(0));
+        let clock_calls = Arc::clone(&clocks);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
+            clock_calls.fetch_add(1, Ordering::SeqCst);
+            1000
+        }));
+        let retained = Arc::downgrade(&owner);
+        let runtime = native_runtime(workers, true);
+        let pool = runtime.blocking_handle().unwrap();
+        let gate = Arc::new(WorkerGate::default());
+        let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
+        let worker_gate = Arc::clone(&gate);
+        let blocker = pool.spawn(move || worker_gate.block());
+        let closing = run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            gate.entered().await;
+            let region = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let mut call = Box::pin(owner.call(
+                region.cx(),
+                invocation(region.cx(), 5),
+                |_, _| async { panic!("cancelled queued admission must never invoke the handler") },
+            ));
+            poll_fn(|task| {
+                assert!(
+                    call.as_mut().poll(task).is_pending(),
+                    "the disk worker is occupied"
+                );
+                if pool.pending_count() == 1 {
                     Poll::Ready(())
-                }).await;
-                closing
-            });
-            assert!(retained.upgrade().expect("only queued work owns this Arc").in_flight());
-            assert!(matches!(file.reopen(), Err(DurableRemoteError::Locked)));
-            assert_eq!(std::fs::metadata(&file.path).unwrap().len(), header_bytes);
-            assert_eq!(clocks.load(Ordering::SeqCst), 0);
-            assert_eq!(pool.pending_count(), 1);
-            assert!(!runtime.task_inspector(Default::default()).list_active_tasks().is_empty());
+                } else {
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            drop(call);
+            assert!(owner.in_flight());
+            assert_eq!(owner.journal_status(), None);
+            drop(owner);
+            let mut closing = Box::pin(region.close());
+            poll_fn(|task| {
+                assert!(
+                    closing.as_mut().poll(task).is_pending(),
+                    "region close must retain the cancelled pool envelope"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            closing
+        });
+        assert!(
+            retained
+                .upgrade()
+                .expect("only queued work owns this Arc")
+                .in_flight()
+        );
+        assert!(matches!(file.reopen(), Err(DurableRemoteError::Locked)));
+        assert_eq!(std::fs::metadata(&file.path).unwrap().len(), header_bytes);
+        assert_eq!(clocks.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.pending_count(), 1);
+        assert!(
+            !runtime
+                .task_inspector(Default::default())
+                .list_active_tasks()
+                .is_empty()
+        );
 
-            gate.release();
-            assert!(blocker.wait_timeout(Duration::from_secs(5)));
-            run(&runtime, closing).unwrap();
-            assert!(retained.upgrade().is_none(), "retired captures release the final file owner");
-            assert_eq!(clocks.load(Ordering::SeqCst), 0, "the queued claim was fenced");
-            assert_eq!(file.reopen().unwrap().records(), 0);
-            drained(&runtime);
-        }
+        gate.release();
+        assert!(blocker.wait_timeout(Duration::from_secs(5)));
+        run(&runtime, closing).unwrap();
+        assert!(
+            retained.upgrade().is_none(),
+            "retired captures release the final file owner"
+        );
+        assert_eq!(
+            clocks.load(Ordering::SeqCst),
+            0,
+            "the queued claim was fenced"
+        );
+        assert_eq!(file.reopen().unwrap().records(), 0);
+        drained(&runtime);
+    }
 }
 
 #[test]
 fn dropping_a_reserved_pending_handler_fences_reexecution_across_restart_and_ttl() {
-        for workers in [1, 2] {
-            let (file, journal) = JournalFile::create();
-            let now = Arc::new(AtomicU64::new(1000));
-            let clock = Arc::clone(&now);
-            let owner = Arc::new(DurableRemoteComputation::new(journal, move || clock.load(Ordering::Acquire)));
-            let effects = Arc::new(AtomicUsize::new(0));
-            let retired = Arc::new(AtomicUsize::new(0));
-            let runtime = native_runtime(workers, true);
-            run(&runtime, async {
-                let cx = Cx::current().unwrap();
-                let (parked, mut parked_rx) = oneshot::channel();
-                let handler_effects = Arc::clone(&effects);
-                let handler_retired = Arc::clone(&retired);
-                let mut call = Box::pin(owner.call(&cx, invocation(&cx, 6), move |_, _| async move {
-                    let _retired = Retired(handler_retired);
-                    handler_effects.fetch_add(1, Ordering::SeqCst);
-                    let mut parked = Some(parked);
-                    let mut pending = std::pin::pin!(std::future::pending::<RemoteOutcome>());
-                    poll_fn(|task| {
-                        let poll = pending.as_mut().poll(task);
-                        if poll.is_pending() && let Some(parked) = parked.take() {
-                            parked.send_blocking(()).unwrap();
-                        }
-                        poll
-                    }).await
-                }));
+    for workers in [1, 2] {
+        let (file, journal) = JournalFile::create();
+        let now = Arc::new(AtomicU64::new(1000));
+        let clock = Arc::clone(&now);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
+            clock.load(Ordering::Acquire)
+        }));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::new(AtomicUsize::new(0));
+        let runtime = native_runtime(workers, true);
+        run(&runtime, async {
+            let cx = Cx::current().unwrap();
+            let (parked, mut parked_rx) = oneshot::channel();
+            let handler_effects = Arc::clone(&effects);
+            let handler_retired = Arc::clone(&retired);
+            let mut call = Box::pin(owner.call(&cx, invocation(&cx, 6), move |_, _| async move {
+                let _retired = Retired(handler_retired);
+                handler_effects.fetch_add(1, Ordering::SeqCst);
+                let mut parked = Some(parked);
+                let mut pending = std::pin::pin!(std::future::pending::<RemoteOutcome>());
                 poll_fn(|task| {
-                    assert!(call.as_mut().poll(task).is_pending());
-                    parked_rx.poll_recv_uninterruptible(task)
-                }).await.unwrap();
-                assert_eq!(effects.load(Ordering::SeqCst), 1);
-                assert_eq!(retired.load(Ordering::SeqCst), 0);
-                drop(call);
-                assert_eq!(retired.load(Ordering::SeqCst), 1, "dropping the call drops its actual handler");
-                assert!(!owner.in_flight());
-                assert_eq!(records(&owner), 1, "the effect began after a durable reservation");
-                now.store(1_000_000, Ordering::Release);
-                let retry = owner.call(&cx, invocation(&cx, 6), |_, _| async {
+                    let poll = pending.as_mut().poll(task);
+                    if poll.is_pending()
+                        && let Some(parked) = parked.take()
+                    {
+                        parked.send_blocking(()).unwrap();
+                    }
+                    poll
+                })
+                .await
+            }));
+            poll_fn(|task| {
+                assert!(call.as_mut().poll(task).is_pending());
+                parked_rx.poll_recv_uninterruptible(task)
+            })
+            .await
+            .unwrap();
+            assert_eq!(effects.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 0);
+            drop(call);
+            assert_eq!(
+                retired.load(Ordering::SeqCst),
+                1,
+                "dropping the call drops its actual handler"
+            );
+            assert!(!owner.in_flight());
+            assert_eq!(
+                records(&owner),
+                1,
+                "the effect began after a durable reservation"
+            );
+            now.store(1_000_000, Ordering::Release);
+            let retry = owner
+                .call(&cx, invocation(&cx, 6), |_, _| async {
                     panic!("uncertain effects never receive automatic execution permission")
-                }).await;
-                assert!(matches!(retry, Err(DurableRemoteError::InDoubt)));
-                assert_eq!(records(&owner), 1);
-            });
-            drop(owner);
-            drained(&runtime);
-            let journal = file.reopen().unwrap();
-            assert_eq!(journal.records(), 1);
-            let owner = Arc::new(DurableRemoteComputation::new(journal, || 2_000_000));
-            let restarted = native_runtime(workers, true);
-            run(&restarted, async {
-                let cx = Cx::current().unwrap();
-                let retry = owner.call(&cx, invocation(&cx, 6), |_, _| async {
+                })
+                .await;
+            assert!(matches!(retry, Err(DurableRemoteError::InDoubt)));
+            assert_eq!(records(&owner), 1);
+        });
+        drop(owner);
+        drained(&runtime);
+        let journal = file.reopen().unwrap();
+        assert_eq!(journal.records(), 1);
+        let owner = Arc::new(DurableRemoteComputation::new(journal, || 2_000_000));
+        let restarted = native_runtime(workers, true);
+        run(&restarted, async {
+            let cx = Cx::current().unwrap();
+            let retry = owner
+                .call(&cx, invocation(&cx, 6), |_, _| async {
                     panic!("restart and many terminal TTLs do not clear an in-doubt fence")
-                }).await;
-                assert!(matches!(retry, Err(DurableRemoteError::InDoubt)));
-                assert_eq!(records(&owner), 1);
-                assert_eq!(effects.load(Ordering::SeqCst), 1);
-                assert_eq!(retired.load(Ordering::SeqCst), 1);
-            });
-            drained(&restarted);
-        }
+                })
+                .await;
+            assert!(matches!(retry, Err(DurableRemoteError::InDoubt)));
+            assert_eq!(records(&owner), 1);
+            assert_eq!(effects.load(Ordering::SeqCst), 1);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+        });
+        drained(&restarted);
+    }
 }
 
 #[test]
 fn real_spawned_task_preserves_durable_completion_and_replay_after_late_cancellation() {
-        for workers in [1, 2] {
-            for replay in [false, true] {
-                let (file, mut journal) = JournalFile::create();
-                if replay {
-                    let reservation = match journal.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(7), INPUT, 1000).unwrap() {
-                        DurableRemoteAdmission::Execute(reservation) => reservation,
-                        DurableRemoteAdmission::Replay(_) => panic!("fresh journal has no terminal"),
-                    };
-                    journal.complete(reservation, RemoteOutcome::Success(INPUT.to_vec()), 1000).unwrap();
+    for workers in [1, 2] {
+        for replay in [false, true] {
+            let (file, mut journal) = JournalFile::create();
+            if replay {
+                let reservation = match journal
+                    .admit(&NodeId::new(PEER), IdempotencyKey::from_raw(7), INPUT, 1000)
+                    .unwrap()
+                {
+                    DurableRemoteAdmission::Execute(reservation) => reservation,
+                    DurableRemoteAdmission::Replay(_) => panic!("fresh journal has no terminal"),
+                };
+                journal
+                    .complete(reservation, RemoteOutcome::Success(INPUT.to_vec()), 1000)
+                    .unwrap();
+            }
+            let gate = Arc::new(WorkerGate::default());
+            let clock_gate = Arc::clone(&gate);
+            let clocks = AtomicUsize::new(0);
+            let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
+                let call = clocks.fetch_add(1, Ordering::SeqCst);
+                // Replay blocks its admission read; a fresh execution
+                // blocks the terminal write after the handler returned.
+                if call == usize::from(!replay) {
+                    clock_gate.block();
                 }
-                let gate = Arc::new(WorkerGate::default());
-                let clock_gate = Arc::clone(&gate);
-                let clocks = AtomicUsize::new(0);
-                let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
-                    let call = clocks.fetch_add(1, Ordering::SeqCst);
-                    // Replay blocks its admission read; a fresh execution
-                    // blocks the terminal write after the handler returned.
-                    if call == usize::from(!replay) {
-                        clock_gate.block();
-                    }
-                    1000
-                }));
-                let effects = Arc::new(AtomicUsize::new(0));
-                let runtime = native_runtime(workers, true);
-                let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
-                run(&runtime, async {
-                    let cx = Cx::current().unwrap();
-                    let task_owner = Arc::clone(&owner);
-                    let task_gate = Arc::clone(&gate);
-                    let handler_effects = Arc::clone(&effects);
-                    let (parked, mut parked_rx) = oneshot::channel();
-                    let mut task = cx.spawn(move |body| async move {
-                        let mut call = Box::pin(task_owner.call(&body, invocation(&body, 7), move |_, request| async move {
-                            handler_effects.fetch_add(1, Ordering::SeqCst);
-                            RemoteOutcome::Success(request.into_request().input.into_data())
-                        }));
+                1000
+            }));
+            let effects = Arc::new(AtomicUsize::new(0));
+            let runtime = native_runtime(workers, true);
+            let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
+            run(&runtime, async {
+                let cx = Cx::current().unwrap();
+                let task_owner = Arc::clone(&owner);
+                let task_gate = Arc::clone(&gate);
+                let handler_effects = Arc::clone(&effects);
+                let (parked, mut parked_rx) = oneshot::channel();
+                let mut task = cx
+                    .spawn(move |body| async move {
+                        let mut call = Box::pin(task_owner.call(
+                            &body,
+                            invocation(&body, 7),
+                            move |_, request| async move {
+                                handler_effects.fetch_add(1, Ordering::SeqCst);
+                                RemoteOutcome::Success(request.into_request().input.into_data())
+                            },
+                        ));
                         let mut entered = Box::pin(task_gate.entered());
                         let mut parked = Some(parked);
                         poll_fn(|task| {
                             let poll = call.as_mut().poll(task);
-                            if poll.is_pending() && parked.is_some() && entered.as_mut().poll(task).is_ready() {
+                            if poll.is_pending()
+                                && parked.is_some()
+                                && entered.as_mut().poll(task).is_ready()
+                            {
                                 parked.take().unwrap().send_blocking(body.clone()).unwrap();
                             }
                             // Do not acknowledge cancellation here: this
                             // witness must test the adapter's receipt boundary.
                             poll
-                        }).await
-                    }).unwrap();
-                    let body: Cx = parked_rx.recv(&cx).await.unwrap();
-                    assert!(!task.is_finished());
-                    assert!(owner.in_flight());
-                    assert_eq!(effects.load(Ordering::SeqCst), usize::from(!replay));
-                    task.abort_with_reason(CancelReason::user("late durable receipt cancellation"));
-                    // Abort publication may cross the scheduler mailbox.
-                    // This observer waits for visibility without acknowledging
-                    // the target task's cancellation on the adapter's behalf.
-                    body.cancelled().await;
-                    assert!(body.is_cancel_requested());
-                    let mut joining = Box::pin(task.join(&cx));
-                    poll_fn(|task| {
-                        assert!(joining.as_mut().poll(task).is_pending(), "the actual disk job has not retired");
-                        Poll::Ready(())
-                    }).await;
-                    gate.release();
-                    success(joining.await.expect("task-level cancellation must preserve its durable receipt").unwrap(), INPUT);
-                    assert!(!owner.in_flight());
-                    assert_eq!(records(&owner), 2);
-                });
-                drop(owner);
-                drained(&runtime);
-                let mut journal = file.reopen().unwrap();
-                assert_eq!(journal.records(), 2);
-                match journal.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(7), INPUT, 1001).unwrap() {
-                    DurableRemoteAdmission::Replay(outcome) => success(outcome, INPUT),
-                    DurableRemoteAdmission::Execute(_) => panic!("a published receipt must survive reopening"),
-                }
+                        })
+                        .await
+                    })
+                    .unwrap();
+                let body: Cx = parked_rx.recv(&cx).await.unwrap();
+                assert!(!task.is_finished());
+                assert!(owner.in_flight());
                 assert_eq!(effects.load(Ordering::SeqCst), usize::from(!replay));
+                task.abort_with_reason(CancelReason::user("late durable receipt cancellation"));
+                // Abort publication may cross the scheduler mailbox.
+                // This observer waits for visibility without acknowledging
+                // the target task's cancellation on the adapter's behalf.
+                body.cancelled().await;
+                assert!(body.is_cancel_requested());
+                let mut joining = Box::pin(task.join(&cx));
+                poll_fn(|task| {
+                    assert!(
+                        joining.as_mut().poll(task).is_pending(),
+                        "the actual disk job has not retired"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                gate.release();
+                success(
+                    joining
+                        .await
+                        .expect("task-level cancellation must preserve its durable receipt")
+                        .unwrap(),
+                    INPUT,
+                );
+                assert!(!owner.in_flight());
+                assert_eq!(records(&owner), 2);
+            });
+            drop(owner);
+            drained(&runtime);
+            let mut journal = file.reopen().unwrap();
+            assert_eq!(journal.records(), 2);
+            match journal
+                .admit(&NodeId::new(PEER), IdempotencyKey::from_raw(7), INPUT, 1001)
+                .unwrap()
+            {
+                DurableRemoteAdmission::Replay(outcome) => success(outcome, INPUT),
+                DurableRemoteAdmission::Execute(_) => {
+                    panic!("a published receipt must survive reopening")
+                }
             }
+            assert_eq!(effects.load(Ordering::SeqCst), usize::from(!replay));
         }
+    }
 }
 
 #[test]
 fn parked_reconciliation_cancellation_drains_the_resolver_and_preserves_uncertainty() {
     for workers in [1, 2] {
         let (_file, mut journal) = JournalFile::create();
-        let original = match journal.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(81), INPUT, 1000).unwrap() {
+        let original = match journal
+            .admit(
+                &NodeId::new(PEER),
+                IdempotencyKey::from_raw(81),
+                INPUT,
+                1000,
+            )
+            .unwrap()
+        {
             DurableRemoteAdmission::Execute(reservation) => reservation,
             DurableRemoteAdmission::Replay(_) => panic!("new request"),
         };
@@ -747,20 +930,39 @@ fn parked_reconciliation_cancellation_drains_the_resolver_and_preserves_uncertai
         let runtime = native_runtime(workers, true);
         run(&runtime, async {
             let cx = Cx::current().unwrap();
-            assert!(matches!(owner.reconcile(&cx, invocation(&cx, 81), |_, _| async {
-                panic!("live original token forbids recovery")
-            }).await, Err(DurableRemoteError::Busy)));
+            assert!(matches!(
+                owner
+                    .reconcile(&cx, invocation(&cx, 81), |_, _| async {
+                        panic!("live original token forbids recovery")
+                    })
+                    .await,
+                Err(DurableRemoteError::Busy)
+            ));
             drop(original);
             let mut wrong = invocation(&cx, 81);
             wrong.request.input = RemoteInput::new(b"substituted input".to_vec());
-            assert!(matches!(owner.reconcile(&cx, wrong, |_, _| async {
-                panic!("input mismatch must refuse before resolver")
-            }).await, Err(DurableRemoteError::Conflict)));
-            assert!(matches!(owner.reconcile(&cx, invocation(&cx, 999), |_, _| async {
-                panic!("reconciliation cannot admit a new operation")
-            }).await, Err(DurableRemoteError::InvalidReservation)));
-            assert!(matches!(owner.reconcile(&cx, invocation(&cx, 81), |_, _| async { None }).await,
-                Err(DurableRemoteError::InDoubt)));
+            assert!(matches!(
+                owner
+                    .reconcile(&cx, wrong, |_, _| async {
+                        panic!("input mismatch must refuse before resolver")
+                    })
+                    .await,
+                Err(DurableRemoteError::Conflict)
+            ));
+            assert!(matches!(
+                owner
+                    .reconcile(&cx, invocation(&cx, 999), |_, _| async {
+                        panic!("reconciliation cannot admit a new operation")
+                    })
+                    .await,
+                Err(DurableRemoteError::InvalidReservation)
+            ));
+            assert!(matches!(
+                owner
+                    .reconcile(&cx, invocation(&cx, 81), |_, _| async { None })
+                    .await,
+                Err(DurableRemoteError::InDoubt)
+            ));
             assert_eq!(records(&owner), 1);
 
             let (_unsent, mut never) = oneshot::channel::<()>();
@@ -769,49 +971,87 @@ fn parked_reconciliation_cancellation_drains_the_resolver_and_preserves_uncertai
             let (release, mut cleanup) = oneshot::channel();
             let task_owner = Arc::clone(&owner);
             let resolver_retired = Arc::clone(&retired);
-            let mut task = cx.spawn(move |body| async move {
-                task_owner.reconcile(&body, invocation(&body, 81), move |body, _| async move {
-                    let _retired = Retired(resolver_retired);
-                    let mut wait = std::pin::pin!(never.recv(&body));
-                    let mut parked = Some(parked);
-                    let result = poll_fn(|task| {
-                        let poll = wait.as_mut().poll(task);
-                        if poll.is_pending() && let Some(parked) = parked.take() {
-                            parked.send_blocking(()).unwrap();
-                        }
-                        poll
-                    }).await;
-                    assert!(matches!(result, Err(oneshot::RecvError::Cancelled)));
-                    cleaning.send_blocking(()).unwrap();
-                    poll_fn(|task| cleanup.poll_recv_uninterruptible(task)).await.unwrap();
-                    None
-                }).await
-            }).unwrap();
+            let mut task = cx
+                .spawn(move |body| async move {
+                    task_owner
+                        .reconcile(&body, invocation(&body, 81), move |body, _| async move {
+                            let _retired = Retired(resolver_retired);
+                            let mut wait = std::pin::pin!(never.recv(&body));
+                            let mut parked = Some(parked);
+                            let result = poll_fn(|task| {
+                                let poll = wait.as_mut().poll(task);
+                                if poll.is_pending()
+                                    && let Some(parked) = parked.take()
+                                {
+                                    parked.send_blocking(()).unwrap();
+                                }
+                                poll
+                            })
+                            .await;
+                            assert!(matches!(result, Err(oneshot::RecvError::Cancelled)));
+                            cleaning.send_blocking(()).unwrap();
+                            poll_fn(|task| cleanup.poll_recv_uninterruptible(task))
+                                .await
+                                .unwrap();
+                            None
+                        })
+                        .await
+                })
+                .unwrap();
             parked_rx.recv(&cx).await.unwrap();
             assert!(owner.in_flight());
-            assert!(matches!(owner.reconcile(&cx, invocation(&cx, 81), |_, _| async {
-                panic!("an active resolver retains the exclusive journal owner")
-            }).await, Err(DurableRemoteError::Busy)));
+            assert!(matches!(
+                owner
+                    .reconcile(&cx, invocation(&cx, 81), |_, _| async {
+                        panic!("an active resolver retains the exclusive journal owner")
+                    })
+                    .await,
+                Err(DurableRemoteError::Busy)
+            ));
             task.abort_with_reason(CancelReason::user("cancel parked effect lookup"));
             cleaning_rx.recv(&cx).await.unwrap();
             let mut joining = Box::pin(task.join(&cx));
-            poll_fn(|task| { assert!(joining.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+            poll_fn(|task| {
+                assert!(joining.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
             assert_eq!(retired.load(Ordering::SeqCst), 0);
             assert!(owner.in_flight());
             release.send_blocking(()).unwrap();
-            assert!(matches!(joining.await.unwrap(), Err(DurableRemoteError::InDoubt)));
+            assert!(matches!(
+                joining.await.unwrap(),
+                Err(DurableRemoteError::InDoubt)
+            ));
             assert_eq!(retired.load(Ordering::SeqCst), 1);
             assert!(!owner.in_flight());
             assert_eq!(records(&owner), 1);
-            assert!(matches!(owner.call(&cx, invocation(&cx, 81), |_, _| async {
-                panic!("cancellation cannot authorize repeating the original effect")
-            }).await, Err(DurableRemoteError::InDoubt)));
-            success(owner.reconcile(&cx, invocation(&cx, 81), |_, _| async {
-                Some(RemoteOutcome::Success(INPUT.to_vec()))
-            }).await.unwrap(), INPUT);
-            success(owner.reconcile(&cx, invocation(&cx, 81), |_, _| async {
-                panic!("saved reconciliation must replay without another lookup")
-            }).await.unwrap(), INPUT);
+            assert!(matches!(
+                owner
+                    .call(&cx, invocation(&cx, 81), |_, _| async {
+                        panic!("cancellation cannot authorize repeating the original effect")
+                    })
+                    .await,
+                Err(DurableRemoteError::InDoubt)
+            ));
+            success(
+                owner
+                    .reconcile(&cx, invocation(&cx, 81), |_, _| async {
+                        Some(RemoteOutcome::Success(INPUT.to_vec()))
+                    })
+                    .await
+                    .unwrap(),
+                INPUT,
+            );
+            success(
+                owner
+                    .reconcile(&cx, invocation(&cx, 81), |_, _| async {
+                        panic!("saved reconciliation must replay without another lookup")
+                    })
+                    .await
+                    .unwrap(),
+                INPUT,
+            );
             assert_eq!(records(&owner), 2);
         });
         drained(&runtime);
@@ -823,19 +1063,33 @@ fn reconciled_terminal_and_replay_survive_late_native_task_cancellation() {
     for workers in [1, 2] {
         for replay in [false, true] {
             let (file, mut journal) = JournalFile::create();
-            let reservation = match journal.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(82), INPUT, 1000).unwrap() {
+            let reservation = match journal
+                .admit(
+                    &NodeId::new(PEER),
+                    IdempotencyKey::from_raw(82),
+                    INPUT,
+                    1000,
+                )
+                .unwrap()
+            {
                 DurableRemoteAdmission::Execute(reservation) => reservation,
                 DurableRemoteAdmission::Replay(_) => panic!("fresh request"),
             };
             if replay {
-                journal.complete(reservation, RemoteOutcome::Success(INPUT.to_vec()), 1000).unwrap();
-            } else { drop(reservation); }
+                journal
+                    .complete(reservation, RemoteOutcome::Success(INPUT.to_vec()), 1000)
+                    .unwrap();
+            } else {
+                drop(reservation);
+            }
             let gate = Arc::new(WorkerGate::default());
             let _release_on_unwind = ReleaseOnDrop(Arc::clone(&gate));
             let clock_gate = Arc::clone(&gate);
             let clocks = AtomicUsize::new(0);
             let owner = Arc::new(DurableRemoteComputation::new(journal, move || {
-                if clocks.fetch_add(1, Ordering::SeqCst) == usize::from(!replay) { clock_gate.block(); }
+                if clocks.fetch_add(1, Ordering::SeqCst) == usize::from(!replay) {
+                    clock_gate.block();
+                }
                 1000
             }));
             let lookups = Arc::new(AtomicUsize::new(0));
@@ -846,38 +1100,70 @@ fn reconciled_terminal_and_replay_survive_late_native_task_cancellation() {
                 let task_gate = Arc::clone(&gate);
                 let resolver_lookups = Arc::clone(&lookups);
                 let (parked, mut parked_rx) = oneshot::channel();
-                let mut task = cx.spawn(move |body| async move {
-                    let mut recovery = Box::pin(task_owner.reconcile(&body, invocation(&body, 82), move |_, request| async move {
-                        resolver_lookups.fetch_add(1, Ordering::SeqCst);
-                        Some(RemoteOutcome::Success(request.into_request().input.into_data()))
-                    }));
-                    let mut entered = Box::pin(task_gate.entered());
-                    let mut parked = Some(parked);
-                    poll_fn(|task| {
-                        let poll = recovery.as_mut().poll(task);
-                        if poll.is_pending() && parked.is_some() && entered.as_mut().poll(task).is_ready() {
-                            parked.take().unwrap().send_blocking(body.clone()).unwrap();
-                        }
-                        poll
-                    }).await
-                }).unwrap();
+                let mut task = cx
+                    .spawn(move |body| async move {
+                        let mut recovery = Box::pin(task_owner.reconcile(
+                            &body,
+                            invocation(&body, 82),
+                            move |_, request| async move {
+                                resolver_lookups.fetch_add(1, Ordering::SeqCst);
+                                Some(RemoteOutcome::Success(
+                                    request.into_request().input.into_data(),
+                                ))
+                            },
+                        ));
+                        let mut entered = Box::pin(task_gate.entered());
+                        let mut parked = Some(parked);
+                        poll_fn(|task| {
+                            let poll = recovery.as_mut().poll(task);
+                            if poll.is_pending()
+                                && parked.is_some()
+                                && entered.as_mut().poll(task).is_ready()
+                            {
+                                parked.take().unwrap().send_blocking(body.clone()).unwrap();
+                            }
+                            poll
+                        })
+                        .await
+                    })
+                    .unwrap();
                 let body: Cx = parked_rx.recv(&cx).await.unwrap();
                 assert!(owner.in_flight());
                 task.abort_with_reason(CancelReason::user("late reconciled outcome cancellation"));
                 body.cancelled().await;
                 let mut joining = Box::pin(task.join(&cx));
-                poll_fn(|task| { assert!(joining.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                poll_fn(|task| {
+                    assert!(joining.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
                 gate.release();
-                success(joining.await.expect("durable recovery receipt survives task cancellation").unwrap(), INPUT);
+                success(
+                    joining
+                        .await
+                        .expect("durable recovery receipt survives task cancellation")
+                        .unwrap(),
+                    INPUT,
+                );
                 assert_eq!(records(&owner), 2);
                 assert_eq!(lookups.load(Ordering::SeqCst), usize::from(!replay));
             });
             drop(owner);
             drained(&runtime);
             let mut reopened = file.reopen().unwrap();
-            match reopened.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(82), INPUT, 1001).unwrap() {
+            match reopened
+                .admit(
+                    &NodeId::new(PEER),
+                    IdempotencyKey::from_raw(82),
+                    INPUT,
+                    1001,
+                )
+                .unwrap()
+            {
                 DurableRemoteAdmission::Replay(outcome) => success(outcome, INPUT),
-                DurableRemoteAdmission::Execute(_) => panic!("saved reconciliation cannot execute twice"),
+                DurableRemoteAdmission::Execute(_) => {
+                    panic!("saved reconciliation cannot execute twice")
+                }
             }
         }
     }
@@ -887,7 +1173,15 @@ fn reconciled_terminal_and_replay_survive_late_native_task_cancellation() {
 fn abandoned_queued_reconciliation_commit_keeps_file_owner_until_actual_worker_retirement() {
     for workers in [1, 2] {
         let (file, mut journal) = JournalFile::create();
-        let reservation = match journal.admit(&NodeId::new(PEER), IdempotencyKey::from_raw(83), INPUT, 1000).unwrap() {
+        let reservation = match journal
+            .admit(
+                &NodeId::new(PEER),
+                IdempotencyKey::from_raw(83),
+                INPUT,
+                1000,
+            )
+            .unwrap()
+        {
             DurableRemoteAdmission::Execute(reservation) => reservation,
             DurableRemoteAdmission::Replay(_) => panic!("fresh request"),
         };
@@ -905,42 +1199,82 @@ fn abandoned_queued_reconciliation_commit_keeps_file_owner_until_actual_worker_r
         let pool = runtime.blocking_handle().unwrap();
         run(&runtime, async {
             let cx = Cx::current().unwrap();
-            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let region = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             let resolver_pool = pool.clone();
             let resolver_gate = Arc::clone(&gate);
             let blocker = Arc::new(Mutex::new(None));
             let blocker_slot = Arc::clone(&blocker);
-            let mut recovery = Box::pin(owner.reconcile(region.cx(), invocation(region.cx(), 83), move |_, _| async move {
-                let worker_gate = Arc::clone(&resolver_gate);
-                *blocker_slot.lock() = Some(resolver_pool.spawn(move || worker_gate.block()));
-                resolver_gate.entered().await;
-                Some(RemoteOutcome::Success(INPUT.to_vec()))
-            }));
+            let mut recovery = Box::pin(owner.reconcile(
+                region.cx(),
+                invocation(region.cx(), 83),
+                move |_, _| async move {
+                    let worker_gate = Arc::clone(&resolver_gate);
+                    *blocker_slot.lock() = Some(resolver_pool.spawn(move || worker_gate.block()));
+                    resolver_gate.entered().await;
+                    Some(RemoteOutcome::Success(INPUT.to_vec()))
+                },
+            ));
             poll_fn(|task| {
                 assert!(recovery.as_mut().poll(task).is_pending());
                 if gate.entered.load(Ordering::Acquire) && pool.pending_count() == 1 {
                     Poll::Ready(())
-                } else { task.waker().wake_by_ref(); Poll::Pending }
-            }).await;
-            assert_eq!(clocks.load(Ordering::SeqCst), 1, "terminal job has not started");
+                } else {
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert_eq!(
+                clocks.load(Ordering::SeqCst),
+                1,
+                "terminal job has not started"
+            );
             drop(recovery);
             assert!(owner.in_flight());
             assert!(matches!(file.reopen(), Err(DurableRemoteError::Locked)));
             assert_eq!(std::fs::metadata(&file.path).unwrap().len(), pending_bytes);
             let mut closing = Box::pin(region.close());
-            poll_fn(|task| { assert!(closing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+            poll_fn(|task| {
+                assert!(closing.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
             gate.release();
-            assert!(blocker.lock().take().unwrap().wait_timeout(Duration::from_secs(5)));
+            assert!(
+                blocker
+                    .lock()
+                    .take()
+                    .unwrap()
+                    .wait_timeout(Duration::from_secs(5))
+            );
             closing.await.unwrap();
             assert!(!owner.in_flight());
-            assert_eq!(clocks.load(Ordering::SeqCst), 1, "cancelled queued worker never starts its terminal append");
+            assert_eq!(
+                clocks.load(Ordering::SeqCst),
+                1,
+                "cancelled queued worker never starts its terminal append"
+            );
             assert_eq!(records(&owner), 1);
-            assert!(matches!(owner.call(&cx, invocation(&cx, 83), |_, _| async {
-                panic!("the original effect must not be re-executed")
-            }).await, Err(DurableRemoteError::InDoubt)));
-            success(owner.reconcile(&cx, invocation(&cx, 83), |_, _| async {
-                Some(RemoteOutcome::Success(INPUT.to_vec()))
-            }).await.unwrap(), INPUT);
+            assert!(matches!(
+                owner
+                    .call(&cx, invocation(&cx, 83), |_, _| async {
+                        panic!("the original effect must not be re-executed")
+                    })
+                    .await,
+                Err(DurableRemoteError::InDoubt)
+            ));
+            success(
+                owner
+                    .reconcile(&cx, invocation(&cx, 83), |_, _| async {
+                        Some(RemoteOutcome::Success(INPUT.to_vec()))
+                    })
+                    .await
+                    .unwrap(),
+                INPUT,
+            );
             assert_eq!(records(&owner), 2);
         });
         drained(&runtime);

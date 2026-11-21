@@ -140,15 +140,15 @@ impl Wake for ReentrantWake {
 
 impl Drop for ReentrantWake {
     fn drop(&mut self) {
-        assert!(self.queue.try_lock().is_some(), "waker drop under queue lock");
+        assert!(
+            self.queue.try_lock().is_some(),
+            "waker drop under queue lock"
+        );
         self.callbacks.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-fn reentrant_waker(
-    queue: &Arc<Mutex<VecDeque<Waker>>>,
-    callbacks: &Arc<AtomicUsize>,
-) -> Waker {
+fn reentrant_waker(queue: &Arc<Mutex<VecDeque<Waker>>>, callbacks: &Arc<AtomicUsize>) -> Waker {
     Waker::from(Arc::new(ReentrantWake {
         queue: Arc::clone(queue),
         callbacks: Arc::clone(callbacks),

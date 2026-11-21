@@ -49,8 +49,13 @@ mod http_content_decoding {
         if mode.is_text_mode() {
             // Independent padding is valid gRPC-Web text. HTTP compression
             // applies to those text bytes, before the client decodes base64.
-            bytes.chunks(2)
-                .flat_map(|part| base64::engine::general_purpose::STANDARD.encode(part).into_bytes())
+            bytes
+                .chunks(2)
+                .flat_map(|part| {
+                    base64::engine::general_purpose::STANDARD
+                        .encode(part)
+                        .into_bytes()
+                })
                 .collect()
         } else {
             bytes.to_vec()
@@ -64,8 +69,13 @@ mod http_content_decoding {
     }
 
     fn cancel_tokens(cx: &Cx) -> Vec<u64> {
-        let mut tokens: Vec<_> = cx.inner.read().cancel_waker_registrations.iter()
-            .map(|entry| entry.token).collect();
+        let mut tokens: Vec<_> = cx
+            .inner
+            .read()
+            .cancel_waker_registrations
+            .iter()
+            .map(|entry| entry.token)
+            .collect();
         tokens.sort_unstable();
         tokens
     }
@@ -102,14 +112,23 @@ mod http_content_decoding {
                         assert!(header_values(&head, "grpc-encoding").is_empty());
                         assert_eq!(
                             header_values(&head, "grpc-accept-encoding"),
-                            vec![if message_gzip { "gzip,identity" } else { "identity" }],
+                            vec![if message_gzip {
+                                "gzip,identity"
+                            } else {
+                                "identity"
+                            }],
                         );
                         let request_message = message(b"request");
-                        assert_eq!(body, if mode.is_text_mode() {
-                            base64::engine::general_purpose::STANDARD.encode(request_message).into_bytes()
-                        } else {
-                            request_message
-                        });
+                        assert_eq!(
+                            body,
+                            if mode.is_text_mode() {
+                                base64::engine::general_purpose::STANDARD
+                                    .encode(request_message)
+                                    .into_bytes()
+                            } else {
+                                request_message
+                            }
+                        );
                         write!(socket,
                             "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nx-initial: decoded\r\n{}\r\n",
                             mode.as_header_value(),
@@ -121,7 +140,9 @@ mod http_content_decoding {
                             message(b"first")
                         };
                         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                        encoder.write_all(&wire_representation(mode, &first)).unwrap();
+                        encoder
+                            .write_all(&wire_representation(mode, &first))
+                            .unwrap();
                         encoder.flush().unwrap();
                         let prefix_len = encoder.get_ref().len();
                         for part in encoder.get_ref().chunks(7) {
@@ -131,17 +152,31 @@ mod http_content_decoding {
                         // Flag zero remains valid when grpc-encoding is gzip.
                         let mut rest = message(b"second");
                         rest.extend(trailers(b"grpc-status: 0\r\nx-final: yes\r\n"));
-                        encoder.write_all(&wire_representation(mode, &rest)).unwrap();
+                        encoder
+                            .write_all(&wire_representation(mode, &rest))
+                            .unwrap();
                         let encoded = encoder.finish().unwrap();
                         chunk(&mut socket, &encoded[prefix_len..]);
-                        socket.write_all(b"0\r\nDigest: stale-wire-digest\r\nx-http-proof: checked\r\n\r\n").unwrap();
+                        socket
+                            .write_all(
+                                b"0\r\nDigest: stale-wire-digest\r\nx-http-proof: checked\r\n\r\n",
+                            )
+                            .unwrap();
                         socket.flush().unwrap();
                         peer_eof.store(true, Ordering::SeqCst);
 
                         request(&mut socket);
-                        fixed(&mut socket, 200, "application/grpc-web", "Connection: close\r\n", &success(b"unary"));
+                        fixed(
+                            &mut socket,
+                            200,
+                            "application/grpc-web",
+                            "Connection: close\r\n",
+                            &success(b"unary"),
+                        );
                         expect_closed(&mut socket);
-                        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                        assert!(
+                            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+                        );
                     });
                     let runtime = runtime(multithread);
                     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -149,18 +184,32 @@ mod http_content_decoding {
                         one_slot_http(),
                         config(mode),
                         GrpcWebCompressionConfig::identity().with_accept_gzip(message_gzip),
-                    ).unwrap().with_http_content_decoding(
+                    )
+                    .unwrap()
+                    .with_http_content_decoding(
                         ContentDecodeLimits::new(4096, 4096)
                             .with_chunk_size(NonZeroUsize::new(3).unwrap()),
                     );
                     runtime.block_on_with_cx(cx.clone(), async {
                         let baseline = cancel_tokens(&cx);
-                        let mut stream = client.server_streaming(
-                            &cx, &url, Request::new(Bytes::from_static(b"request")), IdentityCodec,
-                        ).await.unwrap();
-                        assert_eq!(metadata_text(stream.initial_metadata(), "x-initial").as_deref(), Some("decoded"));
+                        let mut stream = client
+                            .server_streaming(
+                                &cx,
+                                &url,
+                                Request::new(Bytes::from_static(b"request")),
+                                IdentityCodec,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            metadata_text(stream.initial_metadata(), "x-initial").as_deref(),
+                            Some("decoded")
+                        );
                         assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
-                        assert!(!eof_sent.load(Ordering::SeqCst), "HTTP decoding must deliver before wire EOF");
+                        assert!(
+                            !eof_sent.load(Ordering::SeqCst),
+                            "HTTP decoding must deliver before wire EOF"
+                        );
                         assert!(stream.trailing_metadata().is_none());
                         assert!(stream.terminal_status().is_none());
                         assert_eq!(client.http.pool_stats().total_connections, 1);
@@ -169,16 +218,24 @@ mod http_content_decoding {
                         poll_fn(|task| {
                             assert!(wait.as_mut().poll(task).is_pending());
                             Poll::Ready(())
-                        }).await;
+                        })
+                        .await;
                         drop(wait);
                         continue_tx.send(()).unwrap();
                         assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"second");
                         assert!(stream.message().await.unwrap().is_none());
                         assert!(stream.terminal_status().unwrap().is_ok());
-                        assert_eq!(metadata_text(stream.trailing_metadata().unwrap(), "x-final").as_deref(), Some("yes"));
+                        assert_eq!(
+                            metadata_text(stream.trailing_metadata().unwrap(), "x-final")
+                                .as_deref(),
+                            Some("yes")
+                        );
                         assert_eq!(client.http.pool_stats().idle_connections, 1);
                         assert_eq!(cancel_tokens(&cx), baseline);
-                        let unary = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap();
+                        let unary = client
+                            .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                            .await
+                            .unwrap();
                         assert_eq!(unary.into_inner().as_ref(), b"unary");
                         assert_eq!(client.http.pool_stats().connections_created, 1);
                         assert_eq!(client.http.pool_stats().total_connections, 0);
@@ -205,7 +262,8 @@ mod http_content_decoding {
                             "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n",
                             mode.as_header_value(),
                         ).unwrap();
-                        let mut encoded = gzip(&wire_representation(mode, &success(b"provisional")));
+                        let mut encoded =
+                            gzip(&wire_representation(mode, &success(b"provisional")));
                         let footer = encoded.len() - 8;
                         // The entire gRPC success trailer is present, but the
                         // HTTP representation has not passed its CRC/EOF check.
@@ -225,13 +283,18 @@ mod http_content_decoding {
                     let runtime = runtime(multithread);
                     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
                     let client = GrpcWebClient::with_http_config(one_slot_http(), config(mode))
-                        .unwrap().with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+                        .unwrap()
+                        .with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
                     runtime.block_on_with_cx(cx.clone(), async {
                         let baseline = cancel_tokens(&cx);
-                        let mut stream = client.server_streaming(
-                            &cx, &url, Request::new(Bytes::new()), IdentityCodec,
-                        ).await.unwrap();
-                        assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"provisional");
+                        let mut stream = client
+                            .server_streaming(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            stream.message().await.unwrap().unwrap().as_ref(),
+                            b"provisional"
+                        );
                         assert!(stream.trailing_metadata().is_none());
                         assert!(stream.terminal_status().is_none());
                         assert_eq!(client.http.pool_stats().idle_connections, 0);
@@ -302,12 +365,14 @@ mod http_content_decoding {
                     _ => ContentDecodeLimits::new(4096, 4096),
                 };
                 let client = GrpcWebClient::with_http_config(one_slot_http(), bounds)
-                    .unwrap().with_http_content_decoding(limits);
+                    .unwrap()
+                    .with_http_content_decoding(limits);
                 runtime.block_on_with_cx(cx.clone(), async {
                     let baseline = cancel_tokens(&cx);
-                    let error = client.unary(
-                        &cx, &url, Request::new(Bytes::new()), IdentityCodec,
-                    ).await.unwrap_err();
+                    let error = client
+                        .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+                        .await
+                        .unwrap_err();
                     assert_eq!(error.code(), Code::ResourceExhausted, "{case}: {error}");
                     assert_eq!(client.http.pool_stats().total_connections, 0, "{case}");
                     assert_eq!(client.http.pool_stats().idle_connections, 0, "{case}");
@@ -339,7 +404,13 @@ mod http_content_decoding {
 
                     let mut replacement = accept(&listener);
                     request(&mut replacement);
-                    fixed(&mut replacement, 200, "application/grpc-web", "Connection: close\r\n", &success(b"healthy"));
+                    fixed(
+                        &mut replacement,
+                        200,
+                        "application/grpc-web",
+                        "Connection: close\r\n",
+                        &success(b"healthy"),
+                    );
                     expect_closed(&mut replacement);
                 });
                 let runtime = runtime(multithread);
@@ -356,13 +427,16 @@ mod http_content_decoding {
                     Some(timer.clone()),
                     None,
                 );
-                let client = GrpcWebClient::with_http_config(one_slot_http(), config(ContentType::GrpcWeb))
-                    .unwrap().with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+                let client =
+                    GrpcWebClient::with_http_config(one_slot_http(), config(ContentType::GrpcWeb))
+                        .unwrap()
+                        .with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
                 runtime.block_on_with_cx(driver.clone(), async {
                     let baseline = cancel_tokens(&driver);
-                    let mut stream = client.server_streaming(
-                        &owner, &url, Request::new(Bytes::new()), IdentityCodec,
-                    ).await.unwrap();
+                    let mut stream = client
+                        .server_streaming(&owner, &url, Request::new(Bytes::new()), IdentityCodec)
+                        .await
+                        .unwrap();
                     assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
                     let wakes = Arc::new(WakeCount::default());
                     let waker = Waker::from(Arc::clone(&wakes));
@@ -375,7 +449,10 @@ mod http_content_decoding {
                         "caller" | "deadline" => {
                             let before = wakes.0.load(Ordering::SeqCst);
                             let expected = if mode == "caller" {
-                                owner.cancel_with(CancelKind::User, Some("decoded call cancellation"));
+                                owner.cancel_with(
+                                    CancelKind::User,
+                                    Some("decoded call cancellation"),
+                                );
                                 Code::Cancelled
                             } else {
                                 clock.advance(10);
@@ -400,9 +477,10 @@ mod http_content_decoding {
                     assert_eq!(client.http.pool_stats().total_connections, 0);
                     assert!(owner.inner.read().cancel_waker_registrations.is_empty());
                     assert!(driver.checkpoint().is_ok());
-                    let healthy = client.unary(
-                        &driver, &url, Request::new(Bytes::new()), IdentityCodec,
-                    ).await.unwrap();
+                    let healthy = client
+                        .unary(&driver, &url, Request::new(Bytes::new()), IdentityCodec)
+                        .await
+                        .unwrap();
                     assert_eq!(healthy.into_inner().as_ref(), b"healthy");
                     assert_eq!(client.http.pool_stats().connections_created, 2);
                     assert_eq!(client.http.pool_stats().total_connections, 0);
@@ -424,8 +502,14 @@ fn http_content_decoding_without_gzip_keeps_identity_usable_and_refuses_gzip() {
         for unavailable in [false, true] {
             let mut socket = accept(&listener);
             let (head, _) = request(&mut socket);
-            assert_eq!(header_values(&head, "accept-encoding"),
-                vec![if cfg!(feature = "zstd") { "zstd" } else { "identity" }]);
+            assert_eq!(
+                header_values(&head, "accept-encoding"),
+                vec![if cfg!(feature = "zstd") {
+                    "zstd"
+                } else {
+                    "identity"
+                }]
+            );
             let body = success(b"identity");
             let mut response = Vec::new();
             write!(response,
@@ -440,12 +524,18 @@ fn http_content_decoding_without_gzip_keeps_identity_usable_and_refuses_gzip() {
     });
     let runtime = runtime(false);
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-    let client = GrpcWebClient::new()
-        .with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
+    let client =
+        GrpcWebClient::new().with_http_content_decoding(ContentDecodeLimits::new(4096, 4096));
     runtime.block_on_with_cx(cx.clone(), async {
-        let response = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap();
+        let response = client
+            .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+            .await
+            .unwrap();
         assert_eq!(response.into_inner().as_ref(), b"identity");
-        let error = client.unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec).await.unwrap_err();
+        let error = client
+            .unary(&cx, &url, Request::new(Bytes::new()), IdentityCodec)
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), Code::Unimplemented);
         assert_eq!(client.http.pool_stats().total_connections, 0);
     });
@@ -499,7 +589,10 @@ fn request_head(socket: &mut impl Read) -> String {
 
 fn request_to(socket: &mut impl Read, target: &str) -> (String, Vec<u8>) {
     let head = request_head(socket);
-    assert!(head.starts_with(&format!("POST {target} HTTP/1.1\r\n")), "{head}");
+    assert!(
+        head.starts_with(&format!("POST {target} HTTP/1.1\r\n")),
+        "{head}"
+    );
     let length = head
         .split("\r\n")
         .filter_map(|line| line.split_once(':'))
@@ -614,8 +707,16 @@ fn proxy_http_config(proxy: String) -> HttpClientConfig {
 
 fn proxy_request(proxy_authorization: Option<&str>) -> Request<Bytes> {
     let mut request = Request::new(Bytes::from_static(b"request"));
-    assert!(request.metadata_mut().insert("authorization", "Bearer origin-only"));
-    assert!(request.metadata_mut().insert("x-call", "private-method-metadata"));
+    assert!(
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer origin-only")
+    );
+    assert!(
+        request
+            .metadata_mut()
+            .insert("x-call", "private-method-metadata")
+    );
     if let Some(value) = proxy_authorization {
         assert!(request.metadata_mut().insert("proxy-authorization", value));
     }
@@ -659,7 +760,12 @@ fn web_chunk(socket: &mut impl Write, content_type: ContentType, bytes: &[u8]) {
     if content_type.is_text_mode() {
         // Each independently padded part is legal even before the stream ends.
         for part in bytes.chunks(7) {
-            chunk(socket, base64::engine::general_purpose::STANDARD.encode(part).as_bytes());
+            chunk(
+                socket,
+                base64::engine::general_purpose::STANDARD
+                    .encode(part)
+                    .as_bytes(),
+            );
         }
     } else {
         chunk(socket, bytes);
@@ -677,8 +783,13 @@ fn forward_and_socks_proxies_preserve_streams_authentication_and_call_ownership(
         let url = "http://origin.invalid:8080/test.Service/Watch";
         let (continue_tx, continue_rx) = mpsc::channel();
         let peer = std::thread::spawn(move || {
-            for (index, proxy_auth) in ["Bearer proxy-call", "Bearer proxy-default", "Bearer proxy-default"]
-                .into_iter().enumerate()
+            for (index, proxy_auth) in [
+                "Bearer proxy-call",
+                "Bearer proxy-default",
+                "Bearer proxy-default",
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let mut socket = accept(&listener);
                 if socks {
@@ -687,22 +798,43 @@ fn forward_and_socks_proxies_preserve_streams_authentication_and_call_ownership(
                 let target = if socks { "/test.Service/Watch" } else { url };
                 let (head, body) = request_to(&mut socket, target);
                 assert_eq!(header_values(&head, "host"), ["origin.invalid:8080"]);
-                assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
+                assert_eq!(
+                    header_values(&head, "authorization"),
+                    ["Bearer origin-only"]
+                );
                 assert_eq!(header_values(&head, "x-call"), ["private-method-metadata"]);
                 let proxy_headers = header_values(&head, "proxy-authorization");
                 if socks {
-                    assert!(proxy_headers.is_empty(), "SOCKS credentials must not become origin headers");
+                    assert!(
+                        proxy_headers.is_empty(),
+                        "SOCKS credentials must not become origin headers"
+                    );
                 } else {
-                    assert_eq!(proxy_headers, [proxy_auth], "the per-call proxy credential wins");
+                    assert_eq!(
+                        proxy_headers,
+                        [proxy_auth],
+                        "the per-call proxy credential wins"
+                    );
                 }
                 let expected = message(b"request");
-                assert_eq!(body, if content_type.is_text_mode() {
-                    base64::engine::general_purpose::STANDARD.encode(expected).into_bytes()
-                } else {
-                    expected
-                });
+                assert_eq!(
+                    body,
+                    if content_type.is_text_mode() {
+                        base64::engine::general_purpose::STANDARD
+                            .encode(expected)
+                            .into_bytes()
+                    } else {
+                        expected
+                    }
+                );
                 if index == 1 {
-                    fixed(&mut socket, 200, "application/grpc-web", "", &success(b"unary"));
+                    fixed(
+                        &mut socket,
+                        200,
+                        "application/grpc-web",
+                        "",
+                        &success(b"unary"),
+                    );
                 } else {
                     write!(socket,
                         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nx-initial: proxy\r\n\r\n",
@@ -721,38 +853,69 @@ fn forward_and_socks_proxies_preserve_streams_authentication_and_call_ownership(
                 // or cancelled by the caller, with no terminal peer frame.
                 expect_closed(&mut socket);
             }
-            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
         });
         let scheme = if socks { "socks5" } else { "http" };
         let mut http = proxy_http_config(format!("{scheme}://agent:pw@{address}"));
-        http.default_headers.push(("Proxy-Authorization".into(), "Bearer proxy-default".into()));
+        http.default_headers
+            .push(("Proxy-Authorization".into(), "Bearer proxy-default".into()));
         let client = GrpcWebClient::with_http_config(http, config(content_type)).unwrap();
         let runtime = runtime(socks);
         let driver = runtime.request_cx_with_budget(Budget::INFINITE);
         let owner = runtime.request_cx_with_budget(Budget::INFINITE);
         runtime.block_on_with_cx(driver.clone(), async {
-            let mut stream = client.server_streaming(
-                &driver, url, proxy_request(Some("Bearer proxy-call")), IdentityCodec,
-            ).await.unwrap();
-            assert_eq!(metadata_text(stream.initial_metadata(), "x-initial").as_deref(), Some("proxy"));
+            let mut stream = client
+                .server_streaming(
+                    &driver,
+                    url,
+                    proxy_request(Some("Bearer proxy-call")),
+                    IdentityCodec,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                metadata_text(stream.initial_metadata(), "x-initial").as_deref(),
+                Some("proxy")
+            );
             assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"first");
             assert!(stream.trailing_metadata().is_none());
             assert_eq!(client.http.pool_stats().total_connections, 1);
-            let error = client.unary(&driver, url, proxy_request(None), IdentityCodec).await.unwrap_err();
-            assert_eq!(error.code(), Code::ResourceExhausted, "the stream owns its pool slot");
+            let error = client
+                .unary(&driver, url, proxy_request(None), IdentityCodec)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code(),
+                Code::ResourceExhausted,
+                "the stream owns its pool slot"
+            );
             continue_tx.send(()).unwrap();
             assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"second");
             assert!(stream.message().await.unwrap().is_none());
-            assert_eq!(metadata_text(stream.trailing_metadata().unwrap(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(
+                metadata_text(stream.trailing_metadata().unwrap(), "x-final").as_deref(),
+                Some("yes")
+            );
             assert_eq!(client.http.pool_stats().total_connections, 0);
             assert_eq!(client.http.pool_stats().idle_connections, 0);
 
-            let unary = client.unary(&driver, url, proxy_request(None), IdentityCodec).await.unwrap();
+            let unary = client
+                .unary(&driver, url, proxy_request(None), IdentityCodec)
+                .await
+                .unwrap();
             assert_eq!(unary.get_ref().as_ref(), b"unary");
-            assert_eq!(metadata_text(unary.trailing_metadata(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(
+                metadata_text(unary.trailing_metadata(), "x-final").as_deref(),
+                Some("yes")
+            );
             assert_eq!(client.http.pool_stats().total_connections, 0);
 
-            let mut parked = client.server_streaming(&owner, url, proxy_request(None), IdentityCodec).await.unwrap();
+            let mut parked = client
+                .server_streaming(&owner, url, proxy_request(None), IdentityCodec)
+                .await
+                .unwrap();
             assert_eq!(parked.message().await.unwrap().unwrap().as_ref(), b"first");
             let wakes = Arc::new(WakeCount::default());
             let waker = Waker::from(Arc::clone(&wakes));
@@ -777,22 +940,28 @@ fn forward_and_socks_proxies_preserve_streams_authentication_and_call_ownership(
 
 #[cfg(feature = "tls")]
 const PROXY_TLS_CERT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.crt"
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/tls/server.crt"
 ));
 
 #[cfg(feature = "tls")]
 fn proxy_tls_server(socket: TcpStream) -> rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let key = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/server.key"));
+    let key = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tls/server.key"
+    ));
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
-    .with_safe_default_protocol_versions().unwrap()
+    .with_safe_default_protocol_versions()
+    .unwrap()
     .with_no_client_auth()
     .with_single_cert(
         vec![CertificateDer::from_pem_slice(PROXY_TLS_CERT).unwrap()],
         PrivateKeyDer::from_pem_slice(key).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
     rustls::StreamOwned::new(connection, socket)
@@ -814,23 +983,47 @@ fn connect_tunnels_and_https_proxies_preserve_verified_tls_and_auth_boundaries()
             if !https_proxy {
                 let connect = request_head(&mut socket);
                 assert!(connect.starts_with("CONNECT localhost:443 HTTP/1.1\r\n"));
-                assert_eq!(header_values(&connect, "proxy-authorization"), ["Basic YWdlbnQ6cHc="]);
+                assert_eq!(
+                    header_values(&connect, "proxy-authorization"),
+                    ["Basic YWdlbnQ6cHc="]
+                );
                 assert!(header_values(&connect, "authorization").is_empty());
                 assert!(header_values(&connect, "x-call").is_empty());
-                socket.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .unwrap();
             }
             let mut tls = proxy_tls_server(socket);
-            let target = if https_proxy { url } else { "/test.Service/Watch" };
+            let target = if https_proxy {
+                url
+            } else {
+                "/test.Service/Watch"
+            };
             let (head, body) = request_to(&mut tls, target);
             assert_eq!(body, message(b"request"));
-            assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
+            assert_eq!(
+                header_values(&head, "authorization"),
+                ["Bearer origin-only"]
+            );
             assert_eq!(header_values(&head, "x-call"), ["private-method-metadata"]);
             if https_proxy {
-                assert_eq!(header_values(&head, "proxy-authorization"), ["Basic YWdlbnQ6cHc="]);
+                assert_eq!(
+                    header_values(&head, "proxy-authorization"),
+                    ["Basic YWdlbnQ6cHc="]
+                );
             } else {
-                assert!(header_values(&head, "proxy-authorization").is_empty(), "CONNECT credentials reached the origin");
+                assert!(
+                    header_values(&head, "proxy-authorization").is_empty(),
+                    "CONNECT credentials reached the origin"
+                );
             }
-            fixed(&mut tls, 200, "application/grpc-web", "", &success(b"verified"));
+            fixed(
+                &mut tls,
+                200,
+                "application/grpc-web",
+                "",
+                &success(b"verified"),
+            );
         });
         let proxy = if https_proxy {
             format!("https://agent:pw@localhost:{}", address.port())
@@ -843,9 +1036,15 @@ fn connect_tunnels_and_https_proxies_preserve_verified_tls_and_auth_boundaries()
         let runtime = runtime(https_proxy);
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
         runtime.block_on_with_cx(cx.clone(), async {
-            let response = client.unary(&cx, url, proxy_request(None), IdentityCodec).await.unwrap();
+            let response = client
+                .unary(&cx, url, proxy_request(None), IdentityCodec)
+                .await
+                .unwrap();
             assert_eq!(response.get_ref().as_ref(), b"verified");
-            assert_eq!(metadata_text(response.trailing_metadata(), "x-final").as_deref(), Some("yes"));
+            assert_eq!(
+                metadata_text(response.trailing_metadata(), "x-final").as_deref(),
+                Some("yes")
+            );
             assert_eq!(client.http.pool_stats().total_connections, 0);
             assert_eq!(client.http.pool_stats().idle_connections, 0);
         });
@@ -864,16 +1063,25 @@ fn proxy_connect_refusal_cancellation_and_deadline_release_the_call() {
             let mut socket = accept(&listener);
             let head = request_head(&mut socket);
             assert!(head.starts_with("CONNECT origin.invalid:443 HTTP/1.1\r\n"));
-            assert_eq!(header_values(&head, "proxy-authorization"), ["Bearer tunnel-only"]);
+            assert_eq!(
+                header_values(&head, "proxy-authorization"),
+                ["Bearer tunnel-only"]
+            );
             assert!(header_values(&head, "authorization").is_empty());
             assert!(header_values(&head, "x-call").is_empty());
             if mode == "refused" {
-                socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").unwrap();
+                socket
+                    .write_all(
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+                    )
+                    .unwrap();
             } else {
                 entered.send(()).unwrap();
             }
             expect_closed(&mut socket);
-            assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
         });
         let runtime = runtime(false);
         let driver = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -885,28 +1093,41 @@ fn proxy_connect_refusal_cancellation_and_deadline_release_the_call() {
             Budget::INFINITE
         };
         let owner = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 1), TaskId::new_for_test(4, 0), budget,
-            None, driver.io_driver_handle(), None, Some(timer.clone()), None,
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(4, 0),
+            budget,
+            None,
+            driver.io_driver_handle(),
+            None,
+            Some(timer.clone()),
+            None,
         );
         let cancel_owner = owner.clone();
-        let interrupt = (mode != "refused").then(|| std::thread::spawn(move || {
-            // The proxy has received CONNECT and supplies no reply. The
-            // protocol itself cannot wake the parked setup operation.
-            observed.recv_timeout(Duration::from_secs(3)).unwrap();
-            if mode == "deadline" {
-                clock.advance(10);
-                assert!(timer.process_timers() > 0);
-            } else {
-                cancel_owner.cancel_with(CancelKind::User, Some("proxy negotiation parked"));
-            }
-        }));
+        let interrupt = (mode != "refused").then(|| {
+            std::thread::spawn(move || {
+                // The proxy has received CONNECT and supplies no reply. The
+                // protocol itself cannot wake the parked setup operation.
+                observed.recv_timeout(Duration::from_secs(3)).unwrap();
+                if mode == "deadline" {
+                    clock.advance(10);
+                    assert!(timer.process_timers() > 0);
+                } else {
+                    cancel_owner.cancel_with(CancelKind::User, Some("proxy negotiation parked"));
+                }
+            })
+        });
         let http = proxy_http_config(format!("http://{address}"));
         let client = GrpcWebClient::with_http_config(http, config(ContentType::GrpcWeb)).unwrap();
         runtime.block_on_with_cx(driver, async {
-            let error = client.server_streaming(
-                &owner, "https://origin.invalid/test.Service/Watch",
-                proxy_request(Some("Bearer tunnel-only")), IdentityCodec,
-            ).await.unwrap_err();
+            let error = client
+                .server_streaming(
+                    &owner,
+                    "https://origin.invalid/test.Service/Watch",
+                    proxy_request(Some("Bearer tunnel-only")),
+                    IdentityCodec,
+                )
+                .await
+                .unwrap_err();
             let expected = match mode {
                 "refused" => Code::Unavailable,
                 "cancelled" => Code::Cancelled,
@@ -917,7 +1138,9 @@ fn proxy_connect_refusal_cancellation_and_deadline_release_the_call() {
             assert_eq!(client.http.pool_stats().total_connections, 0);
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());
         });
-        if let Some(interrupt) = interrupt { interrupt.join().unwrap(); }
+        if let Some(interrupt) = interrupt {
+            interrupt.join().unwrap();
+        }
         peer.join().unwrap();
         assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
         assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
@@ -932,11 +1155,25 @@ fn proxy_redirects_do_not_replay_rpc_metadata_or_credentials() {
         let mut socket = accept(&listener);
         let (head, body) = request_to(&mut socket, "http://origin.invalid:8080/test.Service/Watch");
         assert_eq!(body, message(b"request"));
-        assert_eq!(header_values(&head, "authorization"), ["Bearer origin-only"]);
-        assert_eq!(header_values(&head, "proxy-authorization"), ["Bearer proxy-only"]);
-        fixed(&mut socket, 307, "text/plain", "Location: http://different.invalid/steal\r\n", b"");
+        assert_eq!(
+            header_values(&head, "authorization"),
+            ["Bearer origin-only"]
+        );
+        assert_eq!(
+            header_values(&head, "proxy-authorization"),
+            ["Bearer proxy-only"]
+        );
+        fixed(
+            &mut socket,
+            307,
+            "text/plain",
+            "Location: http://different.invalid/steal\r\n",
+            b"",
+        );
         expect_closed(&mut socket);
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     });
     let mut http = proxy_http_config(format!("http://{address}"));
     http.redirect_policy = RedirectPolicy::Limited(5);
@@ -945,10 +1182,15 @@ fn proxy_redirects_do_not_replay_rpc_metadata_or_credentials() {
     let runtime = runtime(false);
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on_with_cx(cx.clone(), async {
-        let error = client.unary(
-            &cx, "http://origin.invalid:8080/test.Service/Watch",
-            proxy_request(Some("Bearer proxy-only")), IdentityCodec,
-        ).await.unwrap_err();
+        let error = client
+            .unary(
+                &cx,
+                "http://origin.invalid:8080/test.Service/Watch",
+                proxy_request(Some("Bearer proxy-only")),
+                IdentityCodec,
+            )
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), Code::Unknown);
         assert!(error.message().contains("HTTP 307"));
         assert_eq!(client.http.pool_stats().total_connections, 0);

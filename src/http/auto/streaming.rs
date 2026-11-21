@@ -70,7 +70,12 @@ where
         config: HttpAutoListenerConfig,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
-        Ok(Self::from_listener(listener, http1_handler, http2_handler, config))
+        Ok(Self::from_listener(
+            listener,
+            http1_handler,
+            http2_handler,
+            config,
+        ))
     }
 
     /// Prepare streaming dispatch on an existing socket without starting tasks.
@@ -136,11 +141,13 @@ where
         )
         .with_streaming_config(self.http1_streaming);
         let handler = self.http2_handler;
-        let http2 = self.http2_options.apply(Http2Listener::from_handoff_streaming_produced(
-            Arc::clone(&http2_queue),
-            move |request: StreamingServerRequest| (*handler)(request),
-            self.http2_streaming,
-        ));
+        let http2 = self
+            .http2_options
+            .apply(Http2Listener::from_handoff_streaming_produced(
+                Arc::clone(&http2_queue),
+                move |request: StreamingServerRequest| (*handler)(request),
+                self.http2_streaming,
+            ));
         let http1 = ProtocolService {
             queue: http1_queue,
             manager: http1.connection_manager().clone(),

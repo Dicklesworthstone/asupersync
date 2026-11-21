@@ -51,11 +51,11 @@
 //! Deterministic symbol loss for tests is injected before a symbol is sprayed
 //! ([`QuicConfig::debug_drop_one_in`]).
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
@@ -8865,7 +8865,8 @@ async fn queue_source_stream_bytes(
     if link.conn.stream_send_credit_remaining(stream) < n_u64 {
         drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
         *queued_since_flush = 0;
-        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config, delta).await?;
+        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config, delta)
+            .await?;
     }
     link.conn
         .write_stream_bytes(cx, stream, Bytes::copy_from_slice(bytes), false)?;
@@ -8886,7 +8887,8 @@ async fn queue_source_stream_bytes(
         // window of credit here quantized the transfer into one
         // window per RTT); this wait only enforces the queue and
         // unacked ceilings.
-        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config, delta).await?;
+        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config, delta)
+            .await?;
     }
     Ok(())
 }
@@ -9176,9 +9178,7 @@ async fn run_sender_session(
         && super::delta_cdc::size_may_fit(manifest.total_bytes);
     if offered_cdc {
         let context = super::quic_delta_control_auth_context(config).ok_or_else(|| {
-            QuicTransportError::Config(
-                "QUIC CDC requires strict delta authentication".to_string(),
-            )
+            QuicTransportError::Config("QUIC CDC requires strict delta authentication".to_string())
         })?;
         super::delta_cdc::advertise_cdc(&mut hello_frame, context, &hello)?;
     }
@@ -9211,7 +9211,11 @@ async fn run_sender_session(
         tree_sender_nonce,
     )?;
     let delta_handshake = super::validate_quic_delta_ack(
-        if negotiated_tree { tree_sender_nonce } else { delta_sender_nonce },
+        if negotiated_tree {
+            tree_sender_nonce
+        } else {
+            delta_sender_nonce
+        },
         &ack,
     )?;
     let negotiated_cdc = super::delta_cdc::cdc_acknowledged(
@@ -9269,9 +9273,11 @@ async fn run_sender_session(
         super::validate_quic_manifest_with_cdc(&candidate.manifest, config, true)?;
     }
     let prepared = if negotiated_tree {
-        tree_candidate.ok_or_else(|| QuicTransportError::Control(
-            "accepted QUIC tree capability lost its prepared manifest".to_string(),
-        ))?
+        tree_candidate.ok_or_else(|| {
+            QuicTransportError::Control(
+                "accepted QUIC tree capability lost its prepared manifest".to_string(),
+            )
+        })?
     } else {
         selected.as_ref().unwrap_or(prepared)
     };
@@ -9399,8 +9405,15 @@ async fn run_sender_session(
                     ));
                 }
                 return erase_send(delta_chunks::send(
-                    cx, link, &mut control, prepared, config, session, &request.request,
-                )).await;
+                    cx,
+                    link,
+                    &mut control,
+                    prepared,
+                    config,
+                    session,
+                    &request.request,
+                ))
+                .await;
             }
         }
     }
@@ -10413,9 +10426,8 @@ fn write_quic_packed_member_batch_oneshot(
             }
             // The original writable handle survives restrictive metadata.
             // Sync and close each member now, before publishing any member.
-            synced_members.push(
-                StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?,
-            );
+            synced_members
+                .push(StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?);
             metadata_deferred.push(deferred);
             guards.push(guard);
         }
@@ -10505,9 +10517,8 @@ fn write_quic_packed_member_batch_streaming(
                         .map_err(|err| std::io::Error::other(err.into_message()))?;
                 reports.push((member.out_path.clone(), report));
             }
-            synced_members.push(
-                StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?,
-            );
+            synced_members
+                .push(StagedFileSync::from_file(member.staging_path.clone(), out)?.sync_sync()?);
             metadata_deferred.push(deferred);
             guards.push(guard);
         }
@@ -10869,7 +10880,12 @@ async fn commit_staged_entries(
                 base.clone()
             };
             match super::commit_quic_metadata_entry(
-                cx, &base, &out_path, entry, config, &mut parent_syncs,
+                cx,
+                &base,
+                &out_path,
+                entry,
+                config,
+                &mut parent_syncs,
             )
             .await?
             {
@@ -11843,9 +11859,7 @@ async fn run_receiver_session(
     }
     let negotiated_cdc = if options.cdc_delta() && delta_handshake.is_some() {
         let context = super::quic_delta_control_auth_context(&config).ok_or_else(|| {
-            QuicTransportError::Config(
-                "QUIC CDC requires strict delta authentication".to_string(),
-            )
+            QuicTransportError::Config("QUIC CDC requires strict delta authentication".to_string())
         })?;
         let offered = super::delta_cdc::cdc_offered(&hello_frame, context, &hello)?;
         if offered {
@@ -12001,8 +12015,14 @@ async fn run_receiver_session(
         let manifest: TransferManifest =
             super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
         if let Err(error) = super::validate_quic_manifest(&manifest, config) {
-            refuse_transfer_in_band(cx, link, &mut control, manifest_refusal_reason(&error), None)
-                .await;
+            refuse_transfer_in_band(
+                cx,
+                link,
+                &mut control,
+                manifest_refusal_reason(&error),
+                None,
+            )
+            .await;
             return Err(error);
         }
         (manifest, None)
@@ -12021,7 +12041,9 @@ async fn run_receiver_session(
             Some(session) => super::delta_chunks::offered(
                 &manifest_frame,
                 super::quic_delta_control_auth_context(config).ok_or_else(|| {
-                    QuicTransportError::Config("QUIC changed chunks lost their authentication context".to_string())
+                    QuicTransportError::Config(
+                        "QUIC changed chunks lost their authentication context".to_string(),
+                    )
                 })?,
                 session,
                 &manifest,
@@ -12056,14 +12078,14 @@ async fn run_receiver_session(
                 // recovery evidence. Even zero-payload resume reconstructs and
                 // verifies staging before the ordinary publication barrier.
                 let plan = super::resume::plan(cx, dest_dir, config, &manifest).await?;
-                let request = super::make_quic_delta_request(
-                    session, &manifest, plan.request.clone(),
-                );
+                let request =
+                    super::make_quic_delta_request(session, &manifest, plan.request.clone());
                 (request, Some(plan))
             } else {
                 let mut request = super::build_quic_receiver_delta_request(
                     cx, dest_dir, config, session, &manifest,
-                ).await?;
+                )
+                .await?;
                 let plan = if changed_chunks_offered
                     && request.request.mode == super::DeltaWireMode::FullObject
                 {
@@ -12072,13 +12094,15 @@ async fn run_receiver_session(
                     None
                 };
                 if let Some(plan) = &plan {
-                    request = super::make_quic_delta_request(session, &manifest, plan.request.clone());
+                    request =
+                        super::make_quic_delta_request(session, &manifest, plan.request.clone());
                 }
                 (request, plan)
             };
             let mode = super::validate_quic_delta_request(&request, session, &manifest)?;
             Ok((request, mode, plan))
-        }).await;
+        })
+        .await;
         let (request, request_mode, changed_plan) = match request {
             Ok(request) => request,
             Err(error) => {
@@ -12100,7 +12124,9 @@ async fn run_receiver_session(
         };
         if request_mode == super::DeltaWireMode::DeltaChunks {
             link.conn.configure_stream_recv_window(
-                cx, control.stream, super::delta_chunks::STREAM_WINDOW_BYTES,
+                cx,
+                control.stream,
+                super::delta_chunks::STREAM_WINDOW_BYTES,
             )?;
         }
         let request_frame = super::json_frame(FrameType::ObjectRequest, &request)?;
@@ -12203,13 +12229,25 @@ async fn run_receiver_session(
                 });
             }
             super::DeltaWireMode::DeltaChunks => {
-                let plan = changed_plan.ok_or_else(|| QuicTransportError::Control(
-                    "QUIC changed-chunk request lost its verified baseline plan".to_string(),
-                ))?;
+                let plan = changed_plan.ok_or_else(|| {
+                    QuicTransportError::Control(
+                        "QUIC changed-chunk request lost its verified baseline plan".to_string(),
+                    )
+                })?;
                 return erase_send(delta_chunks::receive(
-                    cx, link, &mut control, dest_dir, config, &manifest, options,
-                    session, plan, &manifest_frame, &request_frame,
-                )).await;
+                    cx,
+                    link,
+                    &mut control,
+                    dest_dir,
+                    config,
+                    &manifest,
+                    options,
+                    session,
+                    plan,
+                    &manifest_frame,
+                    &request_frame,
+                ))
+                .await;
             }
         }
     }
@@ -12931,7 +12969,13 @@ pub(crate) async fn send_prepared_over_udp(
     // sessions are erased the same way.
     let mut link = erase_send(connect(cx, addr, client_tls, &config)).await?;
     let report = erase_send(run_sender_session(
-        cx, &mut link, prepared, tree_candidate.as_ref(), &config, peer_id, options,
+        cx,
+        &mut link,
+        prepared,
+        tree_candidate.as_ref(),
+        &config,
+        peer_id,
+        options,
     ))
     .await?;
     let limiter = link.limiter_report();

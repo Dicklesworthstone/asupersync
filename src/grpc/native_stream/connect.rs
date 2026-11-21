@@ -175,10 +175,7 @@ impl NativeStreamEndpoint {
         self
     }
 
-    pub(crate) fn with_keepalive_backoff(
-        mut self,
-        backoff: Option<Arc<KeepaliveBackoff>>,
-    ) -> Self {
+    pub(crate) fn with_keepalive_backoff(mut self, backoff: Option<Arc<KeepaliveBackoff>>) -> Self {
         self.keepalive_backoff = backoff;
         self
     }
@@ -217,7 +214,8 @@ impl NativeStreamEndpoint {
             Destination::Address(address) => TcpStream::connect_timeout(*address, remaining)
                 .await
                 .map(DialedStream::Tcp),
-            Destination::Host(host, port) => self.connect_policy
+            Destination::Host(host, port) => self
+                .connect_policy
                 .connect_host(host.clone(), *port, remaining)
                 .await
                 .map(DialedStream::Tcp),
@@ -282,7 +280,13 @@ impl NativeStreamEndpoint {
             ));
         }
         self.connect_with_transport(
-            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            NativeStreamWindows::default(),
+            None,
             |dialed| async move { dialed.into_tcp() },
         )
         .await
@@ -365,7 +369,13 @@ impl NativeStreamEndpoint {
         TlsConnector::validate_domain(server_name)
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
         self.connect_with_transport(
-            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            NativeStreamWindows::default(),
+            None,
             |dialed| async move {
                 let tcp = dialed.into_tcp()?;
                 let tls = connector
@@ -409,7 +419,13 @@ impl NativeStreamEndpoint {
             ));
         }
         self.connect_duplex_with_transport(
-            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            NativeStreamWindows::default(),
+            None,
             |dialed| async move { dialed.into_tcp() },
         )
         .await
@@ -442,7 +458,13 @@ impl NativeStreamEndpoint {
         TlsConnector::validate_domain(server_name)
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
         self.connect_duplex_with_transport(
-            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            NativeStreamWindows::default(),
+            None,
             |dialed| async move {
                 let tcp = dialed.into_tcp()?;
                 let tls = connector
@@ -482,8 +504,15 @@ impl NativeStreamEndpoint {
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
         self.connect_with_dial(
-            cx, path, request, codec, config, windows, started,
-            |remaining| self.dial(remaining), upgrade,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            windows,
+            started,
+            |remaining| self.dial(remaining),
+            upgrade,
         )
         .await
     }
@@ -560,14 +589,29 @@ impl NativeStreamEndpoint {
         UpgradeFuture: Future<Output = Result<IO, Status>>,
     {
         self.connect_duplex_with_dial(
-            cx, path, request, codec, config, windows, started,
-            |remaining| self.dial(remaining), upgrade,
+            cx,
+            path,
+            request,
+            codec,
+            config,
+            windows,
+            started,
+            |remaining| self.dial(remaining),
+            upgrade,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn connect_duplex_with_dial<C, D, IO, Dial, DialFuture, Upgrade, UpgradeFuture>(
+    pub(crate) async fn connect_duplex_with_dial<
+        C,
+        D,
+        IO,
+        Dial,
+        DialFuture,
+        Upgrade,
+        UpgradeFuture,
+    >(
         &self,
         cx: &Cx,
         path: &str,

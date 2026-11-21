@@ -1,7 +1,7 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use super::*;
 use super::super::{FactoryOwner, GenerationGuard, Shared, State};
+use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Wake, Waker};
 
@@ -9,25 +9,40 @@ fn fixture() -> (FactoryOwner, WorkerReadiness, Cx) {
     let shared = Arc::new(Shared {
         state: parking_lot::Mutex::new(State {
             snapshot: WorkerReadinessState {
-                generation: None, phase: WorkerReadinessPhase::NotStarted,
+                generation: None,
+                phase: WorkerReadinessPhase::NotStarted,
             },
-            factory_alive: true, active: false,
+            factory_alive: true,
+            active: false,
         }),
         changed: crate::sync::Notify::new(),
     });
-    (FactoryOwner(Arc::clone(&shared)), WorkerReadiness { shared }, Cx::for_testing())
+    (
+        FactoryOwner(Arc::clone(&shared)),
+        WorkerReadiness { shared },
+        Cx::for_testing(),
+    )
 }
 
 fn start(owner: &FactoryOwner, cx: &Cx, number: u64) -> GenerationGuard {
-    owner.begin(cx, ManagedGeneration {
-        number, region: cx.region_id(), task: cx.task_id(),
-    }).expect("valid generation")
+    owner
+        .begin(
+            cx,
+            ManagedGeneration {
+                number,
+                region: cx.region_id(),
+                task: cx.task_id(),
+            },
+        )
+        .expect("valid generation")
 }
 
 #[derive(Default)]
 struct WakeCount(AtomicUsize);
 impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn counting_waker() -> (Arc<WakeCount>, Waker) {
@@ -48,18 +63,31 @@ fn empty_set_is_ready_and_loss_wait_only_observes_cancellation() {
     let mut task = Context::from_waker(Waker::noop());
     assert!(lost.as_mut().poll(&mut task).is_pending());
     cx.cancel_fast(crate::types::CancelKind::User);
-    assert!(matches!(lost.as_mut().poll(&mut task), Poll::Ready(Err(DependencyError::Cancelled))));
-    assert!(snapshot.is_current(), "observer cancellation is not dependency loss");
+    assert!(matches!(
+        lost.as_mut().poll(&mut task),
+        Poll::Ready(Err(DependencyError::Cancelled))
+    ));
+    assert!(
+        snapshot.is_current(),
+        "observer cancellation is not dependency loss"
+    );
 }
 
 #[test]
 fn count_and_duplicate_refusals_leave_prerequisites_untouched() {
     let (_oa, a, _ca) = fixture();
     let (_ob, b, _cb) = fixture();
-    assert!(matches!(WorkerDependencies::new(vec![a.clone(), b.clone()], 1),
-        Err(DependencyError::Capacity { requested: 2, limit: 1 })));
-    assert!(matches!(WorkerDependencies::new(vec![a.clone(), b.clone(), b.clone(), a.clone()], 4),
-        Err(DependencyError::Duplicate { index: 2 })));
+    assert!(matches!(
+        WorkerDependencies::new(vec![a.clone(), b.clone()], 1),
+        Err(DependencyError::Capacity {
+            requested: 2,
+            limit: 1
+        })
+    ));
+    assert!(matches!(
+        WorkerDependencies::new(vec![a.clone(), b.clone(), b.clone(), a.clone()], 4),
+        Err(DependencyError::Duplicate { index: 2 })
+    ));
     assert_eq!(a.state().phase, WorkerReadinessPhase::NotStarted);
     assert_eq!(b.state().phase, WorkerReadinessPhase::NotStarted);
 }
@@ -75,7 +103,10 @@ fn all_initializers_must_be_ready_and_snapshot_preserves_input_order() {
     assert!(dependencies.try_ready().unwrap().is_none());
     gb.phase(WorkerReadinessPhase::Ready);
     let snapshot = dependencies.try_ready().unwrap().unwrap();
-    assert_eq!(snapshot.generations().map(|g| g.number).collect::<Vec<_>>(), [7, 3]);
+    assert_eq!(
+        snapshot.generations().map(|g| g.number).collect::<Vec<_>>(),
+        [7, 3]
+    );
     assert!(snapshot.is_current());
 }
 
@@ -94,7 +125,8 @@ fn previously_ready_values_from_disjoint_intervals_do_not_form_a_barrier() {
     // This is exactly the invalid vector that sequential wait_ready calls can
     // produce. The same second-pass predicate used by try_ready must reject it.
     let mixed = ReadyDependencies {
-        set: Arc::clone(&dependencies.set), ready: vec![first, second],
+        set: Arc::clone(&dependencies.set),
+        ready: vec![first, second],
     };
     assert!(!mixed.is_current());
     assert_eq!(mixed.first_lost().unwrap().index, 0);
@@ -113,8 +145,13 @@ fn closed_later_prerequisite_is_not_hidden_by_an_unstarted_first_worker() {
     assert!(wait.as_mut().poll(&mut task).is_pending());
     drop(ob);
     assert!(count.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(wait.as_mut().poll(&mut task),
-        Poll::Ready(Err(DependencyError::Worker { index: 1, cause: WorkerReadinessError::Closed }))));
+    assert!(matches!(
+        wait.as_mut().poll(&mut task),
+        Poll::Ready(Err(DependencyError::Worker {
+            index: 1,
+            cause: WorkerReadinessError::Closed
+        }))
+    ));
 }
 
 #[test]
@@ -137,7 +174,10 @@ fn barrier_wait_rechecks_old_readiness_when_another_initializer_finishes() {
     let Poll::Ready(Ok(snapshot)) = wait.as_mut().poll(&mut task) else {
         panic!("the new simultaneous generation vector is ready");
     };
-    assert_eq!(snapshot.generations().map(|g| g.number).collect::<Vec<_>>(), [2, 1]);
+    assert_eq!(
+        snapshot.generations().map(|g| g.number).collect::<Vec<_>>(),
+        [2, 1]
+    );
 }
 
 #[test]
@@ -167,18 +207,32 @@ fn loss_wait_replaces_its_waker_without_missing_later_dependency_changes() {
     let gb = start(&ob, &cb, 1);
     ga.phase(WorkerReadinessPhase::Ready);
     gb.phase(WorkerReadinessPhase::Ready);
-    let snapshot = WorkerDependencies::new(vec![a, b], 2).unwrap().try_ready().unwrap().unwrap();
+    let snapshot = WorkerDependencies::new(vec![a, b], 2)
+        .unwrap()
+        .try_ready()
+        .unwrap()
+        .unwrap();
     let observer = Cx::for_testing();
     let mut wait = std::pin::pin!(snapshot.wait_lost(&observer));
     let (first, first_waker) = counting_waker();
     let (latest, latest_waker) = counting_waker();
-    assert!(wait.as_mut().poll(&mut Context::from_waker(&first_waker)).is_pending());
-    assert!(wait.as_mut().poll(&mut Context::from_waker(&latest_waker)).is_pending());
+    assert!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(&first_waker))
+            .is_pending()
+    );
+    assert!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(&latest_waker))
+            .is_pending()
+    );
     gb.phase(WorkerReadinessPhase::Stopping);
     assert_eq!(first.0.load(Ordering::SeqCst), 0);
     assert!(latest.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(wait.as_mut().poll(&mut Context::from_waker(&latest_waker)),
-        Poll::Ready(Ok(DependencyLoss { index: 1, .. }))));
+    assert!(matches!(
+        wait.as_mut().poll(&mut Context::from_waker(&latest_waker)),
+        Poll::Ready(Ok(DependencyLoss { index: 1, .. }))
+    ));
 }
 
 #[test]
@@ -191,7 +245,11 @@ fn dropping_barrier_wait_retires_its_notify_and_cancel_registrations() {
     let baseline = Arc::strong_count(&count);
     for _ in 0..8 {
         let mut wait = Box::pin(dependencies.wait_ready(&observer));
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         assert!(Arc::strong_count(&count) > baseline);
         drop(wait);
         assert_eq!(Arc::strong_count(&count), baseline);
@@ -211,11 +269,17 @@ fn cancelling_one_observer_leaves_workers_and_other_observers_running() {
     assert!(first.as_mut().poll(&mut task).is_pending());
     assert!(second.as_mut().poll(&mut task).is_pending());
     cancelled.cancel_fast(crate::types::CancelKind::User);
-    assert!(matches!(first.as_mut().poll(&mut task), Poll::Ready(Err(DependencyError::Cancelled))));
+    assert!(matches!(
+        first.as_mut().poll(&mut task),
+        Poll::Ready(Err(DependencyError::Cancelled))
+    ));
     assert_eq!(worker.state().phase, WorkerReadinessPhase::Initializing);
     assert!(!cx.is_cancel_requested());
     generation.phase(WorkerReadinessPhase::Ready);
-    assert!(matches!(second.as_mut().poll(&mut task), Poll::Ready(Ok(_))));
+    assert!(matches!(
+        second.as_mut().poll(&mut task),
+        Poll::Ready(Ok(_))
+    ));
 }
 
 #[test]
@@ -223,11 +287,24 @@ fn invalid_generation_is_terminal_even_with_other_pending_dependencies() {
     let (_oa, a, _ca) = fixture();
     let (ob, b, cb) = fixture();
     let _active = start(&ob, &cb, 1);
-    assert!(ob.begin(&cb, ManagedGeneration {
-        number: 2, region: cb.region_id(), task: cb.task_id(),
-    }).is_none());
-    assert!(matches!(WorkerDependencies::new(vec![a, b], 2).unwrap().try_ready(),
-        Err(DependencyError::Worker { index: 1, cause: WorkerReadinessError::InvalidGeneration })));
+    assert!(
+        ob.begin(
+            &cb,
+            ManagedGeneration {
+                number: 2,
+                region: cb.region_id(),
+                task: cb.task_id(),
+            }
+        )
+        .is_none()
+    );
+    assert!(matches!(
+        WorkerDependencies::new(vec![a, b], 2).unwrap().try_ready(),
+        Err(DependencyError::Worker {
+            index: 1,
+            cause: WorkerReadinessError::InvalidGeneration
+        })
+    ));
 }
 
 #[test]

@@ -236,11 +236,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
         async fn until(mut predicate: impl FnMut() -> bool) {
             bounded(async {
                 while !predicate() {
-                    asupersync::time::sleep(
-                        Cx::current().unwrap().now(),
-                        Duration::from_millis(1),
-                    )
-                    .await;
+                    asupersync::time::sleep(Cx::current().unwrap().now(), Duration::from_millis(1))
+                        .await;
                 }
             })
             .await;
@@ -371,8 +368,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
                             body.extend_from_slice(&frame.data);
                             if !frame.data.is_empty() {
                                 let increment = u32::try_from(frame.data.len()).unwrap();
-                                self.send(Frame::WindowUpdate(WindowUpdateFrame::new(0, increment)))
-                                    .await;
+                                self.send(Frame::WindowUpdate(WindowUpdateFrame::new(
+                                    0, increment,
+                                )))
+                                .await;
                                 if !frame.end_stream {
                                     self.send(Frame::WindowUpdate(WindowUpdateFrame::new(
                                         stream_id, increment,
@@ -455,11 +454,19 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 let mut peer = Peer::connect(address).await;
                 peer.request(1, "/buffered").await;
                 let (headers, body) = peer.response(1).await;
-                assert!(headers.iter().any(|h| h.name == ":status" && h.value == "200"));
+                assert!(
+                    headers
+                        .iter()
+                        .any(|h| h.name == ":status" && h.value == "200")
+                );
                 assert_eq!(body, b"native-tls-buffered");
                 peer.request(3, "/produced").await;
                 let (headers, body) = peer.response(3).await;
-                assert!(headers.iter().any(|h| h.name == ":status" && h.value == "200"));
+                assert!(
+                    headers
+                        .iter()
+                        .any(|h| h.name == ":status" && h.value == "200")
+                );
                 assert!(
                     headers
                         .iter()
@@ -512,10 +519,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
                 for protocols in [vec![b"http/1.1".to_vec()], Vec::new()] {
                     let mut stream = connect(address, protocols.clone()).await;
-                    assert_eq!(
-                        stream.alpn_protocol(),
-                        protocols.first().map(Vec::as_slice)
-                    );
+                    assert_eq!(stream.alpn_protocol(), protocols.first().map(Vec::as_slice));
                     // Offer valid H2 bytes anyway. A permissive acceptor must
                     // never make this listener treat missing/wrong ALPN as H2.
                     let mut wire = BytesMut::from(CLIENT_PREFACE);

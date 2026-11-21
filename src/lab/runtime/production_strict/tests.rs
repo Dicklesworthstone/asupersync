@@ -1110,7 +1110,10 @@ fn injected_cancellation_keeps_native_provenance_and_effective_cleanup_budget() 
     );
     fx.drain();
     let protocol = fx.runtime.check_cancellation_protocol();
-    assert!(protocol.is_ok(), "drained cancellation completes: {protocol:?}");
+    assert!(
+        protocol.is_ok(),
+        "drained cancellation completes: {protocol:?}"
+    );
 }
 
 #[test]
@@ -1161,7 +1164,11 @@ fn unbound_cancellation_target_is_not_replaced_with_an_existing_task() {
     );
     let task = fx.runtime.scheduler.lock().first_entry(0).unwrap();
     assert_eq!(
-        fx.runtime.state.task(task).unwrap().context_cancel_requested(),
+        fx.runtime
+            .state
+            .task(task)
+            .unwrap()
+            .context_cancel_requested(),
         Some(false)
     );
     assert_eq!(fx.counts(), [1]);

@@ -203,8 +203,7 @@ impl StreamEncoder {
 
     fn emit(&mut self, output: &mut [u8], input_read: usize) -> StreamProgress {
         let written = output.len().min(self.encoded.len() - self.position);
-        output[..written]
-            .copy_from_slice(&self.encoded[self.position..self.position + written]);
+        output[..written].copy_from_slice(&self.encoded[self.position..self.position + written]);
         self.position += written;
         let status = if self.position < self.encoded.len() {
             StreamStatus::NeedOutput
@@ -270,8 +269,7 @@ mod tests {
                     .collect();
                 for input_chunk in [1, 17, 577] {
                     for output_chunk in [1, 7, 4096] {
-                        let actual =
-                            encode_chunks(&input, frame, input_chunk, output_chunk, level);
+                        let actual = encode_chunks(&input, frame, input_chunk, output_chunk, level);
                         assert_eq!(actual, expected);
                         assert_eq!(
                             decode_all(&actual, &DecodeLimits::new(input.len())).unwrap(),
@@ -354,11 +352,17 @@ mod tests {
             encoder.encode(b"d", &mut []).unwrap_err(),
             StreamEncodeError::Finished
         );
-        assert_eq!(encoder.flush(&mut []).unwrap_err(), StreamEncodeError::Finished);
+        assert_eq!(
+            encoder.flush(&mut []).unwrap_err(),
+            StreamEncodeError::Finished
+        );
         let mut output = [0_u8; 64];
         let finished = encoder.finish(&mut output);
         assert_eq!(finished.status, StreamStatus::Finished);
-        assert_eq!(&output[..finished.output_written], encode_all(b"abc", &params));
+        assert_eq!(
+            &output[..finished.output_written],
+            encode_all(b"abc", &params)
+        );
         assert_eq!(encoder.finish(&mut output).output_written, 0);
     }
 
@@ -380,7 +384,10 @@ mod tests {
         let mut encoder = StreamEncoder::new(params, 3).unwrap();
         let mut output = [0_u8; 64];
         let progress = encoder.encode(b"abc", &mut output).unwrap();
-        assert_eq!(&output[..progress.output_written], encode_all(b"abc", &params));
+        assert_eq!(
+            &output[..progress.output_written],
+            encode_all(b"abc", &params)
+        );
         assert_eq!(encoder.finish(&mut output).output_written, 0);
     }
 

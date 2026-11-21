@@ -26,8 +26,11 @@ struct Script(Arc<Mutex<ScriptState>>);
 
 fn script(events: impl IntoIterator<Item = Event>) -> (Script, Arc<Mutex<ScriptState>>) {
     let state = Arc::new(Mutex::new(ScriptState {
-        events: events.into_iter().collect(), polls: 0, drops: 0,
-        panic_after_take: false, waiter: None,
+        events: events.into_iter().collect(),
+        polls: 0,
+        drops: 0,
+        panic_after_take: false,
+        waiter: None,
     }));
     (Script(state.clone()), state)
 }
@@ -38,11 +41,16 @@ fn publish(state: &Arc<Mutex<ScriptState>>, event: Event) {
         state.events.push_back(event);
         state.waiter.take()
     };
-    if let Some(waiter) = waiter { waiter.wake(); }
+    if let Some(waiter) = waiter {
+        waiter.wake();
+    }
 }
 
 impl SymbolStream for Script {
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let mut state = self.0.lock().unwrap();
         state.polls += 1;
         let Some(event) = state.events.pop_front() else {
@@ -61,34 +69,56 @@ impl SymbolStream for Script {
 }
 
 impl Drop for Script {
-    fn drop(&mut self) { self.0.lock().unwrap().drops += 1; }
+    fn drop(&mut self) {
+        self.0.lock().unwrap().drops += 1;
+    }
 }
 
 #[derive(Default)]
 struct WakeCount(AtomicUsize);
 
 impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn symbol(object: u64, esi: u32, bytes: &[u8]) -> AuthenticatedSymbol {
-    let raw = Symbol::new(SymbolId::new(ObjectId::new(0, object), 0, esi), bytes.to_vec(), SymbolKind::Source);
+    let raw = Symbol::new(
+        SymbolId::new(ObjectId::new(0, object), 0, esi),
+        bytes.to_vec(),
+        SymbolKind::Source,
+    );
     let signed = SecurityContext::new(AuthKey::from_seed(42)).sign_symbol(&raw);
     // Every test symbol arrives without a trusted receiver-side flag.
     AuthenticatedSymbol::from_parts(signed.symbol().clone(), *signed.tag())
 }
 
-fn next(stream: &mut MultipathSymbolStream, cx: &mut Context<'_>) -> Option<Result<AuthenticatedSymbol, StreamError>> {
+fn next(
+    stream: &mut MultipathSymbolStream,
+    cx: &mut Context<'_>,
+) -> Option<Result<AuthenticatedSymbol, StreamError>> {
     for _ in 0..128 {
-        if let Poll::Ready(value) = Pin::new(&mut *stream).poll_next(cx) { return value; }
+        if let Poll::Ready(value) = Pin::new(&mut *stream).poll_next(cx) {
+            return value;
+        }
     }
     panic!("ready scripted stream exceeded its bounded test poll count");
 }
 
 #[test]
 fn limits_and_path_admission_reject_before_polling_sources() {
-    for bounds in [(0, 8, 1, 1), (65, 8, 1, 1), (1, 0, 1, 1), (1, 8, 0, 1), (1, 8, 1, 0), (1, 8, usize::MAX, 2)] {
+    for bounds in [
+        (0, 8, 1, 1),
+        (65, 8, 1, 1),
+        (1, 0, 1, 1),
+        (1, 8, 0, 1),
+        (1, 8, 1, 0),
+        (1, 8, usize::MAX, 2),
+    ] {
         assert!(MultipathStreamLimits::new(bounds.0, bounds.1, bounds.2, bounds.3).is_err());
     }
     let limits = MultipathStreamLimits::new(1, 8, 2, 3).unwrap();
@@ -114,7 +144,10 @@ fn limits_and_path_admission_reject_before_polling_sources() {
     assert_eq!(stream.size_hint(), (0, Some(0)));
     assert_eq!(first_state.lock().unwrap().drops, 1);
     let (late, _) = script([]);
-    assert!(matches!(stream.add_path(PathId(3), late), Err(StreamError::Closed)));
+    assert!(matches!(
+        stream.add_path(PathId(3), late),
+        Err(StreamError::Closed)
+    ));
 }
 
 #[test]
@@ -122,12 +155,17 @@ fn cross_path_duplicates_are_authenticated_then_suppressed_without_reordering() 
     let first = symbol(1, 0, b"zero");
     assert!(!first.is_verified());
     let (a, _) = script([
-        Event::Symbol(first.clone()), Event::Symbol(symbol(1, 1, b"one")), Event::End,
+        Event::Symbol(first.clone()),
+        Event::Symbol(symbol(1, 1, b"one")),
+        Event::End,
     ]);
     let (b, _) = script([
-        Event::Symbol(first), Event::Symbol(symbol(1, 2, b"two")), Event::End,
+        Event::Symbol(first),
+        Event::Symbol(symbol(1, 2, b"two")),
+        Event::End,
     ]);
-    let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+    let mut stream =
+        MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
     stream.add_path(PathId(1), a).unwrap();
     stream.add_path(PathId(2), b).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
@@ -138,8 +176,14 @@ fn cross_path_duplicates_are_authenticated_then_suppressed_without_reordering() 
         ids.push(symbol.symbol().esi());
     }
     assert_eq!(ids, [0, 1, 2]);
-    assert_eq!(stream.path_stats(PathId(1)).unwrap().authenticated_symbols, 2);
-    assert_eq!(stream.path_stats(PathId(2)).unwrap().authenticated_symbols, 2);
+    assert_eq!(
+        stream.path_stats(PathId(1)).unwrap().authenticated_symbols,
+        2
+    );
+    assert_eq!(
+        stream.path_stats(PathId(2)).unwrap().authenticated_symbols,
+        2
+    );
     assert_eq!(stream.path_stats(PathId(2)).unwrap().duplicate_symbols, 1);
     assert_eq!(stream.path_stats(PathId(2)).unwrap().delivered_symbols, 1);
     assert_eq!(stream.dedup_stats().symbols_tracked, 3);
@@ -150,26 +194,50 @@ fn cross_path_duplicates_are_authenticated_then_suppressed_without_reordering() 
 #[test]
 fn one_transport_failure_retires_its_owner_while_other_paths_keep_delivering() {
     let (a, failed) = script([
-        Event::Symbol(symbol(1, 0, b"a")), Event::Error(StreamError::Reset),
+        Event::Symbol(symbol(1, 0, b"a")),
+        Event::Error(StreamError::Reset),
     ]);
     let (b, healthy) = script([
-        Event::Symbol(symbol(1, 1, b"b")), Event::Symbol(symbol(1, 2, b"c")), Event::End,
+        Event::Symbol(symbol(1, 1, b"b")),
+        Event::Symbol(symbol(1, 2, b"c")),
+        Event::End,
     ]);
-    let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+    let mut stream =
+        MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
     stream.add_path(PathId(1), a).unwrap();
     stream.add_path(PathId(2), b).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
     for esi in 0..3 {
-        assert_eq!(next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(), esi);
+        assert_eq!(
+            next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(),
+            esi
+        );
     }
     assert!(stream.path_stats(PathId(1)).unwrap().failed);
-    assert!(matches!(stream.path_error(PathId(1)), Some(StreamError::Reset)));
-    assert_eq!(failed.lock().unwrap().drops, 1, "failed transport is released promptly");
+    assert!(matches!(
+        stream.path_error(PathId(1)),
+        Some(StreamError::Reset)
+    ));
+    assert_eq!(
+        failed.lock().unwrap().drops,
+        1,
+        "failed transport is released promptly"
+    );
     assert_eq!(healthy.lock().unwrap().drops, 0);
-    assert!(matches!(next(&mut stream, &mut cx), Some(Err(StreamError::Reset))));
+    assert!(matches!(
+        next(&mut stream, &mut cx),
+        Some(Err(StreamError::Reset))
+    ));
     assert!(stream.is_exhausted());
-    assert!(matches!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None)));
-    assert_eq!(failed.lock().unwrap().polls, 2, "a failed source is never polled again");
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut cx),
+        Poll::Ready(None)
+    ));
+    assert_eq!(
+        failed.lock().unwrap().polls,
+        2,
+        "a failed source is never polled again"
+    );
     assert_eq!(healthy.lock().unwrap().drops, 1);
 }
 
@@ -191,10 +259,18 @@ fn every_blocked_path_registers_a_wake_without_self_waking() {
         assert!(wait.as_mut().poll(&mut cx).is_pending());
     }
     assert!(states.iter().all(|state| state.lock().unwrap().polls == 1));
-    assert!(states.iter().all(|state| state.lock().unwrap().waiter.is_some()));
+    assert!(
+        states
+            .iter()
+            .all(|state| state.lock().unwrap().waiter.is_some())
+    );
     assert_eq!(counter.0.load(Ordering::SeqCst), 0);
     publish(&states[63], Event::Symbol(symbol(1, 63, b"last")));
-    assert_eq!(counter.0.load(Ordering::SeqCst), 1, "the final path can wake the merged receiver");
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "the final path can wake the merged receiver"
+    );
     let received = next(&mut stream, &mut cx).unwrap().unwrap();
     assert_eq!(received.symbol().esi(), 63);
     assert_eq!(stream.path_stats(PathId(63)).unwrap().delivered_symbols, 1);
@@ -206,7 +282,10 @@ struct Repeated {
 }
 
 impl SymbolStream for Repeated {
-    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         self.polls.fetch_add(1, Ordering::SeqCst);
         Poll::Ready(Some(Ok(self.symbol.clone())))
     }
@@ -215,24 +294,42 @@ impl SymbolStream for Repeated {
 #[test]
 fn duplicate_flood_has_a_poll_budget_and_cannot_starve_a_new_ready_path() {
     let polls = Arc::new(AtomicUsize::new(0));
-    let repeated = Repeated { symbol: symbol(1, 0, b"same"), polls: polls.clone() };
+    let repeated = Repeated {
+        symbol: symbol(1, 0, b"same"),
+        polls: polls.clone(),
+    };
     let (second, second_state) = script([]);
-    let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+    let mut stream =
+        MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
     stream.add_path(PathId(1), repeated).unwrap();
     stream.add_path(PathId(2), second).unwrap();
     let counter = Arc::new(WakeCount::default());
     let waker = Waker::from(counter.clone());
     let mut cx = Context::from_waker(&waker);
-    assert_eq!(next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(), 0);
+    assert_eq!(
+        next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(),
+        0
+    );
     let before = polls.load(Ordering::SeqCst);
     assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
     assert_eq!(polls.load(Ordering::SeqCst) - before, 63);
     assert_eq!(second_state.lock().unwrap().polls, 1);
-    assert_eq!(counter.0.load(Ordering::SeqCst), 1, "budget exhaustion schedules remaining ready work");
+    assert_eq!(
+        counter.0.load(Ordering::SeqCst),
+        1,
+        "budget exhaustion schedules remaining ready work"
+    );
     assert_eq!(stream.dedup_stats().symbols_tracked, 1);
     publish(&second_state, Event::Symbol(symbol(1, 1, b"new")));
-    assert_eq!(next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(), 1);
-    assert_eq!(polls.load(Ordering::SeqCst) - before, 63, "ready sibling gets the next turn");
+    assert_eq!(
+        next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(),
+        1
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst) - before,
+        63,
+        "ready sibling gets the next turn"
+    );
 }
 
 #[test]
@@ -240,26 +337,47 @@ fn invalid_authentication_cannot_poison_duplicate_history_and_payload_limits_pre
     let valid = symbol(1, 0, b"good");
     let wrong = SecurityContext::new(AuthKey::from_seed(7)).sign_symbol(valid.symbol());
     assert!(wrong.is_verified());
-    let sentinel = AuthenticatedSymbol::from_parts(valid.symbol().clone(), AuthenticationTag::zero());
+    let sentinel =
+        AuthenticatedSymbol::from_parts(valid.symbol().clone(), AuthenticationTag::zero());
     for invalid in [wrong, sentinel] {
         let (bad, _) = script([Event::Symbol(invalid)]);
         let (good, untouched) = script([Event::Symbol(valid.clone())]);
-        let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+        let mut stream =
+            MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
         stream.add_path(PathId(1), bad).unwrap();
         stream.add_path(PathId(2), good).unwrap();
         let mut cx = Context::from_waker(Waker::noop());
-        assert!(matches!(next(&mut stream, &mut cx), Some(Err(StreamError::AuthenticationFailed { .. }))));
+        assert!(matches!(
+            next(&mut stream, &mut cx),
+            Some(Err(StreamError::AuthenticationFailed { .. }))
+        ));
         assert_eq!(stream.dedup_stats().objects_tracked, 0);
         assert_eq!(stream.dedup_stats().symbols_tracked, 0);
-        assert_eq!(stream.path_stats(PathId(1)).unwrap().authenticated_symbols, 0);
-        assert_eq!(untouched.lock().unwrap().polls, 0, "authentication failure is globally terminal");
-        assert!(matches!(stream.path_error(PathId(1)), Some(StreamError::AuthenticationFailed { .. })));
+        assert_eq!(
+            stream.path_stats(PathId(1)).unwrap().authenticated_symbols,
+            0
+        );
+        assert_eq!(
+            untouched.lock().unwrap().polls,
+            0,
+            "authentication failure is globally terminal"
+        );
+        assert!(matches!(
+            stream.path_error(PathId(1)),
+            Some(StreamError::AuthenticationFailed { .. })
+        ));
     }
     let (large, _) = script([Event::Symbol(symbol(1, 0, b"ninebytes"))]);
-    let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::new(1, 8, 1, 1).unwrap());
+    let mut stream = MultipathSymbolStream::new(
+        AuthKey::from_seed(42),
+        MultipathStreamLimits::new(1, 8, 1, 1).unwrap(),
+    );
     stream.add_path(PathId(1), large).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
-    assert!(matches!(next(&mut stream, &mut cx), Some(Err(StreamError::ProtocolError { .. }))));
+    assert!(matches!(
+        next(&mut stream, &mut cx),
+        Some(Err(StreamError::ProtocolError { .. }))
+    ));
     assert_eq!(stream.dedup_stats().symbols_tracked, 0);
 }
 
@@ -267,17 +385,26 @@ fn invalid_authentication_cannot_poison_duplicate_history_and_payload_limits_pre
 fn cancellation_and_protocol_errors_are_never_hidden_as_path_failover() {
     let failures = [
         StreamError::Cancelled,
-        StreamError::AuthenticationFailed { reason: "fixture".into() },
-        StreamError::ProtocolError { details: "fixture".into() },
+        StreamError::AuthenticationFailed {
+            reason: "fixture".into(),
+        },
+        StreamError::ProtocolError {
+            details: "fixture".into(),
+        },
         StreamError::PolledAfterCompletion,
-        StreamError::Io { source: io::ErrorKind::Interrupted.into() },
-        StreamError::Io { source: io::ErrorKind::InvalidData.into() },
+        StreamError::Io {
+            source: io::ErrorKind::Interrupted.into(),
+        },
+        StreamError::Io {
+            source: io::ErrorKind::InvalidData.into(),
+        },
     ];
     for error in failures {
         let original = error.to_string();
         let (bad, _) = script([Event::Error(error)]);
         let (good, untouched) = script([Event::Symbol(symbol(1, 0, b"good"))]);
-        let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+        let mut stream =
+            MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
         stream.add_path(PathId(1), bad).unwrap();
         stream.add_path(PathId(2), good).unwrap();
         let mut cx = Context::from_waker(Waker::noop());
@@ -286,7 +413,10 @@ fn cancellation_and_protocol_errors_are_never_hidden_as_path_failover() {
         assert_eq!(stream.path_error(PathId(1)).unwrap().to_string(), original);
         assert_eq!(untouched.lock().unwrap().polls, 0);
         assert!(stream.is_exhausted());
-        assert!(matches!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None)));
+        assert!(matches!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
     }
 }
 
@@ -318,7 +448,10 @@ fn bounded_history_overflow_passes_symbols_through_and_explicit_clear_releases_i
     stream.clear_object(ObjectId::new(0, 1));
     assert_eq!(stream.dedup_stats().objects_tracked, 0);
     publish(&control, Event::Symbol(symbol(1, 0, b"a")));
-    assert_eq!(next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(), 0);
+    assert_eq!(
+        next(&mut stream, &mut cx).unwrap().unwrap().symbol().esi(),
+        0
+    );
     assert_eq!(stream.dedup_stats().symbols_tracked, 1);
 }
 
@@ -327,15 +460,22 @@ fn caught_provider_panic_cannot_resume_unknown_consumed_input() {
     let (panicking, control) = script([Event::Symbol(symbol(1, 0, b"a"))]);
     control.lock().unwrap().panic_after_take = true;
     let (other, untouched) = script([Event::Symbol(symbol(1, 1, b"b"))]);
-    let mut stream = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
+    let mut stream =
+        MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::default());
     stream.add_path(PathId(1), panicking).unwrap();
     stream.add_path(PathId(2), other).unwrap();
     let mut cx = Context::from_waker(Waker::noop());
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = Pin::new(&mut stream).poll_next(&mut cx);
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut stream).poll_next(&mut cx);
+        }))
+        .is_err()
+    );
     assert!(stream.is_exhausted());
-    assert!(matches!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None)));
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut cx),
+        Poll::Ready(None)
+    ));
     assert_eq!(control.lock().unwrap().polls, 1);
     assert_eq!(untouched.lock().unwrap().polls, 0);
     assert_eq!(stream.dedup_stats().symbols_tracked, 0);

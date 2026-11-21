@@ -503,10 +503,7 @@ impl MerkleV2Hasher {
                     // Path ordering normalizes separators, while the digest
                     // binds the original bytes. Break every tie by those bytes
                     // so even equivalent path spellings have a stable order.
-                    Self::compare_paths(
-                        left.symlink_target.as_ref(),
-                        right.symlink_target.as_ref(),
-                    )
+                    Self::compare_paths(left.symlink_target.as_ref(), right.symlink_target.as_ref())
                 })
         });
         self.count(children.len());

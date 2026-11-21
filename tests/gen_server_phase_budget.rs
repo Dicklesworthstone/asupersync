@@ -219,7 +219,10 @@ impl GenServer for BudgetProbe {
 #[test]
 fn finite_init_quota_cancels_self_waking_native_server_and_preserves_cleanup() {
     native(|cx| async move {
-        let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let region = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let cleanup = CancelReason::poll_quota().cleanup_budget();
         let probe = BudgetProbe::new(
             InitMode::UntilQuota,
@@ -230,20 +233,34 @@ fn finite_init_quota_cancels_self_waking_native_server_and_preserves_cleanup() {
         let mut server = region.cx().spawn_gen_server(probe, 2).unwrap();
         let probe = server.join(&cx).await.unwrap();
         assert_eq!(probe.init_quotas, [4, 3, 2, 1, 0, 0]);
-        assert_eq!(probe.init_reason.as_ref().map(|reason| reason.kind), Some(CancelKind::PollQuota));
+        assert_eq!(
+            probe.init_reason.as_ref().map(|reason| reason.kind),
+            Some(CancelKind::PollQuota)
+        );
         assert_eq!(probe.cleanup_before_restore, Some(cleanup));
-        assert_eq!(probe.stop_before, Some(cleanup), "phase restoration must retain cleanup");
-        assert_eq!(probe.stop_after, Some(cleanup), "cleanup quota stays advisory");
-        assert_eq!(probe.stop_reason.as_ref().map(|reason| reason.kind), Some(CancelKind::PollQuota));
+        assert_eq!(
+            probe.stop_before,
+            Some(cleanup),
+            "phase restoration must retain cleanup"
+        );
+        assert_eq!(
+            probe.stop_after,
+            Some(cleanup),
+            "cleanup quota stays advisory"
+        );
+        assert_eq!(
+            probe.stop_reason.as_ref().map(|reason| reason.kind),
+            Some(CancelKind::PollQuota)
+        );
         region.close().await.unwrap();
     });
 }
 
 async fn restored_budget(cx: Cx, parent_quota: u32, stop_budget: Budget, stop_yields: u32) {
     let region = cx
-        .open_child_region(ChildRegionSpec::inherit().with_budget(
-            Budget::INFINITE.with_poll_quota(parent_quota),
-        ))
+        .open_child_region(
+            ChildRegionSpec::inherit().with_budget(Budget::INFINITE.with_poll_quota(parent_quota)),
+        )
         .await
         .unwrap();
     let (ready_send, mut ready_recv) = oneshot::channel();
@@ -271,8 +288,14 @@ async fn restored_budget(cx: Cx, parent_quota: u32, stop_budget: Budget, stop_yi
     };
     assert_eq!(probe.restored.unwrap().poll_quota, expected);
     assert!(probe.init_reason.is_none());
-    assert!(probe.stop_reason.is_none(), "graceful cleanup acquired a cancellation");
-    assert_eq!(probe.stop_after, probe.stop_before, "stop must not consume advisory polls");
+    assert!(
+        probe.stop_reason.is_none(),
+        "graceful cleanup acquired a cancellation"
+    );
+    assert_eq!(
+        probe.stop_after, probe.stop_before,
+        "stop must not consume advisory polls"
+    );
     region.close().await.unwrap();
 }
 
@@ -288,13 +311,23 @@ fn finite_parent_keeps_each_init_poll_charge_exactly_once() {
 
 #[test]
 fn graceful_stop_can_yield_beyond_its_advisory_minimal_poll_quota() {
-    native(|cx| restored_budget(cx, u32::MAX, Budget::MINIMAL, Budget::MINIMAL.poll_quota + 5));
+    native(|cx| {
+        restored_budget(
+            cx,
+            u32::MAX,
+            Budget::MINIMAL,
+            Budget::MINIMAL.poll_quota + 5,
+        )
+    });
 }
 
 #[test]
 fn cancellation_during_init_keeps_user_reason_and_its_cleanup_envelope() {
     native(|cx| async move {
-        let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let region = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let (ready_send, mut ready_recv) = oneshot::channel();
         let cleanup = CancelReason::user("server aborted").cleanup_budget();
         let mut probe = BudgetProbe::new(
@@ -308,11 +341,17 @@ fn cancellation_during_init_keeps_user_reason_and_its_cleanup_envelope() {
         let _admitted = ready_recv.recv(&cx).await.unwrap();
         server.abort();
         let probe = server.join(&cx).await.unwrap();
-        assert_eq!(probe.init_reason.as_ref().map(|reason| reason.kind), Some(CancelKind::User));
+        assert_eq!(
+            probe.init_reason.as_ref().map(|reason| reason.kind),
+            Some(CancelKind::User)
+        );
         assert_eq!(probe.cleanup_before_restore, Some(cleanup));
         assert_eq!(probe.stop_before, Some(cleanup));
         assert_eq!(probe.stop_after, Some(cleanup));
-        assert_eq!(probe.stop_reason.as_ref().map(|reason| reason.kind), Some(CancelKind::User));
+        assert_eq!(
+            probe.stop_reason.as_ref().map(|reason| reason.kind),
+            Some(CancelKind::User)
+        );
         region.close().await.unwrap();
     });
 }
@@ -320,7 +359,10 @@ fn cancellation_during_init_keeps_user_reason_and_its_cleanup_envelope() {
 #[test]
 fn unlimited_init_phase_stays_unlimited_across_real_pending_polls() {
     native(|cx| async move {
-        let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let region = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let (seen_send, mut seen_recv) = oneshot::channel();
         let mut probe = BudgetProbe::new(InitMode::Yield(3), u32::MAX, Budget::INFINITE, 0);
         probe.cast_seen = Some(seen_send);

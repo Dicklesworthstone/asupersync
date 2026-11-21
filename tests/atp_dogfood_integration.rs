@@ -67,7 +67,12 @@ impl DogfoodTestConfig {
         fs::create_dir_all(&artifacts_dir)?;
 
         let mut policy = TrustPolicy::local();
-        for scope in ["dogfood:build", "dogfood:datasets", "dogfood:test", "dogfood:e2e"] {
+        for scope in [
+            "dogfood:build",
+            "dogfood:datasets",
+            "dogfood:test",
+            "dogfood:e2e",
+        ] {
             policy.add_authorized_scope(scope.to_string());
         }
         let coordinator = AtpWorkflowCoordinator::with_trust_policy(

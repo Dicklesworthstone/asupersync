@@ -95,12 +95,12 @@ pub(super) fn validate(
                     chunk.index, entry.rel_path
                 )));
             }
-            entry_offset = entry_offset.checked_add(expected_size).ok_or_else(|| {
-                TransportError::Frame("delta entry range overflows u64".into())
-            })?;
-            stream_offset = stream_offset.checked_add(expected_size).ok_or_else(|| {
-                TransportError::Frame("delta stream range overflows u64".into())
-            })?;
+            entry_offset = entry_offset
+                .checked_add(expected_size)
+                .ok_or_else(|| TransportError::Frame("delta entry range overflows u64".into()))?;
+            stream_offset = stream_offset
+                .checked_add(expected_size)
+                .ok_or_else(|| TransportError::Frame("delta stream range overflows u64".into()))?;
         }
     }
     if chunks.next().is_some() {

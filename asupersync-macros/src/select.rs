@@ -188,21 +188,30 @@ impl Parse for SelectInput {
             ));
         }
 
-        let factories = branches.iter().filter(|branch| factory(&branch.future).is_some()).count();
+        let factories = branches
+            .iter()
+            .filter(|branch| factory(&branch.future).is_some())
+            .count();
         if factories != 0 {
             if factories != branches.len() {
-                return Err(Error::new(input.span(),
-                    "select! cannot mix prebuilt futures and child-context factories; wrap every branch in |child| ..."));
+                return Err(Error::new(
+                    input.span(),
+                    "select! cannot mix prebuilt futures and child-context factories; wrap every branch in |child| ...",
+                ));
             }
             if els.is_some() {
-                return Err(Error::new(input.span(),
-                    "select! child-context factories require the blocking form; else cannot own and drain child tasks"));
+                return Err(Error::new(
+                    input.span(),
+                    "select! child-context factories require the blocking form; else cannot own and drain child tasks",
+                ));
             }
             for branch in &branches {
                 let closure = factory(&branch.future).expect("all branches are factories");
                 if closure.inputs.len() != 1 {
-                    return Err(Error::new_spanned(closure,
-                        "select! factories must take exactly one child Cx argument"));
+                    return Err(Error::new_spanned(
+                        closure,
+                        "select! factories must take exactly one child Cx argument",
+                    ));
                 }
             }
         }
@@ -249,7 +258,10 @@ fn branch_factory(branch: &SelectBranch) -> TokenStream2 {
     let pat = &branch.pat;
     let fut = &branch.future;
     let handler = &branch.handler;
-    let child = format_ident!("__asupersync_select_child", span = proc_macro2::Span::mixed_site());
+    let child = format_ident!(
+        "__asupersync_select_child",
+        span = proc_macro2::Span::mixed_site()
+    );
     quote! {
         ::std::boxed::Box::new(move |#child| {
             ::std::boxed::Box::pin(async move {
@@ -271,7 +283,11 @@ fn generate_select(input: &SelectInput) -> TokenStream2 {
     // therefore documentation-level today — read here so the field stays live.
     let _ = input.biased;
 
-    if els.is_none() && branches.first().is_some_and(|branch| factory(&branch.future).is_some()) {
+    if els.is_none()
+        && branches
+            .first()
+            .is_some_and(|branch| factory(&branch.future).is_some())
+    {
         let factories: Vec<_> = branches.iter().map(branch_factory).collect();
         return quote! {
             {
@@ -529,13 +545,21 @@ mod tests {
     #[test]
     fn factory_select_refuses_ambiguous_ownership_and_default() {
         for (input, expected) in [
-            (quote! { cx, { x = |child| first(child) => x, y = second() => y } }, "cannot mix"),
-            (quote! { cx, { x = |child| first(child) => x, else => 0 } }, "blocking form"),
+            (
+                quote! { cx, { x = |child| first(child) => x, y = second() => y } },
+                "cannot mix",
+            ),
+            (
+                quote! { cx, { x = |child| first(child) => x, else => 0 } },
+                "blocking form",
+            ),
             (quote! { cx, { x = || first() => x } }, "exactly one"),
-            (quote! { cx, { x = |a, b| first(a, b) => x } }, "exactly one"),
+            (
+                quote! { cx, { x = |a, b| first(a, b) => x } },
+                "exactly one",
+            ),
         ] {
             assert!(parse_err(input).contains(expected));
         }
     }
-
 }

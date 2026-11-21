@@ -9,9 +9,9 @@
 use super::{
     AuthMode, AuthenticatedSymbol, AuthenticationTag, ContentId, DeltaChunkWire,
     DeltaObjectRequest, DeltaWireMode, Frame, FrameType, ProtocolVersion,
-    QUIC_DELTA_MAX_MANIFEST_CHUNKS, QuicDeltaProof, QuicDeltaSessionContext,
-    QuicTransportError, ReceiveReceipt, SecurityContext, TransferManifest,
-    quic_decode_delta_root, quic_delta_manifest_entry,
+    QUIC_DELTA_MAX_MANIFEST_CHUNKS, QuicDeltaProof, QuicDeltaSessionContext, QuicTransportError,
+    ReceiveReceipt, SecurityContext, TransferManifest, quic_decode_delta_root,
+    quic_delta_manifest_entry,
 };
 #[cfg(feature = "tls")]
 use super::{
@@ -64,8 +64,13 @@ pub(super) fn advertise(
     // The existing canonical symbol commits both nonces, destination, transfer
     // and the complete manifest. A separate key commits this exact capability.
     let symbol = super::quic_delta_manifest_auth_symbol(session, manifest)?;
-    let tag = context.derive_context(offer_key(manifest)).sign_symbol_tag(&symbol);
-    frame.header.extensions.insert(OFFER_EXTENSION, tag.as_bytes().to_vec());
+    let tag = context
+        .derive_context(offer_key(manifest))
+        .sign_symbol_tag(&symbol);
+    frame
+        .header
+        .extensions
+        .insert(OFFER_EXTENSION, tag.as_bytes().to_vec());
     Ok(())
 }
 
@@ -84,12 +89,13 @@ pub(super) fn offered(
         )
     })?;
     let symbol = super::quic_delta_manifest_auth_symbol(session, manifest)?;
-    let mut authenticated = AuthenticatedSymbol::from_parts(
-        symbol, AuthenticationTag::from_bytes(tag),
-    );
+    let mut authenticated =
+        AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::from_bytes(tag));
     if context.mode() != AuthMode::Strict
-        || context.derive_context(offer_key(manifest))
-            .verify_authenticated_symbol(&mut authenticated).is_err()
+        || context
+            .derive_context(offer_key(manifest))
+            .verify_authenticated_symbol(&mut authenticated)
+            .is_err()
         || !authenticated.is_verified()
     {
         return Err(QuicTransportError::HandshakeRejected(
@@ -114,11 +120,12 @@ pub(super) fn validate_request(
     if (!tree && quic_delta_manifest_entry(manifest).is_none())
         || request.mode != DeltaWireMode::DeltaChunks
         || (resume && !super::resume::supported(manifest))
-        || request.fallback_reason.as_deref() != Some(if resume {
-            super::resume::SELECTOR
-        } else {
-            selector(manifest)
-        })
+        || request.fallback_reason.as_deref()
+            != Some(if resume {
+                super::resume::SELECTOR
+            } else {
+                selector(manifest)
+            })
         || request.sender_merkle_root_hex != delta.merkle_root_hex
         || request.receiver_merkle_root_hex.is_none()
         || (!resume && request.shared_chunks == 0)
@@ -134,7 +141,10 @@ pub(super) fn validate_request(
         ));
     }
     quic_decode_delta_root(
-        request.receiver_merkle_root_hex.as_deref().expect("checked receiver root"),
+        request
+            .receiver_merkle_root_hex
+            .as_deref()
+            .expect("checked receiver root"),
         "QUIC changed-chunk receiver root",
     )?;
     let mut last_index = None;
@@ -190,18 +200,24 @@ fn persistent_manifest(
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         QuicTransportError::Control("changed chunks require a delta manifest".to_string())
     })?;
-    let chunks = delta.chunks.iter().map(|chunk| {
-        Ok(CasChunkRef {
-            index: chunk.index,
-            byte_offset: chunk.stream_offset,
-            size_bytes: chunk.size_bytes,
-            content_id: ContentId::new(quic_decode_delta_root(
-                &chunk.content_id_hex, "delta chunk content id",
-            )?),
+    let chunks = delta
+        .chunks
+        .iter()
+        .map(|chunk| {
+            Ok(CasChunkRef {
+                index: chunk.index,
+                byte_offset: chunk.stream_offset,
+                size_bytes: chunk.size_bytes,
+                content_id: ContentId::new(quic_decode_delta_root(
+                    &chunk.content_id_hex,
+                    "delta chunk content id",
+                )?),
+            })
         })
-    }).collect::<Result<Vec<_>, QuicTransportError>>()?;
-    PersistentChunkManifest::new(delta.tree_id.clone(), chunks)
-        .map_err(|error| QuicTransportError::Control(format!("build sender chunk manifest: {error}")))
+        .collect::<Result<Vec<_>, QuicTransportError>>()?;
+    PersistentChunkManifest::new(delta.tree_id.clone(), chunks).map_err(|error| {
+        QuicTransportError::Control(format!("build sender chunk manifest: {error}"))
+    })
 }
 
 #[cfg(feature = "tls")]
@@ -243,7 +259,9 @@ pub(super) async fn plan(
     let chunk_size = u64::try_from(delta.chunk_size)
         .map_err(|_| QuicTransportError::Control("delta chunk size overflow".to_string()))?;
     let content_defined = super::delta_cdc::is_cdc(manifest);
-    if chunk_size == 0 || !metadata.is_file() || metadata.len() == 0
+    if chunk_size == 0
+        || !metadata.is_file()
+        || metadata.len() == 0
         || metadata.len() > config.max_transfer_bytes
         || (content_defined && !super::delta_cdc::size_may_fit(metadata.len()))
         || (!content_defined
@@ -251,7 +269,9 @@ pub(super) async fn plan(
     {
         return Ok(None);
     }
-    let file = crate::fs::File::open(&baseline).await.map_err(|error| io_error(cx, error))?;
+    let file = crate::fs::File::open(&baseline)
+        .await
+        .map_err(|error| io_error(cx, error))?;
     let mut reader = super::delta_cdc::ChunkReader::new(file, delta.chunk_size, content_defined);
     let mut chunks = Vec::new();
     let mut reusable = BTreeMap::new();
@@ -260,12 +280,17 @@ pub(super) async fn plan(
     let mut whole_content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let Some(bytes) = reader.next_chunk().await.map_err(|error| io_error(cx, error))? else {
+        let Some(bytes) = reader
+            .next_chunk()
+            .await
+            .map_err(|error| io_error(cx, error))?
+        else {
             break;
         };
         let size_bytes = u64::try_from(bytes.len())
             .map_err(|_| QuicTransportError::Control("baseline chunk size overflow".to_string()))?;
-        let end = offset.checked_add(size_bytes)
+        let end = offset
+            .checked_add(size_bytes)
             .ok_or_else(|| QuicTransportError::Control("baseline size overflow".to_string()))?;
         if end > metadata.len()
             || u64::try_from(chunks.len()).unwrap_or(u64::MAX) >= QUIC_DELTA_MAX_MANIFEST_CHUNKS
@@ -275,12 +300,17 @@ pub(super) async fn plan(
         sha256.update(bytes);
         whole_content_id.update(bytes);
         let content_id = ContentId::from_bytes(bytes);
-        reusable.entry(content_id.to_hex()).or_insert(ReusableRange {
-            path: baseline.clone(), offset, size: size_bytes,
-        });
+        reusable
+            .entry(content_id.to_hex())
+            .or_insert(ReusableRange {
+                path: baseline.clone(),
+                offset,
+                size: size_bytes,
+            });
         chunks.push(CasChunkRef {
-            index: u32::try_from(chunks.len())
-                .map_err(|_| QuicTransportError::Control("baseline chunk count overflow".to_string()))?,
+            index: u32::try_from(chunks.len()).map_err(|_| {
+                QuicTransportError::Control("baseline chunk count overflow".to_string())
+            })?,
             byte_offset: offset,
             size_bytes,
             content_id,
@@ -312,14 +342,29 @@ pub(super) async fn plan(
         missing_bytes: diff.missing_bytes,
         shared_chunks: diff.shared_chunks,
         stale_chunks: u64::try_from(diff.stale_chunks.len()).unwrap_or(u64::MAX),
-        missing_chunks: diff.missing_chunks.iter().map(|chunk| {
-            delta.chunks.get(chunk.index as usize).cloned().ok_or_else(|| {
-                QuicTransportError::Control("chunk diff selected an absent manifest entry".to_string())
+        missing_chunks: diff
+            .missing_chunks
+            .iter()
+            .map(|chunk| {
+                delta
+                    .chunks
+                    .get(chunk.index as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        QuicTransportError::Control(
+                            "chunk diff selected an absent manifest entry".to_string(),
+                        )
+                    })
             })
-        }).collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<Vec<_>, _>>()?,
     };
     validate_request(manifest, &request)?;
-    Ok(Some(ReceivePlan { request, baseline, reusable, resume: None }))
+    Ok(Some(ReceivePlan {
+        request,
+        baseline,
+        reusable,
+        resume: None,
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,7 +379,9 @@ pub(super) fn data_frame(
     relative_offset: u64,
     bytes: &[u8],
 ) -> Result<Frame, QuicTransportError> {
-    let offset = chunk.entry_offset.checked_add(relative_offset)
+    let offset = chunk
+        .entry_offset
+        .checked_add(relative_offset)
         .ok_or_else(|| QuicTransportError::Control("changed-chunk offset overflow".to_string()))?;
     let mut payload = Vec::with_capacity(DATA_HEADER_BYTES + bytes.len());
     payload.extend_from_slice(&chunk.index.to_be_bytes());
@@ -359,14 +406,25 @@ pub(super) fn checked_data<'a>(
         ));
     }
     let index = u32::from_be_bytes(payload[..4].try_into().expect("chunk index width"));
-    let offset = u64::from_be_bytes(payload[4..DATA_HEADER_BYTES].try_into().expect("chunk offset width"));
+    let offset = u64::from_be_bytes(
+        payload[4..DATA_HEADER_BYTES]
+            .try_into()
+            .expect("chunk offset width"),
+    );
     let bytes = &payload[DATA_HEADER_BYTES..];
-    let remaining = chunk.size_bytes.checked_sub(relative_offset).ok_or_else(|| {
-        QuicTransportError::Integrity("changed-chunk data exceeds the requested chunk".to_string())
-    })?;
+    let remaining = chunk
+        .size_bytes
+        .checked_sub(relative_offset)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity(
+                "changed-chunk data exceeds the requested chunk".to_string(),
+            )
+        })?;
     let expected = remaining.min(DATA_FRAGMENT_BYTES as u64);
-    if index != chunk.index || chunk.entry_offset.checked_add(relative_offset) != Some(offset)
-        || expected == 0 || u64::try_from(bytes.len()).ok() != Some(expected)
+    if index != chunk.index
+        || chunk.entry_offset.checked_add(relative_offset) != Some(offset)
+        || expected == 0
+        || u64::try_from(bytes.len()).ok() != Some(expected)
     {
         return Err(QuicTransportError::Integrity(
             "changed-chunk data differs from the next requested manifest range".to_string(),
@@ -423,13 +481,22 @@ pub(super) fn validate_proof(
         1
     };
     let expected_paths = usize::try_from(files).unwrap_or(usize::MAX);
-    if !receipt.sha_ok || !receipt.merkle_ok
-        || receipt.bytes_received != request.missing_bytes || receipt.files != files
-        || receipt.symbols_accepted != 0 || receipt.feedback_rounds != 0
-        || receipt.decode_count != 0 || receipt.decode_micros != 0
-        || receipt.reason.is_some() || receipt.committed_paths.len() != expected_paths
+    if !receipt.sha_ok
+        || !receipt.merkle_ok
+        || receipt.bytes_received != request.missing_bytes
+        || receipt.files != files
+        || receipt.symbols_accepted != 0
+        || receipt.feedback_rounds != 0
+        || receipt.decode_count != 0
+        || receipt.decode_micros != 0
+        || receipt.reason.is_some()
+        || receipt.committed_paths.len() != expected_paths
         || receipt.committed_paths.iter().any(String::is_empty)
-        || receipt.committed_paths.iter().collect::<std::collections::BTreeSet<_>>().len()
+        || receipt
+            .committed_paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
             != expected_paths
     {
         return Err(QuicTransportError::Integrity(

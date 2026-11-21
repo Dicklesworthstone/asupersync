@@ -117,7 +117,9 @@ impl Shared {
             // Notify already isolates its fanout. During another unwind, do not
             // turn a hostile wake callback into a double-panic process abort.
             if std::thread::panicking() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify.notify_waiters()));
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    notify.notify_waiters()
+                }));
             } else {
                 notify.notify_waiters();
             }
@@ -166,26 +168,46 @@ impl RemoteExecutor {
         let mut policies = Vec::new();
         let mut usage = Vec::new();
         for (node, policy) in peers {
-            if policies.len() >= limits.max_peers { return Err(RemoteAdmissionError::PeerLimit); }
+            if policies.len() >= limits.max_peers {
+                return Err(RemoteAdmissionError::PeerLimit);
+            }
             if node.as_str().is_empty() || node.as_str().len() > 255 {
                 return Err(RemoteAdmissionError::InvalidPeer);
             }
-            if index.contains_key(&node) { return Err(RemoteAdmissionError::DuplicatePeer); }
-            policies.try_reserve(1).map_err(|_| RemoteAdmissionError::Allocation)?;
-            usage.try_reserve(1).map_err(|_| RemoteAdmissionError::Allocation)?;
+            if index.contains_key(&node) {
+                return Err(RemoteAdmissionError::DuplicatePeer);
+            }
+            policies
+                .try_reserve(1)
+                .map_err(|_| RemoteAdmissionError::Allocation)?;
+            usage
+                .try_reserve(1)
+                .map_err(|_| RemoteAdmissionError::Allocation)?;
             index.insert(node, policies.len());
             policies.push(policy);
             usage.push(RemoteAdmissionUsage::default());
         }
-        Ok(Self { shared: Arc::new(Shared { limits, index, peers: policies,
-            state: Mutex::new(State { total: RemoteAdmissionUsage::default(), peers: usage, closed: false, queue: None }),
-            queue_notify: None,
-        }) })
+        Ok(Self {
+            shared: Arc::new(Shared {
+                limits,
+                index,
+                peers: policies,
+                state: Mutex::new(State {
+                    total: RemoteAdmissionUsage::default(),
+                    peers: usage,
+                    closed: false,
+                    queue: None,
+                }),
+                queue_notify: None,
+            }),
+        })
     }
 
     /// Current aggregate charges, including cancelled or abandoned calls still draining.
     #[must_use]
-    pub fn usage(&self) -> RemoteAdmissionUsage { self.shared.state.lock().total }
+    pub fn usage(&self) -> RemoteAdmissionUsage {
+        self.shared.state.lock().total
+    }
 
     /// Current charges for one configured logical peer; unknown labels return None.
     #[must_use]
@@ -202,16 +224,26 @@ impl RemoteExecutor {
             let mut state = self.shared.state.lock();
             !std::mem::replace(&mut state.closed, true)
         };
-        if changed { self.shared.notify_queue(); }
+        if changed {
+            self.shared.notify_queue();
+        }
         changed
     }
 
     fn acquire(&self, node: &NodeId, bytes: usize) -> Result<Permit, RemoteAdmissionError> {
-        let &index = self.shared.index.get(node).ok_or(RemoteAdmissionError::UnknownPeer)?;
+        let &index = self
+            .shared
+            .index
+            .get(node)
+            .ok_or(RemoteAdmissionError::UnknownPeer)?;
         let policy = self.shared.peers[index];
-        if bytes > policy.max_request_bytes { return Err(RemoteAdmissionError::RequestBytes); }
+        if bytes > policy.max_request_bytes {
+            return Err(RemoteAdmissionError::RequestBytes);
+        }
         let mut state = self.shared.state.lock();
-        if state.closed { return Err(RemoteAdmissionError::Closed); }
+        if state.closed {
+            return Err(RemoteAdmissionError::Closed);
+        }
         if queue::blocks_immediate(&self.shared, &state, index) {
             return Err(RemoteAdmissionError::Queued);
         }
@@ -228,38 +260,75 @@ impl RemoteExecutor {
     /// through child-region/finalizer close. Transport failure can still leave
     /// remote effects unknown, and forced proxy destruction is only local cleanup.
     pub async fn run(
-        &self, cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
+        &self,
+        cx: &Cx,
+        node: NodeId,
+        computation: ComputationName,
+        input: RemoteInput,
         config: RemoteRunConfig,
     ) -> Result<RemoteRunReport, RemoteExecutorError> {
-        if cx.is_cancel_requested() { return Err(RemoteRunError::Cancelled.into()); }
+        if cx.is_cancel_requested() {
+            return Err(RemoteRunError::Cancelled.into());
+        }
         let permit = self.acquire(&node, input.len())?;
         Ok(run_admitted(cx, node, computation, input, config, Some(permit)).await?)
     }
 }
 
-fn next_usage(limits: RemoteAdmissionLimits, policy: RemotePeerLimits,
-    total: RemoteAdmissionUsage, peer: RemoteAdmissionUsage, bytes: usize,
+fn next_usage(
+    limits: RemoteAdmissionLimits,
+    policy: RemotePeerLimits,
+    total: RemoteAdmissionUsage,
+    peer: RemoteAdmissionUsage,
+    bytes: usize,
 ) -> Result<(RemoteAdmissionUsage, RemoteAdmissionUsage), RemoteAdmissionError> {
     let next_peer = RemoteAdmissionUsage {
-        in_flight: peer.in_flight.checked_add(1).filter(|n| *n <= policy.max_in_flight)
+        in_flight: peer
+            .in_flight
+            .checked_add(1)
+            .filter(|n| *n <= policy.max_in_flight)
             .ok_or(RemoteAdmissionError::PeerInFlight)?,
-        input_bytes: peer.input_bytes.checked_add(bytes).filter(|n| *n <= policy.max_input_bytes)
+        input_bytes: peer
+            .input_bytes
+            .checked_add(bytes)
+            .filter(|n| *n <= policy.max_input_bytes)
             .ok_or(RemoteAdmissionError::PeerBytes)?,
     };
     let next_total = RemoteAdmissionUsage {
-        in_flight: total.in_flight.checked_add(1).filter(|n| *n <= limits.max_in_flight)
+        in_flight: total
+            .in_flight
+            .checked_add(1)
+            .filter(|n| *n <= limits.max_in_flight)
             .ok_or(RemoteAdmissionError::TotalInFlight)?,
-        input_bytes: total.input_bytes.checked_add(bytes).filter(|n| *n <= limits.max_input_bytes)
+        input_bytes: total
+            .input_bytes
+            .checked_add(bytes)
+            .filter(|n| *n <= limits.max_input_bytes)
             .ok_or(RemoteAdmissionError::TotalBytes)?,
     };
     Ok((next_peer, next_total))
 }
 
-fn charge(shared: &Arc<Shared>, state: &mut State, index: usize, bytes: usize)
-    -> Result<Permit, RemoteAdmissionError>
-{
-    let (next_peer, next_total) = next_usage(shared.limits, shared.peers[index], state.total, state.peers[index], bytes)?;
-    let permit = Permit { _charge: Arc::new(Charge { shared: Arc::clone(shared), index, bytes }) };
+fn charge(
+    shared: &Arc<Shared>,
+    state: &mut State,
+    index: usize,
+    bytes: usize,
+) -> Result<Permit, RemoteAdmissionError> {
+    let (next_peer, next_total) = next_usage(
+        shared.limits,
+        shared.peers[index],
+        state.total,
+        state.peers[index],
+        bytes,
+    )?;
+    let permit = Permit {
+        _charge: Arc::new(Charge {
+            shared: Arc::clone(shared),
+            index,
+            bytes,
+        }),
+    };
     state.peers[index] = next_peer;
     state.total = next_total;
     Ok(permit)
@@ -268,8 +337,14 @@ fn charge(shared: &Arc<Shared>, state: &mut State, index: usize, bytes: usize)
 // Clones are two references to ONE charge, not new admissions. Root ownership
 // covers local close; the task copy covers an abandoned caller's pending drain.
 #[derive(Clone)]
-pub(super) struct Permit { _charge: Arc<Charge> }
-struct Charge { shared: Arc<Shared>, index: usize, bytes: usize }
+pub(super) struct Permit {
+    _charge: Arc<Charge>,
+}
+struct Charge {
+    shared: Arc<Shared>,
+    index: usize,
+    bytes: usize,
+}
 impl Drop for Charge {
     fn drop(&mut self) {
         {
@@ -290,5 +365,7 @@ mod service;
 pub use service::RemoteServiceAdmission;
 
 mod queue;
-pub use queue::{RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage,
-    RemoteReservation, RemoteReserveError};
+pub use queue::{
+    RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage, RemoteReservation,
+    RemoteReserveError,
+};

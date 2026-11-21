@@ -697,7 +697,9 @@ impl MultipathSink {
             return Err(SinkError::Closed);
         }
         if self.paths.len() == self.max_paths || self.paths.iter().any(|path| path.id == id) {
-            return Err(Self::failure("multipath path limit or duplicate identifier"));
+            return Err(Self::failure(
+                "multipath path limit or duplicate identifier",
+            ));
         }
         self.paths.push(MultipathOutput {
             id,
@@ -761,7 +763,13 @@ impl MultipathSink {
     /// returned symbol. The iterator is in ascending path-ID order.
     pub fn into_paths(
         self,
-    ) -> impl Iterator<Item = (PathId, Box<dyn SymbolSink>, VecDeque<MultipathPendingSymbol>)> {
+    ) -> impl Iterator<
+        Item = (
+            PathId,
+            Box<dyn SymbolSink>,
+            VecDeque<MultipathPendingSymbol>,
+        ),
+    > {
         self.paths
             .into_iter()
             .map(|path| (path.id, path.sink, path.queue))
@@ -819,9 +827,7 @@ impl MultipathSink {
                 selected = Some(index);
             }
         }
-        if !repair
-            && let Some(index) = selected
-        {
+        if !repair && let Some(index) = selected {
             self.paths[index].credit = self.paths[index].credit.saturating_sub(total);
         }
         selected
@@ -1030,7 +1036,9 @@ impl MultipathSink {
 
     fn update_high_water(&mut self, index: usize) {
         let path = &mut self.paths[index];
-        path.stats.high_water_symbols = path.stats.high_water_symbols
+        path.stats.high_water_symbols = path
+            .stats
+            .high_water_symbols
             .max(path.queue.len() + path.stats.unflushed_symbols);
     }
 }
@@ -1050,7 +1058,11 @@ impl SymbolSink for MultipathSink {
             .any(|path| Self::has_capacity(path, self.capacity_per_path))
         {
             Poll::Ready(Ok(()))
-        } else if self.paths.iter().all(|path| path.stats.failed || path.closed) {
+        } else if self
+            .paths
+            .iter()
+            .all(|path| path.stats.failed || path.closed)
+        {
             Poll::Ready(Err(Self::failure("no usable multipath transport")))
         } else {
             Poll::Pending
@@ -1063,9 +1075,7 @@ impl SymbolSink for MultipathSink {
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
         if symbol.symbol().data().len() > self.max_symbol_bytes {
-            return Poll::Ready(Err(Self::failure(
-                "multipath symbol exceeds payload bound",
-            )));
+            return Poll::Ready(Err(Self::failure("multipath symbol exceeds payload bound")));
         }
         match self.as_mut().poll_ready(cx) {
             Poll::Ready(Ok(())) => {}
@@ -1094,7 +1104,9 @@ impl SymbolSink for MultipathSink {
         if let Some(error) = self.cancellation.as_ref() {
             // Healthy queued work must not hide an already observed owner
             // cancellation behind Pending, or resume on a later flush.
-            return Poll::Ready(Err(Self::copy_cancellation(error).expect("stored cancellation")));
+            return Poll::Ready(Err(
+                Self::copy_cancellation(error).expect("stored cancellation")
+            ));
         }
         if self.paths.iter().any(|path| {
             !path.stats.failed && (!path.queue.is_empty() || path.stats.unflushed_symbols != 0)

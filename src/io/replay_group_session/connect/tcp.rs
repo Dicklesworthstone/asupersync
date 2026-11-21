@@ -62,7 +62,8 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
         let key = request_key(address);
         self.connect_with(attempt, &key, key.len(), move || {
             TcpStream::connect_socket_addr(address)
-        }).await
+        })
+        .await
     }
 }
 

@@ -329,7 +329,9 @@ fn interleaved_native_file_reader_and_writer_both_resume_without_rescue() {
         let _release = Release(Arc::clone(&controller_probe));
         let write_blocked = controller_probe.wait_until_first_blocked(Duration::from_secs(5));
         let reader_started = start_reader.send_blocking(()).is_ok();
-        let read_parked = reader_parked_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        let read_parked = reader_parked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .is_ok();
         controller_probe.release_first();
         let mut needed_rescue = false;
         for _ in 0..2 {
@@ -423,7 +425,10 @@ fn interleaved_native_file_reader_and_writer_both_resume_without_rescue() {
         2,
         "one write and one read, with no duplicate write"
     );
-    assert_eq!(std::fs::read(path).expect("read completed file"), b"hellotail");
+    assert_eq!(
+        std::fs::read(path).expect("read completed file"),
+        b"hellotail"
+    );
 }
 
 #[test]
@@ -751,7 +756,10 @@ where
         assert_eq!(file.seek(SeekFrom::End(0)).await.expect("seek to end"), 5);
         abandon_queued_io(file.write_all(b"hello")).await;
         file.flush().await.expect("settle the queued write");
-        assert_eq!(std::fs::read(&path).expect("read settled write"), b"priorhello");
+        assert_eq!(
+            std::fs::read(&path).expect("read settled write"),
+            b"priorhello"
+        );
         assert_eq!(file.stream_position().await.expect("settled cursor"), 10);
         scenario(file, path).await;
     });
@@ -778,7 +786,10 @@ fn settled_write_is_not_reused_after_owned_seek() {
                 file.write_all(b"hello").await.expect("new identical write");
                 file.flush().await.expect("flush new write");
                 assert_eq!(std::fs::read(&path).expect("read back"), expected);
-                assert_eq!(file.stream_position().await.expect("new cursor"), position + 5);
+                assert_eq!(
+                    file.stream_position().await.expect("new cursor"),
+                    position + 5
+                );
             },
         );
     }
@@ -797,11 +808,17 @@ fn settled_write_is_not_reused_after_owned_rewind() {
                     file.rewind().await.expect("rewind");
                     (0, b"hellohello")
                 };
-                assert_eq!(file.stream_position().await.expect("rewind cursor"), position);
+                assert_eq!(
+                    file.stream_position().await.expect("rewind cursor"),
+                    position
+                );
                 file.write_all(b"hello").await.expect("new identical write");
                 file.flush().await.expect("flush new write");
                 assert_eq!(std::fs::read(&path).expect("read back"), expected);
-                assert_eq!(file.stream_position().await.expect("new cursor"), position + 5);
+                assert_eq!(
+                    file.stream_position().await.expect("new cursor"),
+                    position + 5
+                );
             },
         );
     }
@@ -820,7 +837,10 @@ fn settled_write_is_not_reused_after_resize() {
                     file.set_len(0).await.expect("truncate");
                     (0, b"\0\0\0\0\0\0\0\0\0\0hello")
                 };
-                assert_eq!(file.metadata().await.expect("resized metadata").len(), length);
+                assert_eq!(
+                    file.metadata().await.expect("resized metadata").len(),
+                    length
+                );
                 assert_eq!(file.stream_position().await.expect("resize cursor"), 10);
                 file.write_all(b"hello").await.expect("new identical write");
                 file.flush().await.expect("flush new write");
@@ -869,9 +889,14 @@ fn settled_write_retry_survives_reads_flushes_and_syncs() {
         file.sync_all().await.expect("interleaved sync_all");
         file.sync_data().await.expect("interleaved sync_data");
         assert_eq!(file.stream_position().await.expect("unchanged cursor"), 10);
-        let (_, read) = file.read_into_vec(vec![0; 1]).await.expect("owned read at EOF");
+        let (_, read) = file
+            .read_into_vec(vec![0; 1])
+            .await
+            .expect("owned read at EOF");
         assert_eq!(read, 0);
-        file.write_all(b"hello").await.expect("retry original write");
+        file.write_all(b"hello")
+            .await
+            .expect("retry original write");
         file.flush().await.expect("flush retry");
         assert_eq!(std::fs::read(&path).expect("read back"), b"priorhello");
         assert_eq!(file.stream_position().await.expect("unchanged cursor"), 10);

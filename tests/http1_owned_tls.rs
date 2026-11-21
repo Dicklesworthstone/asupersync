@@ -124,7 +124,11 @@ async fn https_waits_for_request_subtree(cx: Cx) {
     let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let signals = Arc::new(Mutex::new(Some((
-        body_ready, child_ready, finished, cleanup_ready, released,
+        body_ready,
+        child_ready,
+        finished,
+        cleanup_ready,
+        released,
     ))));
     let cleanup_owner = cx.clone();
     let handler_drops = Arc::clone(&drops);
@@ -143,33 +147,39 @@ async fn https_waits_for_request_subtree(cx: Cx) {
                 assert_eq!(factory_cx.task_id(), body_cx.task_id());
                 assert_eq!(factory_cx.region_id(), body_cx.region_id());
                 identities.lock().unwrap().push(body_cx.clone());
-                if let Some((body_ready, child_ready, mut finish, cleanup_ready, mut release)) = first {
-                    body_cx.spawn(move |child_cx| async move {
-                        let _dropped = Dropped(drops);
-                        let mut ready = Some(child_ready);
-                        let mut cancelled = pin!(child_cx.cancelled());
-                        poll_fn(|task| match cancelled.as_mut().poll(task) {
-                            Poll::Ready(()) => Poll::Ready(()),
-                            Poll::Pending => {
-                                if let Some(ready) = ready.take() {
-                                    ready.send_blocking(child_cx.clone()).unwrap();
+                if let Some((body_ready, child_ready, mut finish, cleanup_ready, mut release)) =
+                    first
+                {
+                    body_cx
+                        .spawn(move |child_cx| async move {
+                            let _dropped = Dropped(drops);
+                            let mut ready = Some(child_ready);
+                            let mut cancelled = pin!(child_cx.cancelled());
+                            poll_fn(|task| match cancelled.as_mut().poll(task) {
+                                Poll::Ready(()) => Poll::Ready(()),
+                                Poll::Pending => {
+                                    if let Some(ready) = ready.take() {
+                                        ready.send_blocking(child_cx.clone()).unwrap();
+                                    }
+                                    Poll::Pending
                                 }
-                                Poll::Pending
-                            }
-                        }).await;
-                        assert!(child_cx.checkpoint().is_err());
-                        let mut ready = Some(cleanup_ready);
-                        let mut cleanup = pin!(release.recv(&cleanup_owner));
-                        poll_fn(|task| match cleanup.as_mut().poll(task) {
-                            Poll::Ready(result) => Poll::Ready(result.unwrap()),
-                            Poll::Pending => {
-                                if let Some(ready) = ready.take() {
-                                    ready.send_blocking(()).unwrap();
+                            })
+                            .await;
+                            assert!(child_cx.checkpoint().is_err());
+                            let mut ready = Some(cleanup_ready);
+                            let mut cleanup = pin!(release.recv(&cleanup_owner));
+                            poll_fn(|task| match cleanup.as_mut().poll(task) {
+                                Poll::Ready(result) => Poll::Ready(result.unwrap()),
+                                Poll::Pending => {
+                                    if let Some(ready) = ready.take() {
+                                        ready.send_blocking(()).unwrap();
+                                    }
+                                    Poll::Pending
                                 }
-                                Poll::Pending
-                            }
-                        }).await;
-                    }).unwrap();
+                            })
+                            .await;
+                        })
+                        .unwrap();
                     body_ready.send_blocking(body_cx.clone()).unwrap();
                     finish.recv(&body_cx).await.unwrap();
                     Response::new(200, "OK", b"first over TLS".to_vec())
@@ -180,22 +190,32 @@ async fn https_waits_for_request_subtree(cx: Cx) {
             }
         },
         config(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
-    let mut serving = cx.spawn(move |listener_cx| async move {
-        listener.run_tls_owned_in(&listener_cx, acceptor(b"http/1.1")).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |listener_cx| async move {
+            listener
+                .run_tls_owned_in(&listener_cx, acceptor(b"http/1.1"))
+                .await
+        })
+        .unwrap();
     let tls = connector(b"http/1.1")
         .connect("localhost", TcpStream::connect(address).await.unwrap())
-        .await.unwrap();
-    let mut client = cx.spawn(move |_| async move {
-        Http1Client::request_with_io(
-            tls,
-            Request::get("/first").header("Host", "localhost").build(),
-        ).await
-    }).unwrap();
+        .await
+        .unwrap();
+    let mut client = cx
+        .spawn(move |_| async move {
+            Http1Client::request_with_io(
+                tls,
+                Request::get("/first").header("Host", "localhost").build(),
+            )
+            .await
+        })
+        .unwrap();
     let body = body_started.recv(&cx).await.unwrap();
     let child = child_parked.recv(&cx).await.unwrap();
     assert_ne!(body.task_id(), serving.task_id());
@@ -209,9 +229,13 @@ async fn https_waits_for_request_subtree(cx: Cx) {
     assert_eq!(in_flight.load(Ordering::SeqCst), 1);
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     poll_fn(|task| {
-        assert!(client.poll_join(task).is_pending(), "no response before request cleanup");
+        assert!(
+            client.poll_join(task).is_pending(),
+            "no response before request cleanup"
+        );
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     release.send_blocking(()).unwrap();
     let (first, tls, body_withheld) = client.join(&cx).await.unwrap().unwrap();
     assert_eq!(first.status, 200);
@@ -223,7 +247,9 @@ async fn https_waits_for_request_subtree(cx: Cx) {
             .header("Host", "localhost")
             .header("Connection", "close")
             .build(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert_eq!(second.status, 200);
     assert_eq!(second.body, b"second over TLS");
     assert!(manager.begin_drain(Duration::from_secs(5)));
@@ -253,19 +279,28 @@ async fn non_http1_alpn_is_refused(cx: Cx) {
             async { Response::new(200, "OK", Vec::new()) }
         },
         config(),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
-    let mut serving = cx.spawn(move |listener_cx| async move {
-        listener.run_tls_owned_in(&listener_cx, acceptor(b"h2")).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |listener_cx| async move {
+            listener
+                .run_tls_owned_in(&listener_cx, acceptor(b"h2"))
+                .await
+        })
+        .unwrap();
     let mut tls = connector(b"h2")
         .connect("localhost", TcpStream::connect(address).await.unwrap())
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(tls.alpn_protocol(), Some(b"h2".as_slice()));
     // A negotiated h2 peer cannot smuggle HTTP/1 bytes into the handler.
-    let _ = tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    let _ = tls
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await;
     let mut byte = [0; 1];
     match tls.read(&mut byte).await {
         Ok(0) | Err(_) => {}
@@ -285,7 +320,10 @@ fn owned_https_refuses_non_http1_alpn_before_request_admission() {
 
 async fn silent_handshake_retires(cx: Cx) {
     for force_close in [false, true] {
-        let owner = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let owner = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let handler_calls = Arc::clone(&calls);
         let listener = Http1Listener::bind_with_config(
@@ -295,13 +333,20 @@ async fn silent_handshake_retires(cx: Cx) {
                 async { Response::new(200, "OK", Vec::new()) }
             },
             config().drain_timeout(Duration::from_millis(20)),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let address = listener.local_addr().unwrap();
         let manager = listener.connection_manager().clone();
         let in_flight = listener.in_flight_requests();
-        let mut serving = owner.cx().spawn(move |listener_cx| async move {
-            listener.run_tls_owned_in(&listener_cx, acceptor(b"http/1.1")).await
-        }).unwrap();
+        let mut serving = owner
+            .cx()
+            .spawn(move |listener_cx| async move {
+                listener
+                    .run_tls_owned_in(&listener_cx, acceptor(b"http/1.1"))
+                    .await
+            })
+            .unwrap();
         let mut silent = TcpStream::connect(address).await.unwrap();
         while manager.active_count() != 1 {
             yield_now().await;
@@ -312,7 +357,9 @@ async fn silent_handshake_retires(cx: Cx) {
             assert!(manager.begin_drain(Duration::from_secs(5)));
             assert!(manager.begin_force_close());
         } else {
-            owner.cancel(CancelReason::user("cancel owned HTTPS service region")).unwrap();
+            owner
+                .cancel(CancelReason::user("cancel owned HTTPS service region"))
+                .unwrap();
         }
         let result = serving.join(&cx).await;
         assert!(!matches!(result, Err(JoinError::Panicked(_))), "{result:?}");

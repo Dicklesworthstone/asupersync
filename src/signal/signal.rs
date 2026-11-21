@@ -13,9 +13,9 @@
 use std::io;
 
 #[cfg(any(unix, windows))]
-use std::collections::HashMap;
-#[cfg(any(unix, windows))]
 use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(unix, windows))]
+use std::collections::HashMap;
 #[cfg(any(unix, windows))]
 use std::sync::{Arc, RwLock};
 #[cfg(any(unix, windows))]
@@ -515,9 +515,9 @@ fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalE
             return Ok(dispatcher);
         }
     }
-    let mut lock = SIGNAL_DISPATCHER.write().map_err(|_| {
-        SignalError::unsupported(kind, "signal dispatcher lock poisoned")
-    })?;
+    let mut lock = SIGNAL_DISPATCHER
+        .write()
+        .map_err(|_| SignalError::unsupported(kind, "signal dispatcher lock poisoned"))?;
     if let Some(dispatcher) = *lock {
         return Ok(dispatcher);
     }

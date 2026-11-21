@@ -10,8 +10,8 @@
 use asupersync::cx::ChildRegionSpec;
 use asupersync::distributed::remote_owned::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig, RemoteRunHandleError,
-    RemoteRunReport, RemoteRunTrigger, run_remote, spawn_remote_owned,
+    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig,
+    RemoteRunHandleError, RemoteRunReport, RemoteRunTrigger, run_remote, spawn_remote_owned,
 };
 use asupersync::distributed::{ComputationSchemaRegistry, HasSchema, SchemaDescriptor};
 use asupersync::observability::diagnostics::Reason;
@@ -42,10 +42,14 @@ use std::time::{Duration, Instant};
 struct Request;
 struct Response;
 impl HasSchema for Request {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("owned-remote-test-request-v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("owned-remote-test-request-v1")
+    }
 }
 impl HasSchema for Response {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("owned-remote-test-response-v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("owned-remote-test-response-v1")
+    }
 }
 #[derive(Default)]
 struct Witness {
@@ -58,7 +62,10 @@ struct Witness {
 }
 struct Retire(Arc<Witness>);
 impl Drop for Retire {
-    fn drop(&mut self) { self.0.dropped.store(true, Ordering::Release); self.0.changed.notify_waiters(); }
+    fn drop(&mut self) {
+        self.0.dropped.store(true, Ordering::Release);
+        self.0.changed.notify_waiters();
+    }
 }
 struct Stop {
     service: RemoteComputationServiceHandle,
@@ -70,16 +77,28 @@ impl Drop for Stop {
         // A failed assertion must not strand deliberately withheld cleanup.
         self.witness.release.store(true, Ordering::Release);
         self.witness.changed.notify_waiters();
-        let _ = self.remote.begin_drain(); let _ = self.service.begin_drain();
+        let _ = self.remote.begin_drain();
+        let _ = self.service.begin_drain();
     }
 }
 #[derive(Clone, Copy)]
 enum Case {
-    Success, Cancel, Deadline, Drop, RenewalSuccess, RenewalCancel,
-    SpawnedSuccess, SpawnedCancel, SpawnedDrop, SpawnedParentClose,
+    Success,
+    Cancel,
+    Deadline,
+    Drop,
+    RenewalSuccess,
+    RenewalCancel,
+    SpawnedSuccess,
+    SpawnedCancel,
+    SpawnedDrop,
+    SpawnedParentClose,
 }
 fn config() -> RemoteRunConfig {
-    RemoteRunConfig { timeout: Duration::from_secs(5), child: ChildRegionSpec::inherit() }
+    RemoteRunConfig {
+        timeout: Duration::from_secs(5),
+        child: ChildRegionSpec::inherit(),
+    }
 }
 
 fn exercise(workers: usize, case: Case) {
@@ -87,18 +106,45 @@ fn exercise(workers: usize, case: Case) {
 }
 
 async fn invoke(
-    executor: Option<&RemoteExecutor>, cx: &Cx, destination: &str, name: &str,
-    input: RemoteInput, config: RemoteRunConfig,
+    executor: Option<&RemoteExecutor>,
+    cx: &Cx,
+    destination: &str,
+    name: &str,
+    input: RemoteInput,
+    config: RemoteRunConfig,
 ) -> Result<RemoteRunReport, RemoteExecutorError> {
     match executor {
-        Some(executor) => executor.run(cx, NodeId::new(destination), ComputationName::new(name), input, config).await,
-        None => Ok(run_remote(cx, NodeId::new(destination), ComputationName::new(name), input, config).await?),
+        Some(executor) => {
+            executor
+                .run(
+                    cx,
+                    NodeId::new(destination),
+                    ComputationName::new(name),
+                    input,
+                    config,
+                )
+                .await
+        }
+        None => Ok(run_remote(
+            cx,
+            NodeId::new(destination),
+            ComputationName::new(name),
+            input,
+            config,
+        )
+        .await?),
     }
 }
 
 fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
-    let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
-        else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread().build().unwrap()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
+    };
     let runtime_handle = runtime.handle();
     // Keep feature-sensitive Diagnostics on this owner thread, never in a Send task.
     let diagnostics = runtime.diagnostics();
@@ -441,33 +487,104 @@ fn native_trace_count(runtime: &asupersync::runtime::Runtime, message: &str) -> 
 }
 
 async fn assert_peer_still_charged(executor: &RemoteExecutor, cx: &Cx) {
-    assert_eq!(executor.usage(), RemoteAdmissionUsage { in_flight: 1, input_bytes: 8 });
-    assert_eq!(executor.peer_usage(&NodeId::new("worker")).unwrap().in_flight, 1);
-    let refused = executor.clone().run(cx, NodeId::new("worker"), ComputationName::new("echo"), RemoteInput::empty(), config()).await;
-    assert!(matches!(refused, Err(RemoteExecutorError::Admission(RemoteAdmissionError::PeerInFlight))));
-    let oversized = executor.run(cx, NodeId::new("other"), ComputationName::new("echo"), RemoteInput::new(vec![0; 33]), config()).await;
-    assert!(matches!(oversized, Err(RemoteExecutorError::Admission(RemoteAdmissionError::RequestBytes))));
-    let other = executor.run(cx, NodeId::new("other"), ComputationName::new("echo"), RemoteInput::new(vec![7; 32]), config()).await.unwrap();
+    assert_eq!(
+        executor.usage(),
+        RemoteAdmissionUsage {
+            in_flight: 1,
+            input_bytes: 8
+        }
+    );
+    assert_eq!(
+        executor
+            .peer_usage(&NodeId::new("worker"))
+            .unwrap()
+            .in_flight,
+        1
+    );
+    let refused = executor
+        .clone()
+        .run(
+            cx,
+            NodeId::new("worker"),
+            ComputationName::new("echo"),
+            RemoteInput::empty(),
+            config(),
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(RemoteExecutorError::Admission(
+            RemoteAdmissionError::PeerInFlight
+        ))
+    ));
+    let oversized = executor
+        .run(
+            cx,
+            NodeId::new("other"),
+            ComputationName::new("echo"),
+            RemoteInput::new(vec![0; 33]),
+            config(),
+        )
+        .await;
+    assert!(matches!(
+        oversized,
+        Err(RemoteExecutorError::Admission(
+            RemoteAdmissionError::RequestBytes
+        ))
+    ));
+    let other = executor
+        .run(
+            cx,
+            NodeId::new("other"),
+            ComputationName::new("echo"),
+            RemoteInput::new(vec![7; 32]),
+            config(),
+        )
+        .await
+        .unwrap();
     assert!(
         other.is_success(),
         "{other:?}; proxy error: {:?}; reply: {:?}; close: {:?}",
-        other.task.as_ref().err(), other.task.as_ref().ok(), other.close
+        other.task.as_ref().err(),
+        other.task.as_ref().ok(),
+        other.close
     );
-    assert_eq!(executor.usage(), RemoteAdmissionUsage { in_flight: 1, input_bytes: 8 });
+    assert_eq!(
+        executor.usage(),
+        RemoteAdmissionUsage {
+            in_flight: 1,
+            input_bytes: 8
+        }
+    );
 }
 
-fn holds_lease(diagnostics: &asupersync::observability::diagnostics::Diagnostics, region: RegionId, holder: TaskId) -> bool {
-    diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
-        matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
+fn holds_lease(
+    diagnostics: &asupersync::observability::diagnostics::Diagnostics,
+    region: RegionId,
+    holder: TaskId,
+) -> bool {
+    diagnostics
+        .explain_region_open(region)
+        .reasons
+        .iter()
+        .any(|reason| {
+            matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
             if *holder_task == holder && obligation_type == "Lease")
-    })
+        })
 }
-async fn wait_for_lease(cx: &Cx, diagnostics: &asupersync::observability::diagnostics::Diagnostics, region: RegionId, holder: TaskId) {
+async fn wait_for_lease(
+    cx: &Cx,
+    diagnostics: &asupersync::observability::diagnostics::Diagnostics,
+    region: RegionId,
+    holder: TaskId,
+) {
     asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
         while !holds_lease(diagnostics, region, holder) {
             asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
         }
-    }).await.expect("real checked Lease projection before triggering cancellation");
+    })
+    .await
+    .expect("real checked Lease projection before triggering cancellation");
 }
 
 #[derive(Default)]
@@ -1284,8 +1401,8 @@ fn owned_native_silent_cancel_reply_bounds_parent_close() {
 
 #[test]
 fn lab_spawn_join_releases_after_task_record_retirement() {
-    use asupersync::{Budget, LabConfig, LabRuntime};
     use asupersync::runtime::task_handle::JoinError;
+    use asupersync::{Budget, LabConfig, LabRuntime};
 
     for panic_child in [false, true] {
         let mut lab = LabRuntime::new(LabConfig::new(0x59_48_55).max_steps(256));
@@ -1294,36 +1411,50 @@ fn lab_spawn_join_releases_after_task_record_retirement() {
         let completed_task = Arc::clone(&completed);
         let child_id = Arc::new(Mutex::new(None));
         let child_id_task = Arc::clone(&child_id);
-        let (owner, mut owner_join) = lab.state.create_task(root, Budget::INFINITE, async move {
-            let cx = Cx::current().unwrap();
-            let mut child = cx.spawn(move |child_cx| async move {
-                *child_id_task.lock() = Some(child_cx.task_id());
-                assert!(!panic_child, "retirement regression panic");
-                42_u8
-            }).unwrap();
-            let result = child.join(&cx).await;
-            if panic_child {
-                match result {
-                    Err(JoinError::Panicked(payload)) => {
-                        assert_eq!(payload.message(), "retirement regression panic");
+        let (owner, mut owner_join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let mut child = cx
+                    .spawn(move |child_cx| async move {
+                        *child_id_task.lock() = Some(child_cx.task_id());
+                        assert!(!panic_child, "retirement regression panic");
+                        42_u8
+                    })
+                    .unwrap();
+                let result = child.join(&cx).await;
+                if panic_child {
+                    match result {
+                        Err(JoinError::Panicked(payload)) => {
+                            assert_eq!(payload.message(), "retirement regression panic");
+                        }
+                        other => panic!("expected the child's exact panic, got {other:?}"),
                     }
-                    other => panic!("expected the child's exact panic, got {other:?}"),
+                } else {
+                    assert_eq!(result.unwrap(), 42);
                 }
-            } else {
-                assert_eq!(result.unwrap(), 42);
-            }
-            completed_task.store(true, Ordering::Release);
-        }).unwrap();
+                completed_task.store(true, Ordering::Release);
+            })
+            .unwrap();
         lab.scheduler.lock().schedule(owner, 0);
 
         // A lost retirement wake leaves the owner parked. A bounded Lab run lets
         // the assertion expose that failure without an unbounded native join.
         lab.run_until_idle();
         let child_id = child_id.lock().expect("child was actually polled");
-        assert!(lab.state.task(child_id).is_none(), "child record must be retired");
-        assert!(completed.load(Ordering::Acquire), "join stayed parked after child retirement");
+        assert!(
+            lab.state.task(child_id).is_none(),
+            "child record must be retired"
+        );
+        assert!(
+            completed.load(Ordering::Acquire),
+            "join stayed parked after child retirement"
+        );
         assert!(matches!(owner_join.try_join(), Ok(Some(()))));
-        assert!(lab.state.task(owner).is_none(), "owner record must be retired");
+        assert!(
+            lab.state.task(owner).is_none(),
+            "owner record must be retired"
+        );
     }
 }
 
@@ -1458,18 +1589,30 @@ fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
         let runtime = if workers == 1 {
             RuntimeBuilder::current_thread().build().unwrap()
         } else {
-            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
         };
         runtime.block_on(async {
             let base = Cx::current().unwrap();
             assert!(base.remote().is_none());
-            let unprivileged = base.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let unprivileged = base
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             assert!(unprivileged.cx().remote().is_none());
             unprivileged.close().await.unwrap();
 
             let parent = base.with_remote_cap(RemoteCap::new());
-            let child = parent.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
-            assert!(std::ptr::eq(parent.remote().unwrap(), child.cx().remote().unwrap()));
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            assert!(std::ptr::eq(
+                parent.remote().unwrap(),
+                child.cx().remote().unwrap()
+            ));
             assert_ne!(parent.region_id(), child.region_id());
             child.close().await.unwrap();
 
@@ -1482,9 +1625,16 @@ fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
             };
             assert!(parent.remote().is_some());
             assert!(restricted.remote().is_none());
-            let child = restricted.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let child = restricted
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             assert!(child.cx().remote().is_none());
-            let grandchild = child.cx().open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             assert!(grandchild.cx().remote().is_none());
             grandchild.close().await.unwrap();
             child.close().await.unwrap();
@@ -1494,23 +1644,33 @@ fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
 
 #[test]
 fn native_v3_success_has_a_checked_commit_and_closed_local_child() {
-    for workers in [1, 2] { exercise(workers, Case::Success); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Success);
+    }
 }
 #[test]
 fn spawned_owned_remote_handles_run_concurrently_without_join_polling() {
-    for workers in [1, 2] { exercise(workers, Case::SpawnedSuccess); }
+    for workers in [1, 2] {
+        exercise(workers, Case::SpawnedSuccess);
+    }
 }
 #[test]
 fn spawned_owned_remote_abort_retains_lease_and_report_until_protocol_cleanup() {
-    for workers in [1, 2] { exercise(workers, Case::SpawnedCancel); }
+    for workers in [1, 2] {
+        exercise(workers, Case::SpawnedCancel);
+    }
 }
 #[test]
 fn dropped_owned_remote_handle_keeps_cleanup_in_its_parent_region() {
-    for workers in [1, 2] { exercise(workers, Case::SpawnedDrop); }
+    for workers in [1, 2] {
+        exercise(workers, Case::SpawnedDrop);
+    }
 }
 #[test]
 fn parent_close_drains_an_owned_remote_handle_that_was_never_polled() {
-    for workers in [1, 2] { exercise(workers, Case::SpawnedParentClose); }
+    for workers in [1, 2] {
+        exercise(workers, Case::SpawnedParentClose);
+    }
 }
 #[test]
 fn owned_native_automatic_renewal_keeps_production_computation_alive() {
@@ -1526,30 +1686,44 @@ fn owned_native_cancellation_stops_automatic_renewal_during_remote_cleanup() {
 }
 #[test]
 fn cancelled_native_invocation_retains_its_lease_until_remote_handler_cleanup() {
-    for workers in [1, 2] { exercise(workers, Case::Cancel); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Cancel);
+    }
 }
 #[test]
 fn native_deadline_forwards_cancel_without_stopping_unrelated_invocations() {
-    for workers in [1, 2] { exercise(workers, Case::Deadline); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Deadline);
+    }
 }
 #[test]
 fn dropped_native_runner_keeps_region_owned_cleanup_until_terminal_collection() {
-    for workers in [1, 2] { exercise(workers, Case::Drop); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Drop);
+    }
 }
 
 #[test]
 fn admitted_native_success_releases_both_scope_and_proxy_charges() {
-    for workers in [1, 2] { exercise_with_admission(workers, Case::Success, true); }
+    for workers in [1, 2] {
+        exercise_with_admission(workers, Case::Success, true);
+    }
 }
 #[test]
 fn admitted_native_cancellation_cannot_reuse_peer_capacity_during_remote_cleanup() {
-    for workers in [1, 2] { exercise_with_admission(workers, Case::Cancel, true); }
+    for workers in [1, 2] {
+        exercise_with_admission(workers, Case::Cancel, true);
+    }
 }
 #[test]
 fn admitted_native_deadline_preserves_control_progress_and_other_peer_capacity() {
-    for workers in [1, 2] { exercise_with_admission(workers, Case::Deadline, true); }
+    for workers in [1, 2] {
+        exercise_with_admission(workers, Case::Deadline, true);
+    }
 }
 #[test]
 fn admitted_native_caller_drop_keeps_bytes_charged_until_proxy_drain() {
-    for workers in [1, 2] { exercise_with_admission(workers, Case::Drop, true); }
+    for workers in [1, 2] {
+        exercise_with_admission(workers, Case::Drop, true);
+    }
 }

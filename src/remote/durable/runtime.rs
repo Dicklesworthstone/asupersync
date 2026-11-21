@@ -131,7 +131,9 @@ impl DurableRemoteComputation {
                 let handler = Arc::clone(&handler);
                 async move {
                     owner
-                        .call(&cx, invocation, move |cx, invocation| handler(cx, invocation))
+                        .call(&cx, invocation, move |cx, invocation| {
+                            handler(cx, invocation)
+                        })
                         .await
                         .map_err(|error| RemoteError::TransportError(error.to_string()))
                 }
@@ -308,7 +310,8 @@ impl DurableRemoteComputation {
         let mut completion = cx
             .spawn_blocking_drained(move |_worker| {
                 let now = (job.owner.clock)();
-                job.journal_mut().complete_reconciliation(permit, outcome, now)
+                job.journal_mut()
+                    .complete_reconciliation(permit, outcome, now)
             })
             .map_err(|_| DurableRemoteError::Unavailable)?;
         let result = completion

@@ -1,7 +1,9 @@
 //! Atomic replacement whose staging, commit and cleanup are region-owned.
 
-use super::{OperationProbeHook, StagedAtomicWrite, TempPathGuard, normalized_parent,
-    unique_tmp_path, validate_safe_path};
+use super::{
+    OperationProbeHook, StagedAtomicWrite, TempPathGuard, normalized_parent, unique_tmp_path,
+    validate_safe_path,
+};
 use crate::cx::Cx;
 use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
 use crate::fs::scoped::{ScopedFs, ScopedFsError};
@@ -115,9 +117,12 @@ pub(super) fn stage_with(
     validate_safe_path(path, true)?;
     checkpoint()?;
     let parent = normalized_parent(path);
-    let file_name = path.file_name().ok_or_else(|| io::Error::new(
-        io::ErrorKind::InvalidInput, "atomic write target must include a file name",
-    ))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write target must include a file name",
+        )
+    })?;
     let existing_permissions = match std::fs::metadata(path) {
         Ok(metadata) => Some(metadata.permissions()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -186,9 +191,12 @@ fn write_checkpointed(
         match file.write(&bytes[..requested]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(count) if count <= requested => bytes = &bytes[count..],
-            Ok(_) => return Err(io::Error::new(
-                io::ErrorKind::InvalidData, "writer reported more bytes than requested",
-            )),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "writer reported more bytes than requested",
+                ));
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }

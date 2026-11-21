@@ -8,10 +8,9 @@
 use super::*;
 use crate::distributed::remote_owned::{
     OwnedRemoteExchange, OwnedRemoteRequest, RemoteAdmissionLimits, RemoteExecutor,
-    RemotePeerLimits, RemoteQueueLimits, RemoteReservation as QueueReservation,
-    RemoteReserveError, RemoteRunConfig, RemoteRunError, RemoteRunHandle, RemoteRunReport,
-    RemoteRunRetention, RemoteRunTaskError, prepare_owned_timing, run_owned_request,
-    spawn_owned_request,
+    RemotePeerLimits, RemoteQueueLimits, RemoteReservation as QueueReservation, RemoteReserveError,
+    RemoteRunConfig, RemoteRunError, RemoteRunHandle, RemoteRunReport, RemoteRunRetention,
+    RemoteRunTaskError, prepare_owned_timing, run_owned_request, spawn_owned_request,
 };
 
 /// Aggregate limits for a separate native transport domain.
@@ -456,8 +455,12 @@ impl NativeRemoteReservation {
     /// dropping it after admission leaves its proxy owned by the parent region
     /// until cancellation and terminal collection complete.
     pub async fn run_owned(
-        self, cx: &Cx, computation: &ComputationName, input: &[u8],
-        lease: Duration, config: RemoteRunConfig,
+        self,
+        cx: &Cx,
+        computation: &ComputationName,
+        input: &[u8],
+        lease: Duration,
+        config: RemoteRunConfig,
     ) -> Result<RemoteRunReport, NativeRemoteOwnedError> {
         let timing = prepare_owned_timing(cx, &config)?;
         let request = self.prepare_owned(cx, computation, input, lease)?;
@@ -477,8 +480,12 @@ impl NativeRemoteReservation {
     /// as [`Self::run_owned`]. The returned handle needs no manual native close
     /// to participate in parent-region cancellation or quiescence.
     pub fn spawn_owned(
-        self, cx: &Cx, computation: &ComputationName, input: &[u8],
-        lease: Duration, config: RemoteRunConfig,
+        self,
+        cx: &Cx,
+        computation: &ComputationName,
+        input: &[u8],
+        lease: Duration,
+        config: RemoteRunConfig,
     ) -> Result<RemoteRunHandle, NativeRemoteOwnedError> {
         let timing = prepare_owned_timing(cx, &config)?;
         let request = self.prepare_owned(cx, computation, input, lease)?;
@@ -486,19 +493,27 @@ impl NativeRemoteReservation {
     }
 
     fn prepare_owned(
-        self, cx: &Cx, computation: &ComputationName, input: &[u8], lease: Duration,
+        self,
+        cx: &Cx,
+        computation: &ComputationName,
+        input: &[u8],
+        lease: Duration,
     ) -> Result<NativeOwnedRequest, NativeRemoteAdmissionError> {
         if input.len() != self.input_bytes {
             return Err(NativeRemoteAdmissionError::InputLength);
         }
         if lease.is_zero() || computation.as_str().is_empty() || computation.as_str().len() > 255 {
-            return Err(NativeRemoteAdmissionError::InvalidConfig("lease or computation name"));
+            return Err(NativeRemoteAdmissionError::InvalidConfig(
+                "lease or computation name",
+            ));
         }
         if cx.checkpoint().is_err() {
             return Err(NativeRemoteAdmissionError::Cancelled);
         }
         if !cx.capabilities().remote {
-            return Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability));
+            return Err(NativeRemoteAdmissionError::Remote(
+                RemoteError::NoCapability,
+            ));
         }
         if *self.domain.closed.lock() {
             return Err(NativeRemoteAdmissionError::Closed);
@@ -514,8 +529,11 @@ impl NativeRemoteReservation {
             _credit: Arc::clone(&self.credit),
         });
         Ok(NativeOwnedRequest {
-            reservation: self, computation: computation.clone(), input: input.to_vec(),
-            lease, retention,
+            reservation: self,
+            computation: computation.clone(),
+            input: input.to_vec(),
+            lease,
+            retention,
         })
     }
 
@@ -546,7 +564,9 @@ impl NativeRemoteReservation {
             return Err(NativeRemoteAdmissionError::Cancelled);
         }
         if !cx.capabilities().remote {
-            return Err(NativeRemoteAdmissionError::Remote(RemoteError::NoCapability));
+            return Err(NativeRemoteAdmissionError::Remote(
+                RemoteError::NoCapability,
+            ));
         }
         let runtime = &self.domain.runtime;
         let route = runtime
@@ -645,11 +665,16 @@ struct NativeOwnedRequest {
 impl OwnedRemoteRequest for NativeOwnedRequest {
     type Exchange = NativeRemoteAdmittedHandle;
     fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError> {
-        if cx.capabilities().remote { Ok(()) }
-        else { Err(RemoteError::NoCapability.into()) }
+        if cx.capabilities().remote {
+            Ok(())
+        } else {
+            Err(RemoteError::NoCapability.into())
+        }
     }
     fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError> {
-        Ok(self.reservation.commit(cx, &self.computation, &self.input, self.lease)?)
+        Ok(self
+            .reservation
+            .commit(cx, &self.computation, &self.input, self.lease)?)
     }
     fn retention(&self) -> Option<RemoteRunRetention> {
         Some(Arc::clone(&self.retention) as RemoteRunRetention)

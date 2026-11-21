@@ -4023,7 +4023,9 @@ impl RedisSession {
     pub async fn watch_bytes(&mut self, cx: &Cx, keys: &[&[u8]]) -> Result<(), RedisError> {
         self.require_idle()?;
         if keys.is_empty() {
-            return Err(RedisError::Protocol("WATCH requires at least one key".into()));
+            return Err(RedisError::Protocol(
+                "WATCH requires at least one key".into(),
+            ));
         }
         let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
         args.push(b"WATCH");
@@ -4041,7 +4043,10 @@ impl RedisSession {
     ///
     /// The returned transaction exclusively borrows this session. Dropping an
     /// unfinished transaction closes the session; call DISCARD to reuse it.
-    pub async fn transaction(&mut self, cx: &Cx) -> Result<RedisSessionTransaction<'_>, RedisError> {
+    pub async fn transaction(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<RedisSessionTransaction<'_>, RedisError> {
         self.require_idle()?;
         self.control(cx, &[b"MULTI"], "MULTI").await?;
         self.in_transaction = true;
@@ -4067,19 +4072,40 @@ impl Drop for RedisSession {
 
 fn validate_session_command(args: &[&[u8]]) -> Result<(), RedisError> {
     let Some(command) = args.first().filter(|command| !command.is_empty()) else {
-        return Err(RedisError::Protocol("Redis command must not be empty".into()));
+        return Err(RedisError::Protocol(
+            "Redis command must not be empty".into(),
+        ));
     };
     let reserved = [
-        "WATCH", "UNWATCH", "MULTI", "EXEC", "DISCARD", "SUBSCRIBE", "PSUBSCRIBE",
-        "SSUBSCRIBE", "UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE", "MONITOR",
-        "SYNC", "PSYNC", "RESET", "HELLO", "QUIT",
+        "WATCH",
+        "UNWATCH",
+        "MULTI",
+        "EXEC",
+        "DISCARD",
+        "SUBSCRIBE",
+        "PSUBSCRIBE",
+        "SSUBSCRIBE",
+        "UNSUBSCRIBE",
+        "PUNSUBSCRIBE",
+        "SUNSUBSCRIBE",
+        "MONITOR",
+        "SYNC",
+        "PSYNC",
+        "RESET",
+        "HELLO",
+        "QUIT",
     ];
-    if reserved.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+    if reserved
+        .iter()
+        .any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
         || (command.eq_ignore_ascii_case(b"CLIENT")
-            && args.get(1).is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+            && args
+                .get(1)
+                .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
     {
         return Err(RedisError::Protocol(
-            "command changes Redis session protocol; use the typed transaction or Pub/Sub API".into(),
+            "command changes Redis session protocol; use the typed transaction or Pub/Sub API"
+                .into(),
         ));
     }
     Ok(())
@@ -4236,7 +4262,9 @@ impl RedisSessionTransaction<'_> {
     /// Binary-safe counterpart to [`Self::cmd`].
     pub async fn cmd_bytes(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
         if self.queue_failed {
-            return Err(RedisError::Protocol("transaction requires DISCARD after a queue error".into()));
+            return Err(RedisError::Protocol(
+                "transaction requires DISCARD after a queue error".into(),
+            ));
         }
         validate_session_command(args)?;
         let next_count = self.queued_commands.checked_add(1).ok_or_else(|| {
@@ -4249,7 +4277,9 @@ impl RedisSessionTransaction<'_> {
             }
             Ok(other) => {
                 self.session.invalidate();
-                Err(RedisError::Protocol(format!("queued command expected +QUEUED, got {other:?}")))
+                Err(RedisError::Protocol(format!(
+                    "queued command expected +QUEUED, got {other:?}"
+                )))
             }
             Err(error) => {
                 self.queue_failed = true;
@@ -4266,7 +4296,9 @@ impl RedisSessionTransaction<'_> {
     /// committed command result, not a watch conflict.
     pub async fn exec(mut self, cx: &Cx) -> Result<RedisTransactionOutcome, RedisError> {
         if self.queue_failed {
-            return Err(RedisError::Protocol("transaction requires DISCARD after a queue error".into()));
+            return Err(RedisError::Protocol(
+                "transaction requires DISCARD after a queue error".into(),
+            ));
         }
         let response = self.session.exchange(cx, &[b"EXEC"]).await?;
         let result = match response {

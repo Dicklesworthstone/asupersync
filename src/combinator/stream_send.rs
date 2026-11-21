@@ -200,9 +200,10 @@ impl Published {
         if self.committed.load(Ordering::Acquire) {
             return true;
         }
-        let mut changed = pin!(self.changed.wait_until(|| {
-            self.committed.load(Ordering::Acquire)
-        }));
+        let mut changed = pin!(
+            self.changed
+                .wait_until(|| { self.committed.load(Ordering::Acquire) })
+        );
         let mut cancelled = pin!(cx.cancelled());
         poll_fn(|task| {
             if cancelled.as_mut().poll(task).is_ready() {
@@ -210,7 +211,8 @@ impl Published {
             } else {
                 changed.as_mut().poll(task).map(|()| true)
             }
-        }).await
+        })
+        .await
     }
 }
 
@@ -245,31 +247,37 @@ where
         let predecessor = std::mem::replace(&mut previous, published.clone());
         (item, predecessor, published)
     });
-    try_for_each_concurrent_scoped_until(cx, stream, limit, closed, move |child, (item, before, after)| {
-        let sender = sender.clone();
-        let mapped = map(child.clone(), item);
-        async move {
-            let value = mapped.await.map_err(StreamSendError::Map)?;
-            if let Some(before) = before {
-                if !before.wait(&child).await {
-                    return Err(StreamSendError::Delivery(CheckedSendError::Channel(
-                        SendError::Cancelled(value),
-                    )));
+    try_for_each_concurrent_scoped_until(
+        cx,
+        stream,
+        limit,
+        closed,
+        move |child, (item, before, after)| {
+            let sender = sender.clone();
+            let mapped = map(child.clone(), item);
+            async move {
+                let value = mapped.await.map_err(StreamSendError::Map)?;
+                if let Some(before) = before {
+                    if !before.wait(&child).await {
+                        return Err(StreamSendError::Delivery(CheckedSendError::Channel(
+                            SendError::Cancelled(value),
+                        )));
+                    }
                 }
+                sender
+                    .send_checked(&child, value)
+                    .await
+                    .map_err(StreamSendError::Delivery)?;
+                // Do not reserve before this item's turn: later reservations could
+                // otherwise consume every slot and prevent the predecessor sending.
+                // Only acceptance, never Drop or an error, opens the successor gate.
+                if let Some(after) = after {
+                    after.publish();
+                }
+                Ok(())
             }
-            sender
-                .send_checked(&child, value)
-                .await
-                .map_err(StreamSendError::Delivery)?;
-            // Do not reserve before this item's turn: later reservations could
-            // otherwise consume every slot and prevent the predecessor sending.
-            // Only acceptance, never Drop or an error, opens the successor gate.
-            if let Some(after) = after {
-                after.publish();
-            }
-            Ok(())
-        }
-    })
+        },
+    )
     .await
 }
 

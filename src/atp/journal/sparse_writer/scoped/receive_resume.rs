@@ -1,12 +1,14 @@
 //! Revalidate the recorded local prefix before negotiating a receive restart.
 
-use super::{Manifest, ManifestChunkCommitment, ScopedReceive, ScopedReceiveOptions,
-    ScopedSparseWriter, ScopedWriterResult, SparseWriter, SparseWriterError};
+use super::{
+    Manifest, ManifestChunkCommitment, ScopedReceive, ScopedReceiveOptions, ScopedSparseWriter,
+    ScopedWriterResult, SparseWriter, SparseWriterError,
+};
 use crate::atp::journal::sparse_writer::VerificationState;
 use crate::cx::Cx;
 use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
-use crate::types::Outcome;
 use crate::io::AsyncRead;
+use crate::types::Outcome;
 use std::io;
 use std::sync::Arc;
 
@@ -108,21 +110,27 @@ pub(super) fn checked_prefix(writer: &SparseWriter) -> Result<u64, SparseWriterE
     SparseWriter::require_accepting(&state)?;
     let result = (|| {
         let invalid = |message: &str| SparseWriterError::VerificationFailed(message.to_owned());
-        let length = state.expected_size
+        let length = state
+            .expected_size
             .ok_or_else(|| invalid("receive checkpoint requires a declared size"))?;
         let mut offset = 0_u64;
         for (start, chunk) in &state.written_chunks {
             if *start != offset || chunk.offset != *start || chunk.size == 0 {
-                return Err(invalid("receive checkpoint requires contiguous write receipts"));
+                return Err(invalid(
+                    "receive checkpoint requires contiguous write receipts",
+                ));
             }
-            offset = offset.checked_add(chunk.size)
+            offset = offset
+                .checked_add(chunk.size)
                 .filter(|end| *end <= length)
                 .ok_or_else(|| invalid("receive checkpoint range exceeds the declared size"))?;
         }
         if state.range_tracker.total_bytes() != offset
             || !state.range_tracker.is_contiguous_to(offset)
         {
-            return Err(invalid("receive checkpoint ranges disagree with write receipts"));
+            return Err(invalid(
+                "receive checkpoint ranges disagree with write receipts",
+            ));
         }
         let Some(file) = state.temp_file.as_ref() else {
             if offset == 0 && state.temp_path.is_none() {
@@ -133,14 +141,17 @@ pub(super) fn checked_prefix(writer: &SparseWriter) -> Result<u64, SparseWriterE
         if state.temp_path.is_none() {
             return Err(SparseWriterError::NoTempFile);
         }
-        let file_length = file.metadata()
-            .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?.len();
+        let file_length = file
+            .metadata()
+            .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?
+            .len();
         // Preallocation and an unreceipted partial write may extend past offset.
         // Those bytes do not count as received and must be supplied again.
         if file_length < offset || file_length > length {
             return Err(invalid("receive checkpoint storage length is inconsistent"));
         }
-        let mut file = file.try_clone()
+        let mut file = file
+            .try_clone()
             .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?;
         for (start, chunk) in &state.written_chunks {
             if SparseWriter::hash_file_range(&mut file, *start, chunk.size)? != chunk.hash {
@@ -150,7 +161,9 @@ pub(super) fn checked_prefix(writer: &SparseWriter) -> Result<u64, SparseWriterE
         Ok(offset)
     })();
     if let Err(error) = &result {
-        state.verification_state = VerificationState::Failed { reason: error.to_string() };
+        state.verification_state = VerificationState::Failed {
+            reason: error.to_string(),
+        };
     }
     result
 }

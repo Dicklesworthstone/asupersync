@@ -50,7 +50,10 @@ fn output_codec_refusal_keeps_the_committed_protocol_and_cleanup_receipt() {
     assert!(reply.cancellation.is_none());
     assert!(matches!(
         reply.outcome,
-        Outcome::Err(TypedRemoteError::Decode { stage: TypedRemoteStage::Response, .. }),
+        Outcome::Err(TypedRemoteError::Decode {
+            stage: TypedRemoteStage::Response,
+            ..
+        }),
     ));
 }
 
@@ -58,8 +61,8 @@ fn output_codec_refusal_keeps_the_committed_protocol_and_cleanup_receipt() {
 fn a_valid_typed_payload_cannot_erase_cancellation_or_cleanup_failure() {
     let signature = Signature::of::<Value>().unwrap();
     let limits = TypedRemoteLimits::default();
-    let bytes = super::super::encode_value(signature, TypedRemoteStage::Response, &42_u64, limits)
-        .unwrap();
+    let bytes =
+        super::super::encode_value(signature, TypedRemoteStage::Response, &42_u64, limits).unwrap();
     let mut raw = report(bytes);
     let reason = CancelReason::user("cancelled while retiring");
     raw.trigger = RemoteRunTrigger::Cancelled(reason.clone());
@@ -71,7 +74,10 @@ fn a_valid_typed_payload_cannot_erase_cancellation_or_cleanup_failure() {
     let decoded = decode_report::<Value>(signature, limits, raw);
     assert!(!decoded.is_success());
     assert!(matches!(decoded.trigger, RemoteRunTrigger::Cancelled(actual) if actual == reason));
-    assert!(matches!(decoded.cancel_error, Some(ChildRegionError::RuntimeUnavailable)));
+    assert!(matches!(
+        decoded.cancel_error,
+        Some(ChildRegionError::RuntimeUnavailable)
+    ));
     assert!(matches!(
         decoded.close.unwrap().cleanup_outcome,
         Some(Outcome::Panicked(payload)) if payload.message() == "finalizer failed",
@@ -79,7 +85,10 @@ fn a_valid_typed_payload_cannot_erase_cancellation_or_cleanup_failure() {
     let reply = decoded.task.unwrap();
     assert_eq!(reply.cancellation, Some(reason));
     assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
-    assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Success(42))));
+    assert!(matches!(
+        reply.outcome,
+        Outcome::Ok(TypedRemoteOutcome::Success(42))
+    ));
 }
 
 #[derive(Deserialize)]

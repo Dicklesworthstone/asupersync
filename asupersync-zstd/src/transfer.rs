@@ -217,7 +217,8 @@ impl<C: Transform> Transfer<C> {
             if step.status == StreamStatus::FrameFinished {
                 continue;
             }
-            if self.eof || self.input_position != self.input_length
+            if self.eof
+                || self.input_position != self.input_length
                 || step.status != StreamStatus::NeedInput
             {
                 return self.fail(io::Error::other("codec made no progress"), false);
@@ -389,7 +390,9 @@ mod tests {
     }
 
     fn alternating_wait(state: &mut Option<bool>, cx: &Context<'_>) -> bool {
-        let Some(pending) = state else { return false; };
+        let Some(pending) = state else {
+            return false;
+        };
         let wait = *pending;
         *pending = !wait;
         if wait {
@@ -410,8 +413,12 @@ mod tests {
     impl Source {
         fn new(bytes: &[u8], chunk: usize) -> Self {
             Self {
-                bytes: bytes.to_vec(), offset: 0, chunk, calls: 0,
-                interrupt_at: None, alternate_pending: None,
+                bytes: bytes.to_vec(),
+                offset: 0,
+                chunk,
+                calls: 0,
+                interrupt_at: None,
+                alternate_pending: None,
             }
         }
         fn read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
@@ -424,7 +431,10 @@ mod tests {
             if alternating_wait(&mut self.alternate_pending, cx) {
                 return Poll::Pending;
             }
-            let n = out.len().min(self.chunk).min(self.bytes.len() - self.offset);
+            let n = out
+                .len()
+                .min(self.chunk)
+                .min(self.bytes.len() - self.offset);
             out[..n].copy_from_slice(&self.bytes[self.offset..self.offset + n]);
             self.offset += n;
             Poll::Ready(Ok(n))
@@ -445,7 +455,10 @@ mod tests {
 
     impl Sink {
         fn new(chunk: usize) -> Self {
-            Self { chunk, ..Self::default() }
+            Self {
+                chunk,
+                ..Self::default()
+            }
         }
         fn write(&mut self, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
             assert_ne!(bytes.len(), 0, "a write is never asked to write nothing");
@@ -476,22 +489,30 @@ mod tests {
         }
     }
 
-    fn run(session: &mut EncodeTransfer, source: &mut Source, sink: &mut Sink)
-        -> io::Result<TransferProgress>
-    {
+    fn run(
+        session: &mut EncodeTransfer,
+        source: &mut Source,
+        sink: &mut Sink,
+    ) -> io::Result<TransferProgress> {
         complete(session.run(source, sink, Source::read, Sink::write, Sink::flush))
     }
 
     #[test]
     fn encodes_a_known_wire_frame_through_pending_single_byte_io() {
-        let params = EncodeParams { level: Level::Store, checksum: false };
+        let params = EncodeParams {
+            level: Level::Store,
+            checksum: false,
+        };
         let mut session = EncodeTransfer::new(params, 2).unwrap();
         let mut source = Source::new(b"hi", 1);
         source.alternate_pending = Some(false);
         let mut sink = Sink::new(1);
         sink.alternate_pending = Some(false);
         let result = run(&mut session, &mut source, &mut sink).unwrap();
-        assert_eq!(sink.bytes, [0x28, 0xb5, 0x2f, 0xfd, 0x20, 2, 0x11, 0, 0, b'h', b'i']);
+        assert_eq!(
+            sink.bytes,
+            [0x28, 0xb5, 0x2f, 0xfd, 0x20, 2, 0x11, 0, 0, b'h', b'i']
+        );
         assert_eq!(result.bytes_read, 2);
         assert_eq!(result.bytes_written, 11);
         assert!(session.is_finished());
@@ -504,8 +525,10 @@ mod tests {
         for level in [Level::Store, Level::Fast] {
             for frame_size in [31, 1024] {
                 let params = EncodeParams::new(level);
-                let expected: Vec<u8> = input.chunks(frame_size)
-                    .flat_map(|chunk| encode_all(chunk, &params)).collect();
+                let expected: Vec<u8> = input
+                    .chunks(frame_size)
+                    .flat_map(|chunk| encode_all(chunk, &params))
+                    .collect();
                 let mut session = EncodeTransfer::new(params, frame_size).unwrap();
                 let mut source = Source::new(&input, 257);
                 source.alternate_pending = Some(false);
@@ -513,7 +536,10 @@ mod tests {
                 sink.alternate_pending = Some(false);
                 let result = run(&mut session, &mut source, &mut sink).unwrap();
                 assert_eq!(sink.bytes, expected);
-                assert_eq!(decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(), input);
+                assert_eq!(
+                    decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(),
+                    input
+                );
                 assert_eq!(result.bytes_read, input.len() as u64);
                 assert_eq!(result.bytes_written, sink.bytes.len() as u64);
             }
@@ -529,18 +555,35 @@ mod tests {
         let mut sink = Sink::new(2);
         sink.blocked = true;
         {
-            let future = session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush);
+            let future = session.run(
+                &mut source,
+                &mut sink,
+                Source::read,
+                Sink::write,
+                Sink::flush,
+            );
             let mut future = pin!(future);
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
-        assert_eq!(source.calls, 1, "backpressure forbids read-ahead beyond one read");
+        assert_eq!(
+            source.calls, 1,
+            "backpressure forbids read-ahead beyond one read"
+        );
         assert_eq!(source.offset, input.len());
         assert_eq!(session.progress().bytes_read, input.len() as u64);
         assert_eq!(session.progress().bytes_written, 0);
         assert_eq!(sink.bytes, Vec::<u8>::new());
         sink.blocked = false;
         run(&mut session, &mut source, &mut sink).unwrap();
-        let expected: Vec<u8> = input.chunks(8).flat_map(|part| encode_all(part, &params)).collect();
+        let expected: Vec<u8> = input
+            .chunks(8)
+            .flat_map(|part| encode_all(part, &params))
+            .collect();
         assert_eq!(sink.bytes, expected);
     }
 
@@ -551,7 +594,12 @@ mod tests {
         let mut source = Source::new(b"hello", 2);
         let mut sink = Sink::new(2);
         sink.interrupt_at = Some(2);
-        assert_eq!(run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
         assert_eq!(session.progress().bytes_written, 2);
         assert!(!session.is_finished());
         run(&mut session, &mut source, &mut sink).unwrap();
@@ -566,7 +614,12 @@ mod tests {
         let mut source = Source::new(b"partial frame", 4);
         source.interrupt_at = Some(4);
         let mut sink = Sink::new(64);
-        assert_eq!(run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
         assert_eq!(session.progress().bytes_read, 4);
         assert_eq!(sink.bytes, Vec::<u8>::new());
         run(&mut session, &mut source, &mut sink).unwrap();
@@ -581,9 +634,20 @@ mod tests {
         let mut sink = Sink::new(64);
         sink.flush_blocked = true;
         {
-            let future = session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush);
+            let future = session.run(
+                &mut source,
+                &mut sink,
+                Source::read,
+                Sink::write,
+                Sink::flush,
+            );
             let mut future = pin!(future);
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
         assert!(!session.is_finished());
         assert_eq!(sink.bytes, encode_all(&[], &params));
@@ -602,10 +666,20 @@ mod tests {
         let mut session = EncodeTransfer::new(EncodeParams::new(Level::Store), 3).unwrap();
         let mut source = Source::new(b"abc", 3);
         let mut sink = Sink::new(0);
-        assert_eq!(run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::WriteZero);
+        assert_eq!(
+            run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
         let counts = (source.calls, sink.calls, sink.flushes);
         sink.chunk = 64;
-        assert_eq!(run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::WriteZero);
+        assert_eq!(
+            run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
         assert_eq!((source.calls, sink.calls, sink.flushes), counts);
         assert_eq!(session.progress().bytes_written, 0);
     }
@@ -615,24 +689,36 @@ mod tests {
         let mut session = EncodeTransfer::new(EncodeParams::new(Level::Store), 3).unwrap();
         let mut source = Source::new(b"abc", 3);
         let mut sink = Sink::new(64);
-        let error = complete(session.run(&mut source, &mut sink,
+        let error = complete(session.run(
+            &mut source,
+            &mut sink,
             |_: &mut Source, _: &mut Context<'_>, out: &mut [u8]| Poll::Ready(Ok(out.len() + 1)),
-            Sink::write, Sink::flush)).unwrap_err();
+            Sink::write,
+            Sink::flush,
+        ))
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(session.progress(), TransferProgress::default());
         assert_eq!(sink.calls, 0);
 
         let mut session = EncodeTransfer::new(EncodeParams::new(Level::Store), 3).unwrap();
-        let error = complete(session.run(&mut source, &mut sink, Source::read,
+        let error = complete(session.run(
+            &mut source,
+            &mut sink,
+            Source::read,
             |_: &mut Sink, _: &mut Context<'_>, bytes: &[u8]| Poll::Ready(Ok(bytes.len() + 1)),
-            Sink::flush)).unwrap_err();
+            Sink::flush,
+        ))
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(session.progress().bytes_written, 0);
     }
 
     #[test]
     fn always_ready_io_yields_instead_of_monopolizing_a_worker() {
-        let input: Vec<u8> = (0..200_000).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let input: Vec<u8> = (0..200_000)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let params = EncodeParams::new(Level::Store);
         let mut session = EncodeTransfer::new(params, 1024).unwrap();
         let mut source = Source::new(&input, 8192);
@@ -641,18 +727,29 @@ mod tests {
         let waker = Waker::from(Arc::clone(&wake_count));
         let mut cx = Context::from_waker(&waker);
         {
-            let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
+            let mut future = pin!(session.run(
+                &mut source,
+                &mut sink,
+                Source::read,
+                Sink::write,
+                Sink::flush
+            ));
             assert!(future.as_mut().poll(&mut cx).is_pending());
         }
         assert!(wake_count.0.load(Ordering::Relaxed) > 0);
         assert!(session.progress().bytes_read < input.len() as u64);
         run(&mut session, &mut source, &mut sink).unwrap();
-        assert_eq!(decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(), input);
+        assert_eq!(
+            decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(),
+            input
+        );
     }
 
-    fn decode_run(session: &mut DecodeTransfer, source: &mut Source, sink: &mut Sink)
-        -> io::Result<TransferProgress>
-    {
+    fn decode_run(
+        session: &mut DecodeTransfer,
+        source: &mut Source,
+        sink: &mut Sink,
+    ) -> io::Result<TransferProgress> {
         complete(session.run(source, sink, Source::read, Sink::write, Sink::flush))
     }
 
@@ -660,12 +757,17 @@ mod tests {
     fn decoding_transfer_runs_every_existing_cli_reference_frame() {
         let fixtures = include_str!("../tests/vectors/frames_zstd_cli.txt");
         let mut seen = 0;
-        for line in fixtures.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()) {
+        for line in fixtures
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        {
             let fields: Vec<&str> = line.split_whitespace().collect();
             let length: usize = fields[1].parse().unwrap();
             let digest = u64::from_str_radix(fields[2], 16).unwrap();
-            let wire: Vec<u8> = (0..fields[3].len()).step_by(2)
-                .map(|at| u8::from_str_radix(&fields[3][at..at + 2], 16).unwrap()).collect();
+            let wire: Vec<u8> = (0..fields[3].len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&fields[3][at..at + 2], 16).unwrap())
+                .collect();
             let mut session = DecodeTransfer::new(DecodeLimits::new(length));
             let mut source = Source::new(&wire, 73);
             source.alternate_pending = Some(false);
@@ -686,7 +788,9 @@ mod tests {
 
     #[test]
     fn decoding_drop_preserves_pending_output_and_cross_poll_history() {
-        let plain: Vec<u8> = (0..50_000).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let plain: Vec<u8> = (0..50_000)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let wire = encode_all(&plain, &EncodeParams::new(Level::Store));
         let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
         let mut source = Source::new(&wire, 1000);
@@ -696,19 +800,49 @@ mod tests {
         // the decoded block reaches the blocked sink.
         for _ in 0..100 {
             {
-                let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
-                assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                let mut future = pin!(session.run(
+                    &mut source,
+                    &mut sink,
+                    Source::read,
+                    Sink::write,
+                    Sink::flush
+                ));
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
             }
-            if sink.calls != 0 { break; }
+            if sink.calls != 0 {
+                break;
+            }
         }
-        assert!(sink.calls > 0, "reach real output backpressure, not just a budget yield");
+        assert!(
+            sink.calls > 0,
+            "reach real output backpressure, not just a budget yield"
+        );
         assert_eq!(session.progress().bytes_written, 0);
         let reads = source.calls;
         {
-            let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
-            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            let mut future = pin!(session.run(
+                &mut source,
+                &mut sink,
+                Source::read,
+                Sink::write,
+                Sink::flush
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
-        assert_eq!(source.calls, reads, "a blocked sink must stop further source reads");
+        assert_eq!(
+            source.calls, reads,
+            "a blocked sink must stop further source reads"
+        );
         sink.blocked = false;
         let result = decode_run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(sink.bytes, plain);
@@ -724,7 +858,12 @@ mod tests {
         let mut source = Source::new(&wire, 3);
         source.interrupt_at = Some(3);
         let mut sink = Sink::new(64);
-        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            decode_run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
         assert_eq!(session.progress().bytes_read, 3);
         assert_eq!(sink.bytes, Vec::<u8>::new());
         decode_run(&mut session, &mut source, &mut sink).unwrap();
@@ -739,7 +878,12 @@ mod tests {
         let mut source = Source::new(&wire, 7);
         let mut sink = Sink::new(2);
         sink.interrupt_at = Some(2);
-        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            decode_run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
         assert_eq!(sink.bytes, &plain[..2]);
         assert_eq!(session.progress().bytes_written, 2);
         decode_run(&mut session, &mut source, &mut sink).unwrap();
@@ -772,7 +916,10 @@ mod tests {
         let error = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("checksum"));
-        assert_eq!(sink.bytes, plain, "late failure cannot roll back already written bytes");
+        assert_eq!(
+            sink.bytes, plain,
+            "late failure cannot roll back already written bytes"
+        );
         assert_eq!(sink.flushes, 0);
         assert!(!session.is_finished());
         let counts = (source.calls, sink.calls, sink.flushes);
@@ -854,7 +1001,12 @@ mod tests {
             let mut session = DecodeTransfer::new(DecodeLimits::new(2));
             let mut source = Source::new(&wire, 3);
             let mut sink = Sink::new(3);
-            assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), kind);
+            assert_eq!(
+                decode_run(&mut session, &mut source, &mut sink)
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
             assert_eq!(sink.bytes, b"hi");
             assert!(!session.is_finished());
             assert_eq!(sink.flushes, 0);
@@ -874,11 +1026,19 @@ mod tests {
             assert!(session.is_finished());
             assert_eq!(sink.flushes, 1);
         }
-        let limits = DecodeLimits { allow_skippable_frames: false, ..DecodeLimits::new(0) };
+        let limits = DecodeLimits {
+            allow_skippable_frames: false,
+            ..DecodeLimits::new(0)
+        };
         let mut session = DecodeTransfer::new(limits);
         let mut source = Source::new(&skip, 1);
         let mut sink = Sink::new(1);
-        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            decode_run(&mut session, &mut source, &mut sink)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(sink.flushes, 0);
     }
 
@@ -887,13 +1047,24 @@ mod tests {
         // A raw "hi" frame without a declared content size, window = 1024.
         let wire = [0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x11, 0, 0, b'h', b'i'];
         for limits in [
-            DecodeLimits { require_content_size: true, ..DecodeLimits::new(2) },
-            DecodeLimits { max_window: 1023, ..DecodeLimits::new(2) },
+            DecodeLimits {
+                require_content_size: true,
+                ..DecodeLimits::new(2)
+            },
+            DecodeLimits {
+                max_window: 1023,
+                ..DecodeLimits::new(2)
+            },
         ] {
             let mut session = DecodeTransfer::new(limits);
             let mut source = Source::new(&wire, 1);
             let mut sink = Sink::new(2);
-            assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert_eq!(
+                decode_run(&mut session, &mut source, &mut sink)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
             assert_eq!(sink.bytes, Vec::<u8>::new());
             assert_eq!(sink.flushes, 0);
         }
@@ -916,8 +1087,19 @@ mod tests {
         let wake_count = Arc::new(WakeCount::default());
         let waker = Waker::from(Arc::clone(&wake_count));
         {
-            let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
-            assert!(future.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+            let mut future = pin!(session.run(
+                &mut source,
+                &mut sink,
+                Source::read,
+                Sink::write,
+                Sink::flush
+            ));
+            assert!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
         }
         assert!(wake_count.0.load(Ordering::Relaxed) > 0);
         assert!(!session.is_finished());
@@ -933,11 +1115,17 @@ mod tests {
         let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
         let mut source = Source::new(&wire, 8192);
         let mut sink = Sink::new(8192);
-        let error = complete(session.run(&mut source, &mut sink, Source::read, Sink::write,
+        let error = complete(session.run(
+            &mut source,
+            &mut sink,
+            Source::read,
+            Sink::write,
             |sink: &mut Sink, _: &mut Context<'_>| {
                 sink.flushes += 1;
                 Poll::Ready(Err(io::ErrorKind::Interrupted.into()))
-            })).unwrap_err();
+            },
+        ))
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(!session.is_finished());
         assert_eq!(sink.bytes, plain);
@@ -946,7 +1134,10 @@ mod tests {
         assert_eq!((source.calls, sink.calls), counts);
         assert_eq!(sink.flushes, 2);
         let counts = (source.calls, sink.calls, sink.flushes);
-        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap(), result);
+        assert_eq!(
+            decode_run(&mut session, &mut source, &mut sink).unwrap(),
+            result
+        );
         assert_eq!((source.calls, sink.calls, sink.flushes), counts);
     }
 }

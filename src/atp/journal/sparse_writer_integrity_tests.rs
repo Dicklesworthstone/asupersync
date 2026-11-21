@@ -3,8 +3,8 @@
 use super::*;
 use crate::atp::manifest::ChunkStrategy;
 use crate::atp::object::{ContentId, ManifestId, MetadataPolicy, Object, ObjectGraph};
-use futures_lite::future::block_on;
 use crate::sync::atomic::{AtomicU64, Ordering};
+use futures_lite::future::block_on;
 
 fn unique_path() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -38,14 +38,18 @@ fn refresh_root(manifest: &mut Manifest) {
 }
 
 fn descriptors(content: &[u8], ranges: &[(usize, usize)]) -> Vec<ChunkBoundary> {
-    ranges.iter().enumerate().map(|(index, &(start, end))| ChunkBoundary {
-        index: u32::try_from(index).unwrap(),
-        byte_offset: start as u64,
-        size_bytes: (end - start) as u64,
-        content_hash: Sha256::digest(&content[start..end]).into(),
-        strategy: ChunkStrategy::FixedSize,
-        metadata: None,
-    }).collect()
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(index, &(start, end))| ChunkBoundary {
+            index: u32::try_from(index).unwrap(),
+            byte_offset: start as u64,
+            size_bytes: (end - start) as u64,
+            content_hash: Sha256::digest(&content[start..end]).into(),
+            strategy: ChunkStrategy::FixedSize,
+            metadata: None,
+        })
+        .collect()
 }
 
 fn manifest_for(
@@ -62,7 +66,9 @@ fn manifest_for(
     let id = if content_addressed {
         old_id.clone()
     } else {
-        ObjectId::manifest(ManifestId::from_manifest_bytes(b"writer-integrity-test-object"))
+        ObjectId::manifest(ManifestId::from_manifest_bytes(
+            b"writer-integrity-test-object",
+        ))
     };
     let mut record = manifest.objects.remove(&old_id).unwrap();
     record.id = id.clone();
@@ -96,7 +102,8 @@ fn write_local(
             commit_policy,
             ..SparseWriterConfig::default()
         },
-    )).unwrap();
+    ))
+    .unwrap();
     writer.set_expected_size(bytes.len() as u64).unwrap();
     if !bytes.is_empty() {
         block_on(writer.write_chunk(&cx, 0, bytes, WriteOptions::default())).unwrap();
@@ -105,14 +112,22 @@ fn write_local(
 }
 
 fn assert_not_publishable(cx: &Cx, writer: &SparseWriter, destination: &Path) {
-    assert!(matches!(writer.get_stats().verification_state, VerificationState::Failed { .. }));
-    assert!(matches!(block_on(writer.commit(cx)), Outcome::Err(SparseWriterError::NotVerified)));
+    assert!(matches!(
+        writer.get_stats().verification_state,
+        VerificationState::Failed { .. }
+    ));
+    assert!(matches!(
+        block_on(writer.commit(cx)),
+        Outcome::Err(SparseWriterError::NotVerified)
+    ));
     assert!(!destination.exists());
 }
 
 fn assert_refused(cx: &Cx, writer: &SparseWriter, manifest: &Manifest, destination: &Path) {
-    assert!(matches!(block_on(writer.verify(cx, manifest)),
-        Outcome::Err(SparseWriterError::VerificationFailed(_))));
+    assert!(matches!(
+        block_on(writer.verify(cx, manifest)),
+        Outcome::Err(SparseWriterError::VerificationFailed(_))
+    ));
     assert_not_publishable(cx, writer, destination);
 }
 
@@ -123,8 +138,10 @@ fn assert_pinned_refused(
     expected: &ManifestChunkCommitment,
     destination: &Path,
 ) {
-    assert!(matches!(block_on(writer.verify_with_chunk_commitment(cx, manifest, expected)),
-        Outcome::Err(SparseWriterError::VerificationFailed(_))));
+    assert!(matches!(
+        block_on(writer.verify_with_chunk_commitment(cx, manifest, expected)),
+        Outcome::Err(SparseWriterError::VerificationFailed(_))
+    ));
     assert_not_publishable(cx, writer, destination);
 }
 
@@ -179,7 +196,11 @@ fn pinned_complete_chunks_detect_corruption_at_every_byte() {
 fn pinned_complete_files_commit_under_every_publication_policy() {
     let content = b"abcdefgh";
     for content_addressed in [false, true] {
-        for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+        for policy in [
+            CommitPolicy::AtomicRename,
+            CommitPolicy::CopyAndVerify,
+            CommitPolicy::LinkAndUnlink,
+        ] {
             let (id, manifest) = manifest_for(content, content_addressed, false, &[(0, 3), (3, 8)]);
             let expected = ManifestChunkCommitment::from_manifest(&manifest).unwrap();
             let (cx, writer, destination) = write_local(id, content, policy);
@@ -281,14 +302,21 @@ fn a_wrong_pin_invalidates_prior_verification_and_refuses_empty_staging() {
             assert!(writer.lock_state().temp_file.is_none());
         }
         block_on(writer.verify(&cx, &manifest)).unwrap();
-        assert!(matches!(writer.get_stats().verification_state, VerificationState::Verified { .. }));
+        assert!(matches!(
+            writer.get_stats().verification_state,
+            VerificationState::Verified { .. }
+        ));
         assert_pinned_refused(&cx, &writer, &manifest, &wrong, &destination);
     }
 }
 
 #[test]
 fn empty_manifest_addressed_files_need_a_pin_and_then_commit_normally() {
-    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+    for policy in [
+        CommitPolicy::AtomicRename,
+        CommitPolicy::CopyAndVerify,
+        CommitPolicy::LinkAndUnlink,
+    ] {
         let (id, manifest) = manifest_for(b"", false, false, &[]);
         let expected = ManifestChunkCommitment::from_manifest(&manifest).unwrap();
         let (cx, writer, destination) = write_local(id, b"", policy);

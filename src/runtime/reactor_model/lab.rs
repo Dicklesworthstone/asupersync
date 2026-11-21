@@ -133,10 +133,10 @@ mod tests {
     use super::*;
     use crate::runtime::reactor::{Events, Reactor};
     use crate::runtime::reactor_model::ReactorOperation;
+    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use crate::types::{Budget, Time};
     use std::future::poll_fn;
     use std::io;
-    use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Poll, Wake, Waker};
 
     struct CountWakes(AtomicUsize);
@@ -244,14 +244,21 @@ mod tests {
             .unwrap();
         model.pulse_ready(token, Interest::READABLE).unwrap();
         assert_eq!(ready_events(&model), vec![Event::readable(token)]);
-        for invalid in [Interest::ONESHOT, Interest::EDGE_TRIGGERED, Interest::DISPATCH] {
+        for invalid in [
+            Interest::ONESHOT,
+            Interest::EDGE_TRIGGERED,
+            Interest::DISPATCH,
+        ] {
             assert_eq!(
                 model.pulse_ready(token, invalid).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
         }
         assert_eq!(
-            model.pulse_ready(Token::new(44), Interest::READABLE).unwrap_err().kind(),
+            model
+                .pulse_ready(Token::new(44), Interest::READABLE)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::NotFound
         );
         assert_eq!(model.readiness(token).unwrap(), Interest::READABLE);
@@ -275,12 +282,20 @@ mod tests {
             )
             .unwrap();
         for expected in 1..=2 {
-            model.pulse_ready(registration.token(), Interest::READABLE).unwrap();
+            model
+                .pulse_ready(registration.token(), Interest::READABLE)
+                .unwrap();
             assert_eq!(lab.lab_reactor().next_event_time(), Some(Time::ZERO));
-            assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+            assert_eq!(
+                driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+                1
+            );
             assert_eq!(count.0.load(Ordering::SeqCst), expected);
             assert_eq!(lab.lab_reactor().next_event_time(), None);
-            assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+            assert_eq!(
+                driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+                0
+            );
         }
         assert!(model.is_armed(registration.token()).unwrap());
         drop(registration);
@@ -298,15 +313,23 @@ mod tests {
         let model = LabReactorModel::new();
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
-        writer.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        writer
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let token = Token::new(45);
         let interest = Interest::READABLE | Interest::EDGE_TRIGGERED;
         native.register(&reader, token, interest).unwrap();
         model.register(&reader, token, interest).unwrap();
         let compare = |expected: usize| {
             let mut events = Events::with_capacity(4);
-            assert_eq!(native.poll(&mut events, Some(Duration::ZERO)).unwrap(), expected);
-            assert_eq!(ready_events(&model), events.iter().copied().collect::<Vec<_>>());
+            assert_eq!(
+                native.poll(&mut events, Some(Duration::ZERO)).unwrap(),
+                expected
+            );
+            assert_eq!(
+                ready_events(&model),
+                events.iter().copied().collect::<Vec<_>>()
+            );
         };
 
         writer.write_all(b"a").unwrap();
@@ -348,7 +371,9 @@ mod tests {
         assert!(driver.is_empty());
         assert_eq!(model.registration_count(), 0);
         assert_eq!(
-            model.fault_stats(ReactorOperation::Register).injected_failures,
+            model
+                .fault_stats(ReactorOperation::Register)
+                .injected_failures,
             1
         );
     }
@@ -366,9 +391,15 @@ mod tests {
         let token = registration.token();
         model.set_ready(token, Interest::READABLE).unwrap();
         assert_eq!(lab.lab_reactor().next_event_time(), Some(Time::ZERO));
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            1
+        );
         assert_eq!(lab.lab_reactor().next_event_time(), None);
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            0
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
 
         assert!(registration.rearm(Interest::READABLE, &waker).unwrap());
@@ -379,7 +410,10 @@ mod tests {
         assert!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).is_err());
         assert_eq!(lab.lab_reactor().next_event_time(), Some(Time::ZERO));
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            1
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         assert_eq!(lab.lab_reactor().next_event_time(), None);
         drop(registration);
@@ -388,8 +422,7 @@ mod tests {
 
     #[test]
     fn paired_level_delivery_keeps_clock_due_until_conditions_are_cleared() {
-        let (lab, model) =
-            LabRuntime::with_reactor_model(LabConfig::new(9), ReadinessMode::Level);
+        let (lab, model) = LabRuntime::with_reactor_model(LabConfig::new(9), ReadinessMode::Level);
         let token = Token::new(3);
         model
             .register(&std::io::stdin(), token, Interest::READABLE)
@@ -447,7 +480,10 @@ mod tests {
         for expected in 1..=2 {
             lab.lab_reactor()
                 .set_ready(registration.token(), Event::readable(registration.token()));
-            assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+            assert_eq!(
+                driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+                1
+            );
             assert_eq!(count.0.load(Ordering::SeqCst), expected);
         }
     }
@@ -523,7 +559,10 @@ mod tests {
         drop(later);
         assert!(driver.is_empty());
         assert_eq!(model.registration_count(), 0);
-        (observed.load(Ordering::SeqCst), polls.load(Ordering::SeqCst))
+        (
+            observed.load(Ordering::SeqCst),
+            polls.load(Ordering::SeqCst),
+        )
     }
 
     #[test]

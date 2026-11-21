@@ -149,7 +149,11 @@ fn check_wait(end: usize, limit: usize, quiet: bool, cancel: bool) {
         saw_expected_outcome,
         "the wake must deliver the triggering outcome"
     );
-    assert_eq!(started.load(Ordering::SeqCst), MEMBERS, "no extra admission");
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        MEMBERS,
+        "no extra admission"
+    );
     assert_eq!(
         finished_at_return.load(Ordering::SeqCst),
         MEMBERS,

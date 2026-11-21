@@ -235,7 +235,14 @@ impl IoTape {
                         PendingRequest::Write { slices, .. } => {
                             let n = slices.as_ref().map_or(0, Vec::len);
                             slices_total = add(slices_total, n)?;
-                            add(40, if slices.is_some() { add(8, mul(n, 8)?)? } else { 0 })?
+                            add(
+                                40,
+                                if slices.is_some() {
+                                    add(8, mul(n, 8)?)?
+                                } else {
+                                    0
+                                },
+                            )?
                         }
                         PendingRequest::Flush | PendingRequest::Shutdown => 0,
                     },
@@ -250,7 +257,11 @@ impl IoTape {
             .try_reserve_exact(size)
             .map_err(|_| IoTapeError::Allocation)?;
         out.0.extend_from_slice(MAGIC);
-        let version = if self.pending_polls { PENDING_VERSION } else { VERSION };
+        let version = if self.pending_polls {
+            PENDING_VERSION
+        } else {
+            VERSION
+        };
         out.0.extend_from_slice(&version.to_le_bytes());
         out.0.push(u8::from(self.vectored));
         put(&mut out.0, self.events.len())?;
@@ -304,7 +315,11 @@ impl IoTape {
                     out.0.push(5);
                     put(&mut out.0, *capacity)?;
                 }
-                Event::Pending(PendingRequest::Write { length, slices, digest }) => {
+                Event::Pending(PendingRequest::Write {
+                    length,
+                    slices,
+                    digest,
+                }) => {
                     out.0.push(if slices.is_some() { 7 } else { 6 });
                     put(&mut out.0, *length)?;
                     out.0.extend_from_slice(&digest[..]);
@@ -480,7 +495,11 @@ impl IoTape {
                     }
                     seen_write += length;
                     if pending {
-                        Event::Pending(PendingRequest::Write { length, slices, digest })
+                        Event::Pending(PendingRequest::Write {
+                            length,
+                            slices,
+                            digest,
+                        })
                     } else {
                         Event::Write {
                             length,

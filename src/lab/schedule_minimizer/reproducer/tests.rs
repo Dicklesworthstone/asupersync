@@ -17,16 +17,22 @@ fn workload(seed: u64) -> (LabRuntime, (Arc<AtomicUsize>, impl Sized)) {
     let counter = Arc::clone(&polls);
     let (task, handle) = lab
         .state
-        .create_task(root, Budget::INFINITE, poll_fn(move |cx| {
-            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            } else {
-                Poll::Ready(())
-            }
-        }))
+        .create_task(
+            root,
+            Budget::INFINITE,
+            poll_fn(move |cx| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            }),
+        )
         .unwrap();
-    lab.scheduler.lock().schedule(task, Budget::INFINITE.priority);
+    lab.scheduler
+        .lock()
+        .schedule(task, Budget::INFINITE.priority);
     (lab, (polls, handle))
 }
 
@@ -84,7 +90,9 @@ fn reseal(bytes: &mut [u8]) {
 #[test]
 fn actual_minimization_round_trips_an_executable_subsequence() {
     let original = recipe();
-    let bytes = original.to_canonical_bytes(limits().max_encoded_bytes).unwrap();
+    let bytes = original
+        .to_canonical_bytes(limits().max_encoded_bytes)
+        .unwrap();
     let decoded = ScheduleReproducer::try_from_canonical_bytes(&bytes, limits()).unwrap();
     assert_eq!(decoded.to_canonical_bytes(bytes.len()).unwrap(), bytes);
     assert_eq!(decoded.workload(), WORKLOAD);
@@ -93,10 +101,7 @@ fn actual_minimization_round_trips_an_executable_subsequence() {
     let (mut lab, fixture) = workload(decoded.source().seed());
     let candidate = decoded.candidate(100).unwrap();
     let report = lab
-        .run_forced_schedule_candidate(
-            &candidate,
-            ForcedScheduleCandidateLimits::new(40, 40, 100),
-        )
+        .run_forced_schedule_candidate(&candidate, ForcedScheduleCandidateLimits::new(40, 40, 100))
         .unwrap();
     assert!(report.lab.quiescent);
     assert_eq!(fixture.0.load(Ordering::SeqCst), 2);

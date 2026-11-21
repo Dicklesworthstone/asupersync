@@ -55,9 +55,9 @@ impl BaselineChunk {
             check_io(cx)?;
             refuse_if_blocking_forbidden()?;
             let length = chunk_length(key)?;
-            self.offset
-                .checked_add(key.size_bytes)
-                .ok_or_else(|| TransportError::Frame("delta baseline range overflows u64".into()))?;
+            self.offset.checked_add(key.size_bytes).ok_or_else(|| {
+                TransportError::Frame("delta baseline range overflows u64".into())
+            })?;
             let path = Arc::clone(&self.path);
             let offset = self.offset;
             let key = key.clone();
@@ -102,10 +102,10 @@ impl BaselineRead<std::fs::File> {
     ) -> Result<Self, TransportError> {
         use std::io::Seek as _;
 
-        let source_error =
-            |error| TransportError::Source(format!("{}: {error}", path.display()));
+        let source_error = |error| TransportError::Source(format!("{}: {error}", path.display()));
         let mut file = open_baseline_file(path.as_path()).map_err(source_error)?;
-        file.seek(std::io::SeekFrom::Start(offset)).map_err(source_error)?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(source_error)?;
         buffer.resize(length, 0);
         Ok(Self {
             reader: Some(file),
@@ -180,7 +180,9 @@ impl<R: std::io::Read> BaselineRead<R> {
             } else if eof {
                 return Err(TransportError::Source(format!(
                     "{}: delta baseline range ended after {} of {} bytes",
-                    self.path.display(), self.filled, self.buffer.len(),
+                    self.path.display(),
+                    self.filled,
+                    self.buffer.len(),
                 )));
             }
         }

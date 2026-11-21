@@ -4,9 +4,9 @@
 //! - `SymbolPool` for bounded, reusable symbol buffers
 //! - `ResourceTracker` for enforcing global resource limits
 
+use crate::sync::atomic::AtomicU64;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use crate::sync::atomic::AtomicU64;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]

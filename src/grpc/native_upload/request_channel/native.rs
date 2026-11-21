@@ -41,13 +41,22 @@ where
         path: &str,
         request: Request<()>,
         capacity: usize,
-    ) -> Result<(
-        NativeRequestSender<C::Encode>,
-        NativeBidiStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C, NativeRequestStream<C::Encode>>,
-    ), Status> {
+    ) -> Result<
+        (
+            NativeRequestSender<C::Encode>,
+            NativeBidiStream<
+                impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+                C,
+                NativeRequestStream<C::Encode>,
+            >,
+        ),
+        Status,
+    > {
         let (sender, source) = native_request_channel(cx, capacity)?;
         let control = Arc::clone(&sender.control);
-        let mut responses = self.into_native_bidi_streaming(cx, path, request.map(|()| source)).await?;
+        let mut responses = self
+            .into_native_bidi_streaming(cx, path, request.map(|()| source))
+            .await?;
         responses.request_control = Some(control);
         Ok((sender, responses))
     }
@@ -67,13 +76,22 @@ where
         path: &str,
         request: Request<()>,
         capacity: usize,
-    ) -> Result<(
-        NativeRequestSender<C::Encode>,
-        NativeClientStreamingCall<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C, NativeRequestStream<C::Encode>>,
-    ), Status> {
+    ) -> Result<
+        (
+            NativeRequestSender<C::Encode>,
+            NativeClientStreamingCall<
+                impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+                C,
+                NativeRequestStream<C::Encode>,
+            >,
+        ),
+        Status,
+    > {
         let (sender, source) = native_request_channel(cx, capacity)?;
         let control = Arc::clone(&sender.control);
-        let call = self.into_native_client_streaming(cx, path, request.map(|()| source)).await?;
+        let call = self
+            .into_native_client_streaming(cx, path, request.map(|()| source))
+            .await?;
         Ok((sender, call.with_request_control(control)))
     }
 }

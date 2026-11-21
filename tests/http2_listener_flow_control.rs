@@ -435,7 +435,11 @@ impl Drop for OwnedProducerDrop {
 }
 
 async fn owned_cleanup_gate(cx: &Cx, role: &'static str, state: &OwnedProducerState) {
-    let mut cleanup = std::pin::pin!(state.release.wait_until(|| state.released.load(Ordering::Acquire)));
+    let mut cleanup = std::pin::pin!(
+        state
+            .release
+            .wait_until(|| state.released.load(Ordering::Acquire))
+    );
     let mut witnessed = false;
     poll_fn(|task| {
         let result = cleanup.as_mut().poll(task);
@@ -482,31 +486,47 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
                 let state = Arc::clone(&handler_state);
                 async move {
                     if request.uri != "/owned" {
-                        return Http2ProducedResponse::buffered(Response::new(200, "OK", Vec::new()));
+                        return Http2ProducedResponse::buffered(Response::new(
+                            200,
+                            "OK",
+                            Vec::new(),
+                        ));
                     }
                     state.handler.send(handler_cx.clone()).unwrap();
                     let (ready, mut admitted) = oneshot::channel();
                     let (payload, mut dependency) = oneshot::channel();
                     let child_state = Arc::clone(&state);
-                    let _child = handler_cx.spawn(move |child_cx| async move {
-                        let _drop = OwnedProducerDrop(Arc::clone(&child_state), false);
-                        let mut ready = Some(ready);
-                        let mut producer = std::pin::pin!(child_state.producer_started.wait_until(|| {
-                            child_state.producing.load(Ordering::Acquire)
-                        }));
-                        poll_fn(|task| {
-                            let result = producer.as_mut().poll(task);
-                            if result.is_pending() && let Some(ready) = ready.take() {
-                                ready.send_blocking(child_cx.clone()).unwrap();
-                            }
-                            result
+                    let _child = handler_cx
+                        .spawn(move |child_cx| async move {
+                            let _drop = OwnedProducerDrop(Arc::clone(&child_state), false);
+                            let mut ready = Some(ready);
+                            let mut producer =
+                                std::pin::pin!(child_state.producer_started.wait_until(|| {
+                                    child_state.producing.load(Ordering::Acquire)
+                                }));
+                            poll_fn(|task| {
+                                let result = producer.as_mut().poll(task);
+                                if result.is_pending()
+                                    && let Some(ready) = ready.take()
+                                {
+                                    ready.send_blocking(child_cx.clone()).unwrap();
+                                }
+                                result
+                            })
+                            .await;
+                            assert!(
+                                !child_cx.is_cancel_requested(),
+                                "handler child closed before production"
+                            );
+                            payload
+                                .send_blocking(Bytes::from_static(
+                                    b"handler child supplied this body",
+                                ))
+                                .unwrap();
+                            child_cx.cancelled().await;
+                            owned_cleanup_gate(&child_cx, "child", &child_state).await;
                         })
-                        .await;
-                        assert!(!child_cx.is_cancel_requested(), "handler child closed before production");
-                        payload.send_blocking(Bytes::from_static(b"handler child supplied this body")).unwrap();
-                        child_cx.cancelled().await;
-                        owned_cleanup_gate(&child_cx, "child", &child_state).await;
-                    }).unwrap();
+                        .unwrap();
                     let child_cx = admitted.recv(&handler_cx).await.unwrap();
                     assert_eq!(child_cx.region_id(), handler_cx.region_id());
                     assert_ne!(child_cx.task_id(), handler_cx.task_id());
@@ -515,7 +535,8 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
                         NonZeroUsize::MIN,
                         NonZeroUsize::new(128).unwrap(),
                         move |producer_cx, mut sender| {
-                            let ambient = Cx::current().expect("producer factory has a request task");
+                            let ambient =
+                                Cx::current().expect("producer factory has a request task");
                             assert_eq!(producer_cx.task_id(), handler_cx.task_id());
                             assert_eq!(producer_cx.region_id(), handler_cx.region_id());
                             assert_eq!(ambient.task_id(), handler_cx.task_id());
@@ -531,11 +552,15 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
                                     poll_fn(|task| {
                                         let result = cancelled.as_mut().poll(task);
                                         if result.is_pending() && !witnessed {
-                                            state.producer_parked.send(producer_cx.clone()).unwrap();
+                                            state
+                                                .producer_parked
+                                                .send(producer_cx.clone())
+                                                .unwrap();
                                             witnessed = true;
                                         }
                                         result
-                                    }).await;
+                                    })
+                                    .await;
                                     owned_cleanup_gate(&producer_cx, "producer", &state).await;
                                 } else {
                                     sender.finish(&producer_cx)?;
@@ -569,7 +594,10 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
             Frame::Headers(headers) if headers.stream_id == 1 => assert!(!headers.end_stream),
             Frame::Data(data) if data.stream_id == 1 => {
                 assert_eq!(data.data.as_ref(), b"handler child supplied this body");
-                assert!(!data.end_stream, "body bytes must precede request retirement");
+                assert!(
+                    !data.end_stream,
+                    "body bytes must precede request retirement"
+                );
                 break;
             }
             Frame::RstStream(reset) => panic!("owned dependency failed: {reset:?}"),
@@ -596,7 +624,10 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
     assert_eq!(cleanup_roles.contains(&"producer"), cancel);
     assert_eq!(in_flight.load(Ordering::SeqCst), 1);
     assert_eq!(state.child_dropped.load(Ordering::SeqCst), 0);
-    assert_eq!(state.producer_dropped.load(Ordering::SeqCst), usize::from(!cancel));
+    assert_eq!(
+        state.producer_dropped.load(Ordering::SeqCst),
+        usize::from(!cancel)
+    );
 
     if !disconnect {
         // A sibling response proves the connection driver advanced while
@@ -610,7 +641,9 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
                 }
                 Frame::Headers(headers) if headers.stream_id == 1 => assert!(!headers.end_stream),
                 Frame::Data(data) if data.stream_id == 1 => assert!(!data.end_stream),
-                Frame::RstStream(reset) if reset.stream_id == 3 => panic!("sibling reset: {reset:?}"),
+                Frame::RstStream(reset) if reset.stream_id == 3 => {
+                    panic!("sibling reset: {reset:?}")
+                }
                 _ => {}
             }
         }
@@ -640,9 +673,16 @@ fn owned_producer_lifetime(workers: usize, cancel: bool, disconnect: bool) {
     assert!(manager.begin_drain(Duration::from_secs(2)));
     let stats = runtime.block_on(run).unwrap();
     assert!(stats.drain_report.unwrap().reached_quiescence);
-    wait_for("owned H2 runtime must retire all tasks", || runtime.is_quiescent());
+    wait_for("owned H2 runtime must retire all tasks", || {
+        runtime.is_quiescent()
+    });
     assert_eq!(manager.active_count(), 0);
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert_eq!(runtime.draining_region_count(), 0);
 }
@@ -675,32 +715,39 @@ fn owned_producer_finalizer_failure_resets_instead_of_completing_the_response() 
             .unwrap();
         let finalized = Arc::new(AtomicUsize::new(0));
         let handler_finalized = Arc::clone(&finalized);
-        let listener = runtime.block_on(Http2Listener::bind_produced_with_config(
-            "127.0.0.1:0",
-            move |_request: Request| {
-                let cx = Cx::current().unwrap();
-                let finalized = Arc::clone(&handler_finalized);
-                assert!(asupersync::runtime::Runtime::current_handle().unwrap()
-                    .register_sync_finalizer_for_testing(cx.region_id(), move || {
-                        finalized.fetch_add(1, Ordering::SeqCst);
-                        panic!("intentional owned HTTP/2 finalizer failure");
-                    }));
-                async {
-                    Http2ProducedResponse::streaming(
-                        Response::new(200, "OK", Vec::new()),
-                        NonZeroUsize::MIN,
-                        NonZeroUsize::new(8).unwrap(),
-                        |cx, mut sender| async move {
-                            sender.send_bytes(&cx, Bytes::from_static(b"partial")).await?;
-                            sender.finish(&cx)?;
-                            Ok(sender)
-                        },
-                    )
-                }
-            },
-            Http2ListenerConfig::default()
-                .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()])),
-        )).unwrap();
+        let listener = runtime
+            .block_on(Http2Listener::bind_produced_with_config(
+                "127.0.0.1:0",
+                move |_request: Request| {
+                    let cx = Cx::current().unwrap();
+                    let finalized = Arc::clone(&handler_finalized);
+                    assert!(
+                        asupersync::runtime::Runtime::current_handle()
+                            .unwrap()
+                            .register_sync_finalizer_for_testing(cx.region_id(), move || {
+                                finalized.fetch_add(1, Ordering::SeqCst);
+                                panic!("intentional owned HTTP/2 finalizer failure");
+                            })
+                    );
+                    async {
+                        Http2ProducedResponse::streaming(
+                            Response::new(200, "OK", Vec::new()),
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(8).unwrap(),
+                            |cx, mut sender| async move {
+                                sender
+                                    .send_bytes(&cx, Bytes::from_static(b"partial"))
+                                    .await?;
+                                sender.finish(&cx)?;
+                                Ok(sender)
+                            },
+                        )
+                    }
+                },
+                Http2ListenerConfig::default()
+                    .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()])),
+            ))
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let manager = listener.connection_manager().clone();
         let in_flight = listener.in_flight_requests();
@@ -718,16 +765,29 @@ fn owned_producer_finalizer_failure_resets_instead_of_completing_the_response() 
                     assert_eq!(reset.error_code, ErrorCode::InternalError);
                     break;
                 }
-                Frame::GoAway(goaway) => panic!("finalizer failure must be stream-local: {goaway:?}"),
+                Frame::GoAway(goaway) => {
+                    panic!("finalizer failure must be stream-local: {goaway:?}")
+                }
                 _ => {}
             }
         }
         assert_eq!(finalized.load(Ordering::SeqCst), 1);
-        wait_for("failed finalizer must retire its request guard", || in_flight.load(Ordering::SeqCst) == 0);
+        wait_for("failed finalizer must retire its request guard", || {
+            in_flight.load(Ordering::SeqCst) == 0
+        });
         drop(peer);
         assert!(manager.begin_drain(Duration::from_secs(2)));
-        assert!(runtime.block_on(run).unwrap().drain_report.unwrap().reached_quiescence);
-        wait_for("failed finalizer must retire its tasks", || runtime.is_quiescent());
+        assert!(
+            runtime
+                .block_on(run)
+                .unwrap()
+                .drain_report
+                .unwrap()
+                .reached_quiescence
+        );
+        wait_for("failed finalizer must retire its tasks", || {
+            runtime.is_quiescent()
+        });
         assert_eq!(manager.active_count(), 0);
         assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
         assert_eq!(runtime.draining_region_count(), 0);

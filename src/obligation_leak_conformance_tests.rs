@@ -26,9 +26,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use proptest::prelude::*;
     use std::collections::{HashMap, HashSet};
-    use crate::sync::atomic::{AtomicU64, Ordering};
 
     /// Obligation leak conformance test infrastructure
     struct ObligationConformanceTester {

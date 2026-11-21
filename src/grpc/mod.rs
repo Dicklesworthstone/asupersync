@@ -77,10 +77,10 @@ pub mod native_upload;
 pub mod protobuf;
 pub mod reflection;
 pub mod reflection_descriptor;
-#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
-pub mod reflection_rpc;
 #[cfg(test)]
 pub mod reflection_method_list_audit;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub mod reflection_rpc;
 pub mod server;
 pub mod service;
 pub mod status;

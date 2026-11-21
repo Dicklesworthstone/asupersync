@@ -72,12 +72,12 @@
 
 use super::recorder::{DEFAULT_MAX_FILE_SIZE, LimitAction, LimitKind, LimitReached};
 use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::tracing_compat::{error, warn};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 // =============================================================================
 // Constants

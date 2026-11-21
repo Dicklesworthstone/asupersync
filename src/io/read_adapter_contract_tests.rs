@@ -157,7 +157,9 @@ fn reader_stream_propagates_provider_panic_then_fences_unknown_progress() {
         let _ = Pin::new(&mut stream).poll_next(&mut cx);
     }));
     let payload = failure.expect_err("provider panic must propagate");
-    let message = payload.downcast_ref::<&str>().copied()
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
     assert_eq!(message, Some("bounded provider panic sentinel"));
     assert!(matches!(
@@ -181,19 +183,28 @@ fn take_charges_pending_progress_and_preserves_the_callers_prefix() {
         let mut storage = [0xa5; 5];
         let mut buf = ReadBuf::new(&mut storage);
         buf.put_slice(b"P");
-        assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut take).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(buf.filled(), b"Pabc");
         assert_eq!(take.limit(), 2);
         assert_eq!(storage[4], 0xa5);
         let mut rest = [0xa5; 5];
         let mut buf = ReadBuf::new(&mut rest);
-        assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut take).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(buf.filled(), b"de");
         assert_eq!(take.limit(), 0);
         assert_eq!(polls.load(Ordering::SeqCst), 2);
         let mut empty = [0; 8];
         let mut buf = ReadBuf::new(&mut empty);
-        assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut take).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
         assert!(buf.filled().is_empty());
         assert_eq!(polls.load(Ordering::SeqCst), 2);
     }
@@ -258,7 +269,9 @@ fn take_preserves_a_provider_panic_and_refuses_unknown_position_replay() {
         let _ = Pin::new(&mut take).poll_read(&mut cx, &mut buf);
     }));
     let payload = failure.expect_err("provider panic must propagate");
-    let message = payload.downcast_ref::<&str>().copied()
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
     assert_eq!(message, Some("bounded provider panic sentinel"));
     assert!(buf.filled().is_empty());
@@ -297,19 +310,32 @@ fn take_empty_polls_do_not_touch_source_and_empty_pending_is_not_eof() {
     let mut zero = Take::new(source, 0);
     let mut cx = Context::from_waker(Waker::noop());
     let mut storage = [0; 8];
-    assert!(matches!(Pin::new(&mut zero).poll_read(&mut cx, &mut ReadBuf::new(&mut storage)), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut zero).poll_read(&mut cx, &mut ReadBuf::new(&mut storage)),
+        Poll::Ready(Ok(()))
+    ));
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     let source = Reader::new(Status::Ready);
     let polls = Arc::clone(&source.polls);
     let mut take = Take::new(source, 9);
-    assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut ReadBuf::new(&mut [])), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut take).poll_read(&mut cx, &mut ReadBuf::new(&mut [])),
+        Poll::Ready(Ok(()))
+    ));
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     let mut take = Take::new(WaitOnce(false), 1);
     let mut buf = ReadBuf::new(&mut storage);
-    assert!(Pin::new(&mut take).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut take)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     assert_eq!(take.limit(), 1);
     assert!(buf.filled().is_empty());
-    assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut take).poll_read(&mut cx, &mut buf),
+        Poll::Ready(Ok(()))
+    ));
     assert_eq!(buf.filled(), b"x");
     assert_eq!(take.limit(), 0);
 }
@@ -320,8 +346,15 @@ fn vectored_scalar_fallback_reports_pending_bytes_and_preserves_other_destinatio
     let mut first = [0xa5; 4];
     let mut second = [0xa5; 4];
     let mut cx = Context::from_waker(Waker::noop());
-    let mut bufs = [IoSliceMut::new(&mut []), IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
-    assert!(matches!(Pin::new(&mut source).poll_read_vectored(&mut cx, &mut bufs), Poll::Ready(Ok(3))));
+    let mut bufs = [
+        IoSliceMut::new(&mut []),
+        IoSliceMut::new(&mut first),
+        IoSliceMut::new(&mut second),
+    ];
+    assert!(matches!(
+        Pin::new(&mut source).poll_read_vectored(&mut cx, &mut bufs),
+        Poll::Ready(Ok(3))
+    ));
     assert_eq!(&first, &[b'a', b'b', b'c', 0xa5]);
     assert_eq!(second, [0xa5; 4]);
     assert_eq!(source.bytes, b"defghij");
@@ -350,8 +383,15 @@ fn vectored_scalar_fallback_keeps_empty_pending_distinct_from_eof() {
     let mut storage = [0; 4];
     let mut bufs = [IoSliceMut::new(&mut storage)];
     let mut cx = Context::from_waker(Waker::noop());
-    assert!(Pin::new(&mut source).poll_read_vectored(&mut cx, &mut bufs).is_pending());
-    assert!(matches!(Pin::new(&mut source).poll_read_vectored(&mut cx, &mut bufs), Poll::Ready(Ok(1))));
+    assert!(
+        Pin::new(&mut source)
+            .poll_read_vectored(&mut cx, &mut bufs)
+            .is_pending()
+    );
+    assert!(matches!(
+        Pin::new(&mut source).poll_read_vectored(&mut cx, &mut bufs),
+        Poll::Ready(Ok(1))
+    ));
     assert_eq!(bufs[0][0], b'x');
 }
 
@@ -370,7 +410,10 @@ fn bounded_scalar_and_vectored_reads_agree_for_every_small_partition() {
                         let mut storage = vec![0xa5; width];
                         let n = if turn % 2 == 0 {
                             let mut buf = ReadBuf::new(&mut storage);
-                            assert!(matches!(Pin::new(&mut take).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
+                            assert!(matches!(
+                                Pin::new(&mut take).poll_read(&mut cx, &mut buf),
+                                Poll::Ready(Ok(()))
+                            ));
                             buf.filled().len()
                         } else {
                             let mut bufs = [IoSliceMut::new(&mut storage)];
@@ -382,7 +425,9 @@ fn bounded_scalar_and_vectored_reads_agree_for_every_small_partition() {
                         output.extend_from_slice(&storage[..n]);
                         assert!(storage[n..].iter().all(|byte| *byte == 0xa5));
                         assert_eq!(take.limit(), limit - output.len() as u64);
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                     }
                     let expected = usize::try_from(limit).unwrap().min(10);
                     assert_eq!(output, &b"abcdefghij"[..expected]);
@@ -411,7 +456,10 @@ fn reader_body_rejects_shifted_storage_for_every_status_and_never_repolls() {
         assert_eq!(body.size_hint().exact(), Some(0));
         assert_eq!(body.get_ref().bytes, b"defghij");
         for _ in 0..3 {
-            assert!(matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None)));
+            assert!(matches!(
+                Pin::new(&mut body).poll_frame(&mut cx),
+                Poll::Ready(None)
+            ));
         }
         assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
@@ -452,7 +500,10 @@ fn reader_body_accepts_filled_bytes_in_a_shorter_original_prefix() {
     };
     assert_eq!(data.remaining(), 3);
     assert_eq!(data.chunk(), b"abc");
-    assert!(matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None)));
+    assert!(matches!(
+        Pin::new(&mut body).poll_frame(&mut cx),
+        Poll::Ready(None)
+    ));
 }
 
 #[cfg(feature = "zstd")]
@@ -597,7 +648,11 @@ mod zstd {
             let mut storage = [0xa5; 8];
             let mut buf = ReadBuf::new(&mut storage);
             buf.put_slice(b"P");
-            assert!(Pin::new(&mut decoder).poll_read(&mut cx, &mut buf).is_pending());
+            assert!(
+                Pin::new(&mut decoder)
+                    .poll_read(&mut cx, &mut buf)
+                    .is_pending()
+            );
             assert_eq!(buf.filled(), b"P");
             assert!((1..=32).contains(&polls.get()), "one bounded read poll");
             assert_eq!(wake.0.load(Ordering::SeqCst), 1);

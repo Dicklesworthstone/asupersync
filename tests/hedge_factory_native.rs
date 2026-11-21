@@ -50,7 +50,10 @@ where
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::new().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("admitted native owner");
@@ -92,7 +95,8 @@ async fn parked_loser(child: Cx, mut receiver: mpsc::Receiver<()>, seen: Arc<Wit
 
 async fn wait_cancel<F: Future>(future: &mut Pin<Box<F>>, seen: &Witness) {
     let mut cancelled = std::pin::pin!(
-        seen.changed.wait_until(|| seen.cancelled.load(Ordering::Acquire))
+        seen.changed
+            .wait_until(|| seen.cancelled.load(Ordering::Acquire))
     );
     poll_fn(|task| {
         assert!(
@@ -143,7 +147,8 @@ fn delayed_backup_wins_but_waits_for_parked_primary_cleanup() {
                 move |child| parked_loser(child, receiver, primary),
                 move |child| async move {
                     assert!(child.now() >= earliest, "backup started before delay");
-                    backup.changed
+                    backup
+                        .changed
                         .wait_until(|| backup.parked.load(Ordering::Acquire))
                         .await;
                     9_u8
@@ -171,7 +176,8 @@ fn primary_winner_drains_an_already_started_backup() {
             let mut hedge = Box::pin(cx.hedge_drained_with(
                 Duration::ZERO,
                 move |_child| async move {
-                    primary.changed
+                    primary
+                        .changed
                         .wait_until(|| primary.parked.load(Ordering::Acquire))
                         .await;
                     7_u8
@@ -254,7 +260,8 @@ fn synchronous_primary_factory_panic_is_a_join_error_not_an_owner_panic() {
 fn timer_authority_is_required_only_when_delay_is_nonzero() {
     native(1, |cx| async move {
         let no_time = {
-            let _guard = cx.clone()
+            let _guard = cx
+                .clone()
                 .restrict::<cap::CapSet<true, false, true, true, true>>()
                 .set_current_restricted();
             Cx::current().unwrap()
@@ -278,11 +285,13 @@ fn timer_authority_is_required_only_when_delay_is_nonzero() {
         assert!(matches!(result, Err(JoinError::Cancelled(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(matches!(
-            no_time.hedge_drained_with(
-                Duration::ZERO,
-                |_child| async { 1_u8 },
-                |_child| async { 2_u8 },
-            ).await,
+            no_time
+                .hedge_drained_with(
+                    Duration::ZERO,
+                    |_child| async { 1_u8 },
+                    |_child| async { 2_u8 },
+                )
+                .await,
             Ok(1 | 2)
         ));
     });
@@ -292,17 +301,17 @@ fn timer_authority_is_required_only_when_delay_is_nonzero() {
 fn cancellation_during_backup_delay_stops_primary_and_never_launches_backup() {
     for workers in [1, 2] {
         for timed in [false, true] {
-        native(workers, move |cx| async move {
-            let seen = Arc::new(Witness::default());
-            let (_sender, receiver) = mpsc::channel(1);
-            let primary = Arc::clone(&seen);
-            let calls = Arc::new(AtomicUsize::new(0));
-            let backup_calls = Arc::clone(&calls);
-            let reported = Arc::new(AtomicBool::new(false));
-            let publication = Arc::clone(&reported);
-            let reason = CancelReason::user("stop hedged request");
-            let expected = reason.clone();
-            let mut owner = cx.spawn(move |owner| async move {
+            native(workers, move |cx| async move {
+                let seen = Arc::new(Witness::default());
+                let (_sender, receiver) = mpsc::channel(1);
+                let primary = Arc::clone(&seen);
+                let calls = Arc::new(AtomicUsize::new(0));
+                let backup_calls = Arc::clone(&calls);
+                let reported = Arc::new(AtomicBool::new(false));
+                let publication = Arc::clone(&reported);
+                let reason = CancelReason::user("stop hedged request");
+                let expected = reason.clone();
+                let mut owner = cx.spawn(move |owner| async move {
                 let primary = move |child| parked_loser(child, receiver, primary);
                 let backup = move |_child| {
                     backup_calls.fetch_add(1, Ordering::SeqCst);
@@ -321,22 +330,22 @@ fn cancellation_during_backup_delay_stops_primary_and_never_launches_backup() {
                 assert!(matches!(result, Err(JoinError::Cancelled(actual)) if actual == expected));
                 publication.store(true, Ordering::Release);
             }).unwrap();
-            seen.changed
-                .wait_until(|| seen.parked.load(Ordering::Acquire))
-                .await;
-            owner.abort_with_reason(reason.clone());
-            let mut joined = Box::pin(owner.join(&cx));
-            wait_cancel(&mut joined, &seen).await;
-            assert_eq!(*seen.full_reason.lock().unwrap(), Some(reason));
-            assert!(!reported.load(Ordering::Acquire));
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-            seen.release();
-            assert!(matches!(joined.await, Ok(())));
-            assert!(reported.load(Ordering::Acquire));
-            assert!(seen.cancelled.load(Ordering::Acquire));
-            assert!(seen.retired.load(Ordering::Acquire));
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-        });
+                seen.changed
+                    .wait_until(|| seen.parked.load(Ordering::Acquire))
+                    .await;
+                owner.abort_with_reason(reason.clone());
+                let mut joined = Box::pin(owner.join(&cx));
+                wait_cancel(&mut joined, &seen).await;
+                assert_eq!(*seen.full_reason.lock().unwrap(), Some(reason));
+                assert!(!reported.load(Ordering::Acquire));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                seen.release();
+                assert!(matches!(joined.await, Ok(())));
+                assert!(reported.load(Ordering::Acquire));
+                assert!(seen.cancelled.load(Ordering::Acquire));
+                assert!(seen.retired.load(Ordering::Acquire));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            });
         }
     }
 }
@@ -401,7 +410,8 @@ fn panic_in_backup_cleanup_overrides_a_successful_primary() {
             let mut hedge = Box::pin(cx.hedge_drained_with(
                 Duration::ZERO,
                 move |_child| async move {
-                    primary.changed
+                    primary
+                        .changed
                         .wait_until(|| primary.parked.load(Ordering::Acquire))
                         .await;
                     7_u8
@@ -475,7 +485,8 @@ fn overall_timeout_waits_for_cleanup_of_both_started_attempts() {
             poll_fn(|task| {
                 assert!(hedge.as_mut().poll(task).is_pending());
                 Poll::Ready(())
-            }).await;
+            })
+            .await;
             b.release();
             assert!(matches!(hedge.await,
                 Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
@@ -493,34 +504,39 @@ fn expired_or_unauthorized_timed_hedges_do_not_invoke_either_factory() {
             let calls = Arc::new(AtomicUsize::new(0));
             let a = Arc::clone(&calls);
             let b = Arc::clone(&calls);
-            let result = cx.hedge_drained_with_timeout(
-                delay,
-                Duration::ZERO,
-                move |_child| {
-                    a.fetch_add(1, Ordering::SeqCst);
-                    async { 1_u8 }
-                },
-                move |_child| {
-                    b.fetch_add(1, Ordering::SeqCst);
-                    async { 2_u8 }
-                },
-            ).await;
+            let result = cx
+                .hedge_drained_with_timeout(
+                    delay,
+                    Duration::ZERO,
+                    move |_child| {
+                        a.fetch_add(1, Ordering::SeqCst);
+                        async { 1_u8 }
+                    },
+                    move |_child| {
+                        b.fetch_add(1, Ordering::SeqCst);
+                        async { 2_u8 }
+                    },
+                )
+                .await;
             assert!(matches!(result,
                 Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
         let no_time = {
-            let _guard = cx.clone()
+            let _guard = cx
+                .clone()
                 .restrict::<cap::CapSet<true, false, true, true, true>>()
                 .set_current_restricted();
             Cx::current().unwrap()
         };
-        let result = no_time.hedge_drained_with_timeout(
-            Duration::ZERO,
-            Duration::from_secs(1),
-            |_child| -> std::future::Ready<u8> { panic!("unauthorized primary invoked") },
-            |_child| -> std::future::Ready<u8> { panic!("unauthorized backup invoked") },
-        ).await;
+        let result = no_time
+            .hedge_drained_with_timeout(
+                Duration::ZERO,
+                Duration::from_secs(1),
+                |_child| -> std::future::Ready<u8> { panic!("unauthorized primary invoked") },
+                |_child| -> std::future::Ready<u8> { panic!("unauthorized backup invoked") },
+            )
+            .await;
         assert!(matches!(result, Err(JoinError::Cancelled(_))));
     });
 }
@@ -538,7 +554,8 @@ fn timely_winner_survives_cleanup_that_finishes_after_overall_deadline() {
                 Duration::from_secs(1),
                 move |child| parked_loser(child, receiver, primary),
                 move |_child| async move {
-                    backup.changed
+                    backup
+                        .changed
                         .wait_until(|| backup.parked.load(Ordering::Acquire))
                         .await;
                     9_u8
@@ -549,7 +566,8 @@ fn timely_winner_survives_cleanup_that_finishes_after_overall_deadline() {
             poll_fn(|task| {
                 assert!(hedge.as_mut().poll(task).is_pending());
                 Poll::Ready(())
-            }).await;
+            })
+            .await;
             seen.release();
             assert_eq!(hedge.await.unwrap(), 9);
             assert!(seen.retired.load(Ordering::Acquire));
@@ -601,12 +619,14 @@ fn deadline_prevents_backup_side_effects_while_owner_is_not_polling() {
                 },
             ));
             let mut parked = std::pin::pin!(
-                seen.changed.wait_until(|| seen.parked.load(Ordering::Acquire))
+                seen.changed
+                    .wait_until(|| seen.parked.load(Ordering::Acquire))
             );
             poll_fn(|task| {
                 assert!(hedge.as_mut().poll(task).is_pending());
                 parked.as_mut().poll(task)
-            }).await;
+            })
+            .await;
             // Child tasks and timers progress, but the owner does not select a
             // winner or send loser cancellation until it resumes polling.
             asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;

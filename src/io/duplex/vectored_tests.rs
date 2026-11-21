@@ -6,7 +6,9 @@ use std::task::Wake;
 
 fn write_vectored(stream: &mut DuplexStream, buffers: &[IoSlice<'_>]) -> usize {
     match AsyncWrite::poll_write_vectored(
-        Pin::new(stream), &mut Context::from_waker(Waker::noop()), buffers,
+        Pin::new(stream),
+        &mut Context::from_waker(Waker::noop()),
+        buffers,
     ) {
         Poll::Ready(Ok(count)) => count,
         other => panic!("expected an immediate vectored write: {other:?}"),
@@ -15,7 +17,9 @@ fn write_vectored(stream: &mut DuplexStream, buffers: &[IoSlice<'_>]) -> usize {
 
 fn read_vectored(stream: &mut DuplexStream, buffers: &mut [IoSliceMut<'_>]) -> usize {
     match AsyncReadVectored::poll_read_vectored(
-        Pin::new(stream), &mut Context::from_waker(Waker::noop()), buffers,
+        Pin::new(stream),
+        &mut Context::from_waker(Waker::noop()),
+        buffers,
     ) {
         Poll::Ready(Ok(count)) => count,
         other => panic!("expected an immediate vectored read: {other:?}"),
@@ -37,8 +41,11 @@ fn vectored_write_preserves_the_exact_prefix_at_every_capacity_boundary() {
     for capacity in 0..=20 {
         let (mut writer, mut reader) = duplex(capacity);
         let buffers = [
-            IoSlice::new(b""), IoSlice::new(b"HEAD"), IoSlice::new(b""),
-            IoSlice::new(b"payload"), IoSlice::new(b"TAIL"),
+            IoSlice::new(b""),
+            IoSlice::new(b"HEAD"),
+            IoSlice::new(b""),
+            IoSlice::new(b"payload"),
+            IoSlice::new(b"TAIL"),
         ];
         assert!(AsyncWrite::is_write_vectored(&writer));
         let count = write_vectored(&mut writer, &buffers);
@@ -54,7 +61,10 @@ fn vectored_read_spans_destinations_without_replacing_descriptors_or_touching_th
     let payload: Vec<u8> = (0..19).collect();
     for available in 0..=19 {
         let (mut writer, mut reader) = duplex(32);
-        assert_eq!(write_vectored(&mut writer, &[IoSlice::new(&payload[..available])]), available);
+        assert_eq!(
+            write_vectored(&mut writer, &[IoSlice::new(&payload[..available])]),
+            available
+        );
         assert!(matches!(
             Pin::new(&mut writer).poll_shutdown(&mut Context::from_waker(Waker::noop())),
             Poll::Ready(Ok(()))
@@ -64,14 +74,19 @@ fn vectored_read_spans_destinations_without_replacing_descriptors_or_touching_th
         let mut third = [0xA5; 4];
         let count = {
             let mut buffers = [
-                IoSliceMut::new(&mut []), IoSliceMut::new(&mut first),
-                IoSliceMut::new(&mut []), IoSliceMut::new(&mut second),
+                IoSliceMut::new(&mut []),
+                IoSliceMut::new(&mut first),
+                IoSliceMut::new(&mut []),
+                IoSliceMut::new(&mut second),
                 IoSliceMut::new(&mut third),
             ];
             let descriptors: Vec<_> = buffers.iter().map(|b| (b.as_ptr(), b.len())).collect();
             let count = read_vectored(&mut reader, &mut buffers);
             assert_eq!(
-                buffers.iter().map(|b| (b.as_ptr(), b.len())).collect::<Vec<_>>(),
+                buffers
+                    .iter()
+                    .map(|b| (b.as_ptr(), b.len()))
+                    .collect::<Vec<_>>(),
                 descriptors
             );
             count
@@ -95,19 +110,31 @@ impl Wake for Count {
 #[test]
 fn vectored_backpressure_and_scalar_reads_share_one_byte_cursor_and_waiter() {
     let (mut writer, mut reader) = duplex(3);
-    assert_eq!(write_vectored(&mut writer, &[IoSlice::new(b"ab"), IoSlice::new(b"cd")]), 3);
+    assert_eq!(
+        write_vectored(&mut writer, &[IoSlice::new(b"ab"), IoSlice::new(b"cd")]),
+        3
+    );
     let count = Arc::new(Count(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&count));
     let pending = [IoSlice::new(b"d"), IoSlice::new(b"ef")];
-    assert!(AsyncWrite::poll_write_vectored(
-        Pin::new(&mut writer), &mut Context::from_waker(&waker), &pending,
-    ).is_pending());
+    assert!(
+        AsyncWrite::poll_write_vectored(
+            Pin::new(&mut writer),
+            &mut Context::from_waker(&waker),
+            &pending,
+        )
+        .is_pending()
+    );
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
     let mut first = [0; 1];
     let mut second = [0; 1];
-    assert_eq!(read_vectored(&mut reader, &mut [
-        IoSliceMut::new(&mut first), IoSliceMut::new(&mut second),
-    ]), 2);
+    assert_eq!(
+        read_vectored(
+            &mut reader,
+            &mut [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second),]
+        ),
+        2
+    );
     assert_eq!([first[0], second[0]], *b"ab");
     assert_eq!(count.0.load(Ordering::SeqCst), 1);
     assert_eq!(write_vectored(&mut writer, &pending), 2);
@@ -121,15 +148,32 @@ fn vectored_reads_cross_the_ring_wrap_without_reordering_or_replaying_bytes() {
     reader.read.lock().buffer = VecDeque::with_capacity(8);
     assert_eq!(write_vectored(&mut writer, &[IoSlice::new(b"abcdefgh")]), 8);
     assert_eq!(read_bytes(&mut reader, 6), b"abcdef");
-    assert_eq!(write_vectored(&mut writer, &[IoSlice::new(b"ijk"), IoSlice::new(b"lmn")]), 6);
-    assert!(!reader.read.lock().buffer.as_slices().1.is_empty(), "reached wrapped storage");
+    assert_eq!(
+        write_vectored(&mut writer, &[IoSlice::new(b"ijk"), IoSlice::new(b"lmn")]),
+        6
+    );
+    assert!(
+        !reader.read.lock().buffer.as_slices().1.is_empty(),
+        "reached wrapped storage"
+    );
     let mut a = [0; 3];
     let mut b = [0; 2];
     let mut c = [0; 3];
-    assert_eq!(read_vectored(&mut reader, &mut [
-        IoSliceMut::new(&mut a), IoSliceMut::new(&mut b), IoSliceMut::new(&mut c),
-    ]), 8);
-    assert_eq!([a.as_slice(), b.as_slice(), c.as_slice()].concat(), b"ghijklmn");
+    assert_eq!(
+        read_vectored(
+            &mut reader,
+            &mut [
+                IoSliceMut::new(&mut a),
+                IoSliceMut::new(&mut b),
+                IoSliceMut::new(&mut c),
+            ]
+        ),
+        8
+    );
+    assert_eq!(
+        [a.as_slice(), b.as_slice(), c.as_slice()].concat(),
+        b"ghijklmn"
+    );
     assert!(reader.read.lock().buffer.is_empty());
 }
 
@@ -139,13 +183,19 @@ fn descriptor_windows_make_positive_progress_past_long_empty_prefixes() {
     let mut source = vec![IoSlice::new(b""); 4096];
     source.extend((0..32).map(|_| IoSlice::new(b"x")));
     assert_eq!(write_vectored(&mut writer, &source), MAX_VECTORED_BUFFERS);
-    assert_eq!(write_vectored(&mut writer, &source[4096 + MAX_VECTORED_BUFFERS..]), 16);
+    assert_eq!(
+        write_vectored(&mut writer, &source[4096 + MAX_VECTORED_BUFFERS..]),
+        16
+    );
 
     let mut bytes = [0xA5; 32];
     {
         let mut destinations: Vec<_> = (0..4096).map(|_| IoSliceMut::new(&mut [])).collect();
         destinations.extend(bytes.chunks_mut(1).map(IoSliceMut::new));
-        assert_eq!(read_vectored(&mut reader, &mut destinations), MAX_VECTORED_BUFFERS);
+        assert_eq!(
+            read_vectored(&mut reader, &mut destinations),
+            MAX_VECTORED_BUFFERS
+        );
     }
     assert_eq!(&bytes[..16], &[b'x'; 16]);
     assert_eq!(&bytes[16..], &[0xA5; 16]);
@@ -188,17 +238,36 @@ fn native_vectored_sessions_resume_dropped_waits_over_the_real_duplex_transport(
         {
             let mut destinations = [IoSliceMut::new(&mut header), IoSliceMut::new(&mut body)];
             let mut send = WriteAllVectoredSession::new(&mut writer, &sources).unwrap();
-            let mut receive = ReadExactVectoredSession::new(&mut reader, &mut destinations).unwrap();
+            let mut receive =
+                ReadExactVectoredSession::new(&mut reader, &mut destinations).unwrap();
             {
                 let mut attempt = std::pin::pin!(send.run(&cx));
-                assert!(attempt.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(
+                    attempt
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
             }
-            assert_eq!(send.bytes_written(), 2, "writer reached full-pipe suspension");
+            assert_eq!(
+                send.bytes_written(),
+                2,
+                "writer reached full-pipe suspension"
+            );
             {
                 let mut attempt = std::pin::pin!(receive.run(&cx));
-                assert!(attempt.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(
+                    attempt
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
             }
-            assert_eq!(receive.bytes_read(), 2, "reader reached empty-pipe suspension");
+            assert_eq!(
+                receive.bytes_read(),
+                2,
+                "reader reached empty-pipe suspension"
+            );
             let (sent, received) = futures_lite::future::zip(send.run(&cx), receive.run(&cx)).await;
             assert_eq!(sent.unwrap(), 11);
             assert_eq!(received.unwrap(), 11);
@@ -214,6 +283,9 @@ fn native_vectored_sessions_resume_dropped_waits_over_the_real_duplex_transport(
             Pin::new(&mut writer).poll_shutdown(&mut Context::from_waker(Waker::noop())),
             Poll::Ready(Ok(()))
         ));
-        assert!(read_bytes(&mut reader, 1).is_empty(), "no duplicated suffix");
+        assert!(
+            read_bytes(&mut reader, 1).is_empty(),
+            "no duplicated suffix"
+        );
     });
 }

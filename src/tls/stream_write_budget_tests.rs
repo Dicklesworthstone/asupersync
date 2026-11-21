@@ -187,7 +187,10 @@ fn flush_to_completion(stream: &mut Stream) {
             }
             Poll::Pending => {
                 assert_eq!(writes, TLS_WRITE_STEPS_PER_POLL);
-                assert!(count.0.load(Ordering::Relaxed) > wakes, "yield lost its wakeup");
+                assert!(
+                    count.0.load(Ordering::Relaxed) > wakes,
+                    "yield lost its wakeup"
+                );
                 assert!(stream.conn.wants_write());
             }
         }
@@ -216,7 +219,10 @@ fn read_tail(stream: &mut Stream) -> Poll<io::Result<()>> {
     let mut buf = ReadBuf::new(&mut byte);
     let mut cx = Context::from_waker(Waker::noop());
     let result = Pin::new(stream).poll_read(&mut cx, &mut buf);
-    assert!(buf.filled().is_empty(), "duplicate or cancelled plaintext arrived");
+    assert!(
+        buf.filled().is_empty(),
+        "duplicate or cancelled plaintext arrived"
+    );
     result
 }
 
@@ -413,10 +419,7 @@ fn both_shutdown_apis_yield_without_claiming_early_completion() {
                     assert!(pending > 0 && sender.shutdown_flushed);
                     assert_eq!(sender.io.shutdowns, usize::from(transport));
                     read_payload(peer, &payload);
-                    assert!(matches!(
-                        read_tail(peer),
-                        Poll::Ready(Ok(()))
-                    ));
+                    assert!(matches!(read_tail(peer), Poll::Ready(Ok(()))));
                 });
             }
         }
@@ -483,7 +486,11 @@ fn cancellation_interruptions_end_tls_operations_without_retry_wakes() {
         for client_side in [true, false] {
             for operation in 0..4 {
                 run_pair(version, operation != 3, move |mut client, mut server| {
-                    let stream = if client_side { &mut client } else { &mut server };
+                    let stream = if client_side {
+                        &mut client
+                    } else {
+                        &mut server
+                    };
                     let owner = Cx::for_testing();
                     owner.cancel_fast(CancelKind::User);
                     let count = Arc::new(WakeCount::default());
@@ -527,7 +534,11 @@ fn cancellation_interruptions_end_tls_operations_without_retry_wakes() {
                     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
                     assert_eq!(
                         error.to_string(),
-                        if operation == 2 { "interrupted flush" } else { "cancelled" }
+                        if operation == 2 {
+                            "interrupted flush"
+                        } else {
+                            "cancelled"
+                        }
                     );
                     assert_eq!(count.0.load(Ordering::Relaxed), 0);
                     assert!(stream.is_closed());
@@ -560,25 +571,27 @@ fn masked_cancellation_keeps_signal_interruptions_retryable() {
                 let count = Arc::new(WakeCount::default());
                 let waker = Waker::from(Arc::clone(&count));
                 let mut task = Context::from_waker(&waker);
-                owner.masked(|| futures_lite::future::block_on(owner.with_ambient(async {
-                    sender.io.flush_interrupts = 1;
-                    assert!(Pin::new(&mut *sender).poll_flush(&mut task).is_pending());
-                    assert!(count.0.load(Ordering::Relaxed) > 0);
-                    assert!(sender.is_ready() && sender.write_error.is_none());
-                    assert!(matches!(
-                        Pin::new(&mut *sender).poll_flush(&mut task),
-                        Poll::Ready(Ok(()))
-                    ));
-                    let payload = b"masked protocol cleanup";
-                    assert!(matches!(
-                        Pin::new(&mut *sender).poll_write(&mut task, payload),
-                        Poll::Ready(Ok(n)) if n == payload.len()
-                    ));
-                    flush_to_completion(sender);
-                    read_payload(peer, payload);
-                    assert_eq!(sender.tls_exporter_channel_binding().ok(), binding);
-                    assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
-                })));
+                owner.masked(|| {
+                    futures_lite::future::block_on(owner.with_ambient(async {
+                        sender.io.flush_interrupts = 1;
+                        assert!(Pin::new(&mut *sender).poll_flush(&mut task).is_pending());
+                        assert!(count.0.load(Ordering::Relaxed) > 0);
+                        assert!(sender.is_ready() && sender.write_error.is_none());
+                        assert!(matches!(
+                            Pin::new(&mut *sender).poll_flush(&mut task),
+                            Poll::Ready(Ok(()))
+                        ));
+                        let payload = b"masked protocol cleanup";
+                        assert!(matches!(
+                            Pin::new(&mut *sender).poll_write(&mut task, payload),
+                            Poll::Ready(Ok(n)) if n == payload.len()
+                        ));
+                        flush_to_completion(sender);
+                        read_payload(peer, payload);
+                        assert_eq!(sender.tls_exporter_channel_binding().ok(), binding);
+                        assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
+                    }))
+                });
                 assert!(owner.checkpoint().is_err(), "mask escaped its scope");
             });
         }

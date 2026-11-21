@@ -1333,8 +1333,8 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
     let Some(line_end) = find_crlf(src.as_ref()) else {
         // A full-length line may arrive separately from the final LF. Keep
         // exactly one trailing CR without admitting another byte of line data.
-        let incomplete_delimiter = src.last() == Some(&b'\r')
-            && src.len().saturating_sub(1) == max_len;
+        let incomplete_delimiter =
+            src.last() == Some(&b'\r') && src.len().saturating_sub(1) == max_len;
         if src.len() > max_len && !incomplete_delimiter {
             return Err(HttpError::BadChunkedEncoding);
         }

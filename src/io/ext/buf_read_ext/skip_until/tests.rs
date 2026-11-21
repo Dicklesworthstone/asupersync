@@ -28,8 +28,13 @@ struct Source {
 impl Source {
     fn new(bytes: &'static [u8], width: usize) -> Self {
         Self {
-            bytes, pos: 0, width, paused_at: usize::MAX, error_at: None,
-            panic_peek: false, panic_consume: false,
+            bytes,
+            pos: 0,
+            width,
+            paused_at: usize::MAX,
+            error_at: None,
+            panic_peek: false,
+            panic_consume: false,
             observed: Arc::new(Observations::default()),
         }
     }
@@ -37,7 +42,9 @@ impl Source {
 
 impl AsyncRead for Source {
     fn poll_read(
-        self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>,
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         panic!("discard must use the buffered source, not copy through a scratch buffer");
     }
@@ -50,7 +57,10 @@ impl AsyncBufRead for Source {
         assert!(!this.panic_peek, "discard peek panic sentinel");
         if this.error_at == Some(this.pos) {
             this.error_at = None;
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "discard source error")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "discard source error",
+            )));
         }
         if this.pos >= this.paused_at && !this.observed.open.load(Ordering::SeqCst) {
             *this.observed.waiter.lock().unwrap() = Some(cx.waker().clone());
@@ -62,7 +72,10 @@ impl AsyncBufRead for Source {
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
         let this = self.get_mut();
-        assert!(amt > 0, "discard must not call consume on EOF or zero admission");
+        assert!(
+            amt > 0,
+            "discard must not call consume on EOF or zero admission"
+        );
         assert!(amt <= this.width.min(this.bytes.len() - this.pos));
         this.pos += amt;
         this.observed.consumed.fetch_add(amt, Ordering::SeqCst);
@@ -70,7 +83,9 @@ impl AsyncBufRead for Source {
     }
 }
 
-fn run<R: AsyncBufRead + Unpin + ?Sized>(session: &mut SkipUntilSession<'_, R>) -> io::Result<usize> {
+fn run<R: AsyncBufRead + Unpin + ?Sized>(
+    session: &mut SkipUntilSession<'_, R>,
+) -> io::Result<usize> {
     let mut wait = std::pin::pin!(session.run());
     for _ in 0..1024 {
         if let Poll::Ready(result) = wait.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
@@ -136,7 +151,10 @@ fn size_refusal_neither_consumes_the_extra_delimiter_nor_repolls_the_provider() 
     let mut source = Source::new(b"abc|NEXT", 64);
     let observed = Arc::clone(&source.observed);
     let mut session = source.skip_until_limited(b'|', 3);
-    assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        run(&mut session).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
     assert_eq!(session.bytes_skipped(), 3);
     assert_eq!(session.remaining(), 0);
     assert!(session.limit_exceeded());
@@ -144,7 +162,10 @@ fn size_refusal_neither_consumes_the_extra_delimiter_nor_repolls_the_provider() 
     assert!(!session.delimiter_found());
     let polls = observed.polls.load(Ordering::SeqCst);
     for _ in 0..3 {
-        assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            run(&mut session).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
     assert_eq!(observed.polls.load(Ordering::SeqCst), polls);
     assert_eq!(observed.consumed.load(Ordering::SeqCst), 3);
@@ -196,7 +217,10 @@ fn dropped_wait_retains_progress_and_cannot_reset_its_limit() {
     assert!(!session.is_poisoned());
     observed.open.store(true, Ordering::SeqCst);
     observed.waiter.lock().unwrap().take().unwrap().wake();
-    assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        run(&mut session).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
     assert_eq!(session.bytes_skipped(), 5);
     assert_eq!(observed.consumed.load(Ordering::SeqCst), 5);
     let source = session.into_inner();
@@ -229,7 +253,10 @@ fn provider_errors_preserve_their_exact_error_and_do_not_refresh_the_budget() {
     assert_eq!(session.bytes_skipped(), 2);
     assert_eq!(session.remaining(), 2);
     assert!(!session.is_poisoned());
-    assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        run(&mut session).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
     assert_eq!(session.bytes_skipped(), 4);
     let reader = session.into_inner();
     assert_eq!(&reader.bytes[reader.pos..], b"e|NEXT");
@@ -245,15 +272,31 @@ fn panic_in_peek_or_consume_refuses_replay_and_preserves_the_original_panic() {
         let mut session = source.skip_until_limited(b'|', 4);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = run(&mut session);
-        })).expect_err("provider panic must propagate");
-        let text = panic.downcast_ref::<&str>().copied()
+        }))
+        .expect_err("provider panic must propagate");
+        let text = panic
+            .downcast_ref::<&str>()
+            .copied()
             .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
-        assert_eq!(text, Some(if consume { "discard consume panic sentinel" } else { "discard peek panic sentinel" }));
+        assert_eq!(
+            text,
+            Some(if consume {
+                "discard consume panic sentinel"
+            } else {
+                "discard peek panic sentinel"
+            })
+        );
         assert!(session.is_poisoned());
         assert_eq!(session.bytes_skipped(), 0); // No successful consume receipt.
-        assert_eq!(observed.consumed.load(Ordering::SeqCst), if consume { 2 } else { 0 });
+        assert_eq!(
+            observed.consumed.load(Ordering::SeqCst),
+            if consume { 2 } else { 0 }
+        );
         let polls = observed.polls.load(Ordering::SeqCst);
-        assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            run(&mut session).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(observed.polls.load(Ordering::SeqCst), polls);
     }
 }
@@ -263,7 +306,9 @@ fn cooperative_work_budget_and_total_byte_budget_are_independent() {
     static BYTES: [u8; 4096] = [b'x'; 4096];
     struct WakeCount(AtomicUsize);
     impl std::task::Wake for WakeCount {
-        fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
     let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wake));
@@ -272,12 +317,19 @@ fn cooperative_work_budget_and_total_byte_budget_are_independent() {
     let mut session = source.skip_until_limited(b'|', 1000);
     {
         let mut wait = std::pin::pin!(session.run());
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
     }
     assert_eq!(observed.polls.load(Ordering::SeqCst), 32);
     assert_eq!(session.bytes_skipped(), 32);
     assert_eq!(wake.0.load(Ordering::SeqCst), 1);
-    assert_eq!(run(&mut session).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        run(&mut session).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
     assert_eq!(session.bytes_skipped(), 1000);
     assert_eq!(observed.consumed.load(Ordering::SeqCst), 1000);
 }
@@ -285,19 +337,29 @@ fn cooperative_work_budget_and_total_byte_budget_are_independent() {
 #[test]
 fn byte_boundaries_match_flat_slice_oracle_for_every_small_limit_and_refill_width() {
     for (bytes, delimiter) in [
-        (b"".as_slice(), b'|'), (b"|abc", b'|'), (b"abcdef|NEXT", b'|'),
-        (b"abcdef", b'|'), (b"\xff\xfe\0rest", 0),
+        (b"".as_slice(), b'|'),
+        (b"|abc", b'|'),
+        (b"abcdef|NEXT", b'|'),
+        (b"abcdef", b'|'),
+        (b"\xff\xfe\0rest", 0),
     ] {
         for width in 1..=12 {
             for limit in 0..=bytes.len() + 2 {
                 let offered = limit.min(bytes.len());
-                let boundary = bytes[..offered].iter().position(|&b| b == delimiter).map(|p| p + 1);
+                let boundary = bytes[..offered]
+                    .iter()
+                    .position(|&b| b == delimiter)
+                    .map(|p| p + 1);
                 let expected = boundary.unwrap_or(offered);
                 let success = boundary.is_some() || offered == bytes.len();
                 let mut source = Source::new(bytes, width);
                 let mut session = source.skip_until_limited(delimiter, limit);
                 let result = run(&mut session);
-                assert_eq!(result.is_ok(), success, "width={width}, limit={limit}, bytes={bytes:?}");
+                assert_eq!(
+                    result.is_ok(),
+                    success,
+                    "width={width}, limit={limit}, bytes={bytes:?}"
+                );
                 assert_eq!(session.bytes_skipped(), expected);
                 assert_eq!(session.delimiter_found(), boundary.is_some());
                 assert_eq!(session.is_eof(), success && boundary.is_none());
@@ -322,13 +384,22 @@ fn public_session_accepts_trait_objects_and_maximum_counter_bounds() {
 #[test]
 fn native_recovery_wait_can_be_dropped_then_resume_before_peer_eof() {
     use crate::io::{AsyncWriteExt, BufReader, duplex};
-    let runtime = crate::runtime::RuntimeBuilder::current_thread().build().unwrap();
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let (mut sender, receiver) = duplex(64);
         sender.write_all(b"abcdef").await.unwrap();
         let mut reader = BufReader::with_capacity(16, receiver);
         let mut prefix = Vec::new();
-        assert_eq!(reader.read_until_limited(b'|', &mut prefix, 3).await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            reader
+                .read_until_limited(b'|', &mut prefix, 3)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(prefix, b"abc");
         let mut discard = reader.skip_until_limited(b'|', 7);
         {
@@ -344,7 +415,13 @@ fn native_recovery_wait_can_be_dropped_then_resume_before_peer_eof() {
         assert!(discard.delimiter_found());
         let reader = discard.into_inner();
         let mut next_record = Vec::new();
-        assert_eq!(reader.read_until_limited(b'|', &mut next_record, 5).await.unwrap(), 5);
+        assert_eq!(
+            reader
+                .read_until_limited(b'|', &mut next_record, 5)
+                .await
+                .unwrap(),
+            5
+        );
         assert_eq!(next_record, b"NEXT|");
         // Resynchronization completed while the peer was still open.
         sender.shutdown().await.unwrap();
@@ -356,14 +433,18 @@ fn oversized_split_can_explicitly_discard_the_remainder_before_parsing_again() {
     use crate::stream::Stream;
     let mut split = Source::new(b"abcdef|OK|", 2).split_limited(b'|', 3);
     let status = Pin::new(&mut split).poll_next(&mut Context::from_waker(Waker::noop()));
-    assert!(matches!(status, Poll::Ready(Some(Err(ref error))) if error.kind() == io::ErrorKind::InvalidData));
+    assert!(
+        matches!(status, Poll::Ready(Some(Err(ref error))) if error.kind() == io::ErrorKind::InvalidData)
+    );
     let (mut reader, partial) = split.into_parts();
     assert_eq!(partial, b"abc");
     let mut discard = reader.skip_until_limited(b'|', 4);
     assert_eq!(run(&mut discard).unwrap(), 4);
     assert!(discard.delimiter_found());
     let mut record = Vec::new();
-    let mut next_record = discard.into_inner().read_until_limited(b'|', &mut record, 3);
+    let mut next_record = discard
+        .into_inner()
+        .read_until_limited(b'|', &mut record, 3);
     let status = Pin::new(&mut next_record).poll(&mut Context::from_waker(Waker::noop()));
     assert!(matches!(status, Poll::Ready(Ok(3))));
     assert_eq!(record, b"OK|");

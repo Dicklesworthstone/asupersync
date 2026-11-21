@@ -167,16 +167,17 @@ fn scoped_retry_budget_uses_owner_clock_for_refill_under_foreign_ambient() {
             RetryPolicy::immediate(2),
             shared.clone(),
             AlwaysRetry,
-            |_, attempt| {
-                std::future::ready(if attempt == 1 { Err(1_u32) } else { Ok(42_u32) })
-            },
+            |_, attempt| std::future::ready(if attempt == 1 { Err(1_u32) } else { Ok(42_u32) }),
         ));
         let report = {
             let _ambient = Cx::set_current(Some(ambient.clone()));
             drive(&mut lab, retry.as_mut())
         };
         if refilled {
-            assert!(matches!(report.stop, ScopedRetryStop::Succeeded { attempt: 2 }));
+            assert!(matches!(
+                report.stop,
+                ScopedRetryStop::Succeeded { attempt: 2 }
+            ));
             assert_eq!(report.attempts.len(), 2);
         } else {
             assert!(matches!(
@@ -214,7 +215,9 @@ fn scoped_retry_budget_checks_clock_authority_and_precancel_before_work() {
             let Poll::Ready(Ok(report)) = poll_once(retry.as_mut()) else {
                 panic!("precancellation needs no timer authority");
             };
-            assert!(matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason));
+            assert!(
+                matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason)
+            );
             assert_eq!(report.owner_cancellation.as_ref(), Some(&reason));
             assert!(report.attempts.is_empty());
         } else {
@@ -262,7 +265,9 @@ fn scoped_retry_budget_cancel_or_drop_during_backoff_refunds_and_retires_timer()
             owner.masked(|| {
                 owner.set_cancel_reason(reason.clone());
                 let report = drive(&mut lab, retry.as_mut());
-                assert!(matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason));
+                assert!(
+                    matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason)
+                );
                 assert_eq!(report.owner_cancellation.as_ref(), Some(&reason));
                 assert_eq!(report.attempts.len(), 1);
                 assert_eq!(report.total_delay, delay, "scheduled is not elapsed");
@@ -309,7 +314,14 @@ fn scoped_retry_budget_cancel_or_drop_before_late_admission_refunds_without_invo
         assert_eq!(pending.count(), 1);
         let gateway = owner.spawn_gateway_handle().unwrap();
         let parts = gateway.mailbox().dequeue().unwrap().into_parts();
-        let slot = Arc::clone(parts.admitted_slot.as_ref().unwrap().branch_region().unwrap());
+        let slot = Arc::clone(
+            parts
+                .admitted_slot
+                .as_ref()
+                .unwrap()
+                .branch_region()
+                .unwrap(),
+        );
         let reason = CancelReason::user("stop before retry admission");
         let mut retry = if cancelled {
             owner.set_cancel_reason(reason.clone());
@@ -325,20 +337,19 @@ fn scoped_retry_budget_cancel_or_drop_before_late_admission_refunds_without_invo
             priority,
             cancel_publication,
             spawn_effects,
-        } = lab.state.admit_spawn_request(parts) else {
+        } = lab.state.admit_spawn_request(parts)
+        else {
             panic!("dequeued retry must reach the publication seam");
         };
         let region = slot.get().unwrap().region_id;
-        let (wakes, observer) = cancel_publication.publish_with_spawn_effects(
-            spawn_effects,
-            |cancel_priority| {
+        let (wakes, observer) =
+            cancel_publication.publish_with_spawn_effects(spawn_effects, |cancel_priority| {
                 if let Some(priority) = cancel_priority {
                     lab.scheduler.lock().schedule_cancel(task_id, priority);
                 } else {
                     lab.scheduler.lock().schedule(task_id, priority);
                 }
-            },
-        );
+            });
         if let Some(observer) = observer {
             observer.dispatch();
         }
@@ -346,7 +357,9 @@ fn scoped_retry_budget_cancel_or_drop_before_late_admission_refunds_without_invo
         lab.run_until_idle();
         if let Some(retry) = retry.as_mut() {
             let report = drive(&mut lab, retry.as_mut());
-            assert!(matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason));
+            assert!(
+                matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason)
+            );
             assert_eq!(report.owner_cancellation.as_ref(), Some(&reason));
             assert_eq!(report.attempts.len(), 2);
             assert!(matches!(
@@ -386,12 +399,18 @@ fn scoped_retry_budget_refunds_when_runtime_refuses_a_reserved_retry() {
     }
     assert_eq!(shared.available(), 0);
     assert_eq!(pending.count(), 1);
-    assert!(lab.state.set_region_limits(root, RegionLimits {
-        max_tasks: Some(1),
-        ..RegionLimits::default()
-    }));
+    assert!(lab.state.set_region_limits(
+        root,
+        RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::default()
+        }
+    ));
     let report = drive(&mut lab, retry.as_mut());
-    assert!(matches!(report.stop, ScopedRetryStop::NotAdmitted { attempt: 2 }));
+    assert!(matches!(
+        report.stop,
+        ScopedRetryStop::NotAdmitted { attempt: 2 }
+    ));
     assert_eq!(report.attempts.len(), 2);
     assert!(matches!(
         report.attempts[0].task,
@@ -430,14 +449,22 @@ fn scoped_retry_budget_fairness_yield_keeps_next_reservation_refundable() {
     }
     assert_eq!(shared.available(), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 64);
-    assert_eq!(pending.count(), 0, "fairness yields before the next submission");
+    assert_eq!(
+        pending.count(),
+        0,
+        "fairness yields before the next submission"
+    );
     let reason = CancelReason::user("cancel at retry fairness yield");
     owner.set_cancel_reason(reason.clone());
     let report = drive(&mut lab, retry.as_mut());
     assert!(matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason));
     assert_eq!(report.attempts.len(), 64);
     assert_eq!(calls.load(Ordering::SeqCst), 64);
-    assert_eq!(shared.available(), 1, "63 retries spent, one reservation returned");
+    assert_eq!(
+        shared.available(),
+        1,
+        "63 retries spent, one reservation returned"
+    );
     drop(retry);
     finish_fixture(&mut lab, root, &gate);
 }
@@ -456,7 +483,10 @@ fn scoped_retry_budget_spends_an_invoked_factory_token_even_when_the_factory_pan
         },
     ));
     let report = drive(&mut lab, retry.as_mut());
-    assert!(matches!(report.stop, ScopedRetryStop::TaskFailed { attempt: 2 }));
+    assert!(matches!(
+        report.stop,
+        ScopedRetryStop::TaskFailed { attempt: 2 }
+    ));
     assert_eq!(report.attempts.len(), 2);
     assert!(matches!(
         &report.attempts[1].task,
@@ -491,7 +521,9 @@ fn scoped_retry_budget_predicate_decline_or_cancellation_never_reserves() {
         ));
         let report = drive(&mut lab, retry.as_mut());
         if cancelled {
-            assert!(matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason));
+            assert!(
+                matches!(&report.stop, ScopedRetryStop::Cancelled(actual) if actual == &reason)
+            );
         } else {
             assert!(matches!(
                 report.stop,
@@ -595,7 +627,8 @@ fn scoped_retry_budget_native_cancellation_refunds_reserved_backoff_and_drains()
         }));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(45))
+    let result = receive
+        .recv_timeout(Duration::from_secs(45))
         .expect("budgeted retry must finish native cancellation and drain");
     worker.join().unwrap();
     if let Err(payload) = result {

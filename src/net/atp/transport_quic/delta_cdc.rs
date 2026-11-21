@@ -8,9 +8,9 @@ use crate::net::atp::transport_common::delta::{cdc, read_full_chunk};
 
 #[cfg(any(feature = "tls", test))]
 use super::{
-    AuthMode, AuthenticatedSymbol, AuthenticationTag, Cx, Digest, Frame, FrameType,
-    ObjectId, QuicHello, QuicHelloAck, QuicPreparedSource, QuicTransportError,
-    SecurityContext, Sha256, Symbol, SymbolId, SymbolKind,
+    AuthMode, AuthenticatedSymbol, AuthenticationTag, Cx, Digest, Frame, FrameType, ObjectId,
+    QuicHello, QuicHelloAck, QuicPreparedSource, QuicTransportError, SecurityContext, Sha256,
+    Symbol, SymbolId, SymbolKind,
 };
 
 pub(super) const MANIFEST_SCHEMA: &str = "asupersync.atp.quic.cdc-chunk-manifest.v1";
@@ -20,8 +20,7 @@ pub(super) const SELECTOR: &str = "authenticated_cdc_delta_chunks_v1";
 /// Necessary size bound only: the builder also limits the actual chunk count.
 /// This admits ordinary 100 MiB files without assuming every chunk is minimal.
 pub(super) fn size_may_fit(size: u64) -> bool {
-    size != 0
-        && size.div_ceil(cdc::MAX_CHUNK_BYTES as u64) <= QUIC_DELTA_MAX_MANIFEST_CHUNKS
+    size != 0 && size.div_ceil(cdc::MAX_CHUNK_BYTES as u64) <= QUIC_DELTA_MAX_MANIFEST_CHUNKS
 }
 
 pub(super) fn is_cdc(manifest: &TransferManifest) -> bool {
@@ -34,16 +33,28 @@ pub(super) fn is_cdc(manifest: &TransferManifest) -> bool {
 /// Use identical read boundaries for sender manifests, source revalidation,
 /// no-op verification and baseline reuse. Neither mode stores a whole file.
 pub(super) enum ChunkReader {
-    Fixed { file: crate::fs::File, buffer: Vec<u8> },
-    Cdc { reader: cdc::ChunkReader<crate::fs::File>, chunk: Vec<u8> },
+    Fixed {
+        file: crate::fs::File,
+        buffer: Vec<u8>,
+    },
+    Cdc {
+        reader: cdc::ChunkReader<crate::fs::File>,
+        chunk: Vec<u8>,
+    },
 }
 
 impl ChunkReader {
     pub(super) fn new(file: crate::fs::File, chunk_size: usize, content_defined: bool) -> Self {
         if content_defined {
-            Self::Cdc { reader: cdc::ChunkReader::new(file), chunk: Vec::new() }
+            Self::Cdc {
+                reader: cdc::ChunkReader::new(file),
+                chunk: Vec::new(),
+            }
         } else {
-            Self::Fixed { file, buffer: vec![0; chunk_size] }
+            Self::Fixed {
+                file,
+                buffer: vec![0; chunk_size],
+            }
         }
     }
 
@@ -97,7 +108,11 @@ fn capability_symbol(
     }
     let digest: [u8; 32] = hasher.finalize().into();
     Ok(Symbol::new(
-        SymbolId::new(ObjectId::new(0x4154_502d_5155_4943, 0x2d43_4443_2d43_4150), 0, 0),
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5155_4943, 0x2d43_4443_2d43_4150),
+            0,
+            0,
+        ),
         digest.to_vec(),
         SymbolKind::Source,
     ))
@@ -105,7 +120,10 @@ fn capability_symbol(
 
 #[cfg(any(feature = "tls", test))]
 fn require_hello(hello: &QuicHello) -> Result<(), QuicTransportError> {
-    if hello.delta_transfer_nonce.is_none_or(|nonce| nonce.is_zero()) {
+    if hello
+        .delta_transfer_nonce
+        .is_none_or(|nonce| nonce.is_zero())
+    {
         return Err(QuicTransportError::HandshakeRejected(
             "QUIC CDC capability requires a fresh delta transfer nonce".to_string(),
         ));
@@ -116,9 +134,7 @@ fn require_hello(hello: &QuicHello) -> Result<(), QuicTransportError> {
 #[cfg(any(feature = "tls", test))]
 fn require_ack(hello: &QuicHello, ack: &QuicHelloAck) -> Result<(), QuicTransportError> {
     require_hello(hello)?;
-    if !ack.accepted
-        || super::validate_quic_delta_ack(hello.delta_transfer_nonce, ack)?.is_none()
-    {
+    if !ack.accepted || super::validate_quic_delta_ack(hello.delta_transfer_nonce, ack)?.is_none() {
         return Err(QuicTransportError::HandshakeRejected(
             "QUIC CDC acknowledgement requires an accepted bound delta handshake".to_string(),
         ));
@@ -140,7 +156,10 @@ fn sign_capability(
         ));
     }
     let tag = context.derive_context(key).sign_symbol_tag(&symbol);
-    frame.header.extensions.insert(extension, tag.as_bytes().to_vec());
+    frame
+        .header
+        .extensions
+        .insert(extension, tag.as_bytes().to_vec());
     Ok(())
 }
 
@@ -154,11 +173,13 @@ fn verify_capability(
     let tag = bytes.try_into().map_err(|_| {
         QuicTransportError::HandshakeRejected("malformed QUIC CDC capability".to_string())
     })?;
-    let mut authenticated = AuthenticatedSymbol::from_parts(
-        symbol, AuthenticationTag::from_bytes(tag),
-    );
+    let mut authenticated =
+        AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::from_bytes(tag));
     if context.mode() != AuthMode::Strict
-        || context.derive_context(key).verify_authenticated_symbol(&mut authenticated).is_err()
+        || context
+            .derive_context(key)
+            .verify_authenticated_symbol(&mut authenticated)
+            .is_err()
         || !authenticated.is_verified()
     {
         return Err(QuicTransportError::HandshakeRejected(
@@ -175,8 +196,13 @@ pub(super) fn advertise_cdc(
     hello: &QuicHello,
 ) -> Result<(), QuicTransportError> {
     require_hello(hello)?;
-    sign_capability(frame, context, CDC_HELLO_EXTENSION, CDC_HELLO_KEY,
-        capability_symbol(hello, None)?)
+    sign_capability(
+        frame,
+        context,
+        CDC_HELLO_EXTENSION,
+        CDC_HELLO_KEY,
+        capability_symbol(hello, None)?,
+    )
 }
 
 #[cfg(any(feature = "tls", test))]
@@ -189,7 +215,12 @@ pub(super) fn cdc_offered(
         return Ok(false);
     };
     require_hello(hello)?;
-    verify_capability(bytes, context, CDC_HELLO_KEY, capability_symbol(hello, None)?)?;
+    verify_capability(
+        bytes,
+        context,
+        CDC_HELLO_KEY,
+        capability_symbol(hello, None)?,
+    )?;
     Ok(true)
 }
 
@@ -201,8 +232,13 @@ pub(super) fn acknowledge_cdc(
     ack: &QuicHelloAck,
 ) -> Result<(), QuicTransportError> {
     require_ack(hello, ack)?;
-    sign_capability(frame, context, CDC_ACK_EXTENSION, CDC_ACK_KEY,
-        capability_symbol(hello, Some(ack))?)
+    sign_capability(
+        frame,
+        context,
+        CDC_ACK_EXTENSION,
+        CDC_ACK_KEY,
+        capability_symbol(hello, Some(ack))?,
+    )
 }
 
 #[cfg(any(feature = "tls", test))]
@@ -222,10 +258,17 @@ pub(super) fn cdc_acknowledged(
         ));
     }
     require_ack(hello, ack)?;
-    let context = context.ok_or_else(|| QuicTransportError::HandshakeRejected(
-        "QUIC CDC acknowledgement has no strict authentication context".to_string(),
-    ))?;
-    verify_capability(bytes, context, CDC_ACK_KEY, capability_symbol(hello, Some(ack))?)?;
+    let context = context.ok_or_else(|| {
+        QuicTransportError::HandshakeRejected(
+            "QUIC CDC acknowledgement has no strict authentication context".to_string(),
+        )
+    })?;
+    verify_capability(
+        bytes,
+        context,
+        CDC_ACK_KEY,
+        capability_symbol(hello, Some(ack))?,
+    )?;
     Ok(true)
 }
 
@@ -247,21 +290,40 @@ pub(super) async fn select_manifest(
         return Ok(());
     }
     let Some(delta) = super::build_quic_delta_manifest_with_layout(
-        cx, &manifest.merkle_root_hex, &source.abs_path, entry.index,
-        &entry.rel_path, entry.size, &entry.sha256_hex, cdc::MAX_CHUNK_BYTES, true,
-    ).await? else {
-        cx.trace_with_fields("atp_quic.cdc_manifest_fallback", &[("reason", "chunk_count_budget")]);
+        cx,
+        &manifest.merkle_root_hex,
+        &source.abs_path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        cdc::MAX_CHUNK_BYTES,
+        true,
+    )
+    .await?
+    else {
+        cx.trace_with_fields(
+            "atp_quic.cdc_manifest_fallback",
+            &[("reason", "chunk_count_budget")],
+        );
         return Ok(());
     };
     let mut candidate = manifest.clone();
     candidate.delta_manifest = Some(delta);
     match super::json_frame(FrameType::ObjectManifest, &candidate) {
-        Ok(frame) if frame.payload().len() <= usize::try_from(super::MAX_FRAME_SIZE)
-            .unwrap_or(usize::MAX).saturating_sub(super::QUIC_DELTA_ENVELOPE_WIRE_BUDGET) => {
-                prepared.manifest = candidate;
-            }
+        Ok(frame)
+            if frame.payload().len()
+                <= usize::try_from(super::MAX_FRAME_SIZE)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(super::QUIC_DELTA_ENVELOPE_WIRE_BUDGET) =>
+        {
+            prepared.manifest = candidate;
+        }
         Ok(_) | Err(QuicTransportError::Frame(_)) => {
-            cx.trace_with_fields("atp_quic.cdc_manifest_fallback", &[("reason", "authenticated_envelope_budget")]);
+            cx.trace_with_fields(
+                "atp_quic.cdc_manifest_fallback",
+                &[("reason", "authenticated_envelope_budget")],
+            );
         }
         Err(error) => return Err(error),
     }

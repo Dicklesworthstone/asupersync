@@ -13,9 +13,9 @@
 //! authority. Mounted descendants on another filesystem are refused.
 
 use super::{
-    BidirectionalSyncError, BidirectionalSyncPlan, DirectoryEntryKind,
-    DirectoryEntryMetadata, DirectoryManifest, DirectoryManifestEntry,
-    DirectoryPath, DirectorySyncError, PathNormalizationRules, plan_bidirectional_sync,
+    BidirectionalSyncError, BidirectionalSyncPlan, DirectoryEntryKind, DirectoryEntryMetadata,
+    DirectoryManifest, DirectoryManifestEntry, DirectoryPath, DirectorySyncError,
+    PathNormalizationRules, plan_bidirectional_sync,
 };
 use crate::cx::Cx;
 use crate::fs::scoped::ScopedFsError;
@@ -33,10 +33,10 @@ use std::path::{Component, Path, PathBuf};
 mod apply;
 mod session;
 pub use apply::{
-    NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectorySyncReport,
-    NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
-    NativeDirectoryRecoverySource, NativeDirectoryRecoverySourceAction,
-    NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
+    NativeDirectoryActionReceipt, NativeDirectoryActionState, NativeDirectoryRecoveryEntry,
+    NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport, NativeDirectoryRecoverySource,
+    NativeDirectoryRecoverySourceAction, NativeDirectoryRecoveryState, NativeDirectorySyncReport,
+    PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
     prepare_native_directory_recovery_from_source,
 };
 pub use session::{
@@ -372,7 +372,13 @@ async fn prepare_native_directory(
     }
     cx.scoped_fs()
         .run_io(move |worker| {
-            Ok(prepare_native_directory_owned(&worker, basis, &local_path, &remote_path, limits))
+            Ok(prepare_native_directory_owned(
+                &worker,
+                basis,
+                &local_path,
+                &remote_path,
+                limits,
+            ))
         })
         .await
         .map_err(NativeDirectoryError::Runtime)?
@@ -398,9 +404,10 @@ fn prepare_native_directory_owned(
         NativePlanBaseline::Common(baseline) => {
             (baseline, b"asupersync.native-directory-plan.v1\0")
         }
-        NativePlanBaseline::Destination => {
-            (&remote.manifest, b"asupersync.native-directory-mirror-plan.v1\0")
-        }
+        NativePlanBaseline::Destination => (
+            &remote.manifest,
+            b"asupersync.native-directory-mirror-plan.v1\0",
+        ),
     };
     let preview = plan_bidirectional_sync(baseline, &local.manifest, &remote.manifest)
         .map_err(NativeDirectoryError::Plan)?;
@@ -514,8 +521,13 @@ impl NativeRoot {
                 Component::RootDir => {}
                 Component::Normal(name) => {
                     let next = File::from(
-                        openat(&directory, Path::new(name), directory_flags(), Mode::empty())
-                            .map_err(|error| os_error(path, error))?,
+                        openat(
+                            &directory,
+                            Path::new(name),
+                            directory_flags(),
+                            Mode::empty(),
+                        )
+                        .map_err(|error| os_error(path, error))?,
                     );
                     normalized.push(name);
                     directory = next;
@@ -524,7 +536,10 @@ impl NativeRoot {
             }
         }
         if normalized == Path::new("/") {
-            return Err(refused(path, "filesystem root is not a synchronization root"));
+            return Err(refused(
+                path,
+                "filesystem root is not a synchronization root",
+            ));
         }
         let stamp = metadata_stamp(&directory, &normalized)?;
         Ok(Self {
@@ -567,12 +582,19 @@ fn disjoint_inventories(
     local: &NativeDirectorySnapshot,
     remote: &NativeDirectorySnapshot,
 ) -> Result<(), NativeDirectoryError> {
-    let mut local_objects: BTreeSet<_> = local.guards.values().map(|stamp| stamp.identity).collect();
+    let mut local_objects: BTreeSet<_> =
+        local.guards.values().map(|stamp| stamp.identity).collect();
     local_objects.insert(local.root.identity);
     if local_objects.contains(&remote.root.identity)
-        || remote.guards.values().any(|stamp| local_objects.contains(&stamp.identity))
+        || remote
+            .guards
+            .values()
+            .any(|stamp| local_objects.contains(&stamp.identity))
     {
-        return Err(refused(&remote.root.path, "synchronization roots alias filesystem objects"));
+        return Err(refused(
+            &remote.root.path,
+            "synchronization roots alias filesystem objects",
+        ));
     }
     Ok(())
 }
@@ -589,14 +611,26 @@ fn scan_root(
     let mut guards = BTreeMap::new();
     let mut total_bytes = 0;
     scan_children(
-        cx, &root, &root.file, "", 0, limits, &mut manifest, &mut guards, &mut total_bytes,
+        cx,
+        &root,
+        &root.file,
+        "",
+        0,
+        limits,
+        &mut manifest,
+        &mut guards,
+        &mut total_bytes,
     )?;
     if metadata_stamp(&root.file, &root.path)? != root_stamp {
         return Err(changed(&root.path));
     }
     root.revalidate()?;
     let snapshot = NativeDirectorySnapshot {
-        root, manifest, root_stamp, guards, total_bytes,
+        root,
+        manifest,
+        root_stamp,
+        guards,
+        total_bytes,
     };
     revalidate_stamps(cx, &snapshot)?;
     Ok(snapshot)
@@ -631,7 +665,11 @@ fn scan_children(
         if name.contains('\\') || name.contains('/') || name.is_empty() {
             return Err(refused(&display, "directory entry name is not canonical"));
         }
-        let relative = if prefix.is_empty() { name.to_owned() } else { format!("{prefix}/{name}") };
+        let relative = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let path = DirectoryPath::normalize(&relative, PathNormalizationRules::default())
             .map_err(NativeDirectoryError::Manifest)?;
         if path.as_str() != relative {
@@ -646,14 +684,21 @@ fn scan_children(
         }
         let observed = stat_at(directory, name, &display)?.ok_or_else(|| changed(&display))?;
         if observed.identity.device != root.identity.device {
-            return Err(refused(&display, "mounted descendant crosses the root filesystem"));
+            return Err(refused(
+                &display,
+                "mounted descendant crosses the root filesystem",
+            ));
         }
         let kind = observed.kind(&display)?;
         let child = File::from(
             openat(
                 directory,
                 name,
-                if kind == DirectoryEntryKind::Directory { directory_flags() } else { file_flags() },
+                if kind == DirectoryEntryKind::Directory {
+                    directory_flags()
+                } else {
+                    file_flags()
+                },
                 Mode::empty(),
             )
             .map_err(|error| os_error(&display, error))?,
@@ -680,12 +725,25 @@ fn scan_children(
             (None, DirectoryEntryMetadata::default())
         };
         manifest
-            .insert(DirectoryManifestEntry::new(path.clone(), kind, content_id, metadata))
+            .insert(DirectoryManifestEntry::new(
+                path.clone(),
+                kind,
+                content_id,
+                metadata,
+            ))
             .map_err(NativeDirectoryError::Manifest)?;
         guards.insert(path, observed);
         if kind == DirectoryEntryKind::Directory {
             scan_children(
-                cx, root, &child, &relative, depth + 1, limits, manifest, guards, total_bytes,
+                cx,
+                root,
+                &child,
+                &relative,
+                depth + 1,
+                limits,
+                manifest,
+                guards,
+                total_bytes,
             )?;
         }
         if stat_at(directory, name, &display)? != Some(observed) {
@@ -711,7 +769,9 @@ fn hash_file(
     let mut total = 0_u64;
     loop {
         checkpoint(cx)?;
-        let read = file.read(&mut buffer).map_err(|source| io_error(path, source))?;
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| io_error(path, source))?;
         if read == 0 {
             break;
         }
@@ -732,7 +792,10 @@ fn validate_profile(
     limits: NativeDirectoryLimits,
 ) -> Result<(), NativeDirectoryError> {
     if manifest.path_rules != PathNormalizationRules::default() {
-        return Err(refused(Path::new(""), "native content profile requires default path rules"));
+        return Err(refused(
+            Path::new(""),
+            "native content profile requires default path rules",
+        ));
     }
     if manifest.entries.len() > limits.max_entries {
         return Err(limit(Path::new(""), "max_entries"));
@@ -741,13 +804,17 @@ fn validate_profile(
     for (path, entry) in &manifest.entries {
         let display = Path::new(path.as_str());
         if path.as_str().contains('\\') || path.as_str().split('/').count() > limits.max_depth {
-            return Err(refused(display, "baseline path exceeds the native path profile"));
+            return Err(refused(
+                display,
+                "baseline path exceeds the native path profile",
+            ));
         }
         let expected_metadata = match entry.kind {
             DirectoryEntryKind::File => {
-                let size = entry.metadata.size_bytes.ok_or_else(|| {
-                    refused(display, "native file baseline requires size_bytes")
-                })?;
+                let size = entry
+                    .metadata
+                    .size_bytes
+                    .ok_or_else(|| refused(display, "native file baseline requires size_bytes"))?;
                 if size > limits.max_file_bytes {
                     return Err(limit(display, "max_file_bytes"));
                 }
@@ -758,20 +825,35 @@ fn validate_profile(
                 let digest = entry.content_id.as_deref().unwrap_or_default();
                 if !digest.starts_with("sha256:")
                     || digest.len() != 71
-                    || !digest.as_bytes()[7..].iter()
+                    || !digest.as_bytes()[7..]
+                        .iter()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
                 {
-                    return Err(refused(display, "native file baseline requires a SHA-256 content id"));
+                    return Err(refused(
+                        display,
+                        "native file baseline requires a SHA-256 content id",
+                    ));
                 }
-                DirectoryEntryMetadata { size_bytes: Some(size), ..DirectoryEntryMetadata::default() }
+                DirectoryEntryMetadata {
+                    size_bytes: Some(size),
+                    ..DirectoryEntryMetadata::default()
+                }
             }
             DirectoryEntryKind::Directory if entry.content_id.is_none() => {
                 DirectoryEntryMetadata::default()
             }
-            _ => return Err(refused(display, "baseline kind is outside the native content profile")),
+            _ => {
+                return Err(refused(
+                    display,
+                    "baseline kind is outside the native content profile",
+                ));
+            }
         };
         if entry.metadata != expected_metadata || !entry.caveats.is_empty() {
-            return Err(refused(display, "native content profile cannot preserve baseline metadata"));
+            return Err(refused(
+                display,
+                "native content profile cannot preserve baseline metadata",
+            ));
         }
     }
     // Also checks forged map keys, missing ancestors, and noncanonical paths.
@@ -802,7 +884,10 @@ fn open_parent<'a>(
     path: &'a DirectoryPath,
 ) -> Result<(File, &'a str), NativeDirectoryError> {
     let mut components = path.as_str().split('/').peekable();
-    let mut directory = root.file.try_clone().map_err(|source| io_error(&root.path, source))?;
+    let mut directory = root
+        .file
+        .try_clone()
+        .map_err(|source| io_error(&root.path, source))?;
     let mut display = root.path.clone();
     while let Some(name) = components.next() {
         if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
@@ -843,19 +928,30 @@ fn checkpoint(cx: &Cx) -> Result<(), NativeDirectoryError> {
 }
 
 fn refused(path: &Path, reason: &'static str) -> NativeDirectoryError {
-    NativeDirectoryError::Refused { path: path.to_owned(), reason }
+    NativeDirectoryError::Refused {
+        path: path.to_owned(),
+        reason,
+    }
 }
 
 fn changed(path: &Path) -> NativeDirectoryError {
-    NativeDirectoryError::Changed { path: path.to_owned() }
+    NativeDirectoryError::Changed {
+        path: path.to_owned(),
+    }
 }
 
 fn limit(path: &Path, limit: &'static str) -> NativeDirectoryError {
-    NativeDirectoryError::Limit { path: path.to_owned(), limit }
+    NativeDirectoryError::Limit {
+        path: path.to_owned(),
+        limit,
+    }
 }
 
 fn io_error(path: &Path, source: io::Error) -> NativeDirectoryError {
-    NativeDirectoryError::Io { path: path.to_owned(), source }
+    NativeDirectoryError::Io {
+        path: path.to_owned(),
+        source,
+    }
 }
 
 fn os_error(path: &Path, source: Errno) -> NativeDirectoryError {

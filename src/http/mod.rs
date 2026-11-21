@@ -51,8 +51,8 @@ pub mod h3 {
         H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame,
         H3NativeError as H3Error, H3PseudoHeaders, H3QpackMode, H3RequestHead,
         H3RequestStreamState, H3ResponseHead, H3Settings, H3UniStreamType, QpackFieldPlan,
-        UnknownSetting, qpack_decode_field_section, qpack_decode_request_field_section_with_settings,
-        qpack_encode_field_section,
+        UnknownSetting, qpack_decode_field_section,
+        qpack_decode_request_field_section_with_settings, qpack_encode_field_section,
         qpack_encode_request_field_section, qpack_encode_response_field_section,
         qpack_encode_trailer_field_section, qpack_plan_to_header_fields,
         qpack_static_plan_for_request, qpack_static_plan_for_response,
@@ -62,9 +62,9 @@ pub mod h3 {
         H3_REQUEST_CANCELLED, NATIVE_H3_MAX_QPACK_BLOCKED_SECTION_BYTES,
         NATIVE_H3_MAX_QPACK_BLOCKED_STREAMS, NATIVE_H3_MAX_QPACK_DECODER_CAPACITY,
         NATIVE_H3_MAX_QPACK_ENCODER_CAPACITY, NATIVE_H3_MAX_QPACK_FIELD_SECTION_SIZE,
-        NativeH3Event, NativeH3RequestWriteEvent,
-        NativeH3RequestWriter, NativeH3ResponseBodyWriter, NativeH3ResponseWriteEvent,
-        NativeH3Session, NativeH3SessionError,
+        NativeH3Event, NativeH3RequestWriteEvent, NativeH3RequestWriter,
+        NativeH3ResponseBodyWriter, NativeH3ResponseWriteEvent, NativeH3Session,
+        NativeH3SessionError,
     };
     pub(crate) use super::h3_quic::{
         NativeH3ResponseWriter, NativeH3WriteEvent, h3_data_frame_wire_len,
@@ -86,11 +86,13 @@ pub mod client;
 /// Explicit outbound W3C propagation with same-origin redirect boundaries.
 pub mod trace_client;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use auto::{HttpAutoListener, HttpAutoListenerConfig, HttpAutoShutdownStats};
 #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
 pub use auto::HttpAutoStreamingListener;
-pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint};
+#[cfg(not(target_arch = "wasm32"))]
+pub use auto::{HttpAutoListener, HttpAutoListenerConfig, HttpAutoShutdownStats};
+pub use body::{
+    Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, ReaderBody, SizeHint,
+};
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
     MultipartBody, MultipartBodyError, MultipartBodyPart, MultipartChunk, MultipartError,

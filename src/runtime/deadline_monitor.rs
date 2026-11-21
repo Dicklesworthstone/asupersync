@@ -7,10 +7,10 @@
 
 use crate::observability::metrics::MetricsProvider;
 use crate::record::TaskRecord;
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -832,7 +832,8 @@ impl DeadlineMonitor {
                         .as_ref()
                         .is_none_or(|state| state.claim_live_violation());
                     if report_violation {
-                        deadline_violation = Some(Duration::from_nanos(now.duration_since(deadline)));
+                        deadline_violation =
+                            Some(Duration::from_nanos(now.duration_since(deadline)));
                     }
                 }
 

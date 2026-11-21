@@ -180,8 +180,7 @@ pub(crate) mod cdc {
     /// data where a low-bit mask degenerates to max-cap-only chunks
     /// (br-asupersync-iz269u).
     const BOUNDARY_MASK_BITS: u32 = 15;
-    const BOUNDARY_MASK: u64 =
-        ((1u64 << BOUNDARY_MASK_BITS) - 1) << (64 - BOUNDARY_MASK_BITS);
+    const BOUNDARY_MASK: u64 = ((1u64 << BOUNDARY_MASK_BITS) - 1) << (64 - BOUNDARY_MASK_BITS);
     const _: () = assert!(
         AVG_CHUNK_BYTES == 1usize << BOUNDARY_MASK_BITS,
         "boundary mask bits must track the average chunk size",
@@ -314,8 +313,9 @@ pub(crate) mod cdc {
                         }
                         return Ok(Some(std::mem::take(&mut self.pending)));
                     }
-                    return Ok((!self.current.is_empty())
-                        .then(|| std::mem::take(&mut self.current)));
+                    return Ok(
+                        (!self.current.is_empty()).then(|| std::mem::take(&mut self.current))
+                    );
                 }
                 if self.input_pos == self.input_len {
                     self.input_len =

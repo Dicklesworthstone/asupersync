@@ -14,6 +14,7 @@ use crate::net::udp::ReactorRegistration;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::future::Future;
@@ -21,7 +22,6 @@ use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -35,7 +35,11 @@ const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(50);
 /// Inspect native codes because descriptor exhaustion has no stable
 /// `ErrorKind` variant. Callers must delay retries to avoid busy-spinning.
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols", feature = "tls"))]
+#[cfg(any(
+    not(feature = "slim-runtime-profile"),
+    feature = "service-protocols",
+    feature = "tls"
+))]
 pub(crate) fn is_accept_resource_exhaustion(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::OutOfMemory {
         return true;

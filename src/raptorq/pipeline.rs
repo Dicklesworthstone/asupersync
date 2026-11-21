@@ -25,9 +25,7 @@ mod send_session;
 mod session;
 
 pub use receive_session::RaptorQReceiveSession;
-pub use send_session::{
-    RaptorQOffloadedSendSession, RaptorQSendSession, RaptorQSymbolSendSession,
-};
+pub use send_session::{RaptorQOffloadedSendSession, RaptorQSendSession, RaptorQSymbolSendSession};
 
 use receive_state::ReceiveState;
 

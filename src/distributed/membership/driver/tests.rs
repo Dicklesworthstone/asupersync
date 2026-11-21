@@ -8,8 +8,8 @@ use std::task::Waker;
 
 #[test]
 fn elapsed_rearm_keeps_tick_ready_without_repolling_completed_sleep() {
-    use crate::time::VirtualClock;
     use crate::sync::atomic::{AtomicUsize, Ordering};
+    use crate::time::VirtualClock;
     use std::task::Wake;
 
     #[derive(Default)]
@@ -82,25 +82,50 @@ fn elapsed_rearm_keeps_tick_ready_without_repolling_completed_sleep() {
     );
 }
 
-fn node(name: &str) -> NodeId { NodeId::new(name) }
-fn address(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }
+fn node(name: &str) -> NodeId {
+    NodeId::new(name)
+}
+fn address(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
 fn protocol() -> SwimConfig {
-    SwimConfig { probe_interval_ms: 100, probe_timeout_ms: 20, awareness_max: 1,
-        suspicion_mult: 1, suspicion_max_timeout_mult: 1, indirect_probe_count: 1,
-        max_members: 8, ..SwimConfig::default() }
+    SwimConfig {
+        probe_interval_ms: 100,
+        probe_timeout_ms: 20,
+        awareness_max: 1,
+        suspicion_mult: 1,
+        suspicion_max_timeout_mult: 1,
+        indirect_probe_count: 1,
+        max_members: 8,
+        ..SwimConfig::default()
+    }
 }
 fn config() -> SwimDriverConfig {
-    SwimDriverConfig { max_peers: 8, max_queued_datagrams: 16, retained_events: 2,
-        io_batch: 4, tick_ms: 5, max_datagram_age_ms: 500, leave_timeout_ms: 50 }
+    SwimDriverConfig {
+        max_peers: 8,
+        max_queued_datagrams: 16,
+        retained_events: 2,
+        io_batch: 4,
+        tick_ms: 5,
+        max_datagram_age_ms: 500,
+        leave_timeout_ms: 50,
+    }
 }
 fn make_engine(local: &str, peers: &[(&str, u16)]) -> Engine {
     let mut swim = Swim::new(node(local), protocol(), 7);
-    let peers: BTreeMap<_, _> = peers.iter().map(|(id, port)| (node(id), address(*port))).collect();
-    for peer in peers.keys() { swim.add_peer(0, peer.clone()); }
+    let peers: BTreeMap<_, _> = peers
+        .iter()
+        .map(|(id, port)| (node(id), address(*port)))
+        .collect();
+    for peer in peers.keys() {
+        swim.add_peer(0, peer.clone());
+    }
     swim.drain_events();
     Engine::new(swim, peers, 1400, config())
 }
-fn bytes(packet: Packet) -> Vec<u8> { encode_packet(&packet, 1400).unwrap().bytes }
+fn bytes(packet: Packet) -> Vec<u8> {
+    encode_packet(&packet, 1400).unwrap().bytes
+}
 
 #[derive(Default)]
 struct Script {
@@ -115,28 +140,53 @@ struct Script {
 impl DatagramIo for Script {
     fn poll_datagram(&mut self, _: &mut Context<'_>) -> Poll<io::Result<(SocketAddr, &[u8])>> {
         match self.inbound.pop_front() {
-            Some((from, bytes)) => { self.current = bytes; Poll::Ready(Ok((from, &self.current))) }
+            Some((from, bytes)) => {
+                self.current = bytes;
+                Poll::Ready(Ok((from, &self.current)))
+            }
             None => Poll::Pending,
         }
     }
-    fn poll_send_datagram(&mut self, _: &mut Context<'_>, target: SocketAddr, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_send_datagram(
+        &mut self,
+        _: &mut Context<'_>,
+        target: SocketAddr,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.attempts.push((target, bytes.to_vec()));
-        if self.blocked { return Poll::Pending; }
-        if self.send_error { return Poll::Ready(Err(io::ErrorKind::ConnectionRefused.into())); }
-        if self.partial { return Poll::Ready(Ok(bytes.len() - 1)); }
+        if self.blocked {
+            return Poll::Pending;
+        }
+        if self.send_error {
+            return Poll::Ready(Err(io::ErrorKind::ConnectionRefused.into()));
+        }
+        if self.partial {
+            return Poll::Ready(Ok(bytes.len() - 1));
+        }
         self.sent.push((target, bytes.to_vec()));
         Poll::Ready(Ok(bytes.len()))
     }
 }
-fn turn(engine: &mut Engine, io: &mut Script, now: u64, tick: bool) -> Result<engine::Turn, SwimDriverError> {
+fn turn(
+    engine: &mut Engine,
+    io: &mut Script,
+    now: u64,
+    tick: bool,
+) -> Result<engine::Turn, SwimDriverError> {
     engine.turn(io, &mut Context::from_waker(Waker::noop()), now, tick)
 }
 
 #[test]
 fn pending_send_retains_identical_datagram_and_resumes_without_false_accounting() {
     let mut engine = make_engine("a", &[("b", 2)]);
-    let mut io = Script { blocked: true, ..Script::default() };
-    assert_eq!(turn(&mut engine, &mut io, 0, true).unwrap(), engine::Turn::Park);
+    let mut io = Script {
+        blocked: true,
+        ..Script::default()
+    };
+    assert_eq!(
+        turn(&mut engine, &mut io, 0, true).unwrap(),
+        engine::Turn::Park
+    );
     assert_eq!(engine.outbox.len(), 1);
     assert_eq!(engine.stats.sent_datagrams, 0);
     let original = io.attempts[0].clone();
@@ -155,14 +205,18 @@ fn send_backpressure_does_not_block_ack_receive_or_timeout_progress() {
     let mut engine = make_engine("a", &[("b", 2)]);
     let mut io = Script::default();
     turn(&mut engine, &mut io, 0, true).unwrap();
-    let Payload::Ping { seq } = decode_packet(&io.sent[0].1).unwrap().payload else { panic!("first probe"); };
+    let Payload::Ping { seq } = decode_packet(&io.sent[0].1).unwrap().payload else {
+        panic!("first probe");
+    };
     // A real earlier probe was sent; an unrelated response now hits socket
     // backpressure while the original probe's acknowledgement arrives.
     io.blocked = true;
-    io.inbound.push_back((address(2), bytes(Packet::new(Payload::Ping { seq: 100 }))));
+    io.inbound
+        .push_back((address(2), bytes(Packet::new(Payload::Ping { seq: 100 }))));
     turn(&mut engine, &mut io, 1, false).unwrap();
     assert_eq!(engine.outbox.len(), 1);
-    io.inbound.push_back((address(2), bytes(Packet::new(Payload::Ack { seq }))));
+    io.inbound
+        .push_back((address(2), bytes(Packet::new(Payload::Ack { seq }))));
     turn(&mut engine, &mut io, 20, true).unwrap();
     assert_eq!(engine.stats.accepted_packets, 2);
     assert_eq!(engine.stats.received_acks, 1);
@@ -180,10 +234,15 @@ fn absent_peer_transitions_through_suspicion_to_dead_without_input() {
     turn(&mut engine, &mut io, 20, true).unwrap();
     turn(&mut engine, &mut io, 100, true).unwrap();
     assert_eq!(engine.swim.state_of(&node("b")), Some(MemberState::Suspect));
-    for now in (105..=2000).step_by(5) { turn(&mut engine, &mut io, now, true).unwrap(); }
+    for now in (105..=2000).step_by(5) {
+        turn(&mut engine, &mut io, now, true).unwrap();
+    }
     assert_eq!(engine.swim.state_of(&node("b")), Some(MemberState::Dead));
     let events = engine.swim.drain_events();
-    assert_eq!(events.iter().map(|e| e.kind).collect::<Vec<_>>(), vec![MembershipKind::Suspect, MembershipKind::Dead]);
+    assert_eq!(
+        events.iter().map(|e| e.kind).collect::<Vec<_>>(),
+        vec![MembershipKind::Suspect, MembershipKind::Dead]
+    );
 }
 
 #[test]
@@ -198,24 +257,40 @@ fn actual_three_node_indirect_probe_relays_ack_when_direct_packet_is_lost() {
     assert_eq!(indirect.sent.len(), 1);
     let (helper_addr, ping_req) = indirect.sent.pop().unwrap();
     assert_ne!(helper_addr, direct_target);
-    let (helper_name, target_name, target_port) = if helper_addr == address(2) { ("b", "c", 3) } else { ("c", "b", 2) };
+    let (helper_name, target_name, target_port) = if helper_addr == address(2) {
+        ("b", "c", 3)
+    } else {
+        ("c", "b", 2)
+    };
     let mut helper = make_engine(helper_name, &[("a", 1), (target_name, target_port)]);
     let mut target = make_engine(target_name, &[("a", 1), (helper_name, helper_addr.port())]);
     helper.receive(20, address(1), &ping_req).unwrap();
     let mut helper_io = Script::default();
     turn(&mut helper, &mut helper_io, 20, false).unwrap();
     assert_eq!(helper_io.sent[0].0, direct_target);
-    target.receive(21, helper_addr, &helper_io.sent[0].1).unwrap();
+    target
+        .receive(21, helper_addr, &helper_io.sent[0].1)
+        .unwrap();
     let mut target_io = Script::default();
     turn(&mut target, &mut target_io, 21, false).unwrap();
-    helper.receive(22, direct_target, &target_io.sent[0].1).unwrap();
+    helper
+        .receive(22, direct_target, &target_io.sent[0].1)
+        .unwrap();
     helper_io.sent.clear();
     turn(&mut helper, &mut helper_io, 22, false).unwrap();
     assert_eq!(helper_io.sent[0].0, address(1));
     a.receive(23, helper_addr, &helper_io.sent[0].1).unwrap();
     turn(&mut a, &mut Script::default(), 100, true).unwrap();
-    assert_eq!(a.swim.state_of(&node(target_name)), Some(MemberState::Alive));
-    assert!(!a.swim.drain_events().iter().any(|e| e.kind == MembershipKind::Suspect));
+    assert_eq!(
+        a.swim.state_of(&node(target_name)),
+        Some(MemberState::Alive)
+    );
+    assert!(
+        !a.swim
+            .drain_events()
+            .iter()
+            .any(|e| e.kind == MembershipKind::Suspect)
+    );
 }
 
 #[test]
@@ -225,12 +300,34 @@ fn malformed_foreign_oversized_and_unconfigured_gossip_do_not_touch_protocol() {
     engine.receive(1, address(999), &ping).unwrap();
     engine.receive(1, address(2), &[0]).unwrap();
     engine.receive(1, address(2), &vec![0; 1401]).unwrap();
-    let mut trailing = ping.clone(); trailing.push(0);
+    let mut trailing = ping.clone();
+    trailing.push(0);
     engine.receive(1, address(2), &trailing).unwrap();
-    for rumor in [Rumor::alive(node("outsider"), 0), Rumor::suspect(node("b"), 0, node("outsider"))] {
-        engine.receive(1, address(2), &bytes(Packet { payload: Payload::Ping { seq: 9 }, gossip: vec![rumor] })).unwrap();
+    for rumor in [
+        Rumor::alive(node("outsider"), 0),
+        Rumor::suspect(node("b"), 0, node("outsider")),
+    ] {
+        engine
+            .receive(
+                1,
+                address(2),
+                &bytes(Packet {
+                    payload: Payload::Ping { seq: 9 },
+                    gossip: vec![rumor],
+                }),
+            )
+            .unwrap();
     }
-    engine.receive(1, address(2), &bytes(Packet::new(Payload::PingReq { seq: 1, target: node("outsider") }))).unwrap();
+    engine
+        .receive(
+            1,
+            address(2),
+            &bytes(Packet::new(Payload::PingReq {
+                seq: 1,
+                target: node("outsider"),
+            })),
+        )
+        .unwrap();
     assert_eq!(engine.swim.member_count(), 1); // only the admitted peer; local is excluded
     assert_eq!(engine.swim.state_of(&node("b")), Some(MemberState::Alive));
     assert!(engine.outbox.is_empty());
@@ -252,7 +349,10 @@ fn outbox_overflow_is_explicit_and_never_exceeds_bound() {
     let ping = bytes(Packet::new(Payload::Ping { seq: 4 }));
     engine.receive(0, address(2), &ping).unwrap();
     let retained = engine.outbox.front().unwrap().bytes.clone();
-    assert!(matches!(engine.receive(1, address(2), &ping), Err(SwimDriverError::OutboxFull)));
+    assert!(matches!(
+        engine.receive(1, address(2), &ping),
+        Err(SwimDriverError::OutboxFull)
+    ));
     assert_eq!(engine.outbox.len(), 1);
     assert_eq!(engine.outbox.front().unwrap().bytes, retained);
     assert_eq!(engine.stats.queue_high_water, 1);
@@ -263,8 +363,13 @@ fn outbox_overflow_is_explicit_and_never_exceeds_bound() {
 fn bounded_receive_batch_still_ticks_under_foreign_packet_flood() {
     let mut engine = make_engine("a", &[("b", 2)]);
     let mut io = Script::default();
-    for _ in 0..100 { io.inbound.push_back((address(99), vec![0])); }
-    assert_eq!(turn(&mut engine, &mut io, 0, true).unwrap(), engine::Turn::Yield);
+    for _ in 0..100 {
+        io.inbound.push_back((address(99), vec![0]));
+    }
+    assert_eq!(
+        turn(&mut engine, &mut io, 0, true).unwrap(),
+        engine::Turn::Yield
+    );
     assert_eq!(io.inbound.len(), 96);
     assert_eq!(engine.stats.received_datagrams, 4);
     assert_eq!(engine.stats.ticks, 1);
@@ -274,7 +379,10 @@ fn bounded_receive_batch_still_ticks_under_foreign_packet_flood() {
 #[test]
 fn expired_unsent_probe_is_loss_not_a_successful_send() {
     let mut engine = make_engine("a", &[("b", 2)]);
-    let mut io = Script { blocked: true, ..Script::default() };
+    let mut io = Script {
+        blocked: true,
+        ..Script::default()
+    };
     turn(&mut engine, &mut io, 0, true).unwrap();
     turn(&mut engine, &mut io, 500, false).unwrap();
     assert!(engine.outbox.is_empty());
@@ -286,136 +394,319 @@ fn expired_unsent_probe_is_loss_not_a_successful_send() {
 fn graceful_leave_fans_out_and_stops_probes_with_finite_pending_deadline() {
     let mut engine = make_engine("a", &[("b", 2), ("c", 3)]);
     engine.begin_leave(100).unwrap();
-    let mut io = Script { blocked: true, ..Script::default() };
-    assert_eq!(turn(&mut engine, &mut io, 101, true).unwrap(), engine::Turn::Park);
+    let mut io = Script {
+        blocked: true,
+        ..Script::default()
+    };
+    assert_eq!(
+        turn(&mut engine, &mut io, 101, true).unwrap(),
+        engine::Turn::Park
+    );
     assert_eq!(engine.stats.ticks, 0);
-    assert!(matches!(turn(&mut engine, &mut io, 150, true), Err(SwimDriverError::LeaveTimeout)));
+    assert!(matches!(
+        turn(&mut engine, &mut io, 150, true),
+        Err(SwimDriverError::LeaveTimeout)
+    ));
     assert_eq!(engine.stats.sent_datagrams, 0);
 
     let mut engine = make_engine("a", &[("b", 2), ("c", 3)]);
     engine.begin_leave(100).unwrap();
     let mut io = Script::default();
-    assert_eq!(turn(&mut engine, &mut io, 101, true).unwrap(), engine::Turn::Left);
+    assert_eq!(
+        turn(&mut engine, &mut io, 101, true).unwrap(),
+        engine::Turn::Left
+    );
     assert_eq!(io.sent.len(), 2);
     for (_, data) in io.sent {
-        assert_eq!(decode_packet(&data).unwrap().gossip, vec![Rumor::leave(node("a"), 1)]);
+        assert_eq!(
+            decode_packet(&data).unwrap().gossip,
+            vec![Rumor::leave(node("a"), 1)]
+        );
     }
 }
 
 #[test]
 fn send_failure_and_partial_udp_progress_do_not_manufacture_leave_success() {
     let mut engine = make_engine("a", &[("b", 2)]);
-    let mut io = Script { send_error: true, ..Script::default() };
+    let mut io = Script {
+        send_error: true,
+        ..Script::default()
+    };
     turn(&mut engine, &mut io, 0, true).unwrap();
     assert_eq!(engine.stats.send_errors, 1);
     assert_eq!(engine.stats.sent_datagrams, 0);
     engine.begin_leave(1).unwrap();
-    assert!(matches!(turn(&mut engine, &mut io, 1, false), Err(SwimDriverError::Io(_))));
+    assert!(matches!(
+        turn(&mut engine, &mut io, 1, false),
+        Err(SwimDriverError::Io(_))
+    ));
     assert_eq!(engine.stats.sent_datagrams, 0);
-    io.send_error = false; io.partial = true;
-    assert!(matches!(turn(&mut engine, &mut io, 2, false), Err(SwimDriverError::PartialDatagram)));
+    io.send_error = false;
+    io.partial = true;
+    assert!(matches!(
+        turn(&mut engine, &mut io, 2, false),
+        Err(SwimDriverError::PartialDatagram)
+    ));
     assert_eq!(engine.stats.sent_datagrams, 0);
 }
 
 #[test]
 fn observer_bounds_history_exposes_lag_and_wakes_on_terminal_owner_drop() {
     let shared = Arc::new(ObservationState::new(2));
-    let observer = SwimObserver { shared: Arc::clone(&shared) };
-    for kind in [MembershipKind::Alive, MembershipKind::Suspect, MembershipKind::Dead] {
-        shared.publish(vec![MembershipEvent { node: node("b"), kind, incarnation: 0 }], std::iter::empty(), SwimDriverStatus::Running, SwimDriverStats::default()).unwrap();
+    let observer = SwimObserver {
+        shared: Arc::clone(&shared),
+    };
+    for kind in [
+        MembershipKind::Alive,
+        MembershipKind::Suspect,
+        MembershipKind::Dead,
+    ] {
+        shared
+            .publish(
+                vec![MembershipEvent {
+                    node: node("b"),
+                    kind,
+                    incarnation: 0,
+                }],
+                std::iter::empty(),
+                SwimDriverStatus::Running,
+                SwimDriverStats::default(),
+            )
+            .unwrap();
     }
     let snapshot = observer.snapshot();
     assert_eq!(snapshot.membership.event_count(), 3);
     assert_eq!(snapshot.membership.compact_base(), 1);
     assert_eq!(snapshot.membership.events_since(1).len(), 2);
-    assert_eq!(snapshot.membership.kind_of(&node("b")), Some(MembershipKind::Dead));
+    assert_eq!(
+        snapshot.membership.kind_of(&node("b")),
+        Some(MembershipKind::Dead)
+    );
     let mut changed = std::pin::pin!(observer.changed(snapshot.revision));
     let mut task = Context::from_waker(Waker::noop());
     assert!(changed.as_mut().poll(&mut task).is_pending());
     shared.finish_if_active(SwimDriverStatus::Dropped, SwimDriverStats::default());
-    assert!(matches!(changed.as_mut().poll(&mut task), Poll::Ready(SwimObservation { status: SwimDriverStatus::Dropped, .. })));
+    assert!(matches!(
+        changed.as_mut().poll(&mut task),
+        Poll::Ready(SwimObservation {
+            status: SwimDriverStatus::Dropped,
+            ..
+        })
+    ));
 }
 
 #[test]
 fn live_contact_requires_direct_input_and_recovers_without_trusting_gossip() {
     let shared = Arc::new(ObservationState::new(1));
-    let observer = SwimObserver { shared: Arc::clone(&shared) };
-    let event = |kind| MembershipEvent { node: node("b"), kind, incarnation: 0 };
+    let observer = SwimObserver {
+        shared: Arc::clone(&shared),
+    };
+    let event = |kind| MembershipEvent {
+        node: node("b"),
+        kind,
+        incarnation: 0,
+    };
     let stats = SwimDriverStats::default();
-    shared.publish(vec![event(MembershipKind::Alive)], std::iter::empty(), SwimDriverStatus::Prepared, stats).unwrap();
-    assert!(!observer.has_live_contact(&node("b")), "a seed is not a live peer");
-    shared.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
-    assert!(!observer.has_live_contact(&node("b")), "starting a driver is not a probe response");
+    shared
+        .publish(
+            vec![event(MembershipKind::Alive)],
+            std::iter::empty(),
+            SwimDriverStatus::Prepared,
+            stats,
+        )
+        .unwrap();
+    assert!(
+        !observer.has_live_contact(&node("b")),
+        "a seed is not a live peer"
+    );
+    shared
+        .publish(
+            Vec::new(),
+            std::iter::empty(),
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    assert!(
+        !observer.has_live_contact(&node("b")),
+        "starting a driver is not a probe response"
+    );
     assert!(!observer.has_live_contact(&node("unknown")));
 
-    shared.publish(Vec::new(), [node("b"), node("unknown")], SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(
+            Vec::new(),
+            [node("b"), node("unknown")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
     assert!(observer.has_live_contact(&node("b")));
-    assert!(!observer.has_live_contact(&node("unknown")), "only known members have contact state");
-    shared.publish(vec![event(MembershipKind::Suspect)], std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
+    assert!(
+        !observer.has_live_contact(&node("unknown")),
+        "only known members have contact state"
+    );
+    shared
+        .publish(
+            vec![event(MembershipKind::Suspect)],
+            std::iter::empty(),
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
     assert!(!observer.has_live_contact(&node("b")));
-    shared.publish(vec![event(MembershipKind::Alive)], std::iter::empty(), SwimDriverStatus::Running, stats).unwrap();
-    assert!(!observer.has_live_contact(&node("b")), "a rumor cannot reuse pre-suspicion contact");
+    shared
+        .publish(
+            vec![event(MembershipKind::Alive)],
+            std::iter::empty(),
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    assert!(
+        !observer.has_live_contact(&node("b")),
+        "a rumor cannot reuse pre-suspicion contact"
+    );
     assert!(observer.snapshot().membership.compact_base() > 0);
-    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats)
+        .unwrap();
     assert!(observer.has_live_contact(&node("b")));
 
-    shared.publish(
-        vec![event(MembershipKind::Dead), event(MembershipKind::Alive)],
-        [node("b")], SwimDriverStatus::Running, stats,
-    ).unwrap();
-    assert!(!observer.has_live_contact(&node("b")), "same-batch contact cannot precede a departure");
-    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(
+            vec![event(MembershipKind::Dead), event(MembershipKind::Alive)],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    assert!(
+        !observer.has_live_contact(&node("b")),
+        "same-batch contact cannot precede a departure"
+    );
+    shared
+        .publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats)
+        .unwrap();
     assert!(observer.has_live_contact(&node("b")));
-    shared.publish(Vec::new(), std::iter::empty(), SwimDriverStatus::Leaving, stats).unwrap();
+    shared
+        .publish(
+            Vec::new(),
+            std::iter::empty(),
+            SwimDriverStatus::Leaving,
+            stats,
+        )
+        .unwrap();
     assert!(!observer.has_live_contact(&node("b")));
 }
 
 #[test]
 fn terminal_detectors_never_offer_stale_alive_contacts() {
-    for terminal in [SwimDriverStatus::Left, SwimDriverStatus::Cancelled,
-        SwimDriverStatus::Failed, SwimDriverStatus::Dropped]
-    {
+    for terminal in [
+        SwimDriverStatus::Left,
+        SwimDriverStatus::Cancelled,
+        SwimDriverStatus::Failed,
+        SwimDriverStatus::Dropped,
+    ] {
         let shared = Arc::new(ObservationState::new(1));
-        let observer = SwimObserver { shared: Arc::clone(&shared) };
-        shared.publish(
-            vec![MembershipEvent { node: node("b"), kind: MembershipKind::Alive, incarnation: 0 }],
-            [node("b")], SwimDriverStatus::Running, SwimDriverStats::default(),
-        ).unwrap();
+        let observer = SwimObserver {
+            shared: Arc::clone(&shared),
+        };
+        shared
+            .publish(
+                vec![MembershipEvent {
+                    node: node("b"),
+                    kind: MembershipKind::Alive,
+                    incarnation: 0,
+                }],
+                [node("b")],
+                SwimDriverStatus::Running,
+                SwimDriverStats::default(),
+            )
+            .unwrap();
         assert!(observer.has_live_contact(&node("b")));
         shared.finish(terminal, SwimDriverStats::default());
-        assert_eq!(observer.snapshot().membership.kind_of(&node("b")), Some(MembershipKind::Alive));
-        assert!(!observer.has_live_contact(&node("b")), "terminal {terminal:?}");
+        assert_eq!(
+            observer.snapshot().membership.kind_of(&node("b")),
+            Some(MembershipKind::Alive)
+        );
+        assert!(
+            !observer.has_live_contact(&node("b")),
+            "terminal {terminal:?}"
+        );
     }
 }
 
 #[test]
 fn only_accepted_direct_datagrams_create_contact_evidence() {
     let mut engine = make_engine("a", &[("b", 2), ("c", 3)]);
-    engine.receive(0, address(99), &bytes(Packet::new(Payload::Ping { seq: 1 }))).unwrap();
+    engine
+        .receive(
+            0,
+            address(99),
+            &bytes(Packet::new(Payload::Ping { seq: 1 })),
+        )
+        .unwrap();
     engine.receive(0, address(2), b"malformed").unwrap();
-    engine.receive(0, address(2), &bytes(Packet {
-        payload: Payload::Ping { seq: 2 },
-        gossip: vec![Rumor::alive(node("unknown"), 0)],
-    })).unwrap();
+    engine
+        .receive(
+            0,
+            address(2),
+            &bytes(Packet {
+                payload: Payload::Ping { seq: 2 },
+                gossip: vec![Rumor::alive(node("unknown"), 0)],
+            }),
+        )
+        .unwrap();
     assert!(engine.contacts.is_empty());
-    engine.receive(0, address(2), &bytes(Packet {
-        payload: Payload::Ping { seq: 3 },
-        gossip: vec![Rumor::alive(node("c"), 1)],
-    })).unwrap();
-    assert_eq!(engine.contacts, vec![node("b")], "a rumor does not prove contact with its subject");
-    engine.receive(0, address(2), &bytes(Packet::new(Payload::Ping { seq: 4 }))).unwrap();
-    assert_eq!(engine.contacts, vec![node("b")], "one pending identity per configured peer");
+    engine
+        .receive(
+            0,
+            address(2),
+            &bytes(Packet {
+                payload: Payload::Ping { seq: 3 },
+                gossip: vec![Rumor::alive(node("c"), 1)],
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        engine.contacts,
+        vec![node("b")],
+        "a rumor does not prove contact with its subject"
+    );
+    engine
+        .receive(0, address(2), &bytes(Packet::new(Payload::Ping { seq: 4 })))
+        .unwrap();
+    assert_eq!(
+        engine.contacts,
+        vec![node("b")],
+        "one pending identity per configured peer"
+    );
 }
 
 #[test]
 fn captured_contact_cannot_revive_after_missed_recovery_or_log_compaction() {
     let shared = Arc::new(ObservationState::new(1));
-    let observer = SwimObserver { shared: Arc::clone(&shared) };
-    let event = |kind| MembershipEvent { node: node("b"), kind, incarnation: 4 };
+    let observer = SwimObserver {
+        shared: Arc::clone(&shared),
+    };
+    let event = |kind| MembershipEvent {
+        node: node("b"),
+        kind,
+        incarnation: 4,
+    };
     let stats = SwimDriverStats::default();
-    shared.publish(vec![event(MembershipKind::Alive)], [node("b")],
-        SwimDriverStatus::Running, stats).unwrap();
-    let contact = observer.live_contact(&node("b")).expect("direct live contact");
+    shared
+        .publish(
+            vec![event(MembershipKind::Alive)],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    let contact = observer
+        .live_contact(&node("b"))
+        .expect("direct live contact");
     assert_eq!(contact.node(), &node("b"));
     assert!(observer.live_contact(&node("unknown")).is_none());
     let mut ended = std::pin::pin!(contact.ended());
@@ -423,62 +714,133 @@ fn captured_contact_cannot_revive_after_missed_recovery_or_log_compaction() {
     assert!(ended.as_mut().poll(&mut task).is_pending());
 
     // The consumer is not polled between loss and recovery.
-    shared.publish(vec![event(MembershipKind::Suspect)], std::iter::empty(),
-        SwimDriverStatus::Running, stats).unwrap();
-    shared.publish(vec![event(MembershipKind::Alive)], [node("b")],
-        SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(
+            vec![event(MembershipKind::Suspect)],
+            std::iter::empty(),
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    shared
+        .publish(
+            vec![event(MembershipKind::Alive)],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
     assert!(observer.has_live_contact(&node("b")));
     assert_eq!(observer.snapshot().membership.compact_base(), 2);
     assert!(!contact.is_live());
     assert!(ended.as_mut().poll(&mut task).is_ready());
     // Even a wait first registered after recovery observes the old epoch's end.
-    assert!(std::pin::pin!(contact.ended()).as_mut().poll(&mut task).is_ready());
+    assert!(
+        std::pin::pin!(contact.ended())
+            .as_mut()
+            .poll(&mut task)
+            .is_ready()
+    );
 
     let recovered = observer.live_contact(&node("b")).unwrap();
-    shared.publish(vec![MembershipEvent {
-        node: node("c"), kind: MembershipKind::Dead, incarnation: 8,
-    }], [node("b")], SwimDriverStatus::Running, stats).unwrap();
-    assert!(recovered.is_live(), "healthy traffic and another peer preserve this epoch");
-    assert!(!contact.is_live(), "cloning or repeated packets cannot renew an old token");
+    shared
+        .publish(
+            vec![MembershipEvent {
+                node: node("c"),
+                kind: MembershipKind::Dead,
+                incarnation: 8,
+            }],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
+    assert!(
+        recovered.is_live(),
+        "healthy traffic and another peer preserve this epoch"
+    );
+    assert!(
+        !contact.is_live(),
+        "cloning or repeated packets cannot renew an old token"
+    );
     assert!(!contact.clone().is_live());
 }
 
 #[test]
 fn contact_incarnation_change_requires_new_direct_evidence_and_a_new_token() {
     let shared = Arc::new(ObservationState::new(1));
-    let observer = SwimObserver { shared: Arc::clone(&shared) };
+    let observer = SwimObserver {
+        shared: Arc::clone(&shared),
+    };
     let stats = SwimDriverStats::default();
     let event = |incarnation| MembershipEvent {
-        node: node("b"), kind: MembershipKind::Alive, incarnation,
+        node: node("b"),
+        kind: MembershipKind::Alive,
+        incarnation,
     };
-    shared.publish(vec![event(4)], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(
+            vec![event(4)],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
     let previous = observer.live_contact(&node("b")).unwrap();
-    shared.publish(vec![event(5)], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    shared
+        .publish(
+            vec![event(5)],
+            [node("b")],
+            SwimDriverStatus::Running,
+            stats,
+        )
+        .unwrap();
     assert!(!previous.is_live());
-    assert!(observer.live_contact(&node("b")).is_none(),
-        "a same-turn packet may precede the incarnation transition");
-    shared.publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats).unwrap();
+    assert!(
+        observer.live_contact(&node("b")).is_none(),
+        "a same-turn packet may precede the incarnation transition"
+    );
+    shared
+        .publish(Vec::new(), [node("b")], SwimDriverStatus::Running, stats)
+        .unwrap();
     assert!(observer.live_contact(&node("b")).unwrap().is_live());
     assert!(!previous.is_live());
 }
 
 #[test]
 fn leaving_and_every_detector_terminal_status_permanently_end_captured_contact() {
-    for status in [SwimDriverStatus::Leaving, SwimDriverStatus::Left,
-        SwimDriverStatus::Cancelled, SwimDriverStatus::Failed, SwimDriverStatus::Dropped]
-    {
+    for status in [
+        SwimDriverStatus::Leaving,
+        SwimDriverStatus::Left,
+        SwimDriverStatus::Cancelled,
+        SwimDriverStatus::Failed,
+        SwimDriverStatus::Dropped,
+    ] {
         let shared = Arc::new(ObservationState::new(1));
-        let observer = SwimObserver { shared: Arc::clone(&shared) };
+        let observer = SwimObserver {
+            shared: Arc::clone(&shared),
+        };
         let stats = SwimDriverStats::default();
-        shared.publish(vec![MembershipEvent {
-            node: node("b"), kind: MembershipKind::Alive, incarnation: 0,
-        }], [node("b")], SwimDriverStatus::Running, stats).unwrap();
+        shared
+            .publish(
+                vec![MembershipEvent {
+                    node: node("b"),
+                    kind: MembershipKind::Alive,
+                    incarnation: 0,
+                }],
+                [node("b")],
+                SwimDriverStatus::Running,
+                stats,
+            )
+            .unwrap();
         let contact = observer.live_contact(&node("b")).unwrap();
         let mut ended = std::pin::pin!(contact.ended());
         let mut task = Context::from_waker(Waker::noop());
         assert!(ended.as_mut().poll(&mut task).is_pending());
         if status == SwimDriverStatus::Leaving {
-            shared.publish(Vec::new(), std::iter::empty(), status, stats).unwrap();
+            shared
+                .publish(Vec::new(), std::iter::empty(), status, stats)
+                .unwrap();
         } else {
             shared.finish(status, stats);
         }
@@ -492,33 +854,80 @@ fn leaving_and_every_detector_terminal_status_permanently_end_captured_contact()
 fn accepted_new_incarnation_datagram_ends_the_old_contact_epoch() {
     let mut swim = Swim::new(node("a"), protocol(), 7);
     swim.add_peer(0, node("b"));
-    let mut engine = Engine::new(swim, BTreeMap::from([(node("b"), address(2))]), 1400, config());
+    let mut engine = Engine::new(
+        swim,
+        BTreeMap::from([(node("b"), address(2))]),
+        1400,
+        config(),
+    );
     let shared = Arc::new(ObservationState::new(1));
-    let observer = SwimObserver { shared: Arc::clone(&shared) };
-    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
-        SwimDriverStatus::Running, engine.stats).unwrap();
-    engine.receive(1, address(2), &bytes(Packet::new(Payload::Ping { seq: 1 }))).unwrap();
-    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
-        SwimDriverStatus::Running, engine.stats).unwrap();
+    let observer = SwimObserver {
+        shared: Arc::clone(&shared),
+    };
+    shared
+        .publish(
+            engine.swim.drain_events(),
+            std::mem::take(&mut engine.contacts),
+            SwimDriverStatus::Running,
+            engine.stats,
+        )
+        .unwrap();
+    engine
+        .receive(1, address(2), &bytes(Packet::new(Payload::Ping { seq: 1 })))
+        .unwrap();
+    shared
+        .publish(
+            engine.swim.drain_events(),
+            std::mem::take(&mut engine.contacts),
+            SwimDriverStatus::Running,
+            engine.stats,
+        )
+        .unwrap();
     let previous = observer.live_contact(&node("b")).unwrap();
 
-    engine.receive(2, address(2), &bytes(Packet {
-        payload: Payload::Ping { seq: 2 },
-        gossip: vec![Rumor::alive(node("b"), 1)],
-    })).unwrap();
+    engine
+        .receive(
+            2,
+            address(2),
+            &bytes(Packet {
+                payload: Payload::Ping { seq: 2 },
+                gossip: vec![Rumor::alive(node("b"), 1)],
+            }),
+        )
+        .unwrap();
     let events = engine.swim.drain_events();
-    assert!(events.iter().any(|event| event.node == node("b")
-        && event.kind == MembershipKind::Alive && event.incarnation == 1),
-        "same-kind incarnation changes must reach observers");
-    shared.publish(events, std::mem::take(&mut engine.contacts),
-        SwimDriverStatus::Running, engine.stats).unwrap();
+    assert!(
+        events.iter().any(|event| event.node == node("b")
+            && event.kind == MembershipKind::Alive
+            && event.incarnation == 1),
+        "same-kind incarnation changes must reach observers"
+    );
+    shared
+        .publish(
+            events,
+            std::mem::take(&mut engine.contacts),
+            SwimDriverStatus::Running,
+            engine.stats,
+        )
+        .unwrap();
     assert!(!previous.is_live());
     assert!(observer.live_contact(&node("b")).is_none());
-    engine.receive(3, address(2), &bytes(Packet::new(Payload::Ping { seq: 3 }))).unwrap();
-    shared.publish(engine.swim.drain_events(), std::mem::take(&mut engine.contacts),
-        SwimDriverStatus::Running, engine.stats).unwrap();
+    engine
+        .receive(3, address(2), &bytes(Packet::new(Payload::Ping { seq: 3 })))
+        .unwrap();
+    shared
+        .publish(
+            engine.swim.drain_events(),
+            std::mem::take(&mut engine.contacts),
+            SwimDriverStatus::Running,
+            engine.stats,
+        )
+        .unwrap();
     assert!(observer.live_contact(&node("b")).is_some());
-    assert!(!previous.is_live(), "the direct recovery cannot refresh a captured epoch");
+    assert!(
+        !previous.is_live(),
+        "the direct recovery cannot refresh a captured epoch"
+    );
 }
 
 #[test]
@@ -527,12 +936,21 @@ fn raw_driver_and_owned_run_future_preserve_send_and_drop_retirement() {
     is_send::<UdpSwimDriver>();
     is_send::<SwimDriverReport>();
     is_send::<SwimObserver>();
-    fn require_send<T: Send>(value: T) -> T { value }
+    fn require_send<T: Send>(value: T) -> T {
+        value
+    }
     let native = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     native.set_nonblocking(true).unwrap();
     let transport = UdpMembershipTransport::new(crate::net::UdpSocket::from_std(native).unwrap());
-    let driver = UdpSwimDriver::new_trusted_network(node("a"), protocol(), 7,
-        BTreeMap::new(), transport, config()).unwrap();
+    let driver = UdpSwimDriver::new_trusted_network(
+        node("a"),
+        protocol(),
+        7,
+        BTreeMap::new(),
+        transport,
+        config(),
+    )
+    .unwrap();
     let observer = driver.observer();
     let cx = Cx::for_testing();
     drop(require_send(driver.run(&cx)));
@@ -544,19 +962,38 @@ fn invalid_topology_and_timing_are_refused_before_socket_polling() {
     for case in 0..6 {
         let native = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         native.set_nonblocking(true).unwrap();
-        let transport = UdpMembershipTransport::new(crate::net::UdpSocket::from_std(native).unwrap());
+        let transport =
+            UdpMembershipTransport::new(crate::net::UdpSocket::from_std(native).unwrap());
         let mut bounds = config();
         let mut peers = BTreeMap::from([(node("b"), address(2))]);
         match case {
             0 => bounds.io_batch = 0,
             1 => bounds.tick_ms = 21,
             2 => bounds.tick_ms = u64::MAX,
-            3 => { peers.insert(node("c"), address(2)); }
-            4 => { peers.insert(node("a"), address(3)); }
-            _ => { peers.insert(node(&"x".repeat(256)), address(3)); }
+            3 => {
+                peers.insert(node("c"), address(2));
+            }
+            4 => {
+                peers.insert(node("a"), address(3));
+            }
+            _ => {
+                peers.insert(node(&"x".repeat(256)), address(3));
+            }
         }
-        assert!(matches!(UdpSwimDriver::new_trusted_network(node("a"), protocol(), 7,
-            peers, transport, bounds), Err(SwimDriverError::Configuration(_))), "case {case}");
+        assert!(
+            matches!(
+                UdpSwimDriver::new_trusted_network(
+                    node("a"),
+                    protocol(),
+                    7,
+                    peers,
+                    transport,
+                    bounds
+                ),
+                Err(SwimDriverError::Configuration(_))
+            ),
+            "case {case}"
+        );
     }
 }
 
@@ -569,7 +1006,10 @@ struct StrideClock {
 }
 impl crate::time::TimeSource for StrideClock {
     fn now(&self) -> Time {
-        let read = self.reads.fetch_add(1, crate::sync::atomic::Ordering::SeqCst) + 1;
+        let read = self
+            .reads
+            .fetch_add(1, crate::sync::atomic::Ordering::SeqCst)
+            + 1;
         Time::from_nanos(read * self.stride_nanos)
     }
 }
@@ -580,36 +1020,68 @@ fn already_due_rearmed_tick_is_consumed_without_repolling_the_completed_sleep() 
     // panicked with "Sleep polled after completion" when the re-armed tick
     // sleep completed while it was being armed and the next pass polled it.
     use crate::runtime::{IoDriverHandle, LabReactor};
-    use crate::types::{Budget, RegionId, TaskId};
     use crate::sync::atomic::{AtomicU64, Ordering};
+    use crate::types::{Budget, RegionId, TaskId};
 
     const PASSES: u64 = 64;
     let stride_nanos = config().tick_ms * 1_000_000;
-    let clock = Arc::new(StrideClock { reads: AtomicU64::new(0), stride_nanos });
-    let timer = TimerDriverHandle::new(Arc::new(crate::time::TimerDriver::with_clock(Arc::clone(&clock))));
+    let clock = Arc::new(StrideClock {
+        reads: AtomicU64::new(0),
+        stride_nanos,
+    });
+    let timer = TimerDriverHandle::new(Arc::new(crate::time::TimerDriver::with_clock(Arc::clone(
+        &clock,
+    ))));
     let io = IoDriverHandle::new(Arc::new(LabReactor::new()));
-    let cx = Cx::new_with_drivers(RegionId::new_for_test(0, 1), TaskId::new_for_test(0, 0),
-        Budget::INFINITE, None, Some(io), None, Some(timer), None);
+    let cx = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        Some(io),
+        None,
+        Some(timer),
+        None,
+    );
     let _current = Cx::set_current(Some(cx.clone()));
     let silent_peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let native = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     native.set_nonblocking(true).unwrap();
     let transport = UdpMembershipTransport::new(crate::net::UdpSocket::from_std(native).unwrap());
-    let driver = UdpSwimDriver::new_trusted_network(node("a"), protocol(), 7,
-        BTreeMap::from([(node("b"), silent_peer.local_addr().unwrap())]), transport, config()).unwrap();
+    let driver = UdpSwimDriver::new_trusted_network(
+        node("a"),
+        protocol(),
+        7,
+        BTreeMap::from([(node("b"), silent_peer.local_addr().unwrap())]),
+        transport,
+        config(),
+    )
+    .unwrap();
     let observer = driver.observer();
     let mut run = std::pin::pin!(driver.run(&cx));
     let mut task = Context::from_waker(Waker::noop());
     for pass in 1..=PASSES {
         let before = clock.reads.load(Ordering::SeqCst);
-        assert!(run.as_mut().poll(&mut task).is_pending(), "pass {pass}: {:?}", observer.snapshot());
+        assert!(
+            run.as_mut().poll(&mut task).is_pending(),
+            "pass {pass}: {:?}",
+            observer.snapshot()
+        );
         let after = clock.reads.load(Ordering::SeqCst);
         let snapshot = observer.snapshot();
         // Each pass reads the clock at least twice after its turn time, so the
         // re-armed deadline (turn time + one stride) is due when it is armed.
-        eprintln!("pass={pass} clock_ns={}..{} ticks={} status={:?}",
-            before * stride_nanos, after * stride_nanos, snapshot.stats.ticks, snapshot.status);
-        assert!(after >= before + 2, "pass {pass} must arm an already-due tick sleep");
+        eprintln!(
+            "pass={pass} clock_ns={}..{} ticks={} status={:?}",
+            before * stride_nanos,
+            after * stride_nanos,
+            snapshot.stats.ticks,
+            snapshot.status
+        );
+        assert!(
+            after >= before + 2,
+            "pass {pass} must arm an already-due tick sleep"
+        );
     }
     let snapshot = observer.snapshot();
     assert_eq!(snapshot.status, SwimDriverStatus::Running);

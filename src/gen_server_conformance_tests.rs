@@ -15,10 +15,10 @@
 
 #![allow(dead_code, clippy::vec_init_then_push)]
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

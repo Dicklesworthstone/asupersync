@@ -75,9 +75,9 @@
 //! # Ok::<(), Status>(())
 //! ```
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::bytes::Bytes;
@@ -987,7 +987,10 @@ impl RateLimitLease {
             return;
         }
 
-        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
+        let mut packed = self
+            .state
+            .packed
+            .load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let generation = rate_limit_generation(packed);
             let count = rate_limit_count(packed);
@@ -1028,7 +1031,10 @@ impl RateLimitInterceptor {
     }
 
     fn try_acquire_slot(&self) -> Option<u32> {
-        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
+        let mut packed = self
+            .state
+            .packed
+            .load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let generation = rate_limit_generation(packed);
             let count = rate_limit_count(packed);
@@ -1063,7 +1069,10 @@ impl RateLimitInterceptor {
 
     /// Reset the request counter.
     pub fn reset(&self) {
-        let mut packed = self.state.packed.load(crate::sync::atomic::Ordering::Relaxed);
+        let mut packed = self
+            .state
+            .packed
+            .load(crate::sync::atomic::Ordering::Relaxed);
         loop {
             let next_generation = rate_limit_generation(packed).wrapping_add(1);
             let next = rate_limit_pack(next_generation, 0);
@@ -1082,7 +1091,11 @@ impl RateLimitInterceptor {
     /// Get the current request count.
     #[must_use]
     pub fn current_count(&self) -> u32 {
-        rate_limit_count(self.state.packed.load(crate::sync::atomic::Ordering::Relaxed))
+        rate_limit_count(
+            self.state
+                .packed
+                .load(crate::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 

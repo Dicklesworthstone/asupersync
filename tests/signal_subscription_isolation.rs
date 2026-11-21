@@ -43,10 +43,16 @@ fn child_status(test: &str, case: &str) -> ExitStatus {
     loop {
         if let Some(status) = owner.0.as_mut().unwrap().try_wait().expect("child status") {
             drop(owner.0.take());
-            eprintln!("signal_subscription case={case} status={status:?} elapsed={:?}", started.elapsed());
+            eprintln!(
+                "signal_subscription case={case} status={status:?} elapsed={:?}",
+                started.elapsed()
+            );
             return status;
         }
-        assert!(started.elapsed() < CHILD_BOUND, "signal child {case} exceeded watchdog");
+        assert!(
+            started.elapsed() < CHILD_BOUND,
+            "signal child {case} exceeded watchdog"
+        );
         thread::sleep(Duration::from_millis(2));
     }
 }
@@ -81,7 +87,10 @@ impl WakeProbe {
     fn wait(&self, until: Instant) {
         while !self.notified.swap(false, Ordering::AcqRel) {
             let remaining = until.saturating_duration_since(Instant::now());
-            assert!(!remaining.is_zero(), "parked signal receiver was never woken");
+            assert!(
+                !remaining.is_zero(),
+                "parked signal receiver was never woken"
+            );
             thread::park_timeout(remaining);
         }
     }
@@ -91,11 +100,21 @@ fn receive_all(streams: &mut [Signal], raw: &[i32]) {
     let probe = WakeProbe::new();
     let waker = Waker::from(Arc::clone(&probe));
     let mut task = Context::from_waker(&waker);
-    let mut waits: Vec<_> = streams.iter_mut().map(|stream| Box::pin(stream.recv())).collect();
+    let mut waits: Vec<_> = streams
+        .iter_mut()
+        .map(|stream| Box::pin(stream.recv()))
+        .collect();
     for wait in &mut waits {
-        assert!(wait.as_mut().poll(&mut task).is_pending(), "receiver must park before delivery");
+        assert!(
+            wait.as_mut().poll(&mut task).is_pending(),
+            "receiver must park before delivery"
+        );
     }
-    assert_eq!(probe.wakes.load(Ordering::Acquire), 0, "no ready signal before raise");
+    assert_eq!(
+        probe.wakes.load(Ordering::Acquire),
+        0,
+        "no ready signal before raise"
+    );
     eprintln!("signal_subscription parked={} raising={raw:?}", waits.len());
     for &number in raw {
         signal_hook::low_level::raise(number).expect("raise real OS signal");
@@ -103,7 +122,10 @@ fn receive_all(streams: &mut [Signal], raw: &[i32]) {
     let until = Instant::now() + DELIVERY_BOUND;
     let mut complete = vec![false; waits.len()];
     while complete.iter().any(|done| !done) {
-        assert!(Instant::now() < until, "signal fanout exceeded the delivery bound");
+        assert!(
+            Instant::now() < until,
+            "signal fanout exceeded the delivery bound"
+        );
         // No timer-driven repoll can conceal a lost wake: require an actual
         // notification before every sweep after the initial Pending witness.
         probe.wait(until);
@@ -117,11 +139,18 @@ fn receive_all(streams: &mut [Signal], raw: &[i32]) {
             }
         }
     }
-    eprintln!("signal_subscription received={} wakes={}", complete.len(), probe.wakes.load(Ordering::Acquire));
+    eprintln!(
+        "signal_subscription received={} wakes={}",
+        complete.len(),
+        probe.wakes.load(Ordering::Acquire)
+    );
     drop(waits);
     for stream in streams {
         let mut extra = std::pin::pin!(stream.recv());
-        assert!(extra.as_mut().poll(&mut task).is_pending(), "one raise must not duplicate a delivery");
+        assert!(
+            extra.as_mut().poll(&mut task).is_pending(),
+            "one raise must not duplicate a delivery"
+        );
     }
 }
 
@@ -163,7 +192,11 @@ fn ctrl_c_leaves_unrequested_termination_signals_alone() {
         let mut wait = std::pin::pin!(ctrl_c());
         match mode {
             "baseline" => {}
-            "subscribed" => assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending()),
+            "subscribed" => assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            ),
             _ => panic!("unknown child mode {mode}"),
         }
         eprintln!("signal_subscription mode={mode} unrelated_signal={raw} raising=true");
@@ -177,7 +210,11 @@ fn ctrl_c_leaves_unrequested_termination_signals_alone() {
         for mode in ["baseline", "subscribed"] {
             let case = format!("{mode}:{name}");
             let status = child_status("ctrl_c_leaves_unrequested_termination_signals_alone", &case);
-            assert_eq!(status.signal(), expected, "case={case}: registration changed termination behavior");
+            assert_eq!(
+                status.signal(),
+                expected,
+                "case={case}: registration changed termination behavior"
+            );
         }
     }
 }
@@ -190,12 +227,20 @@ fn late_and_duplicate_subscriptions_receive_without_capturing_other_kinds() {
         // it has already dispatched a real signal, not just after construction.
         let mut interrupts = [signal(SignalKind::Interrupt).unwrap()];
         receive_all(&mut interrupts, &[signal_hook::consts::SIGINT]);
-        let mut users = [signal(SignalKind::User1).unwrap(), signal(SignalKind::User1).unwrap()];
+        let mut users = [
+            signal(SignalKind::User1).unwrap(),
+            signal(SignalKind::User1).unwrap(),
+        ];
         receive_all(&mut users, &[signal_hook::consts::SIGUSR1]);
         // Cancelling a borrowed receive drops its waiter, not its stream.
         {
             let mut cancelled_wait = std::pin::pin!(users[0].recv());
-            assert!(cancelled_wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            assert!(
+                cancelled_wait
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         }
         receive_all(&mut users, &[signal_hook::consts::SIGUSR1]);
         let [first, second] = users;
@@ -206,7 +251,11 @@ fn late_and_duplicate_subscriptions_receive_without_capturing_other_kinds() {
         std::process::exit(CHILD_COMPLETE);
     }
     assert_eq!(
-        child_status("late_and_duplicate_subscriptions_receive_without_capturing_other_kinds", "delivery").code(),
+        child_status(
+            "late_and_duplicate_subscriptions_receive_without_capturing_other_kinds",
+            "delivery"
+        )
+        .code(),
         Some(CHILD_COMPLETE),
         "the child must finish its actual signal assertions, not just exit successfully",
     );
@@ -224,16 +273,30 @@ fn concurrent_first_subscriptions_share_delivery_without_losing_a_kind() {
             let start = Arc::clone(&start);
             handles.push(thread::spawn(move || {
                 start.wait();
-                let kind = if index % 2 == 0 { SignalKind::User1 } else { SignalKind::User2 };
+                let kind = if index % 2 == 0 {
+                    SignalKind::User1
+                } else {
+                    SignalKind::User2
+                };
                 signal(kind).expect("concurrent subscription")
             }));
         }
-        let mut streams: Vec<_> = handles.into_iter().map(|handle| handle.join().expect("subscription thread")).collect();
-        receive_all(&mut streams, &[signal_hook::consts::SIGUSR1, signal_hook::consts::SIGUSR2]);
+        let mut streams: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("subscription thread"))
+            .collect();
+        receive_all(
+            &mut streams,
+            &[signal_hook::consts::SIGUSR1, signal_hook::consts::SIGUSR2],
+        );
         std::process::exit(CHILD_COMPLETE);
     }
     assert_eq!(
-        child_status("concurrent_first_subscriptions_share_delivery_without_losing_a_kind", "concurrent").code(),
+        child_status(
+            "concurrent_first_subscriptions_share_delivery_without_losing_a_kind",
+            "concurrent"
+        )
+        .code(),
         Some(CHILD_COMPLETE),
         "the concurrent child must finish all parked receives",
     );

@@ -289,7 +289,11 @@ impl<T: SymbolSink + Unpin> SessionOperation for RaptorQSendSession<'_, T> {
                     }
                 });
             }
-            let kind = self.core.pending.as_ref().map(|symbol| symbol.symbol().kind());
+            let kind = self
+                .core
+                .pending
+                .as_ref()
+                .map(|symbol| symbol.symbol().kind());
             match self.core.poll_pending(cx)? {
                 Poll::Ready(()) => match kind {
                     Some(SymbolKind::Source) => self.source_symbols += 1,
@@ -321,7 +325,9 @@ where
             if self.core.pending.is_none() && !self.core.exhausted {
                 match self.symbols.next() {
                     Some(mut symbol) => {
-                        if let Err(error) = self.core.security.verify_authenticated_symbol(&mut symbol) {
+                        if let Err(error) =
+                            self.core.security.verify_authenticated_symbol(&mut symbol)
+                        {
                             if let Some(metrics) = self.core.metrics {
                                 metrics.counter("raptorq.auth_rejected").increment();
                             }
@@ -365,7 +371,10 @@ impl<T: SymbolSink + Unpin> RaptorQOffloadedSendSession<'_, T> {
 
     #[allow(clippy::result_large_err)]
     fn start_encode(&mut self) -> Result<(), Error> {
-        debug_assert!(self.encode_job.is_none(), "one owned encode job per session");
+        debug_assert!(
+            self.encode_job.is_none(),
+            "one owned encode job per session"
+        );
         debug_assert!(self.batch.is_empty() && self.core.pending.is_none());
         let encoder = self.encoder.take();
         let initial = self.initial.take();
@@ -485,7 +494,11 @@ impl<T: SymbolSink + Unpin> SessionOperation for RaptorQOffloadedSendSession<'_,
                     continue;
                 }
             }
-            let kind = self.core.pending.as_ref().map(|symbol| symbol.symbol().kind());
+            let kind = self
+                .core
+                .pending
+                .as_ref()
+                .map(|symbol| symbol.symbol().kind());
             match self.core.poll_pending(cx)? {
                 Poll::Ready(()) => match kind {
                     Some(SymbolKind::Source) => self.source_symbols += 1,

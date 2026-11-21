@@ -28,6 +28,7 @@ use crate::observability::spectral_health::{
 use crate::runtime::rch_health::{RchAdmissionDecision, RchWorkerAdmissionReceipt};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
 use crate::sync::LockMetricsSnapshot;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::lock_ordering::{LockModule, LockOrderAtlasSnapshot, LockRank};
 use crate::types::pressure::SystemPressure;
 use crate::types::{CapabilityBudget, RegionId};
@@ -35,7 +36,6 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 

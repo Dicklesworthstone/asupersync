@@ -15,11 +15,19 @@ pub(super) struct Admission {
 
 impl Admission {
     pub(super) const fn new(limit: usize) -> Self {
-        Self { active: AtomicUsize::new(0), limit, queue: None }
+        Self {
+            active: AtomicUsize::new(0),
+            limit,
+            queue: None,
+        }
     }
 
-    pub(super) fn active(&self) -> usize { self.active.load(Ordering::Acquire) }
-    pub(super) const fn limit(&self) -> usize { self.limit }
+    pub(super) fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+    pub(super) const fn limit(&self) -> usize {
+        self.limit
+    }
 
     pub(super) fn enable_queue(&mut self, max_waiters: usize) {
         self.queue = Some(QueuedAdmission {
@@ -29,10 +37,14 @@ impl Admission {
         });
     }
 
-    pub(super) const fn is_queued(&self) -> bool { self.queue.is_some() }
+    pub(super) const fn is_queued(&self) -> bool {
+        self.queue.is_some()
+    }
 
     pub(super) fn waiting(&self) -> usize {
-        self.queue.as_ref().map_or(0, |queue| queue.waiting.load(Ordering::Acquire))
+        self.queue
+            .as_ref()
+            .map_or(0, |queue| queue.waiting.load(Ordering::Acquire))
     }
 
     pub(super) fn max_waiters(&self) -> usize {
@@ -44,9 +56,13 @@ impl Admission {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, RemoteSymbolError>>,
     {
-        let Some(queue) = &self.queue else { return self.run(make).await; };
+        let Some(queue) = &self.queue else {
+            return self.run(make).await;
+        };
         // Zero active capacity is a deliberate refusal, never an infinite wait.
-        if self.limit == 0 { return Err(RemoteSymbolError::Admission); }
+        if self.limit == 0 {
+            return Err(RemoteSymbolError::Admission);
+        }
         let permit = queue.acquire(cx).await?;
         // The grant can run user waker/obligation callbacks. Recheck before the
         // factory can allocate, encode, or dispatch using a cancelled owner.
@@ -61,9 +77,16 @@ impl Admission {
     fn acquire(&self) -> Result<Credit<'_>, RemoteSymbolError> {
         let mut active = self.active();
         loop {
-            if active >= self.limit { return Err(RemoteSymbolError::Admission); }
+            if active >= self.limit {
+                return Err(RemoteSymbolError::Admission);
+            }
             // active < limit <= usize::MAX proves increment cannot overflow.
-            match self.active.compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire) {
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(Credit(self)),
                 Err(current) => active = current,
             }
@@ -98,8 +121,15 @@ impl QueuedAdmission {
     fn reserve_waiter(&self) -> Result<WaitingCredit<'_>, RemoteSymbolError> {
         let mut waiting = self.waiting.load(Ordering::Acquire);
         loop {
-            if waiting >= self.max_waiters { return Err(RemoteSymbolError::Admission); }
-            match self.waiting.compare_exchange_weak(waiting, waiting + 1, Ordering::AcqRel, Ordering::Acquire) {
+            if waiting >= self.max_waiters {
+                return Err(RemoteSymbolError::Admission);
+            }
+            match self.waiting.compare_exchange_weak(
+                waiting,
+                waiting + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(WaitingCredit(&self.waiting)),
                 Err(current) => waiting = current,
             }
@@ -110,7 +140,7 @@ impl QueuedAdmission {
         check_owner(cx)?;
         match self.permits.try_acquire_checked(cx, 1) {
             Ok(permit) => return Ok(permit),
-            Err(CheckedAcquireError::Unavailable(_)) => {},
+            Err(CheckedAcquireError::Unavailable(_)) => {}
             Err(error) => return Err(acquire_error(error)),
         }
         // Reserve metadata BEFORE the semaphore or cancellation observer may
@@ -120,12 +150,18 @@ impl QueuedAdmission {
             let timer = if let Some(deadline) = cx.budget().deadline {
                 let driver = cx.timer_driver().ok_or(RemoteSymbolError::Configuration)?;
                 Some(crate::time::Sleep::with_timer_driver(deadline, driver))
-            } else { None };
+            } else {
+                None
+            };
             let mut timer = std::pin::pin!(timer);
             let mut cancelled = std::pin::pin!(cx.cancelled());
             let mut acquire = std::pin::pin!(self.permits.acquire_checked(cx, 1));
             poll_fn(|task| {
-                if timer.as_mut().as_pin_mut().is_some_and(|timer| timer.poll_deadline(task).is_ready()) {
+                if timer
+                    .as_mut()
+                    .as_pin_mut()
+                    .is_some_and(|timer| timer.poll_deadline(task).is_ready())
+                {
                     let _ = cx.checkpoint();
                     return Poll::Ready(Err(RemoteSymbolError::Deadline));
                 }
@@ -133,8 +169,12 @@ impl QueuedAdmission {
                     let _ = cx.checkpoint();
                     return Poll::Ready(Err(RemoteSymbolError::Cancelled));
                 }
-                acquire.as_mut().poll(task).map(|result| result.map_err(acquire_error))
-            }).await
+                acquire
+                    .as_mut()
+                    .poll(task)
+                    .map(|result| result.map_err(acquire_error))
+            })
+            .await
         };
         drop(waiter);
         result
@@ -146,7 +186,11 @@ fn check_owner(cx: &Cx) -> Result<(), RemoteSymbolError> {
         let _ = cx.checkpoint();
         return Err(RemoteSymbolError::Cancelled);
     }
-    if cx.budget().deadline.is_some_and(|deadline| cx.now() >= deadline) {
+    if cx
+        .budget()
+        .deadline
+        .is_some_and(|deadline| cx.now() >= deadline)
+    {
         let _ = cx.checkpoint();
         return Err(RemoteSymbolError::Deadline);
     }
@@ -162,12 +206,16 @@ fn acquire_error(error: CheckedAcquireError) -> RemoteSymbolError {
 
 struct WaitingCredit<'a>(&'a AtomicUsize);
 impl Drop for WaitingCredit<'_> {
-    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct Credit<'a>(&'a Admission);
 impl Drop for Credit<'_> {
-    fn drop(&mut self) { self.0.active.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 #[cfg(test)]

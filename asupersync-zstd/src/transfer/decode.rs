@@ -158,14 +158,20 @@ mod tests {
     fn error_mapping_keeps_the_decoder_cause() {
         for (cause, kind) in [
             (DecodeError::Truncated, io::ErrorKind::UnexpectedEof),
-            (DecodeError::DictionaryUnsupported, io::ErrorKind::Unsupported),
+            (
+                DecodeError::DictionaryUnsupported,
+                io::ErrorKind::Unsupported,
+            ),
             (DecodeError::ChecksumMismatch, io::ErrorKind::InvalidData),
             (DecodeError::WindowTooLarge, io::ErrorKind::InvalidData),
             (DecodeError::OutputTooLarge, io::ErrorKind::InvalidData),
         ] {
             let error = decode_error(cause);
             assert_eq!(error.kind(), kind);
-            assert_eq!(error.get_ref().unwrap().downcast_ref::<DecodeError>(), Some(&cause));
+            assert_eq!(
+                error.get_ref().unwrap().downcast_ref::<DecodeError>(),
+                Some(&cause)
+            );
         }
     }
 }

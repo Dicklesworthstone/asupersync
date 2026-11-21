@@ -52,7 +52,10 @@ impl SymbolFrameLimits {
     /// length-prefixed frames are rejected before a transport is acquired.
     pub fn new(max_symbol_bytes: usize) -> io::Result<Self> {
         let invalid = || {
-            io::Error::new(io::ErrorKind::InvalidInput, "invalid symbol frame payload limit")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid symbol frame payload limit",
+            )
         };
         if max_symbol_bytes == 0 {
             return Err(invalid());
@@ -60,7 +63,9 @@ impl SymbolFrameLimits {
         let max_encoded_bytes = max_symbol_bytes
             .checked_add(SINGLE_SYMBOL_OVERHEAD)
             .ok_or_else(invalid)?;
-        let max_wire_bytes = max_encoded_bytes.checked_add(LENGTH_PREFIX).ok_or_else(invalid)?;
+        let max_wire_bytes = max_encoded_bytes
+            .checked_add(LENGTH_PREFIX)
+            .ok_or_else(invalid)?;
         let max_decoded_bytes = max_symbol_bytes
             .checked_add(std::mem::size_of::<AuthenticatedSymbol>())
             .ok_or_else(invalid)?;
@@ -84,11 +89,15 @@ impl SymbolFrameLimits {
 
     /// Maximum symbol payload length.
     #[must_use]
-    pub const fn max_symbol_bytes(self) -> usize { self.max_symbol_bytes }
+    pub const fn max_symbol_bytes(self) -> usize {
+        self.max_symbol_bytes
+    }
 
     /// Maximum complete wire frame, including length and canonical headers.
     #[must_use]
-    pub const fn max_wire_bytes(self) -> usize { self.max_wire_bytes }
+    pub const fn max_wire_bytes(self) -> usize {
+        self.max_wire_bytes
+    }
 
     pub(super) const fn batch_limits(self) -> SymbolBatchLimits {
         self.batch
@@ -148,8 +157,11 @@ impl<W> FramedSymbolSink<W> {
     pub fn new(writer: W, limits: SymbolFrameLimits) -> Self {
         Self {
             framed: FramedWrite::with_capacity(
-                writer, limits.codec(), limits.max_wire_bytes.min(INITIAL_CAPACITY),
-            ).with_backpressure_boundary(1),
+                writer,
+                limits.codec(),
+                limits.max_wire_bytes.min(INITIAL_CAPACITY),
+            )
+            .with_backpressure_boundary(1),
             limits,
             state: SinkState::Open,
         }
@@ -157,15 +169,21 @@ impl<W> FramedSymbolSink<W> {
 
     /// The immutable per-frame bounds.
     #[must_use]
-    pub const fn limits(&self) -> SymbolFrameLimits { self.limits }
+    pub const fn limits(&self) -> SymbolFrameLimits {
+        self.limits
+    }
 
     /// Inspect the transport without bypassing its retained frame cursor.
     #[must_use]
-    pub fn get_ref(&self) -> &W { self.framed.get_ref() }
+    pub fn get_ref(&self) -> &W {
+        self.framed.get_ref()
+    }
 
     /// Bytes of the accepted frame that have not yet reached the transport.
     #[must_use]
-    pub fn buffered_bytes(&self) -> usize { self.framed.write_buffer().len() }
+    pub fn buffered_bytes(&self) -> usize {
+        self.framed.write_buffer().len()
+    }
 }
 
 impl<W: AsyncWrite + Unpin> FramedSymbolSink<W> {
@@ -175,9 +193,7 @@ impl<W: AsyncWrite + Unpin> FramedSymbolSink<W> {
         }
         self.state = SinkState::Failed;
         match self.framed.poll_ready(cx) {
-            Poll::Ready(Err(error)) => {
-                Poll::Ready(Err(error.into()))
-            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error.into())),
             other => {
                 self.state = SinkState::Open;
                 other.map_err(Into::into)
@@ -188,7 +204,9 @@ impl<W: AsyncWrite + Unpin> FramedSymbolSink<W> {
 
 impl<W: AsyncWrite + Send + Unpin> SymbolSink for FramedSymbolSink<W> {
     fn poll_send(
-        self: Pin<&mut Self>, cx: &mut Context<'_>, symbol: AuthenticatedSymbol,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
         if this.state != SinkState::Open {
@@ -211,10 +229,15 @@ impl<W: AsyncWrite + Send + Unpin> SymbolSink for FramedSymbolSink<W> {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
         }
-        let encoded = match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch_limits()) {
-            Ok(encoded) => encoded,
-            Err(error) => return Poll::Ready(Err(SinkError::SendFailed { reason: error.to_string() })),
-        };
+        let encoded =
+            match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch_limits()) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    return Poll::Ready(Err(SinkError::SendFailed {
+                        reason: error.to_string(),
+                    }));
+                }
+            };
         // All acceptance is synchronous. Returning Pending after this point
         // would let SymbolSinkExt retry the argument and duplicate the symbol.
         match this.framed.start_send(BytesMut::from(encoded.as_ref())) {
@@ -240,9 +263,7 @@ impl<W: AsyncWrite + Send + Unpin> SymbolSink for FramedSymbolSink<W> {
         let previous = this.state;
         this.state = SinkState::Failed;
         match this.framed.poll_flush(cx) {
-            Poll::Ready(Err(error)) => {
-                Poll::Ready(Err(error.into()))
-            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error.into())),
             other => {
                 this.state = previous;
                 other.map_err(Into::into)
@@ -313,8 +334,11 @@ impl<R> FramedSymbolStream<R> {
     pub fn new(reader: R, key: AuthKey, limits: SymbolFrameLimits) -> Self {
         Self {
             framed: FramedRead::with_capacity(
-                reader, limits.codec(), limits.max_wire_bytes.min(INITIAL_CAPACITY),
-            ).with_max_buffer_len(limits.max_wire_bytes),
+                reader,
+                limits.codec(),
+                limits.max_wire_bytes.min(INITIAL_CAPACITY),
+            )
+            .with_max_buffer_len(limits.max_wire_bytes),
             key,
             limits,
             ended: false,
@@ -323,20 +347,27 @@ impl<R> FramedSymbolStream<R> {
 
     /// The immutable per-frame bounds.
     #[must_use]
-    pub const fn limits(&self) -> SymbolFrameLimits { self.limits }
+    pub const fn limits(&self) -> SymbolFrameLimits {
+        self.limits
+    }
 
     /// Inspect the transport without consuming retained frame bytes.
     #[must_use]
-    pub fn get_ref(&self) -> &R { self.framed.get_ref() }
+    pub fn get_ref(&self) -> &R {
+        self.framed.get_ref()
+    }
 
     /// Wire bytes retained while waiting for a complete frame.
     #[must_use]
-    pub fn buffered_bytes(&self) -> usize { self.framed.read_buffer().len() }
+    pub fn buffered_bytes(&self) -> usize {
+        self.framed.read_buffer().len()
+    }
 }
 
 impl<R: AsyncRead + Send + Unpin> SymbolStream for FramedSymbolStream<R> {
     fn poll_next(
-        self: Pin<&mut Self>, cx: &mut Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let this = self.get_mut();
         if this.ended {
@@ -367,9 +398,13 @@ impl<R: AsyncRead + Send + Unpin> SymbolStream for FramedSymbolStream<R> {
             Err(error) => {
                 this.ended = true;
                 let error = if error == SymbolStoreError::Authentication {
-                    StreamError::AuthenticationFailed { reason: error.to_string() }
+                    StreamError::AuthenticationFailed {
+                        reason: error.to_string(),
+                    }
                 } else {
-                    StreamError::ProtocolError { details: error.to_string() }
+                    StreamError::ProtocolError {
+                        details: error.to_string(),
+                    }
                 };
                 Poll::Ready(Some(Err(error)))
             }
@@ -380,7 +415,9 @@ impl<R: AsyncRead + Send + Unpin> SymbolStream for FramedSymbolStream<R> {
         if self.ended { (0, Some(0)) } else { (0, None) }
     }
 
-    fn is_exhausted(&self) -> bool { self.ended }
+    fn is_exhausted(&self) -> bool {
+        self.ended
+    }
 }
 
 impl<R> fmt::Debug for FramedSymbolStream<R> {

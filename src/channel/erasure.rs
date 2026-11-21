@@ -945,9 +945,7 @@ impl AuthenticatedEcPermit<'_> {
 
     fn publish(self, message: AuthenticatedEcEnvelope) -> Result<u64, AuthenticatedEcError> {
         self.cx.checkpoint().map_err(|_| EcError::Cancelled)?;
-        let (result, notification) = self
-            .permit
-            .try_send_deferred_wake(message);
+        let (result, notification) = self.permit.try_send_deferred_wake(message);
         if result.is_ok() {
             // Publication is authoritative even if an arbitrary receiver wake
             // panics. Retire this id before invoking that callback.
@@ -972,10 +970,7 @@ impl AuthenticatedEcPermit<'_> {
     }
 }
 
-fn serialize_bounded<T: serde::Serialize>(
-    value: &T,
-    maximum: usize,
-) -> Result<Vec<u8>, EcError> {
+fn serialize_bounded<T: serde::Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, EcError> {
     let mut writer = BoundedEcJsonWriter {
         bytes: Vec::new(),
         maximum,
@@ -1061,7 +1056,10 @@ impl AuthenticatedEcReceiver {
     pub async fn recv(&mut self, cx: &Cx) -> Result<Vec<u8>, AuthenticatedEcError> {
         if self.pending.is_some() {
             cx.checkpoint().map_err(|_| EcError::Cancelled)?;
-            let message = self.pending.take().expect("a retained receive envelope exists");
+            let message = self
+                .pending
+                .take()
+                .expect("a retained receive envelope exists");
             return self.decode(&message);
         }
         let message = self.rx.recv(cx).await.map_err(|error| match error {

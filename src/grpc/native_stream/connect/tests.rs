@@ -1119,11 +1119,9 @@ fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_handshake_wait() {
             let (address, reached, peer) = scripted_peer(PeerScript::Silent);
             runtime_case(multithread, move |cx| async move {
                 let endpoint = match policy {
-                    ConnectPolicy::Sequential => NativeStreamEndpoint::new(
-                        address,
-                        "localhost",
-                        Duration::from_secs(3),
-                    ),
+                    ConnectPolicy::Sequential => {
+                        NativeStreamEndpoint::new(address, "localhost", Duration::from_secs(3))
+                    }
                     ConnectPolicy::HappyEyeballs => NativeStreamEndpoint::from_host(
                         "localhost",
                         address.port(),

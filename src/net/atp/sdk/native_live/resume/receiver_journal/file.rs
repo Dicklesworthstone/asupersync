@@ -239,11 +239,22 @@ impl Storage {
             .transpose()?;
         let metadata = data.metadata()?;
         let parent = data_directory.metadata()?;
-        let header_length = if intent.is_some() { compact::HEADER } else { HEADER };
+        let header_length = if intent.is_some() {
+            compact::HEADER
+        } else {
+            HEADER
+        };
         let checksum_at = header_length - 32;
-        let magic = if intent.is_some() { compact::MAGIC } else { MAGIC };
-        let journal_hash: fn(&[u8], &[u8]) -> [u8; 32] =
-            if intent.is_some() { compact::hash } else { hash };
+        let magic = if intent.is_some() {
+            compact::MAGIC
+        } else {
+            MAGIC
+        };
+        let journal_hash: fn(&[u8], &[u8]) -> [u8; 32] = if intent.is_some() {
+            compact::hash
+        } else {
+            hash
+        };
         let mut header = vec![0; header_length];
         if let Some(limits) = create {
             header[..8].copy_from_slice(magic);
@@ -462,7 +473,10 @@ impl Storage {
                 // A new epoch uses the other slot; its predecessor's completed
                 // prefix was synchronized before this transition was admitted.
                 if !checkpoint.pending.is_empty()
-                    && state.latest.as_ref().is_none_or(|old| old.pending.is_empty())
+                    && state
+                        .latest
+                        .as_ref()
+                        .is_none_or(|old| old.pending.is_empty())
                 {
                     intent.stage(&checkpoint)?;
                 }
@@ -589,7 +603,9 @@ impl ReceiverJournalObserver {
             .try_lock()
             .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
         if state.poisoned {
-            return Err(io::Error::other("receiver journal persistence is unconfirmed"));
+            return Err(io::Error::other(
+                "receiver journal persistence is unconfirmed",
+            ));
         }
         state
             .latest
@@ -800,11 +816,15 @@ impl ReceiverJournalFile {
         if self.latest.is_some() {
             let saved = self.checkpoint()?;
             if saved.phase() == ReceiverCheckpointPhase::Finalizing {
-                return Err(io::Error::other("receiver application commit remains unresolved"));
+                return Err(io::Error::other(
+                    "receiver application commit remains unresolved",
+                ));
             }
             let sink = self.sink()?;
             let retained = AsyncFile::from_std(self.storage.reader()?);
-            Ok(super::shared::JournaledSession::restore(sink, self, retained, saved))
+            Ok(super::shared::JournaledSession::restore(
+                sink, self, retained, saved,
+            ))
         } else {
             if self.storage.data.metadata()?.len() != 0
                 || self.storage.state.lock().latest.is_some()

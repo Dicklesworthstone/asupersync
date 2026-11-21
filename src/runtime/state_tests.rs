@@ -3970,7 +3970,10 @@ fn settled_obligation_aborts_do_not_create_cancellation_debt() {
     let region = state.create_root_region(Budget::INFINITE);
     let task = insert_task(&mut state, region);
     let monitor = state.debt_monitor();
-    for reason in [ObligationAbortReason::Explicit, ObligationAbortReason::Cancel] {
+    for reason in [
+        ObligationAbortReason::Explicit,
+        ObligationAbortReason::Cancel,
+    ] {
         let obligation = state
             .create_obligation(ObligationKind::SendPermit, task, region, None)
             .expect("reserve obligation");

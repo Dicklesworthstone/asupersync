@@ -77,7 +77,10 @@ fn graceful_close_preserves_permits_and_fifo_while_sealing_every_sender() {
         sender.try_reserve(),
         Err(SendError::Disconnected(()))
     ));
-    assert_eq!(sender.clone().try_send(98), Err(SendError::Disconnected(98)));
+    assert_eq!(
+        sender.clone().try_send(98),
+        Err(SendError::Disconnected(98))
+    );
     assert_eq!(
         weak.upgrade().unwrap().try_send(97),
         Err(SendError::Disconnected(97))
@@ -301,7 +304,10 @@ fn cancellation_during_graceful_drain_does_not_revoke_accepted_work() {
     assert_eq!(sender.telemetry_snapshot(1).recv_waiter_count, 0);
     accepted.try_send(12).unwrap();
     let drain_cx = Cx::for_testing();
-    assert_eq!(receiver.poll_recv(&drain_cx, &mut task), Poll::Ready(Ok(12)));
+    assert_eq!(
+        receiver.poll_recv(&drain_cx, &mut task),
+        Poll::Ready(Ok(12))
+    );
     assert_eq!(
         receiver.poll_recv(&drain_cx, &mut task),
         Poll::Ready(Err(RecvError::Disconnected))

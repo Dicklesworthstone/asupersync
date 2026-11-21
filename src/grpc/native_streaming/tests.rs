@@ -7,8 +7,8 @@ use crate::time::VirtualClock;
 use crate::types::{Budget, RegionId, TaskId};
 use std::collections::VecDeque;
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
 
 #[derive(Default)]
@@ -36,22 +36,32 @@ impl Wire {
     fn append(&self, bytes: &[u8]) {
         self.input.lock().unwrap().extend(bytes);
         let wake = self.reader.lock().unwrap().take();
-        if let Some(wake) = wake { wake.wake(); }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
     }
 
     fn allow_writes(&self) {
         self.write_credit.store(usize::MAX, Ordering::SeqCst);
         let wake = self.writer.lock().unwrap().take();
-        if let Some(wake) = wake { wake.wake(); }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
     }
 }
 
 struct ScriptIo(Arc<Wire>);
 impl Drop for ScriptIo {
-    fn drop(&mut self) { self.0.drops.fetch_add(1, Ordering::SeqCst); }
+    fn drop(&mut self) {
+        self.0.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 impl AsyncRead for ScriptIo {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
         let mut input = self.0.input.lock().unwrap();
         if input.is_empty() && !self.0.eof.load(Ordering::SeqCst) {
@@ -59,14 +69,20 @@ impl AsyncRead for ScriptIo {
             return Poll::Pending;
         }
         while buf.remaining() > 0 {
-            let Some(byte) = input.pop_front() else { break; };
+            let Some(byte) = input.pop_front() else {
+                break;
+            };
             buf.put_slice(&[byte]);
         }
         Poll::Ready(Ok(()))
     }
 }
 impl AsyncWrite for ScriptIo {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let credit = self.0.write_credit.load(Ordering::SeqCst);
         if credit == 0 {
             *self.0.writer.lock().unwrap() = Some(cx.waker().clone());
@@ -85,13 +101,17 @@ impl AsyncWrite for ScriptIo {
             Poll::Ready(Ok(()))
         }
     }
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[derive(Default)]
 struct CountWake(AtomicUsize);
 impl Wake for CountWake {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn complete<F: Future>(future: F) -> F::Output {
@@ -100,19 +120,29 @@ fn complete<F: Future>(future: F) -> F::Output {
     // Only immediate fixed-fixture I/O: bounded polling accommodates the
     // production cooperative yield, never substitutes for a native wake test.
     for _ in 0..128 {
-        if let Poll::Ready(value) = future.as_mut().poll(&mut task) { return value; }
+        if let Poll::Ready(value) = future.as_mut().poll(&mut task) {
+            return value;
+        }
     }
     panic!("fixture unexpectedly parked");
 }
 
 fn context(clock: &Arc<VirtualClock>) -> Cx {
     Cx::new_with_drivers(
-        RegionId::new_for_test(1, 0), TaskId::new_for_test(1, 0), Budget::INFINITE,
-        None, None, None, Some(TimerDriverHandle::with_virtual_clock(Arc::clone(clock))), None,
+        RegionId::new_for_test(1, 0),
+        TaskId::new_for_test(1, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(TimerDriverHandle::with_virtual_clock(Arc::clone(clock))),
+        None,
     )
 }
 
-fn channel() -> Channel { complete(Channel::connect("http://localhost:50051")).unwrap() }
+fn channel() -> Channel {
+    complete(Channel::connect("http://localhost:50051")).unwrap()
+}
 
 fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -137,7 +167,14 @@ fn header_block(pairs: &[(&str, &str)], end: bool) -> Vec<u8> {
 
 fn initial() -> Vec<u8> {
     let mut bytes = frame(4, 0, 0, &[]);
-    bytes.extend(header_block(&[(":status", "200"), ("content-type", "application/grpc"), ("x-origin", "initial")], false));
+    bytes.extend(header_block(
+        &[
+            (":status", "200"),
+            ("content-type", "application/grpc"),
+            ("x-origin", "initial"),
+        ],
+        false,
+    ));
     bytes
 }
 
@@ -152,27 +189,46 @@ type Client = NativeServerStream<ScriptIo, IdentityCodec>;
 
 fn open(wire: &Arc<Wire>, cx: &Cx) -> Client {
     complete(channel().server_streaming_on(
-        cx, ScriptIo(Arc::clone(wire)), "/test.Service/Watch", Request::new(Bytes::new()), IdentityCodec,
-    )).unwrap()
+        cx,
+        ScriptIo(Arc::clone(wire)),
+        "/test.Service/Watch",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ))
+    .unwrap()
 }
 
 fn keepalive_channel_with_policy(progress_aware: bool) -> Channel {
-    let channel = complete(Channel::builder("http://localhost:50051")
-        .keepalive_interval(Duration::from_secs(1))
-        .keepalive_timeout(Duration::from_secs(2))
-        .connect()).unwrap();
-    if progress_aware { channel.with_progress_aware_keepalive() } else { channel }
+    let channel = complete(
+        Channel::builder("http://localhost:50051")
+            .keepalive_interval(Duration::from_secs(1))
+            .keepalive_timeout(Duration::from_secs(2))
+            .connect(),
+    )
+    .unwrap();
+    if progress_aware {
+        channel.with_progress_aware_keepalive()
+    } else {
+        channel
+    }
 }
 
 fn written_frames(wire: &Wire) -> Vec<Frame> {
     let output = wire.output.lock().unwrap();
-    let mut bytes = BytesMut::from(output.strip_prefix(CLIENT_PREFACE).expect("H2 preface written first"));
+    let mut bytes = BytesMut::from(
+        output
+            .strip_prefix(CLIENT_PREFACE)
+            .expect("H2 preface written first"),
+    );
     let mut codec = FrameCodec::new();
     let mut frames = Vec::new();
     while let Some(frame) = crate::codec::Decoder::decode(&mut codec, &mut bytes).unwrap() {
         frames.push(frame);
     }
-    assert!(bytes.is_empty(), "every observed outbound frame is complete");
+    assert!(
+        bytes.is_empty(),
+        "every observed outbound frame is complete"
+    );
     frames
 }
 
@@ -194,7 +250,10 @@ fn channel_keepalive_timer_wakes_a_parked_read_and_matching_ack_rearms_it() {
     clock.advance_to(Time::from_secs(1));
     let before = count.0.load(Ordering::SeqCst);
     assert!(cx.timer_driver().unwrap().process_timers() > 0);
-    assert!(count.0.load(Ordering::SeqCst) > before, "no socket event supplied the wake");
+    assert!(
+        count.0.load(Ordering::SeqCst) > before,
+        "no socket event supplied the wake"
+    );
     assert!(poll_client(&mut client, &waker).is_pending());
     assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes()]);
     wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
@@ -202,11 +261,17 @@ fn channel_keepalive_timer_wakes_a_parked_read_and_matching_ack_rearms_it() {
 
     clock.advance_to(Time::from_secs(2));
     assert!(poll_client(&mut client, &waker).is_pending());
-    assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes(), 2_u64.to_be_bytes()]);
+    assert_eq!(
+        sent_probes(&wire),
+        vec![1_u64.to_be_bytes(), 2_u64.to_be_bytes()]
+    );
     wire.append(&frame(6, 1, 0, &2_u64.to_be_bytes()));
     wire.append(&frame(0, 0, 1, &envelope(b"live")));
     wire.append(&header_block(&[("grpc-status", "0")], true));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"live");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"live"
+    );
     assert!(complete(client.message()).unwrap().is_none());
     assert_eq!(client.terminal_status().unwrap().code(), Code::Ok);
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
@@ -226,7 +291,10 @@ fn channel_keepalive_ready_noise_has_a_bounded_recovery_pass() {
     }
     wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
     clock.advance_to(Time::from_secs(4));
-    assert_eq!(complete(client.message()).unwrap_err().code(), Code::Unavailable);
+    assert_eq!(
+        complete(client.message()).unwrap_err().code(),
+        Code::Unavailable
+    );
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
 }
 
@@ -255,11 +323,18 @@ fn channel_keepalive_deadline_retires_partial_writes_and_parked_flushes() {
             }
             let wakes = count.0.load(Ordering::SeqCst);
             assert!(poll_client(&mut client, &waker).is_pending());
-            assert_eq!(count.0.load(Ordering::SeqCst), wakes, "a parked writer must not spin");
+            assert_eq!(
+                count.0.load(Ordering::SeqCst),
+                wakes,
+                "a parked writer must not spin"
+            );
             clock.advance_to(Time::from_secs(3));
             assert!(cx.timer_driver().unwrap().process_timers() > 0);
             assert!(count.0.load(Ordering::SeqCst) > wakes);
-            assert_eq!(complete(client.message()).unwrap_err().code(), Code::Unavailable);
+            assert_eq!(
+                complete(client.message()).unwrap_err().code(),
+                Code::Unavailable
+            );
             assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
             assert!(!cx.is_cancel_requested());
         }
@@ -272,20 +347,38 @@ fn channel_keepalive_probe_never_splits_a_fragmented_header_block() {
     let cx = context(&clock);
     let wire = Wire::new(Vec::new());
     let mut request = Request::new(Bytes::new());
-    assert!(request.metadata_mut().insert("x-large", "0123456789abcdef".repeat(3000)));
-    let mut client = NativeServerStream::prepare(&cx, ScriptIo(Arc::clone(&wire)),
-        &keepalive_channel_with_policy(true), "/s/Watch", request, IdentityCodec).unwrap();
+    assert!(
+        request
+            .metadata_mut()
+            .insert("x-large", "0123456789abcdef".repeat(3000))
+    );
+    let mut client = NativeServerStream::prepare(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        &keepalive_channel_with_policy(true),
+        "/s/Watch",
+        request,
+        IdentityCodec,
+    )
+    .unwrap();
     let mut started_headers = false;
     for _ in 0..1024 {
         wire.write_credit.store(1, Ordering::SeqCst);
         assert!(poll_client(&mut client, Waker::noop()).is_pending());
         if client.outbound.get(3) == Some(&1) && client.written > 0 {
-            assert_eq!(client.outbound[4] & 4, 0, "fixture must require CONTINUATION");
+            assert_eq!(
+                client.outbound[4] & 4,
+                0,
+                "fixture must require CONTINUATION"
+            );
             started_headers = true;
             break;
         }
     }
-    assert!(started_headers, "partial HEADERS must be witnessed before queueing a probe");
+    assert!(
+        started_headers,
+        "partial HEADERS must be witnessed before queueing a probe"
+    );
     clock.advance_to(Time::from_secs(1));
     assert!(poll_client(&mut client, Waker::noop()).is_pending());
     wire.allow_writes();
@@ -329,12 +422,19 @@ fn channel_keepalive_cancellation_retires_its_timer_and_owned_transport() {
     assert!(poll_client(&mut client, &waker).is_pending());
     assert_eq!(sent_probes(&wire).len(), 1);
     cx.cancel_with(CancelKind::User, Some("cancel an actual keepalive wait"));
-    assert_eq!(complete(client.message()).unwrap_err().code(), Code::Cancelled);
+    assert_eq!(
+        complete(client.message()).unwrap_err().code(),
+        Code::Cancelled
+    );
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
     let wakes = count.0.load(Ordering::SeqCst);
     clock.advance_to(Time::from_secs(5));
     assert_eq!(cx.timer_driver().unwrap().process_timers(), 0);
-    assert_eq!(count.0.load(Ordering::SeqCst), wakes, "retired keepalive must not wake its former owner");
+    assert_eq!(
+        count.0.load(Ordering::SeqCst),
+        wakes,
+        "retired keepalive must not wake its former owner"
+    );
     assert!(complete(client.message()).unwrap().is_none());
 }
 
@@ -346,22 +446,48 @@ fn native_pull_messages_preserve_separate_metadata_and_terminal_details() {
     let mut data = envelope(b"first");
     data.extend(envelope(b"second"));
     wire.append(&frame(0, 0, 1, &data));
-    wire.append(&header_block(&[("grpc-status", "3"), ("grpc-message", "bad%20%25"),
-        ("grpc-status-details-bin", "AP8="), ("x-origin", "trailing"), ("x-bin", "AQ==,Ag")], true));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"first");
+    wire.append(&header_block(
+        &[
+            ("grpc-status", "3"),
+            ("grpc-message", "bad%20%25"),
+            ("grpc-status-details-bin", "AP8="),
+            ("x-origin", "trailing"),
+            ("x-bin", "AQ==,Ag"),
+        ],
+        true,
+    ));
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"first"
+    );
     let reads = wire.reads.load(Ordering::SeqCst);
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"second");
-    assert_eq!(wire.reads.load(Ordering::SeqCst), reads, "buffered message needs no read-ahead");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"second"
+    );
+    assert_eq!(
+        wire.reads.load(Ordering::SeqCst),
+        reads,
+        "buffered message needs no read-ahead"
+    );
     let status = complete(client.message()).unwrap_err();
     assert_eq!(status.code(), Code::InvalidArgument);
     assert_eq!(status.message(), "bad %");
     assert_eq!(status.details().unwrap().as_ref(), &[0, 255]);
-    assert!(matches!(client.initial_metadata().get("x-origin"), Some(MetadataValue::Ascii(v)) if v == "initial"));
+    assert!(
+        matches!(client.initial_metadata().get("x-origin"), Some(MetadataValue::Ascii(v)) if v == "initial")
+    );
     let trailers = client.trailing_metadata().unwrap();
     assert!(matches!(trailers.get("x-origin"), Some(MetadataValue::Ascii(v)) if v == "trailing"));
-    assert_eq!(trailers.iter().filter(|(key, _)| *key == "x-bin").count(), 2);
+    assert_eq!(
+        trailers.iter().filter(|(key, _)| *key == "x-bin").count(),
+        2
+    );
     assert!(complete(client.message()).unwrap().is_none());
-    assert_eq!(client.terminal_status().unwrap().code(), Code::InvalidArgument);
+    assert_eq!(
+        client.terminal_status().unwrap().code(),
+        Code::InvalidArgument
+    );
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
     assert!(!cx.is_cancel_requested());
 }
@@ -377,16 +503,31 @@ fn interrupted_message_wait_preserves_fragment_and_unregisters_on_drop() {
     let waker = Waker::from(Arc::clone(&count));
     {
         let mut wait = Box::pin(client.message());
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
     }
     let written = wire.output.lock().unwrap().clone();
     wire.append(&frame(0, 0, 1, &bytes[7..]));
     wire.append(&header_block(&[("grpc-status", "0")], true));
     assert!(count.0.load(Ordering::SeqCst) > 0);
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"fragmented");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"fragmented"
+    );
     assert!(complete(client.message()).unwrap().is_none());
     assert!(wire.output.lock().unwrap().starts_with(&written));
-    assert_eq!(wire.output.lock().unwrap().windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == CLIENT_PREFACE).count(), 1);
+    assert_eq!(
+        wire.output
+            .lock()
+            .unwrap()
+            .windows(CLIENT_PREFACE.len())
+            .filter(|bytes| *bytes == CLIENT_PREFACE)
+            .count(),
+        1
+    );
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
 }
 
@@ -399,16 +540,29 @@ fn partial_transport_write_resumes_without_replaying_committed_prefix() {
     assert_eq!(&*wire.output.lock().unwrap(), &CLIENT_PREFACE[..5]);
     {
         let mut wait = Box::pin(client.message());
-        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
     }
     wire.allow_writes();
     wire.append(&frame(0, 0, 1, &envelope(b"resumed")));
     wire.append(&header_block(&[("grpc-status", "0")], true));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"resumed");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"resumed"
+    );
     assert!(complete(client.message()).unwrap().is_none());
     let output = wire.output.lock().unwrap();
     assert!(output.starts_with(CLIENT_PREFACE));
-    assert_eq!(output.windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == CLIENT_PREFACE).count(), 1);
+    assert_eq!(
+        output
+            .windows(CLIENT_PREFACE.len())
+            .filter(|bytes| *bytes == CLIENT_PREFACE)
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -432,10 +586,25 @@ fn missing_status_truncation_and_early_eof_never_become_ok() {
 fn oversized_declared_message_fails_before_its_payload_arrives() {
     let wire = Wire::new(initial());
     let cx = context(&Arc::new(VirtualClock::new()));
-    let channel = complete(Channel::builder("http://localhost:50051").max_recv_message_size(2).connect()).unwrap();
-    let mut client = complete(channel.server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec)).unwrap();
+    let channel = complete(
+        Channel::builder("http://localhost:50051")
+            .max_recv_message_size(2)
+            .connect(),
+    )
+    .unwrap();
+    let mut client = complete(channel.server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/M",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ))
+    .unwrap();
     wire.append(&frame(0, 0, 1, &[0, 0, 0, 0, 3]));
-    assert_eq!(complete(client.message()).unwrap_err().code(), Code::ResourceExhausted);
+    assert_eq!(
+        complete(client.message()).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
 }
 
@@ -443,12 +612,22 @@ fn oversized_declared_message_fails_before_its_payload_arrives() {
 fn headers_only_success_and_failure_do_not_invent_a_message() {
     for code in ["0", "16"] {
         let mut bytes = frame(4, 0, 0, &[]);
-        bytes.extend(header_block(&[(":status", "200"), ("content-type", "application/grpc"), ("grpc-status", code)], true));
+        bytes.extend(header_block(
+            &[
+                (":status", "200"),
+                ("content-type", "application/grpc"),
+                ("grpc-status", code),
+            ],
+            true,
+        ));
         let wire = Wire::new(bytes);
         let mut client = open(&wire, &context(&Arc::new(VirtualClock::new())));
         let result = complete(client.message());
-        if code == "0" { assert!(result.unwrap().is_none()); }
-        else { assert_eq!(result.unwrap_err().code(), Code::Unauthenticated); }
+        if code == "0" {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert_eq!(result.unwrap_err().code(), Code::Unauthenticated);
+        }
         assert!(complete(client.message()).unwrap().is_none());
     }
 }
@@ -457,9 +636,15 @@ fn headers_only_success_and_failure_do_not_invent_a_message() {
 fn malformed_and_unnegotiated_response_headers_fail_closed() {
     for extra in [
         vec![("content-type", "application/grpc-web")],
-        vec![("content-type", "application/grpc"), ("grpc-encoding", "gzip")],
+        vec![
+            ("content-type", "application/grpc"),
+            ("grpc-encoding", "gzip"),
+        ],
         vec![("content-type", "application/grpc"), ("grpc-status", "0")],
-        vec![("content-type", "application/grpc"), ("content-type", "application/grpc")],
+        vec![
+            ("content-type", "application/grpc"),
+            ("content-type", "application/grpc"),
+        ],
     ] {
         let mut headers = vec![(":status", "200")];
         headers.extend(extra);
@@ -467,7 +652,13 @@ fn malformed_and_unnegotiated_response_headers_fail_closed() {
         bytes.extend(header_block(&headers, false));
         let wire = Wire::new(bytes);
         let cx = context(&Arc::new(VirtualClock::new()));
-        let result = complete(channel().server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec));
+        let result = complete(channel().server_streaming_on(
+            &cx,
+            ScriptIo(Arc::clone(&wire)),
+            "/s/M",
+            Request::new(Bytes::new()),
+            IdentityCodec,
+        ));
         assert!(result.is_err());
         assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
     }
@@ -504,12 +695,22 @@ fn trailers_only_status_wins_over_an_unnegotiated_response_encoding() {
 
 #[test]
 fn unnegotiated_response_compression_maps_to_internal_error() {
-    let headers = vec![(":status", "200"), ("content-type", "application/grpc"), ("grpc-encoding", "gzip")];
+    let headers = vec![
+        (":status", "200"),
+        ("content-type", "application/grpc"),
+        ("grpc-encoding", "gzip"),
+    ];
     let mut bytes = frame(4, 0, 0, &[]);
     bytes.extend(header_block(&headers, false));
     let wire = Wire::new(bytes);
     let cx = context(&Arc::new(VirtualClock::new()));
-    let result = complete(channel().server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec));
+    let result = complete(channel().server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/M",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ));
     let err = result.expect_err("unnegotiated compression should fail");
     assert_eq!(err.code(), Code::Internal);
     assert_eq!(err.message(), "unnegotiated gRPC response compression");
@@ -517,17 +718,30 @@ fn unnegotiated_response_compression_maps_to_internal_error() {
 
 #[test]
 fn cancellation_wakes_a_parked_read_and_preserves_attribution() {
-    for (cause, code) in [(CancelKind::User, Code::Cancelled), (CancelKind::Deadline, Code::DeadlineExceeded), (CancelKind::CostBudget, Code::ResourceExhausted)] {
+    for (cause, code) in [
+        (CancelKind::User, Code::Cancelled),
+        (CancelKind::Deadline, Code::DeadlineExceeded),
+        (CancelKind::CostBudget, Code::ResourceExhausted),
+    ] {
         let wire = Wire::new(initial());
         let cx = context(&Arc::new(VirtualClock::new()));
         let mut client = open(&wire, &cx);
         let count = Arc::new(CountWake::default());
         let waker = Waker::from(Arc::clone(&count));
         let mut wait = Box::pin(client.message());
-        assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
         cx.cancel_with(cause, Some("fixture cancellation"));
-        assert!(count.0.load(Ordering::SeqCst) > 0, "no I/O event was injected");
-        assert!(matches!(wait.as_mut().poll(&mut Context::from_waker(&waker)), Poll::Ready(Err(status)) if status.code() == code));
+        assert!(
+            count.0.load(Ordering::SeqCst) > 0,
+            "no I/O event was injected"
+        );
+        assert!(
+            matches!(wait.as_mut().poll(&mut Context::from_waker(&waker)), Poll::Ready(Err(status)) if status.code() == code)
+        );
         drop(wait);
         assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
         assert!(complete(client.message()).unwrap().is_none());
@@ -539,17 +753,38 @@ fn absolute_deadline_is_not_restarted_by_message_or_unrelated_ambient_clock() {
     let clock = Arc::new(VirtualClock::new());
     let cx = context(&clock);
     let wire = Wire::new(initial());
-    let channel = complete(Channel::builder("http://localhost:50051").timeout(Duration::from_secs(2)).connect()).unwrap();
-    let mut client = complete(channel.server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec)).unwrap();
+    let channel = complete(
+        Channel::builder("http://localhost:50051")
+            .timeout(Duration::from_secs(2))
+            .connect(),
+    )
+    .unwrap();
+    let mut client = complete(channel.server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/M",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    ))
+    .unwrap();
     clock.advance_to(Time::from_secs(1));
     wire.append(&frame(0, 0, 1, &envelope(b"one")));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"one");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"one"
+    );
     let unrelated = context(&Arc::new(VirtualClock::starting_at(Time::from_secs(999))));
     let _guard = Cx::set_current(Some(unrelated));
     clock.advance_to(Time::from_secs(2));
     wire.append(&frame(0, 0, 1, &envelope(b"too late")));
-    assert_eq!(complete(client.message()).unwrap_err().code(), Code::DeadlineExceeded);
-    assert!(!cx.is_cancel_requested(), "local call timeout must not cancel caller");
+    assert_eq!(
+        complete(client.message()).unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
+    assert!(
+        !cx.is_cancel_requested(),
+        "local call timeout must not cancel caller"
+    );
 }
 
 #[test]
@@ -561,7 +796,10 @@ fn header_timeout_does_not_limit_an_unbounded_stream_after_headers() {
     assert!(client.header_timer.is_none());
     clock.advance_to(Time::from_secs(600));
     wire.append(&frame(0, 0, 1, &envelope(b"still alive")));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"still alive");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"still alive"
+    );
     client.cancel();
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
     assert_eq!(client.terminal_status().unwrap().code(), Code::Cancelled);
@@ -573,14 +811,29 @@ fn path_metadata_and_window_admission_happen_before_any_transport_write() {
     let cx = context(&Arc::new(VirtualClock::new()));
     for path in ["missing", "/s", "/s/M/extra", "/s/M?query"] {
         let wire = Wire::new(Vec::new());
-        assert!(complete(channel().server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), path, Request::new(Bytes::new()), IdentityCodec)).is_err());
+        assert!(
+            complete(channel().server_streaming_on(
+                &cx,
+                ScriptIo(Arc::clone(&wire)),
+                path,
+                Request::new(Bytes::new()),
+                IdentityCodec
+            ))
+            .is_err()
+        );
         assert!(wire.output.lock().unwrap().is_empty());
     }
     for name in ["content-length", "grpc-status", "authorization"] {
         let wire = Wire::new(initial());
         let mut request = Request::new(Bytes::new());
         assert!(request.metadata_mut().insert(name, "private"));
-        let result = complete(channel().server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", request, IdentityCodec));
+        let result = complete(channel().server_streaming_on(
+            &cx,
+            ScriptIo(Arc::clone(&wire)),
+            "/s/M",
+            request,
+            IdentityCodec,
+        ));
         if name == "authorization" {
             let client = result.unwrap();
             assert!(!format!("{client:?}").contains("private"));
@@ -601,12 +854,23 @@ fn deadline_meets_channel_request_and_parent_without_using_connect_timeout() {
     let cx = context(&Arc::new(VirtualClock::new()));
     let mut metadata = Metadata::new();
     let mut config = ChannelConfig::default();
-    assert_eq!(call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap(), None);
+    assert_eq!(
+        call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap(),
+        None
+    );
     config.timeout = Some(Duration::from_secs(4));
     assert!(metadata.insert("grpc-timeout", "9S"));
-    assert_eq!(call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap(), Some(Time::from_secs(4)));
+    assert_eq!(
+        call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap(),
+        Some(Time::from_secs(4))
+    );
     assert!(metadata.insert("grpc-timeout", "1S"));
-    assert_eq!(call_deadline(&cx, &metadata, &config, Time::ZERO).unwrap_err().code(), Code::InvalidArgument);
+    assert_eq!(
+        call_deadline(&cx, &metadata, &config, Time::ZERO)
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
 }
 
 fn connect_timeout_channel(timeout: Duration) -> Channel {
@@ -761,7 +1025,10 @@ fn supplied_stream_keepalive_correlates_ack_and_rearms() {
 
     clock.advance_to(Time::from_secs(4));
     assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
-    assert_eq!(sent_probes(&wire), vec![1_u64.to_be_bytes(), 2_u64.to_be_bytes()]);
+    assert_eq!(
+        sent_probes(&wire),
+        vec![1_u64.to_be_bytes(), 2_u64.to_be_bytes()]
+    );
     wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
     assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
     clock.advance_to(Time::from_secs(5));
@@ -781,16 +1048,29 @@ fn supplied_stream_keepalive_bounds_a_parked_probe_write() {
         let cx = context(&clock);
         let wire = Wire::new(initial());
         let channel = keepalive_channel();
-        let channel = if progress_aware { channel.with_progress_aware_keepalive() } else { channel };
+        let channel = if progress_aware {
+            channel.with_progress_aware_keepalive()
+        } else {
+            channel
+        };
         let mut client = open_on(&channel, &wire, &cx);
         wire.write_credit.store(0, Ordering::SeqCst);
         clock.advance_to(Time::from_secs(2));
         let mut task = Context::from_waker(Waker::noop());
         assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
-        assert!(wire.writer.lock().unwrap().is_some(), "probe write is parked");
-        assert!(sent_probes(&wire).is_empty(), "no probe byte reached the peer");
+        assert!(
+            wire.writer.lock().unwrap().is_some(),
+            "probe write is parked"
+        );
+        assert!(
+            sent_probes(&wire).is_empty(),
+            "no probe byte reached the peer"
+        );
         clock.advance_to(Time::from_secs(3));
-        assert_eq!(complete(client.message()).unwrap_err().code(), Code::Unavailable);
+        assert_eq!(
+            complete(client.message()).unwrap_err().code(),
+            Code::Unavailable
+        );
         assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
         assert!(!cx.is_cancel_requested());
     }
@@ -806,10 +1086,19 @@ fn supplied_stream_progress_keepalive_preserves_slow_consumer_and_ready_ack() {
     let mut messages = envelope(b"first");
     messages.extend(envelope(b"buffered"));
     wire.append(&frame(0, 0, 1, &messages));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"first");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"first"
+    );
     clock.advance_to(Time::from_secs(2));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"buffered");
-    assert!(sent_probes(&wire).is_empty(), "buffered reads do not admit a PING");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"buffered"
+    );
+    assert!(
+        sent_probes(&wire).is_empty(),
+        "buffered reads do not admit a PING"
+    );
 
     clock.advance_to(Time::from_secs(20));
     let mut task = Context::from_waker(Waker::noop());
@@ -818,7 +1107,10 @@ fn supplied_stream_progress_keepalive_preserves_slow_consumer_and_ready_ack() {
     wire.append(&frame(6, 1, 0, &1_u64.to_be_bytes()));
     wire.append(&frame(0, 0, 1, &envelope(b"after pause")));
     clock.advance_to(Time::from_secs(30));
-    assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"after pause");
+    assert_eq!(
+        complete(client.message()).unwrap().unwrap().as_ref(),
+        b"after pause"
+    );
     assert!(client.terminal_status().is_none());
     assert!(client.keepalive.as_ref().unwrap().is_idle());
     client.cancel();
@@ -831,7 +1123,11 @@ fn supplied_stream_terminal_trailers_win_over_expired_keepalive() {
         let cx = context(&clock);
         let wire = Wire::new(initial());
         let channel = keepalive_channel();
-        let channel = if progress_aware { channel.with_progress_aware_keepalive() } else { channel };
+        let channel = if progress_aware {
+            channel.with_progress_aware_keepalive()
+        } else {
+            channel
+        };
         let mut client = open_on(&channel, &wire, &cx);
         clock.advance_to(Time::from_secs(2));
         let mut task = Context::from_waker(Waker::noop());
@@ -853,7 +1149,11 @@ fn supplied_stream_terminal_recovery_does_not_wait_for_control_writes() {
             let cx = context(&clock);
             let wire = Wire::new(initial());
             let channel = keepalive_channel();
-            let channel = if progress_aware { channel.with_progress_aware_keepalive() } else { channel };
+            let channel = if progress_aware {
+                channel.with_progress_aware_keepalive()
+            } else {
+                channel
+            };
             let mut client = open_on(&channel, &wire, &cx);
             let mut task = Context::from_waker(Waker::noop());
             clock.advance_to(Time::from_secs(2));
@@ -870,8 +1170,14 @@ fn supplied_stream_terminal_recovery_does_not_wait_for_control_writes() {
 
             // Exercise the inner driver: a message decoder can use time after
             // poll_next's outer gate, so expiry may be observed here first.
-            assert!(matches!(client.poll_progress(&mut task, false), Poll::Ready(Ok(()))));
-            assert!(wire.writer.lock().unwrap().is_none(), "terminal status needs no ACK write");
+            assert!(matches!(
+                client.poll_progress(&mut task, false),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(
+                wire.writer.lock().unwrap().is_none(),
+                "terminal status needs no ACK write"
+            );
             if expected == Code::Ok {
                 assert!(complete(client.message()).unwrap().is_none());
             } else {
@@ -898,11 +1204,20 @@ fn supplied_stream_keepalive_rejects_invalid_policy_before_io() {
             keepalive_timeout: timeout,
             ..ChannelConfig::default()
         };
-        let channel = complete(Channel::connect_with_config("http://localhost:50051", config)).unwrap();
+        let channel = complete(Channel::connect_with_config(
+            "http://localhost:50051",
+            config,
+        ))
+        .unwrap();
         let wire = Wire::new(initial());
         let status = complete(channel.server_streaming_on(
-            &cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec,
-        )).unwrap_err();
+            &cx,
+            ScriptIo(Arc::clone(&wire)),
+            "/s/M",
+            Request::new(Bytes::new()),
+            IdentityCodec,
+        ))
+        .unwrap_err();
         assert_eq!(status.code(), Code::InvalidArgument);
         assert!(wire.output.lock().unwrap().is_empty());
         assert_eq!(wire.reads.load(Ordering::SeqCst), 0);
@@ -933,17 +1248,27 @@ fn supplied_stream_recovery_yields_data_before_a_matching_ack_without_spinning()
         // Expiry can first become visible in the inner driver, after the
         // outer check. DATA read before the recovered ACK must reach the
         // decoder now, even if no further socket event ever arrives.
-        assert!(matches!(client.poll_progress(&mut task, false), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            client.poll_progress(&mut task, false),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(client.body.as_ref(), &message[..received]);
         assert!(client.keepalive.as_ref().unwrap().is_idle());
         if fragmented {
             let wakes = count.0.load(Ordering::SeqCst);
             assert!(Pin::new(&mut client).poll_next(&mut task).is_pending());
-            assert_eq!(count.0.load(Ordering::SeqCst), wakes, "old partial DATA must park without spinning");
+            assert_eq!(
+                count.0.load(Ordering::SeqCst),
+                wakes,
+                "old partial DATA must park without spinning"
+            );
             assert!(wire.reader.lock().unwrap().is_some());
             wire.append(&frame(0, 0, 1, &message[received..]));
         }
-        assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"recovered before ack");
+        assert_eq!(
+            complete(client.message()).unwrap().unwrap().as_ref(),
+            b"recovered before ack"
+        );
         wire.append(&header_block(&[("grpc-status", "0")], true));
         assert!(complete(client.message()).unwrap().is_none());
         assert_eq!(client.terminal_status().unwrap().code(), Code::Ok);

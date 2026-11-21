@@ -53,13 +53,13 @@ use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
 use crate::sync::ContendedMutex;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::time::TimerDriverHandle;
 use crate::trace::TraceBufferHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{CancelAttributionConfig, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, EntropySource};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Observability configuration wrapper for sharded state.
 ///

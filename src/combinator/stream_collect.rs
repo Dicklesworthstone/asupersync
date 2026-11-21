@@ -89,7 +89,10 @@ where
     Fut: Future<Output = Result<(), E>> + Send + 'static,
     E: Send + 'static,
 {
-    assert!(limit > 0, "scoped stream concurrency limit must be non-zero");
+    assert!(
+        limit > 0,
+        "scoped stream concurrency limit must be non-zero"
+    );
     if cx.is_cancel_requested() {
         return Outcome::Cancelled(scoped_cancel_reason(cx));
     }
@@ -144,9 +147,8 @@ where
 }
 
 fn scoped_cancel_reason(cx: &Cx) -> crate::types::CancelReason {
-    cx.cancel_reason().unwrap_or_else(|| {
-        crate::types::CancelReason::user("scoped stream owner cancelled")
-    })
+    cx.cancel_reason()
+        .unwrap_or_else(|| crate::types::CancelReason::user("scoped stream owner cancelled"))
 }
 
 pub(super) fn scoped_outcome<E>(
@@ -269,14 +271,19 @@ where
 {
     let results = Results::new();
     let writer = results.clone();
-    let outcome = try_for_each_concurrent(cx, stream.enumerate(), limit, move |item_cx, (index, item)| {
-        let writer = writer.clone();
-        let future = f(item_cx, item);
-        async move {
-            writer.store(index, future.await?);
-            Ok(())
-        }
-    })
+    let outcome = try_for_each_concurrent(
+        cx,
+        stream.enumerate(),
+        limit,
+        move |item_cx, (index, item)| {
+            let writer = writer.clone();
+            let future = f(item_cx, item);
+            async move {
+                writer.store(index, future.await?);
+                Ok(())
+            }
+        },
+    )
     .await;
     results.finish(outcome)
 }
@@ -338,7 +345,8 @@ where
                 Ok(())
             }
         },
-    ).await;
+    )
+    .await;
     results.finish(outcome)
 }
 
@@ -365,7 +373,8 @@ where
     try_map_collect_concurrent_scoped(cx, stream, limit, move |child, item| {
         let future = f(child, item);
         async move { Ok(future.await) }
-    }).await
+    })
+    .await
 }
 
 // Both collection modes use this one result-placement and retirement path.
@@ -386,7 +395,10 @@ impl<T> Results<T> {
     fn store(&self, index: usize, value: T) {
         let mut slots = self.0.lock();
         if slots.len() <= index {
-            slots.resize_with(index.checked_add(1).expect("stream result index overflow"), || None);
+            slots.resize_with(
+                index.checked_add(1).expect("stream result index overflow"),
+                || None,
+            );
         }
         // Each source index is admitted once. Never overwrite a previous T.
         assert!(slots[index].is_none(), "duplicate stream result index");
@@ -398,9 +410,14 @@ impl<T> Results<T> {
         // after their selected task-only or full-subtree barrier has resolved.
         let slots = std::mem::take(&mut *self.0.lock());
         match outcome {
-            Outcome::Ok(()) => Outcome::Ok(slots.into_iter().map(|slot| {
-                slot.expect("successful stream collection has every admitted result")
-            }).collect()),
+            Outcome::Ok(()) => Outcome::Ok(
+                slots
+                    .into_iter()
+                    .map(|slot| {
+                        slot.expect("successful stream collection has every admitted result")
+                    })
+                    .collect(),
+            ),
             Outcome::Err(error) => Outcome::Err(error),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),

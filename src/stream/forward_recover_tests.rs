@@ -93,7 +93,9 @@ fn recoverable_pre_cancelled_run_does_not_advance_source() {
 
     assert!(matches!(
         poll_once(run.as_mut()),
-        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(()))))
+        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(
+            ()
+        ))))
     ));
     drop(run);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
@@ -116,7 +118,9 @@ fn recoverable_idle_source_wakes_on_cancellation_only() {
     assert!(count.0.load(Ordering::SeqCst) > 0);
     assert!(matches!(
         run.as_mut().poll(&mut task),
-        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(()))))
+        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(
+            ()
+        ))))
     ));
     assert_eq!(Arc::strong_count(&count), 2);
     drop(run);
@@ -140,7 +144,9 @@ fn recoverable_full_channel_cancellation_preserves_item_for_retry() {
     assert!(count.0.load(Ordering::SeqCst) > 0);
     assert!(matches!(
         run.as_mut().poll(&mut task),
-        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(()))))
+        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(
+            ()
+        ))))
     ));
     drop(run);
     assert_eq!(pending, Some(1));
@@ -149,11 +155,7 @@ fn recoverable_full_channel_cancellation_preserves_item_for_retry() {
     assert_eq!(Arc::strong_count(&count), 2);
 
     let retry_cx = Cx::for_testing();
-    let mut retry = Box::pin(sink.send_all_recoverable(
-        &retry_cx,
-        &mut source,
-        &mut pending,
-    ));
+    let mut retry = Box::pin(sink.send_all_recoverable(&retry_cx, &mut source, &mut pending));
     assert!(poll_once(retry.as_mut()).is_pending());
     assert_eq!(receiver.try_recv(), Ok(1));
     assert!(matches!(poll_once(retry.as_mut()), Poll::Ready(Ok(()))));
@@ -208,18 +210,16 @@ fn recoverable_disconnection_allows_retry_with_a_new_sink() {
     let mut run = Box::pin(sink.send_all_recoverable(&cx, &mut source, &mut pending));
     assert!(matches!(
         poll_once(run.as_mut()),
-        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Disconnected(()))))
+        Poll::Ready(Err(mpsc::CheckedSendError::Channel(
+            SendError::Disconnected(())
+        )))
     ));
     drop(run);
     assert_eq!(pending, Some(1));
 
     let (sender, mut receiver) = mpsc::channel(4);
     let replacement = into_sink(sender);
-    let mut retry = Box::pin(replacement.send_all_recoverable(
-        &cx,
-        &mut source,
-        &mut pending,
-    ));
+    let mut retry = Box::pin(replacement.send_all_recoverable(&cx, &mut source, &mut pending));
     assert!(matches!(poll_once(retry.as_mut()), Poll::Ready(Ok(()))));
     drop(retry);
     assert_eq!(pending, None);
@@ -282,8 +282,14 @@ fn recoverable_drop_retains_non_clone_values_in_caller_state() {
     let (sender, mut receiver) = mpsc::channel(1);
     let sink = into_sink(sender);
     let mut source = iter([
-        DropProbe { id: 1, drops: Arc::clone(&drops) },
-        DropProbe { id: 2, drops: Arc::clone(&drops) },
+        DropProbe {
+            id: 1,
+            drops: Arc::clone(&drops),
+        },
+        DropProbe {
+            id: 2,
+            drops: Arc::clone(&drops),
+        },
     ]);
     let mut pending = None;
     let mut run = Box::pin(sink.send_all_recoverable(&cx, &mut source, &mut pending));
@@ -327,32 +333,31 @@ fn recoverable_keeps_item_when_source_cancels_during_ready_poll() {
     let cx = Cx::for_testing();
     let (sender, mut receiver) = mpsc::channel(1);
     let sink = into_sink(sender);
-    let mut source = CancelWithItem { cx: cx.clone(), yielded: false };
+    let mut source = CancelWithItem {
+        cx: cx.clone(),
+        yielded: false,
+    };
     let mut pending = None;
     let mut run = Box::pin(sink.send_all_recoverable(&cx, &mut source, &mut pending));
     assert!(matches!(
         poll_once(run.as_mut()),
-        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(()))))
+        Poll::Ready(Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(
+            ()
+        ))))
     ));
     drop(run);
     assert_eq!(pending, Some(7));
     assert_eq!(receiver.try_recv(), Err(mpsc::RecvError::Empty));
 
     let retry_cx = Cx::for_testing();
-    let mut retry = Box::pin(sink.send_all_recoverable(
-        &retry_cx,
-        &mut source,
-        &mut pending,
-    ));
+    let mut retry = Box::pin(sink.send_all_recoverable(&retry_cx, &mut source, &mut pending));
     assert!(matches!(poll_once(retry.as_mut()), Poll::Ready(Ok(()))));
     drop(retry);
     assert_eq!(pending, None);
     assert_eq!(receiver.try_recv(), Ok(7));
 }
 
-fn admission_fixture(
-    limit: usize,
-) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+fn admission_fixture(limit: usize) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
     crate::test_utils::init_test_logging();
     let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c002).max_steps(128));
     let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
@@ -419,7 +424,12 @@ fn recoverable_quota_refusal_preserves_item_and_retry_reuses_returned_credit() {
     drop(run);
     assert_eq!(pending, Some(41));
     assert!(receiver.is_empty());
-    assert_eq!(sink.sender.telemetry_snapshot(1).reserved_uncommitted_obligations, 0);
+    assert_eq!(
+        sink.sender
+            .telemetry_snapshot(1)
+            .reserved_uncommitted_obligations,
+        0
+    );
 
     // No lab step or mailbox drain: dropping the blocker must return quota
     // synchronously, and each successful forward must recycle that one credit.
@@ -462,8 +472,14 @@ fn recoverable_close_during_admission_restores_item_before_settlement_notificati
         let sink = into_sink(sender);
         let drops = Arc::new(AtomicUsize::new(0));
         let mut source = iter([
-            DropProbe { id: 7, drops: Arc::clone(&drops) },
-            DropProbe { id: 8, drops: Arc::clone(&drops) },
+            DropProbe {
+                id: 7,
+                drops: Arc::clone(&drops),
+            },
+            DropProbe {
+                id: 8,
+                drops: Arc::clone(&drops),
+            },
         ]);
         let mut pending = None;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -483,8 +499,16 @@ fn recoverable_close_during_admission_restores_item_before_settlement_notificati
         assert_eq!(notifications.load(Ordering::SeqCst), 2);
         assert_eq!(pending.as_ref().map(|item| item.id), Some(7));
         assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert!(matches!(receiver.try_recv(), Err(mpsc::RecvError::Disconnected)));
-        assert_eq!(sink.sender.telemetry_snapshot(1).reserved_uncommitted_obligations, 0);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::RecvError::Disconnected)
+        ));
+        assert_eq!(
+            sink.sender
+                .telemetry_snapshot(1)
+                .reserved_uncommitted_obligations,
+            0
+        );
 
         let (sender, mut receiver) = mpsc::channel(2);
         let replacement = into_sink(sender);
@@ -493,7 +517,10 @@ fn recoverable_close_during_admission_restores_item_before_settlement_notificati
         drop(retry);
         assert!(pending.is_none());
         let delivered = drain(&mut receiver);
-        assert_eq!(delivered.iter().map(|item| item.id).collect::<Vec<_>>(), [7, 8]);
+        assert_eq!(
+            delivered.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [7, 8]
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(delivered);
         assert_eq!(drops.load(Ordering::SeqCst), 2);

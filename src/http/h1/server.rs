@@ -1188,10 +1188,9 @@ where
         let read_future = async {
             let mut owner_cancel =
                 crate::http::listener_cancel::ListenerCancellation::new(connection_owner.cloned());
-            let mut polling_cancel =
-                crate::http::listener_cancel::ListenerCancellation::new(
-                    connection_owner.and_then(|_| Cx::current()),
-                );
+            let mut polling_cancel = crate::http::listener_cancel::ListenerCancellation::new(
+                connection_owner.and_then(|_| Cx::current()),
+            );
             let mut pending_expectation_flush = None;
             let mut handled_expectation = false;
             let mut shutdown_fut: Option<ShutdownWaitFuture<'_>> =
@@ -1617,13 +1616,11 @@ where
                         "Internal Server Error",
                     ))
                 }
-                Some(ServerHopOutcome::DeadlineExceeded) => {
-                    Http1Response::new(hop_error_response(
-                        request_version,
-                        503,
-                        HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC,
-                    ))
-                }
+                Some(ServerHopOutcome::DeadlineExceeded) => Http1Response::new(hop_error_response(
+                    request_version,
+                    503,
+                    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC,
+                )),
             };
 
             let Http1Response {
@@ -1957,7 +1954,11 @@ where
         execution.request.shutdown.as_ref(),
     )
     .await;
-    Ok((io, read_buffer, StreamingRequestOutcome::from_joined(joined)))
+    Ok((
+        io,
+        read_buffer,
+        StreamingRequestOutcome::from_joined(joined),
+    ))
 }
 
 impl<F> Http1StreamingServer<F> {
@@ -2141,7 +2142,9 @@ where
                     trailers: Vec::new(),
                 };
                 state.phase = ConnectionPhase::Writing;
-                response_write.write_streaming_response(cx, &mut io, response).await?;
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -2152,30 +2155,33 @@ where
                 let response = expectation_response(head.version, expectation)
                     .expect("rejected expectation must have a response");
                 state.phase = ConnectionPhase::Writing;
-                response_write.write_streaming_response(cx, &mut io, response).await?;
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
                 break;
             }
-            let request_config = match admit_streaming_request_head(
-                &execution_config,
-                &head,
-                body_kind,
-            ) {
-                Ok(config) => config,
-                Err(response) => {
-                    state.phase = ConnectionPhase::Writing;
-                    response_write.write_streaming_response(cx, &mut io, response).await?;
-                    state.requests_served += 1;
-                    state.phase = ConnectionPhase::Closing;
-                    break;
-                }
-            };
+            let request_config =
+                match admit_streaming_request_head(&execution_config, &head, body_kind) {
+                    Ok(config) => config,
+                    Err(response) => {
+                        state.phase = ConnectionPhase::Writing;
+                        response_write
+                            .write_streaming_response(cx, &mut io, response)
+                            .await?;
+                        state.requests_served += 1;
+                        state.phase = ConnectionPhase::Closing;
+                        break;
+                    }
+                };
             if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
                 let response = expectation_response(head.version, expectation)
                     .expect("100-continue expectation must have a response");
                 state.phase = ConnectionPhase::Writing;
-                response_write.write_streaming_response(cx, &mut io, response).await?;
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await?;
             }
 
             let close_after =
@@ -2352,7 +2358,9 @@ where
     {
         let owned = OwnedRequests::new(cx.clone())?;
         self.serve_connection_using(cx, io, peer_addr, move |handler, io, buffer, execution| {
-            owned.clone().execute_streaming(handler, io, buffer, execution)
+            owned
+                .clone()
+                .execute_streaming(handler, io, buffer, execution)
         })
         .await
     }
@@ -2634,13 +2642,17 @@ impl ProducedCompletion {
         match self {
             Self::Complete => Ok(()),
             Self::Buffered(response) => {
-                response_write.write_streaming_response(cx, io, response).await
+                response_write
+                    .write_streaming_response(cx, io, response)
+                    .await
             }
             Self::Bytes(bytes) => {
                 write_all_within_idle(io, bytes.as_ref(), response_write)
                     .await
                     .map_err(HttpError::Io)?;
-                flush_within_idle(io, response_write).await.map_err(HttpError::Io)
+                flush_within_idle(io, response_write)
+                    .await
+                    .map_err(HttpError::Io)
             }
         }
     }
@@ -2661,7 +2673,9 @@ where
         return Ok(ProducedCompletion::Buffered(response));
     }
     head_committed.store(true, Ordering::Release);
-    response_write.write_streaming_response(cx, io, response).await?;
+    response_write
+        .write_streaming_response(cx, io, response)
+        .await?;
     Ok(ProducedCompletion::Complete)
 }
 
@@ -2789,7 +2803,9 @@ where
             suppress_response_body_for_head(&mut response);
         }
         state.phase = ConnectionPhase::Writing;
-        response_write.write_streaming_response(cx, &mut io, response).await?;
+        response_write
+            .write_streaming_response(cx, &mut io, response)
+            .await?;
         state.requests_served = 1;
         state.phase = ConnectionPhase::Closing;
         let _ = response_write.close_transport(&mut io).await;
@@ -2805,32 +2821,35 @@ where
             suppress_response_body_for_head(&mut response);
         }
         state.phase = ConnectionPhase::Writing;
-        response_write.write_streaming_response(cx, &mut io, response).await?;
+        response_write
+            .write_streaming_response(cx, &mut io, response)
+            .await?;
         state.requests_served = 1;
         state.phase = ConnectionPhase::Closing;
         let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     }
-    let request_config = match admit_streaming_request_head(
-        &Arc::new(config.clone()),
-        &head,
-        body_kind,
-    ) {
-        Ok(config) => config,
-        Err(response) => {
-            state.phase = ConnectionPhase::Writing;
-            response_write.write_streaming_response(cx, &mut io, response).await?;
-            state.requests_served = 1;
-            state.phase = ConnectionPhase::Closing;
-            let _ = response_write.close_transport(&mut io).await;
-            return Ok(state);
-        }
-    };
+    let request_config =
+        match admit_streaming_request_head(&Arc::new(config.clone()), &head, body_kind) {
+            Ok(config) => config,
+            Err(response) => {
+                state.phase = ConnectionPhase::Writing;
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await?;
+                state.requests_served = 1;
+                state.phase = ConnectionPhase::Closing;
+                let _ = response_write.close_transport(&mut io).await;
+                return Ok(state);
+            }
+        };
     if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
         let response = expectation_response(head.version, expectation)
             .expect("100-continue expectation must have a response");
         state.phase = ConnectionPhase::Writing;
-        response_write.write_streaming_response(cx, &mut io, response).await?;
+        response_write
+            .write_streaming_response(cx, &mut io, response)
+            .await?;
     }
 
     let request_version = head.version;
@@ -2895,7 +2914,9 @@ where
                 if request_method == Method::Head {
                     suppress_response_body_for_head(&mut response);
                 }
-                response_write.write_streaming_response(cx, &mut io, response).await
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await
             } else {
                 error!(
                     diagnostic = WebBodyDiagnostic::ResponseProducerFailure.code(),
@@ -2912,7 +2933,9 @@ where
                 if request_method == Method::Head {
                     suppress_response_body_for_head(&mut response);
                 }
-                response_write.write_streaming_response(cx, &mut io, response).await
+                response_write
+                    .write_streaming_response(cx, &mut io, response)
+                    .await
             } else {
                 error!(
                     diagnostic = "ASUP-E501",
@@ -2938,23 +2961,32 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let config = execution.streaming.request.clone();
-    let cx = config.connection.as_ref().expect("produced connection context");
+    let cx = config
+        .connection
+        .as_ref()
+        .expect("produced connection context");
     let region_name = match execution.policy {
         ProducedResponsePolicy::Sse => "h1-sse",
         ProducedResponsePolicy::Generic => "h1-produced",
     };
     let region = ServerRequestRegion::mint_from_connection(
-        region_name, config.budget, config.started_at, cx,
+        region_name,
+        config.budget,
+        config.started_at,
+        cx,
     );
     let request_cx = region.cx().clone();
     let flow = execute_produced_request_flow(
-        &request_cx, &mut io, &mut read_buffer, handler, execution, false,
+        &request_cx,
+        &mut io,
+        &mut read_buffer,
+        handler,
+        execution,
+        false,
     );
     let hop = race_force_close(
         config.shutdown.as_ref(),
-        region.run_with_protocol_drain(
-            config.source, Some(cx.clone()), config.drain_grace, flow,
-        ),
+        region.run_with_protocol_drain(config.source, Some(cx.clone()), config.drain_grace, flow),
     )
     .await;
     Ok((io, hop))
@@ -2974,7 +3006,11 @@ where
     Fut: Future<Output = Http1ProducedResponse> + Send,
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let ProducedRequestExecution { streaming, policy, head_committed } = execution;
+    let ProducedRequestExecution {
+        streaming,
+        policy,
+        head_committed,
+    } = execution;
     let config = streaming.config;
     let shutdown_signal = streaming.request.shutdown;
     let request_version = streaming.head.version;
@@ -2997,9 +3033,15 @@ where
             Err(error) => {
                 let mut refusal = match error {
                     IncomingBodyAdmissionError::Policy(error) => {
-                        incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
-                            hop_error_response(request_version, 413, "request body exceeds the configured limit")
-                        })
+                        incoming_body_failure_response(request_version, &error).unwrap_or_else(
+                            || {
+                                hop_error_response(
+                                    request_version,
+                                    413,
+                                    "request body exceeds the configured limit",
+                                )
+                            },
+                        )
                     }
                     IncomingBodyAdmissionError::Cancelled {
                         kind: CancelKind::Deadline | CancelKind::Timeout,
@@ -3010,9 +3052,11 @@ where
                         return Err(HttpError::BodyCancelled);
                     }
                     IncomingBodyAdmissionError::Runtime(_)
-                    | IncomingBodyAdmissionError::RuntimeRequired => {
-                        hop_error_response(request_version, 503, "request body admission unavailable")
-                    }
+                    | IncomingBodyAdmissionError::RuntimeRequired => hop_error_response(
+                        request_version,
+                        503,
+                        "request body admission unavailable",
+                    ),
                 };
                 add_connection_close(&mut refusal);
                 if request_method == Method::Head {
@@ -3088,7 +3132,12 @@ where
                         suppress_response_body_for_head(&mut response);
                     }
                     return write_or_defer_produced_response(
-                        request_cx, io, response, response_write, &head_committed, defer_completion,
+                        request_cx,
+                        io,
+                        response,
+                        response_write,
+                        &head_committed,
+                        defer_completion,
                     )
                     .await;
                 }
@@ -3106,8 +3155,8 @@ where
         // intentionally not started.
         if let Err(error) = validate_unread_drain(writer.drain_progress(), &config) {
             record_incoming_body_failure(&error);
-            let mut response =
-                incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
+            let mut response = incoming_body_failure_response(request_version, &error)
+                .unwrap_or_else(|| {
                     hop_error_response(
                         request_version,
                         413,
@@ -3119,7 +3168,12 @@ where
                 suppress_response_body_for_head(&mut response);
             }
             return write_or_defer_produced_response(
-                request_cx, io, response, response_write, &head_committed, defer_completion,
+                request_cx,
+                io,
+                response,
+                response_write,
+                &head_committed,
+                defer_completion,
             )
             .await;
         }
@@ -3145,7 +3199,12 @@ where
             }
             add_connection_close(&mut response);
             return write_or_defer_produced_response(
-                request_cx, io, response, response_write, &head_committed, defer_completion,
+                request_cx,
+                io,
+                response,
+                response_write,
+                &head_committed,
+                defer_completion,
             )
             .await;
         }
@@ -3163,7 +3222,12 @@ where
                 suppress_response_body_for_head(&mut response);
             }
             return write_or_defer_produced_response(
-                request_cx, io, response, response_write, &head_committed, defer_completion,
+                request_cx,
+                io,
+                response,
+                response_write,
+                &head_committed,
+                defer_completion,
             )
             .await;
         }
@@ -3174,7 +3238,12 @@ where
                 ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
             };
             return write_or_defer_produced_response(
-                request_cx, io, response, response_write, &head_committed, defer_completion,
+                request_cx,
+                io,
+                response,
+                response_write,
+                &head_committed,
+                defer_completion,
             )
             .await;
         }
@@ -3505,9 +3574,14 @@ where
         for (name, value) in headers.iter() {
             // Publication validated field syntax before committing the block.
             let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
-            response.head.headers.push((name.as_str().to_owned(), value.to_owned()));
+            response
+                .head
+                .headers
+                .push((name.as_str().to_owned(), value.to_owned()));
         }
-        if let Err(error) = validate_produced_response_head(&mut response.head, response.body.kind()) {
+        if let Err(error) =
+            validate_produced_response_head(&mut response.head, response.body.kind())
+        {
             drain_producer_after_write_error(
                 cx,
                 producer.as_mut(),
@@ -3535,8 +3609,13 @@ where
                 WebBodyDiagnostic::ClientAbort,
                 "client transport failed while writing the response head",
             );
-            drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
-                .await;
+            drain_producer_after_write_error(
+                cx,
+                producer.as_mut(),
+                &mut producer_result,
+                drain_grace,
+            )
+            .await;
             return Err(HttpError::Io(error));
         }
         if let Err(error) = flush_within_idle(io, response_write).await {
@@ -3544,8 +3623,13 @@ where
                 WebBodyDiagnostic::ClientAbort,
                 "client transport failed while flushing the response head",
             );
-            drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
-                .await;
+            drain_producer_after_write_error(
+                cx,
+                producer.as_mut(),
+                &mut producer_result,
+                drain_grace,
+            )
+            .await;
             return Err(HttpError::Io(error));
         }
         None
@@ -3597,9 +3681,16 @@ where
         let Some(frame) = frame else {
             let producer_result = match producer_result.take() {
                 Some(result) => result,
-                None => finish_producer_within_idle(
-                    cx, producer.as_mut(), &response.body, response_write, drain_grace,
-                ).await,
+                None => {
+                    finish_producer_within_idle(
+                        cx,
+                        producer.as_mut(),
+                        &response.body,
+                        response_write,
+                        drain_grace,
+                    )
+                    .await
+                }
             };
             let sender = match producer_result {
                 Ok(sender) => sender,
@@ -3631,7 +3722,9 @@ where
             if defer_completion {
                 return Ok(ProducedCompletion::Bytes(final_chunk));
             }
-            if let Err(error) = write_all_within_idle(io, final_chunk.as_ref(), response_write).await {
+            if let Err(error) =
+                write_all_within_idle(io, final_chunk.as_ref(), response_write).await
+            {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
                     "client transport failed while writing the terminal chunk",
@@ -3702,9 +3795,16 @@ where
                 }
                 let producer_result = match producer_result.take() {
                     Some(result) => result,
-                    None => finish_producer_within_idle(
-                        cx, producer.as_mut(), &response.body, response_write, drain_grace,
-                    ).await,
+                    None => {
+                        finish_producer_within_idle(
+                            cx,
+                            producer.as_mut(),
+                            &response.body,
+                            response_write,
+                            drain_grace,
+                        )
+                        .await
+                    }
                 };
                 let sender = match producer_result {
                     Ok(sender) => sender,
@@ -3758,7 +3858,9 @@ where
         }
         if defer_completion && let Some(remaining) = remaining.as_mut() {
             let length = u64::try_from(encoded_frame.len()).map_err(|_| HttpError::BodyTooLarge)?;
-            *remaining = remaining.checked_sub(length).ok_or(HttpError::BadContentLength)?;
+            *remaining = remaining
+                .checked_sub(length)
+                .ok_or(HttpError::BadContentLength)?;
             if !encoded_frame.is_empty() && *remaining == 0 {
                 // Retain only the final bounded transport frame. The producer,
                 // sender, and any obligations settle before these plain bytes
@@ -4268,22 +4370,19 @@ impl<'a> ResponseWritePolicy<'a> {
     {
         let bounded = async {
             match self.idle_timeout {
-                Some(idle) => {
-                    timeout_with_owner(self.connection_owner, idle, progress)
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "HTTP/1 response progress timed out",
-                            ))
-                        })
-                }
+                Some(idle) => timeout_with_owner(self.connection_owner, idle, progress)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "HTTP/1 response progress timed out",
+                        ))
+                    }),
                 None => progress.await,
             }
         };
-        let mut owner_cancel = crate::http::listener_cancel::ListenerCancellation::new(
-            self.connection_owner.cloned(),
-        );
+        let mut owner_cancel =
+            crate::http::listener_cancel::ListenerCancellation::new(self.connection_owner.cloned());
         let mut polling_cancel = crate::http::listener_cancel::ListenerCancellation::new(
             self.connection_owner.and_then(|_| Cx::current()),
         );

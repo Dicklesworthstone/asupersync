@@ -8,11 +8,11 @@
 //! These types are intentionally synchronous and deterministic; higher-level
 //! async orchestration belongs in the runtime layer.
 
+use crate::sync::atomic::AtomicU64;
 use crate::types::DEFAULT_SYMBOL_SIZE;
 use core::fmt;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use crate::sync::atomic::AtomicU64;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]

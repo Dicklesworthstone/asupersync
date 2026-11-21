@@ -53,7 +53,10 @@ async fn held_cleanup(cx: Cx, seen: Arc<Witness>, mut release: oneshot::Receiver
         })
         .await;
     }
-    assert!(cx.checkpoint().is_err(), "owned task acknowledges cancellation");
+    assert!(
+        cx.checkpoint().is_err(),
+        "owned task acknowledges cancellation"
+    );
     {
         let mut cleanup = std::pin::pin!(release.recv_uninterruptible());
         poll_fn(|task| {
@@ -91,7 +94,10 @@ where
                         runtime.block_on(async {
                             let root = Cx::current().expect("native root context");
                             let mut owner = root.spawn(scenario).expect("native scenario owner");
-                            owner.join(&root).await.expect("native scoped join scenario");
+                            owner
+                                .join(&root)
+                                .await
+                                .expect("native scoped join scenario");
                         });
                         let drain = runtime.shutdown_drained(Duration::from_secs(5));
                         assert_eq!(
@@ -125,7 +131,9 @@ where
 
 fn assert_closed<T>(attempt: &ScopedJoinAttempt<T>, index: usize, parent: RegionId) -> RegionId {
     assert_eq!(attempt.index, index);
-    let region = attempt.region_id.expect("admitted branch has a private region");
+    let region = attempt
+        .region_id
+        .expect("admitted branch has a private region");
     assert_ne!(region, parent);
     let close = attempt
         .close
@@ -245,12 +253,15 @@ async fn cancellation_fans_out_before_held_cleanup(owner: Cx) {
         })
         .unwrap();
     for seen in &witnesses {
-        seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+        seen.wait(|state| state.parked.load(Ordering::Acquire))
+            .await;
     }
-    let reason = CancelReason::shutdown().with_cause(CancelReason::user("stop all joined branches"));
+    let reason =
+        CancelReason::shutdown().with_cause(CancelReason::user("stop all joined branches"));
     task.abort_with_reason(reason.clone());
     for seen in &witnesses {
-        seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
+        seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+            .await;
         assert!(!seen.retired.load(Ordering::Acquire));
     }
     poll_fn(|context| {
@@ -302,7 +313,8 @@ async fn dropped_collector_closes_every_subtree(owner: Cx) {
                 branch
                     .spawn(move |child| held_cleanup(child, child_seen, cleanup))
                     .unwrap();
-                seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+                seen.wait(|state| state.parked.load(Ordering::Acquire))
+                    .await;
                 branch.cancelled().await;
                 assert!(branch.checkpoint().is_err());
             }
@@ -311,7 +323,8 @@ async fn dropped_collector_closes_every_subtree(owner: Cx) {
     let mut joining = Box::pin(owner.join_all_scoped(factories));
     let mut parked = std::pin::pin!(async {
         for seen in &witnesses {
-            seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+            seen.wait(|state| state.parked.load(Ordering::Acquire))
+                .await;
         }
     });
     poll_fn(|task| {
@@ -321,14 +334,16 @@ async fn dropped_collector_closes_every_subtree(owner: Cx) {
     .await;
     drop(joining);
     for seen in &witnesses {
-        seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
+        seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+            .await;
         assert!(!seen.retired.load(Ordering::Acquire));
     }
     for release in releases {
         release.send_blocking(()).unwrap();
     }
     for seen in &witnesses {
-        seen.wait(|state| state.retired.load(Ordering::Acquire)).await;
+        seen.wait(|state| state.retired.load(Ordering::Acquire))
+            .await;
         assert!(seen.finished.load(Ordering::Acquire));
     }
     assert!(!owner.is_cancel_requested());

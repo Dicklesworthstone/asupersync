@@ -2,11 +2,13 @@
 
 use super::{EncodedSymbolBatch, SymbolBatchKey, SymbolReplicaStore, SymbolStoreError};
 use crate::cx::{ChildRegionSpec, Cx};
-use crate::distributed::remote_owned::RemoteServiceAdmission;
-use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
 use crate::distributed::distribution::ReplicaAck;
-use crate::remote::{RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome};
+use crate::distributed::remote_owned::RemoteServiceAdmission;
+use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
+use crate::remote::{
+    RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome,
+};
 use crate::types::{Time, symbol::ObjectId};
 use std::future::Future;
 use std::sync::Arc;
@@ -40,8 +42,10 @@ struct Admission<'a> {
 }
 
 fn register_handler<I, O, F, Fut>(
-    registry: &mut RemoteComputationRegistry, name: &str,
-    admission: Option<Admission<'_>>, handler: F,
+    registry: &mut RemoteComputationRegistry,
+    name: &str,
+    admission: Option<Admission<'_>>,
+    handler: F,
 ) -> Result<(), ComputationSchemaRegistryError>
 where
     I: HasSchema,
@@ -51,12 +55,16 @@ where
 {
     match admission {
         None => registry.register::<I, O, _, _>(name, handler),
-        Some(Admission { limiter, child, wait_timeout: None }) => {
-            limiter.register::<I, O, _, _>(registry, name, child, handler)
-        }
-        Some(Admission { limiter, child, wait_timeout: Some(timeout) }) => {
-            limiter.register_waiting::<I, O, _, _>(registry, name, child, timeout, handler)
-        }
+        Some(Admission {
+            limiter,
+            child,
+            wait_timeout: None,
+        }) => limiter.register::<I, O, _, _>(registry, name, child, handler),
+        Some(Admission {
+            limiter,
+            child,
+            wait_timeout: Some(timeout),
+        }) => limiter.register_waiting::<I, O, _, _>(registry, name, child, timeout, handler),
     }
 }
 
@@ -73,7 +81,8 @@ where
 /// or remote quiescence. Store success followed by connection loss is ambiguous
 /// to the caller; the native client never automatically retries that delivery.
 pub fn register_symbol_service(
-    registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
+    registry: &mut RemoteComputationRegistry,
+    store: Arc<SymbolReplicaStore>,
 ) -> Result<(), ComputationSchemaRegistryError> {
     register_symbol_service_inner(registry, store, None)
 }
@@ -98,15 +107,26 @@ pub fn register_symbol_service(
 /// storage semantics are unchanged. Admission counts input bytes, not response
 /// buffers or retained batches; listener/frame and store bounds still apply.
 pub fn register_symbol_service_with_admission(
-    registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
-    admission: &RemoteServiceAdmission, child: ChildRegionSpec, wait_timeout: Option<Duration>,
+    registry: &mut RemoteComputationRegistry,
+    store: Arc<SymbolReplicaStore>,
+    admission: &RemoteServiceAdmission,
+    child: ChildRegionSpec,
+    wait_timeout: Option<Duration>,
 ) -> Result<(), ComputationSchemaRegistryError> {
-    register_symbol_service_inner(registry, store,
-        Some(Admission { limiter: admission, child, wait_timeout }))
+    register_symbol_service_inner(
+        registry,
+        store,
+        Some(Admission {
+            limiter: admission,
+            child,
+            wait_timeout,
+        }),
+    )
 }
 
 fn register_symbol_service_inner(
-    registry: &mut RemoteComputationRegistry, store: Arc<SymbolReplicaStore>,
+    registry: &mut RemoteComputationRegistry,
+    store: Arc<SymbolReplicaStore>,
     admission: Option<Admission<'_>>,
 ) -> Result<(), ComputationSchemaRegistryError> {
     register_handler::<ServiceRequest, ServiceResponse, _, _>(
@@ -126,12 +146,16 @@ fn register_symbol_service_inner(
                 let input = invocation.request().input.data();
                 let result = split_request(input, store.replica_id()).and_then(|(get, body)| {
                     if get {
-                        read_key(body).and_then(|key| store.get(peer, key)).map(|batch| {
-                            // The frame writer also enforces its encoded response limit.
-                            batch.as_ref().as_ref().to_vec()
-                        })
+                        read_key(body)
+                            .and_then(|key| store.get(peer, key))
+                            .map(|batch| {
+                                // The frame writer also enforces its encoded response limit.
+                                batch.as_ref().as_ref().to_vec()
+                            })
                     } else {
-                        store.put(peer, body).map(|batch| receipt(store.replica_id(), &batch, cx.now()))
+                        store
+                            .put(peer, body)
+                            .map(|batch| receipt(store.replica_id(), &batch, cx.now()))
                     }
                 });
                 Ok(match result {
@@ -148,9 +172,13 @@ fn put_key(bytes: &mut Vec<u8>, key: SymbolBatchKey) {
     bytes.extend_from_slice(&key.digest);
 }
 fn read_key(bytes: &[u8]) -> Result<SymbolBatchKey, SymbolStoreError> {
-    if bytes.len() != 48 { return Err(SymbolStoreError::Format); }
+    if bytes.len() != 48 {
+        return Err(SymbolStoreError::Format);
+    }
     Ok(SymbolBatchKey {
-        object_id: ObjectId::from_u128(u128::from_le_bytes(bytes[..16].try_into().expect("object bytes"))),
+        object_id: ObjectId::from_u128(u128::from_le_bytes(
+            bytes[..16].try_into().expect("object bytes"),
+        )),
         digest: bytes[16..].try_into().expect("digest bytes"),
     })
 }
@@ -158,21 +186,39 @@ fn read_key(bytes: &[u8]) -> Result<SymbolBatchKey, SymbolStoreError> {
 // Both requests carry a target, so a misconfigured route is refused BEFORE put.
 // V1: magic[8], version:u32, target-length:u8, target UTF-8, then batch or key[48].
 fn split_request<'a>(bytes: &'a [u8], replica: &str) -> Result<(bool, &'a [u8]), SymbolStoreError> {
-    if bytes.len() < 13 || bytes[8..12] != 1_u32.to_le_bytes() { return Err(SymbolStoreError::Format); }
-    let get = if &bytes[..8] == GET { true } else if &bytes[..8] == PUT { false }
-        else { return Err(SymbolStoreError::Format); };
+    if bytes.len() < 13 || bytes[8..12] != 1_u32.to_le_bytes() {
+        return Err(SymbolStoreError::Format);
+    }
+    let get = if &bytes[..8] == GET {
+        true
+    } else if &bytes[..8] == PUT {
+        false
+    } else {
+        return Err(SymbolStoreError::Format);
+    };
     let n = usize::from(bytes[12]);
-    if n == 0 || bytes.len() < 13 + n { return Err(SymbolStoreError::Format); }
-    if &bytes[13..13+n] != replica.as_bytes() { return Err(SymbolStoreError::Identity); }
-    Ok((get, &bytes[13+n..]))
+    if n == 0 || bytes.len() < 13 + n {
+        return Err(SymbolStoreError::Format);
+    }
+    if &bytes[13..13 + n] != replica.as_bytes() {
+        return Err(SymbolStoreError::Identity);
+    }
+    Ok((get, &bytes[13 + n..]))
 }
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
 fn request(magic: &[u8; 8], replica: &str, body: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
-    if !super::valid_identity(replica) { return Err(SymbolStoreError::InvalidIdentity); }
-    let size = body.len().checked_add(13 + replica.len()).ok_or(SymbolStoreError::Overflow)?;
+    if !super::valid_identity(replica) {
+        return Err(SymbolStoreError::InvalidIdentity);
+    }
+    let size = body
+        .len()
+        .checked_add(13 + replica.len())
+        .ok_or(SymbolStoreError::Overflow)?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| SymbolStoreError::Allocation)?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| SymbolStoreError::Allocation)?;
     bytes.extend_from_slice(magic);
     bytes.extend_from_slice(&1_u32.to_le_bytes());
     bytes.push(replica.len() as u8);
@@ -181,7 +227,10 @@ fn request(magic: &[u8; 8], replica: &str, body: &[u8]) -> Result<Vec<u8>, Symbo
     Ok(bytes)
 }
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
-pub(super) fn fetch_request(replica: &str, key: SymbolBatchKey) -> Result<Vec<u8>, SymbolStoreError> {
+pub(super) fn fetch_request(
+    replica: &str,
+    key: SymbolBatchKey,
+) -> Result<Vec<u8>, SymbolStoreError> {
     let mut body = Vec::with_capacity(48);
     put_key(&mut body, key);
     request(GET, replica, &body)
@@ -205,22 +254,39 @@ fn receipt(replica: &str, batch: &EncodedSymbolBatch, now: Time) -> Vec<u8> {
 
 #[cfg(any(test, all(feature = "tls", not(target_arch = "wasm32"))))]
 pub(super) fn validate_receipt(
-    bytes: &[u8], replica: &str, key: SymbolBatchKey, count: u32,
+    bytes: &[u8],
+    replica: &str,
+    key: SymbolBatchKey,
+    count: u32,
 ) -> Result<ReplicaAck, SymbolStoreError> {
-    if !(74..=329).contains(&bytes.len()) || &bytes[..8] != ACK || bytes[8..12] != 1_u32.to_le_bytes() {
+    if !(74..=329).contains(&bytes.len())
+        || &bytes[..8] != ACK
+        || bytes[8..12] != 1_u32.to_le_bytes()
+    {
         return Err(SymbolStoreError::Format);
     }
-    let n = usize::from(u16::from_le_bytes(bytes[12..14].try_into().expect("name length")));
-    if n == 0 || n > 255 || bytes.len() != 74 + n { return Err(SymbolStoreError::Format); }
-    if &bytes[14..14+n] != replica.as_bytes() { return Err(SymbolStoreError::Identity); }
-    let tail = &bytes[14+n..];
-    if read_key(&tail[..48])? != key { return Err(SymbolStoreError::Identity); }
+    let n = usize::from(u16::from_le_bytes(
+        bytes[12..14].try_into().expect("name length"),
+    ));
+    if n == 0 || n > 255 || bytes.len() != 74 + n {
+        return Err(SymbolStoreError::Format);
+    }
+    if &bytes[14..14 + n] != replica.as_bytes() {
+        return Err(SymbolStoreError::Identity);
+    }
+    let tail = &bytes[14 + n..];
+    if read_key(&tail[..48])? != key {
+        return Err(SymbolStoreError::Identity);
+    }
     if u32::from_le_bytes(tail[48..52].try_into().expect("count bytes")) != count {
         return Err(SymbolStoreError::Identity);
     }
     Ok(ReplicaAck {
-        replica_id: replica.to_owned(), symbols_received: count,
-        ack_time: Time::from_nanos(u64::from_le_bytes(tail[52..60].try_into().expect("time bytes"))),
+        replica_id: replica.to_owned(),
+        symbols_received: count,
+        ack_time: Time::from_nanos(u64::from_le_bytes(
+            tail[52..60].try_into().expect("time bytes"),
+        )),
     })
 }
 

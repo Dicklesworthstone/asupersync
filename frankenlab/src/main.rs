@@ -694,7 +694,12 @@ fn format_schedule_result(report: &ScenarioScheduleReport, json: bool) -> String
         format!("Omitted alternatives: {}", report.progress.omitted),
         format!("Scenario failures: {}", report.scenario_failed),
     ];
-    for (index, run) in report.runs.iter().enumerate().filter(|(_, run)| !run.passed()) {
+    for (index, run) in report
+        .runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| !run.passed())
+    {
         lines.push(format!(
             "Execution {}: {:?} ({} steps)",
             index + 1,
@@ -757,11 +762,18 @@ fn schedule_command_result(report: &ScenarioScheduleReport) -> Result<(), String
     ))
 }
 
-fn cmd_explore_exact(scenario: &Scenario, args: &ExactExploreArgs, json: bool) -> Result<(), String> {
+fn cmd_explore_exact(
+    scenario: &Scenario,
+    args: &ExactExploreArgs,
+    json: bool,
+) -> Result<(), String> {
     let checkpoint_limits = args.checkpoint_limits()?;
     if let Some(path) = &args.checkpoint_out
         && path.try_exists().map_err(|error| {
-            format!("Cannot inspect checkpoint output {}: {error}", path.display())
+            format!(
+                "Cannot inspect checkpoint output {}: {error}",
+                path.display()
+            )
         })?
     {
         return Err(format!(
@@ -824,22 +836,35 @@ fn format_cancel_result(report: &ScenarioCancellationReport, json: bool) -> Stri
         return pretty_json_or(&report.to_json(), "{}");
     }
     let status = if report.passed() { "PASS" } else { "FAIL" };
-    let baseline_status = if report.baseline.passed() { "PASS" } else { "FAIL" };
+    let baseline_status = if report.baseline.passed() {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     let recorded = report.baseline_schedule.as_ref().map_or_else(
         || "unavailable".to_string(),
         |schedule| schedule.dispatches().len().to_string(),
     );
     let passed_trials = report.trials.iter().filter(|trial| trial.passed()).count();
     let mut lines = vec![
-        format!("Cancellation campaign: {} [{status}]", report.baseline.scenario_id),
+        format!(
+            "Cancellation campaign: {} [{status}]",
+            report.baseline.scenario_id
+        ),
         format!("Seed: {}", report.baseline.seed),
         format!("Termination: {}", report.termination.as_str()),
-        format!("Baseline: {baseline_status}; quiescent={}", report.baseline.lab_report.quiescent),
+        format!(
+            "Baseline: {baseline_status}; quiescent={}",
+            report.baseline.lab_report.quiescent
+        ),
         format!("Recorded scheduler poll boundaries: {recorded}"),
         format!("Selected trials: {}", report.selected_polls.len()),
         format!("Executed trials: {}", report.trials.len()),
         format!("Trials passed: {passed_trials}/{}", report.trials.len()),
-        format!("Untested selected boundaries: {}", report.remaining_trials()),
+        format!(
+            "Untested selected boundaries: {}",
+            report.remaining_trials()
+        ),
     ];
     if !report.baseline.passed() {
         append_cancellation_failures(&mut lines, &report.baseline);
@@ -847,7 +872,10 @@ fn format_cancel_result(report: &ScenarioCancellationReport, json: bool) -> Stri
     for trial in report.trials.iter().filter(|trial| !trial.passed()) {
         lines.push(format!(
             "  Poll {}: {:?}; target terminal={}, quiescent={}",
-            trial.poll_index, trial.injection, trial.target_terminal, trial.run.lab_report.quiescent
+            trial.poll_index,
+            trial.injection,
+            trial.target_terminal,
+            trial.run.lab_report.quiescent
         ));
         append_cancellation_failures(&mut lines, &trial.run);
     }
@@ -1786,9 +1814,19 @@ mod tests {
     #[test]
     fn cancellation_command_parses_campaign_bounds_and_json() {
         let cli = Cli::try_parse_from([
-            "frankenlab", "cancel", "scenario.yaml", "--seed", "17",
-            "--max-runs", "8", "--max-polls", "128", "--max-steps", "500",
-            "--keep-going", "--json",
+            "frankenlab",
+            "cancel",
+            "scenario.yaml",
+            "--seed",
+            "17",
+            "--max-runs",
+            "8",
+            "--max-polls",
+            "128",
+            "--max-steps",
+            "500",
+            "--keep-going",
+            "--json",
         ])
         .expect("parse cancellation campaign");
         assert!(cli.json);
@@ -1827,14 +1865,22 @@ cancellation:
     #[test]
     fn cancellation_command_reports_real_completed_coverage() {
         let report = ScenarioRunner::run_cancellation_campaign(
-            &cancellation_fixture(), None, ScenarioCancellationLimits::default(),
+            &cancellation_fixture(),
+            None,
+            ScenarioCancellationLimits::default(),
         )
         .expect("execute cancellation campaign");
         assert!(report.passed(), "{}", format_cancel_result(&report, false));
-        assert!(report.trials.len() > 1, "must execute actual cancellation trials");
+        assert!(
+            report.trials.len() > 1,
+            "must execute actual cancellation trials"
+        );
         assert!(cancellation_command_result(&report).is_ok());
         let text = format_cancel_result(&report, false);
-        assert!(text.contains("Cancellation campaign: cancellation-cli [PASS]"), "{text}");
+        assert!(
+            text.contains("Cancellation campaign: cancellation-cli [PASS]"),
+            "{text}"
+        );
         assert!(text.contains("Untested selected boundaries: 0"), "{text}");
         let json: serde_json::Value =
             serde_json::from_str(&format_cancel_result(&report, true)).expect("JSON report");
@@ -1879,7 +1925,9 @@ cancellation:
             asupersync::lab::scenario::CancellationStrategy::Never;
         for scenario in [empty, record_only] {
             let report = ScenarioRunner::run_cancellation_campaign(
-                &scenario, None, ScenarioCancellationLimits::default(),
+                &scenario,
+                None,
+                ScenarioCancellationLimits::default(),
             )
             .expect("record baseline");
             assert!(report.trials.is_empty());

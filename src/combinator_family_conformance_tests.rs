@@ -32,9 +32,9 @@
 //! - CB-S03: Quorum memory usage is proportional to input count
 
 #[cfg(any(test, feature = "test-internals"))]
-use std::sync::Arc;
-#[cfg(any(test, feature = "test-internals"))]
 use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-internals"))]
+use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -561,7 +561,9 @@ where
     ) -> Result<Self, HandshakeError> {
         let compressed = super::compression::negotiated_client(extensions)?;
         let mut ws = Self::from_upgraded_with_entropy(io, config, entropy);
-        if compressed { ws.codec.enable_permessage_deflate(); }
+        if compressed {
+            ws.codec.enable_permessage_deflate();
+        }
         Ok(ws)
     }
 
@@ -629,7 +631,8 @@ where
         }
 
         let frame = super::compression::outgoing(
-            Frame::from(msg), self.codec.permessage_deflate_enabled(),
+            Frame::from(msg),
+            self.codec.permessage_deflate_enabled(),
             self.config.max_message_size,
             self.config.max_frame_size,
         )?;
@@ -810,7 +813,9 @@ where
                                 // Publish the retained echo before a deadline
                                 // or cancellation wait can return. A retry of
                                 // CloseReceived must always have bytes to flush.
-                                if let Err(error) = self.encode_frame_with_entropy(&response, cx.entropy()) {
+                                if let Err(error) =
+                                    self.encode_frame_with_entropy(&response, cx.entropy())
+                                {
                                     self.force_close(CloseReason::new(error.as_close_code(), None));
                                     return Err(error);
                                 }
@@ -894,10 +899,12 @@ where
             }
         }
         self.close_handshake.mark_response_sent();
-        cx.checkpoint().map_err(|_| {
-            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-        })?;
-        Ok(self.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
+        cx.checkpoint()
+            .map_err(|_| WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))?;
+        Ok(self
+            .close_handshake
+            .take_peer_close()
+            .map(|reason| Message::Close(Some(reason))))
     }
 
     /// Initiate a close handshake.
@@ -908,10 +915,14 @@ where
         if self.close_handshake.timed_out() {
             return Ok(());
         }
-        let deadline = self.close_handshake.deadline().unwrap_or_else(|| {
-            CloseDeadline::new(Some(cx), self.close_handshake.close_timeout())
-        });
-        match deadline.wait(Some(cx), self.close_exchange(cx, &deadline)).await? {
+        let deadline = self
+            .close_handshake
+            .deadline()
+            .unwrap_or_else(|| CloseDeadline::new(Some(cx), self.close_handshake.close_timeout()));
+        match deadline
+            .wait(Some(cx), self.close_exchange(cx, &deadline))
+            .await?
+        {
             Some(()) => Ok(()),
             None => {
                 self.force_close(CloseReason::going_away());
@@ -1042,10 +1053,16 @@ where
             }
         }
         self.close_handshake.start_deadline(candidate);
-        let deadline = self.close_handshake.deadline().expect("close deadline installed");
+        let deadline = self
+            .close_handshake
+            .deadline()
+            .expect("close deadline installed");
         // Closed can still have a retained crossing Close or final flush.
         // A resumed operation inherits both the original bytes and deadline.
-        match deadline.wait(op_cx, self.flush_write_buf_with_cx(op_cx)).await? {
+        match deadline
+            .wait(op_cx, self.flush_write_buf_with_cx(op_cx))
+            .await?
+        {
             Some(()) => self.close_handshake.mark_response_sent(),
             None => self.force_close(CloseReason::going_away()),
         }
@@ -1231,9 +1248,17 @@ where
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
         let Some(deadline) = self.active_close_deadline() else {
-            return self.send_frame_with_entropy_inner(op_cx, frame, entropy).await;
+            return self
+                .send_frame_with_entropy_inner(op_cx, frame, entropy)
+                .await;
         };
-        match deadline.wait(op_cx, self.send_frame_with_entropy_inner(op_cx, frame, entropy)).await? {
+        match deadline
+            .wait(
+                op_cx,
+                self.send_frame_with_entropy_inner(op_cx, frame, entropy),
+            )
+            .await?
+        {
             Some(()) => Ok(()),
             None => {
                 self.force_close(CloseReason::going_away());
@@ -1415,13 +1440,18 @@ impl WebSocket<TcpStream> {
     /// encoded-write limits apply to the same owned connection.
     #[cfg(feature = "compression")]
     pub async fn connect_with_compression(
-        cx: &Cx, url: &str, config: WebSocketConfig,
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
         Self::connect_configured(cx, url, config, true, Vec::new()).await
     }
 
     async fn connect_configured(
-        cx: &Cx, url: &str, config: WebSocketConfig, compression: bool,
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
+        compression: bool,
         headers: Vec<(String, String)>,
     ) -> Result<Self, WsConnectError> {
         // Parse URL
@@ -1452,7 +1482,16 @@ impl WebSocket<TcpStream> {
         }
 
         // Perform handshake
-        perform_client_handshake(cx, tcp, &parsed, &config, compression, config.connect_timeout, &headers).await
+        perform_client_handshake(
+            cx,
+            tcp,
+            &parsed,
+            &config,
+            compression,
+            config.connect_timeout,
+            &headers,
+        )
+        .await
     }
 }
 
@@ -1562,25 +1601,35 @@ impl WebSocket<TlsStream<TcpStream>> {
         }
         let ambient = Cx::current().ok_or_else(missing_connect_setup_authority)?;
         let mut setup = WsConnectSetup::new(cx, &ambient, config.connect_timeout)?;
-        let tcp = setup.run(async {
-            let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
-                TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
-            } else {
-                crate::net::happy_eyeballs::connect_resolved(
-                    (parsed.host.clone(), parsed.port),
-                    None,
-                )
-                .await
-            };
-            result.map_err(|error| map_tcp_connect_error(cx, error))
-        }).await?;
+        let tcp = setup
+            .run(async {
+                let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
+                    TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
+                } else {
+                    crate::net::happy_eyeballs::connect_resolved(
+                        (parsed.host.clone(), parsed.port),
+                        None,
+                    )
+                    .await
+                };
+                result.map_err(|error| map_tcp_connect_error(cx, error))
+            })
+            .await?;
         if config.nodelay {
             let _ = tcp.set_nodelay(true);
         }
-        let tls = setup.run(async {
-            connector.connect(&parsed.host, tcp).await.map_err(map_tls_connect_error)
-        }).await?;
-        if tls.alpn_protocol().is_some_and(|protocol| protocol != b"http/1.1") {
+        let tls = setup
+            .run(async {
+                connector
+                    .connect(&parsed.host, tcp)
+                    .await
+                    .map_err(map_tls_connect_error)
+            })
+            .await?;
+        if tls
+            .alpn_protocol()
+            .is_some_and(|protocol| protocol != b"http/1.1")
+        {
             return Err(WsConnectError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "secure WebSocket peer negotiated a protocol other than HTTP/1.1",
@@ -1588,7 +1637,17 @@ impl WebSocket<TlsStream<TcpStream>> {
         }
         // The outer setup retains the original timer. Starting HTTP must not
         // restore a full timeout after a slow DNS/TCP/TLS phase.
-        setup.run(perform_client_handshake(cx, tls, &parsed, &config, compression, None, &headers)).await
+        setup
+            .run(perform_client_handshake(
+                cx,
+                tls,
+                &parsed,
+                &config,
+                compression,
+                None,
+                &headers,
+            ))
+            .await
     }
 }
 
@@ -1634,13 +1693,20 @@ impl<'a> WsConnectSetup<'a> {
                 return Err(missing_connect_setup_authority());
             }
         }
-        let clock = cx.timer_driver().ok_or_else(missing_connect_setup_authority)?;
-        if !ambient.timer_driver().is_some_and(|ambient_clock| clock.ptr_eq(&ambient_clock)) {
+        let clock = cx
+            .timer_driver()
+            .ok_or_else(missing_connect_setup_authority)?;
+        if !ambient
+            .timer_driver()
+            .is_some_and(|ambient_clock| clock.ptr_eq(&ambient_clock))
+        {
             return Err(missing_connect_setup_authority());
         }
-        let mut deadline = timeout.map(|timeout| clock.now().saturating_add_nanos(
-            u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX),
-        ));
+        let mut deadline = timeout.map(|timeout| {
+            clock
+                .now()
+                .saturating_add_nanos(u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX))
+        });
         for context in [cx, ambient] {
             if let Some(bound) = context.budget().deadline {
                 deadline = Some(deadline.map_or(bound, |until| until.min(bound)));
@@ -1683,12 +1749,15 @@ impl<'a> WsConnectSetup<'a> {
             // the task that created this setup or the current polling task.
             let current = Cx::current().ok_or_else(missing_connect_setup_authority)?;
             let mut io_cx = self.cx.clone();
-            io_cx.runtime_mask = io_cx.runtime_mask
+            io_cx.runtime_mask = io_cx
+                .runtime_mask
                 .intersect(self.ambient.runtime_mask)
                 .intersect(current.runtime_mask);
             if !io_cx.runtime_mask.has(crate::cx::cap::CapMask::IO)
                 || io_cx.timer_driver().is_none()
-                || !current.timer_driver().is_some_and(|clock| self.clock.ptr_eq(&clock))
+                || !current
+                    .timer_driver()
+                    .is_some_and(|clock| self.clock.ptr_eq(&clock))
             {
                 return Poll::Ready(Err(missing_connect_setup_authority()));
             }
@@ -1696,7 +1765,9 @@ impl<'a> WsConnectSetup<'a> {
             self.caller_cancel.refresh(task.waker());
             self.ambient_cancel.refresh(task.waker());
             self.check()?;
-            let timer_ready = self.timer.as_mut()
+            let timer_ready = self
+                .timer
+                .as_mut()
                 .is_some_and(|timer| Pin::new(timer).poll_deadline(task).is_ready());
             if timer_ready {
                 self.check()?;
@@ -1710,7 +1781,8 @@ impl<'a> WsConnectSetup<'a> {
                 Poll::Ready(result) => Poll::Ready(self.check().and(result)),
                 Poll::Pending => Poll::Pending,
             }
-        }).await
+        })
+        .await
     }
 }
 
@@ -1732,7 +1804,9 @@ async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
     for protocol in &config.protocols {
         handshake = handshake.protocol(protocol);
     }
-    if compression { handshake = handshake.extension(super::compression::OFFER); }
+    if compression {
+        handshake = handshake.extension(super::compression::OFFER);
+    }
     for (name, value) in headers {
         handshake = handshake.header(name.clone(), value.clone());
     }
@@ -1744,10 +1818,21 @@ async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
         bounded_upgrade_exchange(cx, &mut io, &request, upgrade_timeout).await?;
     let response = HttpResponse::parse(&response_bytes)?;
     handshake.validate_response(&response)?;
-    let extensions: Vec<String> = response.header("sec-websocket-extensions")
-        .map(|value| value.split(',').map(|field| field.trim().to_owned()).collect())
+    let extensions: Vec<String> = response
+        .header("sec-websocket-extensions")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|field| field.trim().to_owned())
+                .collect()
+        })
         .unwrap_or_default();
-    let mut ws = WebSocket::from_upgraded_with_extensions(io, config.clone(), &extensions, cx.entropy_handle())?;
+    let mut ws = WebSocket::from_upgraded_with_extensions(
+        io,
+        config.clone(),
+        &extensions,
+        cx.entropy_handle(),
+    )?;
     ws.protocol = response.header("sec-websocket-protocol").map(String::from);
     ws.read_buf.extend_from_slice(&trailing);
     Ok(ws)

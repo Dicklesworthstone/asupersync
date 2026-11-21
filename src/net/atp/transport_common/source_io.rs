@@ -21,7 +21,10 @@ fn source_error(path: &Path, error: impl std::fmt::Display) -> StreamingError {
 }
 
 fn cancelled(path: &Path) -> StreamingError {
-    source_error(path, io::Error::new(io::ErrorKind::Interrupted, "source operation cancelled"))
+    source_error(
+        path,
+        io::Error::new(io::ErrorKind::Interrupted, "source operation cancelled"),
+    )
 }
 
 async fn guard<T>(

@@ -764,8 +764,14 @@ impl QuicFrame {
                 // CRYPTO (RFC 9000 §19.6: offset + length must not exceed 2^62-1)
                 let offset = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
                 let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
-                if offset.value().checked_add(length.value()).is_none_or(|end| end > VARINT_MAX) {
-                    return Err(QuicFrameError::InvalidFormat("crypto offset and length exceed 2^62-1".into()));
+                if offset
+                    .value()
+                    .checked_add(length.value())
+                    .is_none_or(|end| end > VARINT_MAX)
+                {
+                    return Err(QuicFrameError::InvalidFormat(
+                        "crypto offset and length exceed 2^62-1".into(),
+                    ));
                 }
                 let data = copy_length_prefixed(buf, length)?;
                 Ok(Some(QuicFrame::Crypto { offset, data }))

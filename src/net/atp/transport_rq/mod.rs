@@ -49,10 +49,10 @@
 //! loop only engages under real loss, which the loopback loss-injection test
 //! exercises deterministically.
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -108,12 +108,12 @@ use crate::net::atp::transport_common::metadata::apply_entry_metadata_sync;
 use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata,
-    FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind, StagedFileSync, SyncedStagedFile,
-    capture_directory_metadata_manifest, classify_path_link, classify_path_link_sync,
-    commit_hardlink_transactionally, commit_symlink_transactionally, inode_key_if_regular_sync,
-    create_directory_tree_durably, metadata_commitment, path_is_link_or_reparse,
-    read_entry_metadata_sync,
-    validate_entry_metadata_for_receive, write_sparse_zero_runs, write_sparse_zero_runs_sync,
+    FileKind, HardlinkIdentity, MetadataApplyReport, PathLinkKind, StagedFileSync,
+    SyncedStagedFile, capture_directory_metadata_manifest, classify_path_link,
+    classify_path_link_sync, commit_hardlink_transactionally, commit_symlink_transactionally,
+    create_directory_tree_durably, inode_key_if_regular_sync, metadata_commitment,
+    path_is_link_or_reparse, read_entry_metadata_sync, validate_entry_metadata_for_receive,
+    write_sparse_zero_runs, write_sparse_zero_runs_sync,
 };
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode, EntryDigest,
@@ -5085,8 +5085,15 @@ async fn build_rq_delta_manifest_for_file(
     chunk_size: usize,
 ) -> Result<DeltaManifestWire, RqError> {
     build_rq_delta_manifest_with_layout(
-        cx, tree_id, path, entry_index, rel_path, expected_size, expected_sha256_hex,
-        chunk_size, false,
+        cx,
+        tree_id,
+        path,
+        entry_index,
+        rel_path,
+        expected_size,
+        expected_sha256_hex,
+        chunk_size,
+        false,
     )
     .await
 }
@@ -5126,14 +5133,17 @@ async fn build_rq_delta_manifest_with_layout(
     let mut whole_content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let bytes = reader.next_chunk()
+        let bytes = reader
+            .next_chunk()
             .await
             .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
         let Some(bytes) = bytes else {
             break;
         };
         if content_defined && u64::from(index) >= RQ_DELTA_MAX_MANIFEST_CHUNKS {
-            return Err(RqError::Source("RQ CDC source exceeds the manifest chunk bound".to_string()));
+            return Err(RqError::Source(
+                "RQ CDC source exceeds the manifest chunk bound".to_string(),
+            ));
         }
         sha256.update(bytes);
         whole_content_id.update(bytes);
@@ -5162,7 +5172,9 @@ async fn build_rq_delta_manifest_with_layout(
             .checked_add(size_bytes)
             .ok_or_else(|| RqError::Control("RQ delta chunk offset overflow".to_string()))?;
         if content_defined && offset > expected_size {
-            return Err(RqError::Source("RQ CDC source grew beyond its declared size".to_string()));
+            return Err(RqError::Source(
+                "RQ CDC source grew beyond its declared size".to_string(),
+            ));
         }
     }
     if offset != expected_size {
@@ -5188,8 +5200,12 @@ async fn build_rq_delta_manifest_with_layout(
     let planner = PersistentChunkManifest::new(tree_id.to_string(), planner_chunks)
         .map_err(|error| RqError::Control(format!("build RQ delta manifest: {error}")))?;
     Ok(DeltaManifestWire {
-        schema: if content_defined { cdc::MANIFEST_SCHEMA } else { ATP_DELTA_CHUNK_MANIFEST_SCHEMA }
-            .to_string(),
+        schema: if content_defined {
+            cdc::MANIFEST_SCHEMA
+        } else {
+            ATP_DELTA_CHUNK_MANIFEST_SCHEMA
+        }
+        .to_string(),
         tree_id: tree_id.to_string(),
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
@@ -7098,9 +7114,7 @@ fn validate_rq_delta_manifest_with_cdc(
         ));
     }
     let content_defined = delta_chunks::is_cdc(manifest);
-    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA
-        && !(content_defined && cdc_negotiated)
-    {
+    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA && !(content_defined && cdc_negotiated) {
         return Err(RqError::Frame(format!(
             "unsupported RQ delta manifest schema: {}",
             delta.schema
@@ -7124,7 +7138,9 @@ fn validate_rq_delta_manifest_with_cdc(
         && (delta.chunk_size != cdc::MAX_CHUNK_BYTES
             || !delta_chunks::cdc_size_supported(delta.total_size_bytes))
     {
-        return Err(RqError::Frame("RQ CDC manifest exceeds its fixed policy bounds".to_string()));
+        return Err(RqError::Frame(
+            "RQ CDC manifest exceeds its fixed policy bounds".to_string(),
+        ));
     }
     if delta.total_size_bytes != manifest.total_bytes || delta.total_size_bytes != entry.size {
         return Err(RqError::Frame(format!(
@@ -8851,7 +8867,9 @@ async fn send_path_inner(
     }
     if offer_cdc_delta && delta_handshake.is_some() {
         let context = delta_auth.as_ref().ok_or_else(|| {
-            RqError::Authentication("RQ CDC acknowledgement requires authenticated delta".to_string())
+            RqError::Authentication(
+                "RQ CDC acknowledgement requires authenticated delta".to_string(),
+            )
         })?;
         if delta_chunks::cdc_acknowledged(&ack_frame, context, &hello, &ack)? {
             delta_chunks::select_cdc_manifest(cx, &mut manifest, &entries).await?;
@@ -11490,9 +11508,7 @@ pub async fn receive_connection_with_options(
     let strict_delta_context = rq_delta_control_auth_context(&config);
     let authenticated_delta_nonce = validate_rq_delta_hello(strict_delta_context, &hello)?;
     let delta_offered = authenticated_delta_nonce.is_some();
-    if options.authenticated_control()
-        && (!delta_offered || hello.prefer_control_source_stream)
-    {
+    if options.authenticated_control() && (!delta_offered || hello.prefer_control_source_stream) {
         return Err(RqError::Authentication(
             "receiver requires an authenticated delta offer on the UDP symbol path".to_string(),
         ));
@@ -11599,7 +11615,9 @@ pub async fn receive_connection_with_options(
     let mut ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
     let cdc_negotiated = if options.cdc_delta() && delta_handshake.is_some() {
         let context = strict_delta_context.ok_or_else(|| {
-            RqError::Authentication("RQ CDC acknowledgement requires strict authentication".to_string())
+            RqError::Authentication(
+                "RQ CDC acknowledgement requires strict authentication".to_string(),
+            )
         })?;
         if delta_chunks::cdc_offered(&hello_frame, context, &hello)? {
             delta_chunks::acknowledge_cdc(&mut ack_frame, context, &hello, &ack)?;
@@ -11825,7 +11843,9 @@ pub async fn receive_connection_with_options(
             }
             DeltaWireMode::DeltaChunks => {
                 let plan = chunk_plan.ok_or_else(|| {
-                    RqError::Control("changed-chunk request lost its reconstruction plan".to_string())
+                    RqError::Control(
+                        "changed-chunk request lost its reconstruction plan".to_string(),
+                    )
                 })?;
                 control.enable_authenticated_control(
                     context,
@@ -14480,20 +14500,26 @@ fn rq_staged_commit_syncs_and_publishes_mode_zero_without_reopening() {
         unix_mode: Some(0),
         ..EntryMetadata::default()
     };
-    let (deferred, synced) = futures_lite::future::block_on(
-        prepare_rq_entry_metadata_for_commit(&staging, &metadata),
-    )
-    .expect("sync retains access through mode 000");
+    let (deferred, synced) =
+        futures_lite::future::block_on(prepare_rq_entry_metadata_for_commit(&staging, &metadata))
+            .expect("sync retains access through mode 000");
     assert!(deferred.is_none());
     assert_eq!(std::fs::read(&destination).unwrap(), b"old bytes");
-    assert_eq!(std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777, 0);
+    assert_eq!(
+        std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777,
+        0
+    );
     let mut parents = DeferredParentSyncs::default();
     futures_lite::future::block_on(parents.commit_synced_regular_file(synced, &destination))
         .expect("publish the synced staging file");
     futures_lite::future::block_on(parents.sync()).expect("sync the destination directory");
     assert!(!staging.exists());
     assert_eq!(
-        std::fs::metadata(&destination).unwrap().permissions().mode() & 0o7777,
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
         0
     );
     std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -14569,10 +14595,16 @@ fn rq_directory_metadata_syncs_the_tree_before_applying_mode_zero() {
     futures_lite::future::block_on(apply_rq_directory_metadata(&base, &directories))
         .expect("sync all directory names before restrictive replay");
     for path in [base.clone(), base.join("nested"), base.join("nested/deep")] {
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0
+        );
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    assert_eq!(std::fs::read_dir(base.join("nested/deep")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(base.join("nested/deep")).unwrap().count(),
+        0
+    );
 }
 
 async fn hash_packed_members_streaming(

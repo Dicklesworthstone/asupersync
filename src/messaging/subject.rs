@@ -387,10 +387,10 @@ fn segments_can_match(left: &SubjectToken, right: &SubjectToken) -> bool {
 // Sublist: trie-based subject routing engine
 // ---------------------------------------------------------------------------
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Opaque subscription identifier assigned by the [`Sublist`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

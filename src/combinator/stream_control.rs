@@ -62,16 +62,23 @@ where
     E: Send + 'static,
     Stop: Future<Output = E>,
 {
-    assert!(limit > 0, "scoped stream concurrency limit must be non-zero");
+    assert!(
+        limit > 0,
+        "scoped stream concurrency limit must be non-zero"
+    );
     if cx.is_cancel_requested() {
         return Outcome::Cancelled(owner_reason(cx));
     }
     let (region, work) = {
         let mut stop = pin!(stop);
-        if let Some(stopped) = poll_fn(|task| Poll::Ready(match poll_stop(stop.as_mut(), task) {
-            Poll::Ready(outcome) => Some(outcome),
-            Poll::Pending => None,
-        })).await {
+        if let Some(stopped) = poll_fn(|task| {
+            Poll::Ready(match poll_stop(stop.as_mut(), task) {
+                Poll::Ready(outcome) => Some(outcome),
+                Poll::Pending => None,
+            })
+        })
+        .await
+        {
             return scope_error(stopped);
         }
         // Do not abandon a mint that may have succeeded. Once it is observed,
@@ -80,34 +87,40 @@ where
             Ok(region) => region,
             Err(error) => return Outcome::Err(ScopedStreamError::Region(error)),
         };
-        let stopped = poll_fn(|task| Poll::Ready(match poll_stop(stop.as_mut(), task) {
-            Poll::Ready(outcome) => Some(outcome),
-            Poll::Pending => None,
-        })).await;
+        let stopped = poll_fn(|task| {
+            Poll::Ready(match poll_stop(stop.as_mut(), task) {
+                Poll::Ready(outcome) => Some(outcome),
+                Poll::Pending => None,
+            })
+        })
+        .await;
         let outcome = if let Some(stopped) = stopped {
             stopped
         } else {
             let fence = Arc::new(AtomicBool::new(false));
-            let source = StopSource { inner: stream, stopped: Arc::clone(&fence) };
+            let source = StopSource {
+                inner: stream,
+                stopped: Arc::clone(&fence),
+            };
             let mut work = pin!(region.for_each_stream(cx, source, limit, f));
             let selected = poll_fn(|task| {
                 if let Poll::Ready(outcome) = work.as_mut().poll(task) {
                     return Poll::Ready(Ok(outcome));
                 }
                 poll_stop(stop.as_mut(), task).map(Err)
-            }).await;
+            })
+            .await;
             match selected {
                 Ok(outcome) => outcome,
                 Err(stopped) => {
                     // A stop observed during owner cancellation must not turn
                     // shutdown into a new application error. Panics still win.
-                    let stopped = if !matches!(&stopped, Outcome::Panicked(_))
-                        && cx.is_cancel_requested()
-                    {
-                        Outcome::Cancelled(owner_reason(cx))
-                    } else {
-                        stopped
-                    };
+                    let stopped =
+                        if !matches!(&stopped, Outcome::Panicked(_)) && cx.is_cancel_requested() {
+                            Outcome::Cancelled(owner_reason(cx))
+                        } else {
+                            stopped
+                        };
                     // Fence source admission BEFORE invoking any cancellation
                     // callback. The driver can observe EOF even with no members
                     // and a source that would otherwise never wake again.
@@ -148,7 +161,8 @@ where
 }
 
 fn owner_reason(cx: &Cx) -> CancelReason {
-    cx.cancel_reason().unwrap_or_else(|| CancelReason::user("scoped stream owner cancelled"))
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("scoped stream owner cancelled"))
 }
 
 fn scope_error<E>(work: Outcome<(), E>) -> Outcome<(), ScopedStreamError<E>> {
@@ -160,7 +174,10 @@ fn scope_error<E>(work: Outcome<(), E>) -> Outcome<(), ScopedStreamError<E>> {
     }
 }
 
-fn poll_stop<E>(mut stop: Pin<&mut impl Future<Output = E>>, task: &mut Context<'_>) -> Poll<Outcome<(), E>> {
+fn poll_stop<E>(
+    mut stop: Pin<&mut impl Future<Output = E>>,
+    task: &mut Context<'_>,
+) -> Poll<Outcome<(), E>> {
     match catch_unwind(AssertUnwindSafe(|| stop.as_mut().poll(task))) {
         Ok(poll) => poll.map(Outcome::Err),
         Err(payload) => {
@@ -197,7 +214,11 @@ impl<S: Stream + Unpin> Stream for StopSource<S> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.stopped.load(Ordering::Acquire) { (0, Some(0)) } else { self.inner.size_hint() }
+        if self.stopped.load(Ordering::Acquire) {
+            (0, Some(0))
+        } else {
+            self.inner.size_hint()
+        }
     }
 }
 

@@ -19,14 +19,14 @@
 //! component tapes zeroize their owned sensitive storage. Nothing is persisted
 //! automatically. Capture limits never replace a live provider's result.
 
+use super::AsyncWrite;
 use super::replay::{
     IoCaptureError, IoCaptureLimits, IoReplayCompletionError, IoTape, RecordingIo, ReplayIo,
 };
-use super::AsyncWrite;
+use crate::time::TimeSource;
 use crate::time::replay::{
     RecordingTimeSource, ReplayTimeSource, TimeCaptureError, TimeReplayError, TimeTape,
 };
-use crate::time::TimeSource;
 use crate::util::entropy::EntropySource;
 use crate::util::entropy_replay::{
     EntropyCaptureError, EntropyCaptureLimits, EntropyReplayCompletionError, EntropyTape,

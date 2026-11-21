@@ -10,8 +10,8 @@ use asupersync::net::UdpSocket;
 use asupersync::remote::NodeId;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::sync::Notify;
-use asupersync::types::CancelReason;
 use asupersync::types::CancelKind;
+use asupersync::types::CancelReason;
 use asupersync::{Cx, Outcome};
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -24,34 +24,63 @@ fn socket() -> (UdpMembershipTransport, SocketAddr) {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     socket.set_nonblocking(true).unwrap();
-    (UdpMembershipTransport::new(UdpSocket::from_std(socket).unwrap()), address)
+    (
+        UdpMembershipTransport::new(UdpSocket::from_std(socket).unwrap()),
+        address,
+    )
 }
-fn driver(local: &str, peer: &str, address: SocketAddr, transport: UdpMembershipTransport) -> UdpSwimDriver {
+fn driver(
+    local: &str,
+    peer: &str,
+    address: SocketAddr,
+    transport: UdpMembershipTransport,
+) -> UdpSwimDriver {
     UdpSwimDriver::new_trusted_network(
         NodeId::new(local),
         SwimConfig {
-            probe_interval_ms: 500, probe_timeout_ms: 200, awareness_max: 1,
-            suspicion_mult: 2, suspicion_max_timeout_mult: 1,
-            max_members: 4, ..SwimConfig::default()
+            probe_interval_ms: 500,
+            probe_timeout_ms: 200,
+            awareness_max: 1,
+            suspicion_mult: 2,
+            suspicion_max_timeout_mult: 1,
+            max_members: 4,
+            ..SwimConfig::default()
         },
         0x5357_494d,
         BTreeMap::from([(NodeId::new(peer), address)]),
         transport,
         SwimDriverConfig {
-            max_peers: 4, max_queued_datagrams: 16, retained_events: 16,
-            io_batch: 8, tick_ms: 10, max_datagram_age_ms: 200, leave_timeout_ms: 300,
+            max_peers: 4,
+            max_queued_datagrams: 16,
+            retained_events: 16,
+            io_batch: 8,
+            tick_ms: 10,
+            max_datagram_age_ms: 200,
+            leave_timeout_ms: 300,
         },
-    ).unwrap()
+    )
+    .unwrap()
 }
-async fn observed(cx: &Cx, observer: &SwimObserver, predicate: impl Fn(&SwimObservation) -> bool) -> SwimObservation {
+async fn observed(
+    cx: &Cx,
+    observer: &SwimObserver,
+    predicate: impl Fn(&SwimObservation) -> bool,
+) -> SwimObservation {
     asupersync::time::timeout(cx.now(), Duration::from_secs(8), async {
         loop {
             let snapshot = observer.snapshot();
-            if predicate(&snapshot) { return snapshot; }
-            assert!(!snapshot.status.is_terminal(), "driver stopped before observation: {snapshot:?}");
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                !snapshot.status.is_terminal(),
+                "driver stopped before observation: {snapshot:?}"
+            );
             observer.changed(snapshot.revision).await;
         }
-    }).await.expect("bounded real SWIM progress")
+    })
+    .await
+    .expect("bounded real SWIM progress")
 }
 fn exercise(workers: usize, abrupt: bool) {
     let (a_socket, a_address) = socket();
@@ -64,8 +93,14 @@ fn exercise(workers: usize, abrupt: bool) {
     let stop_b = Arc::new(Notify::new());
     let pending_b = Arc::new(AtomicUsize::new(0));
     let parked_b = Arc::new(Notify::new());
-    let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
-        else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread().build().unwrap()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
+    };
     runtime.block_on(async {
         let cx = Cx::current().expect("native owner context");
         let stop = Arc::clone(&stop_a);
@@ -129,15 +164,23 @@ fn exercise(workers: usize, abrupt: bool) {
 }
 
 #[test]
-fn current_thread_real_probe_ack_and_graceful_leave() { exercise(1, false); }
+fn current_thread_real_probe_ack_and_graceful_leave() {
+    exercise(1, false);
+}
 
 #[test]
-fn two_workers_real_probe_ack_and_graceful_leave() { exercise(2, false); }
+fn two_workers_real_probe_ack_and_graceful_leave() {
+    exercise(2, false);
+}
 
 /// Consecutive runs of the two-worker cancellation case. `ASUPERSYNC_SWIM_REPEAT`
 /// raises it for flake-rate evidence (asupersync-bi2462.161 asks for 20 in one lane).
 fn repetitions() -> usize {
-    std::env::var("ASUPERSYNC_SWIM_REPEAT").ok().and_then(|value| value.parse().ok()).unwrap_or(1).max(1)
+    std::env::var("ASUPERSYNC_SWIM_REPEAT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+        .max(1)
 }
 
 #[test]

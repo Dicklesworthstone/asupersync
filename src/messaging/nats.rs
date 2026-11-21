@@ -145,10 +145,8 @@ async fn nats_channel_wait_until<T>(
 ) -> Result<T, NatsError> {
     let mut timer = deadline.map(|deadline| nats_deadline_timer(cx, deadline.at));
     let mut future = std::pin::pin!(future);
-    let mut cancellation = std::pin::pin!(nats_io(
-        cx,
-        std::future::pending::<Result<T, NatsError>>(),
-    ));
+    let mut cancellation =
+        std::pin::pin!(nats_io(cx, std::future::pending::<Result<T, NatsError>>(),));
     std::future::poll_fn(|task_cx| {
         // Preserve each channel's commit precedence, particularly oneshot
         // replies: a completed operation must not become a retryable failure
@@ -2297,10 +2295,8 @@ impl NatsConnection {
                 // Keep the retry delay on the same owner's clock as the
                 // attempt bound, even when a supervisor drives the retry.
                 nats_io(cx, async {
-                    let mut timer = std::pin::pin!(nats_deadline_timer(
-                        cx,
-                        timeout_now(cx) + delay,
-                    ));
+                    let mut timer =
+                        std::pin::pin!(nats_deadline_timer(cx, timeout_now(cx) + delay,));
                     std::future::poll_fn(|task| timer.as_mut().poll_deadline(task)).await;
                     Ok::<(), NatsError>(())
                 })
@@ -3076,8 +3072,13 @@ impl NatsConnection {
             random_suffix(cx)
         );
 
-        let subscribed =
-            nats_timeout_at(cx, deadline, request_timeout_error, self.subscribe(cx, &inbox)).await;
+        let subscribed = nats_timeout_at(
+            cx,
+            deadline,
+            request_timeout_error,
+            self.subscribe(cx, &inbox),
+        )
+        .await;
         let mut sub = match subscribed {
             Ok(sub) => sub,
             Err(error) => {
@@ -3871,7 +3872,9 @@ impl NatsSupervisor {
             std::future::poll_fn(|task_cx| {
                 send.as_mut().poll(task_cx).map_err(|error| match error {
                     mpsc::SendError::Cancelled(_) => NatsError::Cancelled,
-                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => NatsError::Closed,
+                    mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => {
+                        NatsError::Closed
+                    }
                 })
             }),
         );
@@ -4586,9 +4589,7 @@ fn request_error_is_unrelated(error: &str, subject: &str, inbox: &str) -> bool {
         error
             .get(prefix.len()..)
             .and_then(|tail| tail.strip_suffix('"'))
-            .is_some_and(|actual| {
-                !actual.is_empty() && !actual.contains('"') && actual != expected
-            })
+            .is_some_and(|actual| !actual.is_empty() && !actual.contains('"') && actual != expected)
     })
 }
 
@@ -4723,9 +4724,8 @@ async fn handle_supervisor_command(
                 .collect::<Vec<_>>();
             complete_supervisor_command(
                 reply,
-                connection.publish_request_with_headers(
-                    &cx, &subject, &reply_to, &headers, &payload,
-                ),
+                connection
+                    .publish_request_with_headers(&cx, &subject, &reply_to, &headers, &payload),
             )
             .await;
         }
@@ -4806,13 +4806,8 @@ async fn handle_supervisor_command(
                 match ping_bound {
                     Some(bound) => {
                         let ping = connection.ping(&cx);
-                        nats_timeout_at(
-                            &cx,
-                            timeout_now(&cx) + bound,
-                            stale_connection_error,
-                            ping,
-                        )
-                        .await
+                        nats_timeout_at(&cx, timeout_now(&cx) + bound, stale_connection_error, ping)
+                            .await
                     }
                     None => connection.ping(&cx).await,
                 }
@@ -5153,7 +5148,9 @@ impl Subscription {
                         if loss.count.load(Ordering::Acquire) != reported || notified.is_ready() {
                             return Poll::Ready(Ok::<_, NatsError>(None));
                         }
-                        receive.as_mut().poll(task_cx)
+                        receive
+                            .as_mut()
+                            .poll(task_cx)
                             .map(|received| Ok(Some(received)))
                     }),
                 )
@@ -5207,11 +5204,14 @@ impl Subscription {
         nats_channel_wait(
             cx,
             std::future::poll_fn(|task_cx| {
-                receive.as_mut().poll(task_cx).map(|received| match received {
-                    Ok(msg) => Ok(Some(msg)),
-                    Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
-                    Err(mpsc::RecvError::Cancelled) => Err(NatsError::Cancelled),
-                })
+                receive
+                    .as_mut()
+                    .poll(task_cx)
+                    .map(|received| match received {
+                        Ok(msg) => Ok(Some(msg)),
+                        Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Empty) => Ok(None),
+                        Err(mpsc::RecvError::Cancelled) => Err(NatsError::Cancelled),
+                    })
             }),
         )
         .await

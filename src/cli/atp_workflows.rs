@@ -89,7 +89,10 @@ impl AtpWorkflowCoordinator {
     /// `root` (created on first write). Unlike [`new`](Self::new), this reads no
     /// environment variable and does not depend on the current directory, so two
     /// coordinators with different roots never share state.
-    pub fn with_root(output_format: OutputFormat, root: impl Into<PathBuf>) -> Result<Self, CliError> {
+    pub fn with_root(
+        output_format: OutputFormat,
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, CliError> {
         Self::build(output_format, Some(root.into()), None)
     }
 
@@ -1689,12 +1692,15 @@ impl AtpWorkflowCoordinator {
     }
 
     fn dataset_scope(dataset: &AtpDatasetInfo) -> Result<Option<&str>, CliError> {
-        dataset.metadata.get("access_scope").map_or(Ok(None), |value| {
-            value.as_str().map(Some).ok_or_else(|| {
-                CliError::new("metadata_error", "Dataset access_scope must be a string")
-                    .exit_code(ExitCode::USER_ERROR)
+        dataset
+            .metadata
+            .get("access_scope")
+            .map_or(Ok(None), |value| {
+                value.as_str().map(Some).ok_or_else(|| {
+                    CliError::new("metadata_error", "Dataset access_scope must be a string")
+                        .exit_code(ExitCode::USER_ERROR)
+                })
             })
-        })
     }
 
     fn read_stored_dataset(&self, path: &Path) -> Result<StoredDataset, CliError> {
