@@ -421,6 +421,10 @@ the region's task ledger. Asynchronous scope/runtime closure waits for native
 backpressure, cancellation, sink cleanup, and lock release. This transfers
 existing endpoint authority and does not change the standalone byte helpers or
 expose the Rust `AsyncRead`/`AsyncWrite` bridge.
+`BrowserRuntime.withScopeAsync()` and `RegionHandle.withScopeAsync()` include
+that awaited cleanup in a callback bracket. Cleanup refusal raises a
+`BrowserScopeCleanupError` retaining both the callback completion and a child
+handle for explicit retry; the existing synchronous APIs keep their contracts.
 
 ### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
 

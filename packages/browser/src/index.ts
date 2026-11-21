@@ -183,6 +183,34 @@ export interface BrowserScopeOptions {
   consumerVersion?: AbiVersion | null;
 }
 
+export type BrowserScopeBodyCompletion<T = unknown> =
+  | { readonly kind: "returned"; readonly outcome: BrowserOutcome<T> }
+  | { readonly kind: "threw"; readonly error: unknown };
+
+/** A failed asynchronous owner-close attempt, with its original body result. */
+export class BrowserScopeCleanupError<T = unknown> extends Error {
+  readonly code = "ASUPERSYNC_BROWSER_SCOPE_CLEANUP_FAILED";
+  declare readonly cleanupOutcome: Exclude<BrowserOutcome<void>, { outcome: "ok" }>;
+  declare readonly scope: RegionHandle;
+  declare readonly bodyCompletion: BrowserScopeBodyCompletion<T>;
+
+  constructor(
+    scope: RegionHandle,
+    cleanupOutcome: Exclude<BrowserOutcome<void>, { outcome: "ok" }>,
+    bodyCompletion: BrowserScopeBodyCompletion<T>,
+  ) {
+    super("Browser scope cleanup failed; inspect cleanupOutcome and retry scope.closeAsync().");
+    this.name = "BrowserScopeCleanupError";
+    // Keep authority tokens and arbitrary application payloads out of ordinary
+    // error serialization. Preserve the exact objects for explicit inspection.
+    Object.defineProperties(this, {
+      cleanupOutcome: { value: cleanupOutcome },
+      scope: { value: scope },
+      bodyCompletion: { value: Object.freeze(bodyCompletion) },
+    });
+  }
+}
+
 export interface BrowserSdkDiagnostics {
   abiVersion: AbiVersion;
   abiFingerprint: string;
@@ -1429,6 +1457,9 @@ interface BrowserStorageGlobalLike {
 const REGION_PARENTS = new Map<string, string>();
 const RUNTIME_FETCH_GRANTS = new Map<string, BrowserFetchGrant>();
 const FETCH_OWNER_CLOSES = new Map<string, Promise<BrowserOutcome<void>>>();
+// Only live callback brackets retain this evidence. A missing/stale handle is
+// not itself proof that an SDK owner successfully completed its cleanup.
+const ASYNC_SCOPE_BRACKETS = new Map<string, { closed: boolean }>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
 // Match browser-core's facade-owned send bounds, including readiness waiters
@@ -6631,6 +6662,7 @@ function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "scope_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "scope_close");
   closeOwnedWebTransports(ownerKeys, "scope_close");
+  recordClosedAsyncScopeBrackets(ownerKeys);
 }
 
 function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
@@ -6642,6 +6674,14 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   SDK_STREAM_PIPES.closeScopes(ownerKeys, "runtime_close");
   releaseOwnedBrowserMessageStreams(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
+  recordClosedAsyncScopeBrackets(ownerKeys);
+}
+
+function recordClosedAsyncScopeBrackets(ownerKeys: Set<string>): void {
+  for (const key of ownerKeys) {
+    const bracket = ASYNC_SCOPE_BRACKETS.get(key);
+    if (bracket) bracket.closed = true;
+  }
 }
 
 async function drainBrowserOwnerResources(ownerKeys: Set<string>, kind: string): Promise<BrowserOutcome<void>> {
@@ -6818,6 +6858,52 @@ export function unwrapOutcome<T>(outcome: BrowserOutcome<T>): T {
   throw new Error(formatOutcomeFailure(outcome));
 }
 
+async function withBrowserScopeAsync<T>(
+  owner: BrowserRuntime | RegionHandle,
+  fn: (scope: RegionHandle) => Promise<BrowserOutcome<T>> | BrowserOutcome<T>,
+  options: BrowserScopeOptions,
+): Promise<BrowserOutcome<T>> {
+  // Snapshot caller-owned options before admission. Keep the version frozen
+  // and the independent cleanup handle private from the body callback.
+  const version = snapshotOwnerCloseVersion(options.consumerVersion ?? owner.consumerVersion);
+  const entered = owner.enterScope(options.label, version);
+  if (entered.outcome !== "ok") return entered;
+  const scope = entered.value;
+  const ownedCore = snapshotRegionHandle(scope.core);
+  const runtime = scope.runtime;
+  const ownerKey = browserWebTransportStateKey(ownedCore);
+  const bracket = { closed: false };
+  ASYNC_SCOPE_BRACKETS.set(ownerKey, bracket);
+  try {
+    let completion: BrowserScopeBodyCompletion<T>;
+    try {
+      completion = { kind: "returned", outcome: await fn(scope) };
+    } catch (error) {
+      completion = { kind: "threw", error };
+    }
+
+    // Use the captured owner and trusted close function, even if user code
+    // overwrote the callback's public scope.core or scope.closeAsync fields.
+    if (!bracket.closed) {
+      const cleanup = await closeFetchOwnerAsync(ownedCore, version, "scope_close");
+      // Another successful SDK close may win while this attempt drains. Only
+      // its positive receipt can explain an invalid handle; preserve every
+      // other refusal, including host cleanup failures, without auto-retry.
+      const closedConcurrently = bracket.closed && cleanup.outcome === "err"
+        && cleanup.failure.code === "invalid_handle";
+      if (cleanup.outcome !== "ok" && !closedConcurrently) {
+        throw new BrowserScopeCleanupError(
+          new RegionHandle(ownedCore, version, runtime), cleanup, completion,
+        );
+      }
+    }
+    if (completion.kind === "threw") throw completion.error;
+    return completion.outcome;
+  } finally {
+    if (ASYNC_SCOPE_BRACKETS.get(ownerKey) === bracket) ASYNC_SCOPE_BRACKETS.delete(ownerKey);
+  }
+}
+
 export class BrowserRuntime {
   diagnostics: BrowserSdkDiagnostics;
   private readonly globalObject: Record<string, unknown> | undefined;
@@ -6974,6 +7060,19 @@ export class BrowserRuntime {
       scope.close(consumerVersion);
     }
   }
+
+  /**
+   * Run a callback in a child region and await owned host cleanup before
+   * returning its exact Outcome or rethrowing its exact rejection. A cleanup
+   * refusal rejects with BrowserScopeCleanupError, retaining both the body
+   * completion and an independent scope handle for an explicit close retry.
+   */
+  withScopeAsync<T>(
+    fn: (scope: RegionHandle) => Promise<BrowserOutcome<T>> | BrowserOutcome<T>,
+    options: BrowserScopeOptions = {},
+  ): Promise<BrowserOutcome<T>> {
+    return withBrowserScopeAsync(this, fn, options);
+  }
 }
 
 export class RegionHandle {
@@ -7009,6 +7108,14 @@ export class RegionHandle {
       const version = snapshotOwnerCloseVersion(consumerVersion);
       return closeFetchOwnerAsync(core, version, "scope_close");
     } catch (error) { return Promise.resolve(ownerCloseFailure("scope_close_async", error)); }
+  }
+
+  /** Asynchronously bracket a nested child with the same cleanup contract as BrowserRuntime.withScopeAsync. */
+  withScopeAsync<T>(
+    fn: (scope: RegionHandle) => Promise<BrowserOutcome<T>> | BrowserOutcome<T>,
+    options: BrowserScopeOptions = {},
+  ): Promise<BrowserOutcome<T>> {
+    return withBrowserScopeAsync(this, fn, options);
   }
 
   enterScope(

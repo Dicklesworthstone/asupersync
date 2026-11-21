@@ -24,6 +24,66 @@ try {
 }
 ```
 
+## Automatic asynchronous scopes
+
+`BrowserRuntime.withScopeAsync()` creates a child scope, runs its callback,
+and awaits asynchronous owner cleanup before returning. A region has the same
+method for nested child scopes. This makes the cleanup barrier part of the
+application's normal control flow:
+
+```ts
+const result = await runtime.withScopeAsync(async scope => {
+  const pipe = unwrapOutcome(scope.pipeTo(source, destination, { signal }));
+  return await pipe.closed;
+}, { label: "copy-stream" });
+unwrapOutcome(result);
+```
+
+When the callback finishes early, its still-active fetches, message receivers,
+WebSockets, and stream pipes are cancelled and drained before the helper
+settles. A pending native write or asynchronous abort keeps the helper pending.
+Use `scope.withScopeAsync()` for independently bracketed nested work. If the
+callback or an ancestor already completed SDK closure of the child, the helper
+recognizes that successful cleanup instead of closing the invalidated handle
+again. An invalid-handle error alone is never treated as proof of cleanup.
+The helper does not close the runtime or unrelated sibling scopes.
+
+After successful cleanup, the helper returns the exact callback `Outcome`
+object, including `err`, `cancelled`, or `panicked` outcomes. A thrown value or
+promise rejection is rethrown unchanged, including rejection with `undefined`.
+Cleanup uses a private owner snapshot and frozen ABI version, so mutating the
+callback's scope fields cannot redirect its cleanup to a different region.
+
+If cleanup is refused, the helper rejects with `BrowserScopeCleanupError`:
+
+| Property | Meaning |
+| --- | --- |
+| `code` | `ASUPERSYNC_BROWSER_SCOPE_CLEANUP_FAILED` |
+| `cleanupOutcome` | The exact non-success cleanup receipt. |
+| `bodyCompletion` | `{ kind: "returned", outcome }` or `{ kind: "threw", error }`, preserving the original callback completion. |
+| `scope` | An independent handle to the child for an explicit `closeAsync()` retry. |
+
+The three detailed properties are readonly and non-enumerable. Ordinary error
+serialization does not expose the scope's authority token or callback payload.
+The helper makes one cleanup attempt; it does not silently retry a refusal or
+replace a failed cleanup with the callback's successful result.
+
+```ts
+import { BrowserScopeCleanupError } from "@asupersync/browser";
+
+try {
+  await runtime.withScopeAsync(runApplicationWork);
+} catch (error) {
+  if (error instanceof BrowserScopeCleanupError) {
+    // Inspect both failures, repair the reported condition, then retry explicitly.
+    const retry = await error.scope.closeAsync();
+    unwrapOutcome(retry);
+    // A successful retry does not erase the original body/cleanup result.
+  }
+  throw error;
+}
+```
+
 ## Ownership and data flow
 
 Admission reserves one ABI task before invoking host piping. The native call
@@ -89,8 +149,8 @@ barrier. Nested scopes participate; unrelated sibling scopes remain live.
 `runtime.closeAsync()` applies the same behavior across its root scopes.
 
 The existing synchronous `close()` and `withScope()` APIs retain their existing
-behavior. Use asynchronous owner closure for host resources that require
-draining. Existing standalone `BrowserReadableStream` and
+behavior. Use `withScopeAsync()` or explicit asynchronous owner closure for host
+resources that require draining. Existing standalone `BrowserReadableStream` and
 `BrowserWritableStream` byte helpers also retain their contracts.
 
 Passing endpoints transfers existing host capabilities; this API opens no
@@ -103,12 +163,14 @@ executor dispatch.
 ```sh
 node --unhandled-rejections=strict --experimental-vm-modules --test \
   scripts/test_browser_stream_pipe.mjs \
-  scripts/test_browser_message_regions_wasm.mjs
+  scripts/test_browser_message_regions_wasm.mjs \
+  scripts/test_browser_scope_async.mjs
 ```
 
 The first suite executes the actual TypeScript manager with native Node
-WHATWG streams and explicit fault-injection task adapters. The second executes
-the actual SDK with the checked-in generated JavaScript/WASM handle ledger.
+WHATWG streams and explicit fault-injection task adapters. The other suites
+execute the actual SDK with the checked-in generated JavaScript/WASM handle ledger;
+scope-refusal cases replace only the explicit ABI refusal under test.
 They cover pending-write witnesses, asynchronous cancel/abort/close barriers,
 task counts, nested ownership, signal handling, refusal and retry, endpoint
 exclusivity, and reentrant admission/publication. These are native Node and
