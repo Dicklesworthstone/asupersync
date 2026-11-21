@@ -493,6 +493,7 @@ impl BlockingTaskCompletion {
     /// `Ready` once the task is done, which for a task the worker has run, skipped or detached is after its closure,
     /// its captures, the allocation holding them and any byte reservation are gone. Otherwise registers `cx`'s waker
     /// (one slot, replacing a previous one) to be woken by [`Self::signal_done`].
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn poll_done(&self, cx: &Context<'_>) -> Poll<()> {
         if self.done.load(Ordering::Acquire) {
             return Poll::Ready(());
@@ -514,6 +515,7 @@ impl BlockingTaskCompletion {
     }
 
     /// Drops the waker registered by [`Self::poll_done`], if any, so an abandoned waiter is not kept alive by the task.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn clear_waker(&self) {
         let retired = self.mutex.lock().take();
         drop(retired);
@@ -609,11 +611,13 @@ impl BlockingTaskHandle {
     /// the allocation holding them and any byte reservation are gone; otherwise registers `cx`'s waker, replacing a
     /// previously registered one, to be woken at that moment. Crate-private: the pool's own consumers use it where
     /// "the job reported its result" is not yet "the job's bytes are back".
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn poll_done(&self, cx: &Context<'_>) -> Poll<()> {
         self.completion.poll_done(cx)
     }
 
     /// Drops the waker registered by [`Self::poll_done`], if any.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn clear_done_waiter(&self) {
         self.completion.clear_waker();
     }

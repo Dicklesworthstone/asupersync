@@ -6396,6 +6396,7 @@ struct RuntimeInner {
 /// runtime's concrete scheduler and state types. The weak pointer still
 /// refers to the same runtime allocation and cannot prolong its lifetime.
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 trait RequestOwnerFactory: Send + Sync {
     fn register(
         self: Arc<Self>,
@@ -6416,6 +6417,7 @@ impl RequestOwnerFactory for RuntimeInner {
 /// Weak provenance carried only by externally constructed request contexts.
 #[derive(Clone)]
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct RequestRuntime(std::sync::Weak<dyn RequestOwnerFactory>);
 
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
@@ -6426,6 +6428,7 @@ impl std::fmt::Debug for RequestRuntime {
 }
 
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl RequestRuntime {
     fn new(inner: &Arc<RuntimeInner>) -> Self {
         let weak = Arc::downgrade(inner) as std::sync::Weak<dyn RequestOwnerFactory>;
@@ -6451,6 +6454,7 @@ pub(crate) struct CallerTaskRegistration {
 
 impl CallerTaskRegistration {
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn cx(&self) -> &crate::cx::Cx {
         &self.cx
     }

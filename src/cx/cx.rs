@@ -1857,6 +1857,7 @@ impl<Caps> Cx<Caps> {
     }
 
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn request_obligation_owner(
         &self,
     ) -> Result<

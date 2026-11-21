@@ -746,6 +746,7 @@ impl Semaphore {
     /// returned unless checked obligation admission succeeds. The rollback
     /// guard settles before the owner retires on error or unwind.
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn try_acquire_one_checked_with<Caps, T, E>(
         &self,
         cx: &Cx<Caps>,
