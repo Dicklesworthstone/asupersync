@@ -5500,7 +5500,8 @@ mod platform {
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         let pid = sysinfo::get_current_pid()
             .map_err(|err| std::io::Error::other(format!("current pid unavailable: {err}")))?;
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new()
+            .map_err(|err| std::io::Error::other(format!("sysinfo unavailable: {err}")))?;
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
@@ -5519,7 +5520,8 @@ mod platform {
 
     #[cfg(windows)]
     pub fn memory_max_bytes() -> std::io::Result<u64> {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new()
+            .map_err(|err| std::io::Error::other(format!("sysinfo unavailable: {err}")))?;
         system.refresh_memory();
         let total = system.total_memory();
         if total == 0 {

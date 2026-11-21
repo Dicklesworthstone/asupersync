@@ -1231,7 +1231,9 @@ fn process_is_running(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        let mut system = sysinfo::System::new_all();
+        let Ok(mut system) = sysinfo::System::new_all() else {
+            return false;
+        };
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         system.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
@@ -1265,7 +1267,9 @@ fn read_pid_file(path: &Path) -> Result<u32> {
 /// only after this check (asupersync-fas2rq).
 fn pid_is_atpd(pid: u32) -> bool {
     let target = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Ok(mut system) = sysinfo::System::new() else {
+        return false;
+    };
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[target]),
         true,
