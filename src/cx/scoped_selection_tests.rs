@@ -237,10 +237,8 @@ fn scoped_timeout_observes_cancel_and_deadline_inside_native_join_without_losing
         run_native(move |owner, clock| async move {
             let native = Arc::new(NativeAttempt::default());
             let body = Arc::clone(&native);
-            let mut timeout = Box::pin(owner.timeout_scoped(
-                Duration::from_secs(60),
-                move |cx| body.run(cx),
-            ));
+            let mut timeout =
+                Box::pin(owner.timeout_scoped(Duration::from_secs(60), move |cx| body.run(cx)));
             let parent = poll_fn(|task| Poll::Ready(task.waker().clone())).await;
             let hook = clone_hook::CloneHook::new(parent);
             let waker = hook.waker();
@@ -280,7 +278,12 @@ fn scoped_timeout_observes_cancel_and_deadline_inside_native_join_without_losing
             assert!(matches!(report.task, ScopedTimeoutTask::Joined(Ok(42))));
             assert!(report.region_id.is_some());
             let close = report.close.unwrap().unwrap();
-            assert!(close.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok()));
+            assert!(
+                close
+                    .cleanup_outcome
+                    .as_ref()
+                    .is_none_or(|outcome| outcome.is_ok())
+            );
             assert!(close.descendant_panic.is_none());
             assert!(native.descendant_cleaned.load(Ordering::SeqCst));
             if cancel {
@@ -295,9 +298,10 @@ fn scoped_first_ok_observes_cancel_inside_native_join_without_losing_success() {
     run_native(|owner, _clock| async move {
         let native = Arc::new(NativeAttempt::default());
         let body = Arc::clone(&native);
-        let mut chain = Box::pin(owner.first_ok_scoped([move |cx| async move {
-            Ok::<_, &'static str>(body.run(cx).await)
-        }]));
+        let mut chain =
+            Box::pin(owner.first_ok_scoped([move |cx| async move {
+                Ok::<_, &'static str>(body.run(cx).await)
+            }]));
         let parent = poll_fn(|task| Poll::Ready(task.waker().clone())).await;
         let hook = clone_hook::CloneHook::new(parent);
         let waker = hook.waker();
@@ -326,7 +330,12 @@ fn scoped_first_ok_observes_cancel_inside_native_join_without_losing_success() {
             ScopedFirstOkTask::Joined(Ok(Ok(42)))
         ));
         let close = report.attempts[0].close.as_ref().unwrap().as_ref().unwrap();
-        assert!(close.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok()));
+        assert!(
+            close
+                .cleanup_outcome
+                .as_ref()
+                .is_none_or(|outcome| outcome.is_ok())
+        );
         assert!(close.descendant_panic.is_none());
         assert!(native.descendant_cleaned.load(Ordering::SeqCst));
         assert!(!owner.inner.read().cancel_acknowledged);
@@ -340,8 +349,8 @@ fn scoped_first_ok_observes_cancellation_from_exhausted_native_fallback_input() 
         let native = Arc::new(NativeAttempt::default());
         let input_native = Arc::clone(&native);
         let input_owner = owner.clone();
-        let reason = CancelReason::user("fallback generator stopped")
-            .with_cause(CancelReason::shutdown());
+        let reason =
+            CancelReason::user("fallback generator stopped").with_cause(CancelReason::shutdown());
         let input_reason = reason.clone();
         let mut supplied = false;
         let factories = std::iter::from_fn(move || {

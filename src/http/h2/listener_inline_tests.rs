@@ -3660,3 +3660,187 @@ fn fatal_connection_spawn_error_drains_native_http2_requests() {
         }
     }
 }
+
+#[test]
+fn buffered_h2_body_budget_refusal_preserves_existing_bytes_and_reuses_credit() {
+    let stats = Arc::new(Http2ListenerStats::default());
+    let limit = NonZeroUsize::new(8);
+    let mut first = BufferedRequestBody::new(Arc::clone(&stats), limit);
+    let mut second = BufferedRequestBody::new(Arc::clone(&stats), limit);
+    assert!(first.try_extend_from_slice(b"first!"));
+    assert!(second.try_extend_from_slice(b"ok"));
+    assert_eq!(stats.buffered_request_body_bytes(), 8);
+    assert!(!second.try_extend_from_slice(b"!"));
+    assert_eq!(second.data.as_slice(), b"ok");
+    assert_eq!(stats.buffered_request_body_bytes(), 8);
+    assert_eq!(stats.body_budget_refusals_total(), 1);
+    assert!(second.try_extend_from_slice(b""));
+    assert_eq!(stats.body_budget_refusals_total(), 1);
+    drop(second);
+    assert_eq!(stats.buffered_request_body_bytes(), 6);
+    assert!(first.try_extend_from_slice(b"ok"));
+    assert_eq!(stats.buffered_request_body_bytes(), 8);
+    drop(first);
+    assert_eq!(stats.buffered_request_body_bytes(), 0);
+}
+
+#[test]
+fn unlimited_buffered_h2_body_accounting_refuses_overflow_without_allocating() {
+    let stats = Arc::new(Http2ListenerStats::default());
+    let mut charge = BufferedRequestBodyCharge {
+        stats: Arc::clone(&stats),
+        limit: None,
+        bytes: 0,
+    };
+    assert!(charge.try_grow(usize::MAX));
+    assert_eq!(stats.buffered_request_body_bytes(), usize::MAX);
+    assert!(!charge.try_grow(1));
+    assert_eq!(charge.bytes, usize::MAX);
+    assert_eq!(stats.buffered_request_body_bytes(), usize::MAX);
+    assert_eq!(stats.body_budget_refusals_total(), 1);
+    assert!(charge.try_grow(0));
+    drop(charge);
+    assert_eq!(stats.buffered_request_body_bytes(), 0);
+}
+
+#[test]
+fn buffered_h2_body_charge_survives_abandoned_producer_and_descendant_cleanup() {
+    use crate::channel::oneshot;
+    use crate::lab::{LabConfig, LabRuntime};
+
+    const PAYLOAD: &[u8] = b"retained";
+    for seed in [0x36_601, 0x36_602] {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(2048));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let stats = Arc::new(Http2ListenerStats::default());
+        let mut buffered =
+            BufferedRequestBody::new(Arc::clone(&stats), NonZeroUsize::new(PAYLOAD.len()));
+        assert!(buffered.try_extend_from_slice(PAYLOAD));
+        let BufferedRequestBody { data, charge } = buffered;
+        let request = request_from_h2_parts(request_block(&[]), data, Vec::new(), None).unwrap();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let mut guard = InFlightRequestGuard::acquire(Some(&in_flight));
+        guard.request_body = charge;
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let body_cleanup_entered = Arc::clone(&cleanup);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let body_retired = Arc::clone(&dropped);
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let body_cancelled = Arc::clone(&cancelled);
+        let (release_body, body_cleanup) = oneshot::channel::<()>();
+        let (release_child, child_cleanup) = oneshot::channel::<()>();
+        let cleanup_waits = Arc::new(parking_lot::Mutex::new(Some((body_cleanup, child_cleanup))));
+        let handler = Arc::new(move |request: Request| {
+            let (mut body_cleanup, mut child_cleanup) =
+                cleanup_waits.lock().take().expect("one admitted handler");
+            let entered = Arc::clone(&body_cleanup_entered);
+            let dropped = Arc::clone(&body_retired);
+            let cancelled = Arc::clone(&body_cancelled);
+            async move {
+                Http2ProducedResponse::streaming(
+                    Response::new(200, "OK", Vec::new()),
+                    NonZeroUsize::MIN,
+                    NonZeroUsize::new(8).unwrap(),
+                    move |cx, sender| async move {
+                        let _drop = OwnedBodyDrop {
+                            cx: cx.clone(),
+                            dropped,
+                            cancelled,
+                        };
+                        let child_entered = Arc::clone(&entered);
+                        let _descendant = cx
+                            .spawn(move |child| async move {
+                                let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                                assert_eq!(
+                                    receiver.recv(&child).await,
+                                    Err(mpsc::RecvError::Cancelled)
+                                );
+                                child_entered.fetch_add(1, Ordering::SeqCst);
+                                child_cleanup.recv_uninterruptible().await.unwrap();
+                            })
+                            .unwrap();
+                        let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                        assert_eq!(receiver.recv(&cx).await, Err(mpsc::RecvError::Cancelled));
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        body_cleanup.recv_uninterruptible().await.unwrap();
+                        assert_eq!(request.body.as_slice(), PAYLOAD);
+                        Ok(sender)
+                    },
+                )
+                .into_driver_response()
+            }
+        });
+        let (tx, mut rx) = mpsc::channel::<FunnelItem>(4);
+        let (abandon_owner, mut abandon) = oneshot::channel::<()>();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let signal = ShutdownSignal::new();
+                let mut dispatch = Box::pin(dispatch_owned_h2_response(
+                    &cx,
+                    &signal,
+                    owned_hop_config(),
+                    handler,
+                    request,
+                    1,
+                    &tx,
+                    guard,
+                    false,
+                ));
+                let mut abandoned = Box::pin(abandon.recv_uninterruptible());
+                std::future::poll_fn(|poll_cx| {
+                    if abandoned.as_mut().poll(poll_cx).is_ready() {
+                        return Poll::Ready(());
+                    }
+                    assert!(dispatch.as_mut().poll(poll_cx).is_pending());
+                    Poll::Pending
+                })
+                .await;
+                drop(dispatch);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        assert!(lab.run_until_idle() < 2048);
+        let start = rx
+            .try_recv()
+            .expect("producer publishes before abandonment");
+        assert!(matches!(
+            &start,
+            FunnelItem::ProducedStart { stream_id: 1, .. }
+        ));
+        assert_eq!(stats.buffered_request_body_bytes(), PAYLOAD.len());
+
+        // The wire and coordinator relinquish their clones while the actual
+        // producer still retains the received Vec during cancellation cleanup.
+        drop(start);
+        abandon_owner.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(join.try_join(), Ok(Some(())));
+        assert_eq!(cleanup.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.buffered_request_body_bytes(), PAYLOAD.len());
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(lab.run_until_idle(), 0, "abandoned cleanup must park");
+
+        release_body.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.buffered_request_body_bytes(), PAYLOAD.len());
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lab.run_until_idle(),
+            0,
+            "descendant cleanup must still park"
+        );
+
+        release_child.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(stats.buffered_request_body_bytes(), 0);
+        assert_eq!(stats.body_budget_refusals_total(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        drop(rx);
+        finish_owned_h2_lab(&mut lab, root);
+    }
+}
