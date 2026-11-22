@@ -29,7 +29,7 @@
 #[cfg(feature = "http2-streaming")]
 mod streaming;
 #[cfg(feature = "http2-streaming")]
-pub use streaming::HttpAutoStreamingListener;
+pub use streaming::{HttpAutoStreamingListener, HttpAutoStreamingListenerStats};
 
 use super::handoff::{HandoffQueue, Prefixed};
 use crate::cx::{CancelWakerToken, Cx};

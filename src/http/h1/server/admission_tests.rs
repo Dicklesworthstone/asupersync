@@ -1,9 +1,10 @@
 //! Policy composition and response semantics before incoming-body ownership.
 
 use super::{
-    BodyKind, Http1Config, Http1StreamingConfig, Method, RequestHead, Response, Version,
-    admit_streaming_request_head,
+    BodyBudget, BodyKind, Http1Config, Http1StreamingConfig, IncomingRequestBodyWriter, Method,
+    RequestHead, Response, Version, admit_streaming_request_head, reserve_streaming_request_body,
 };
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -25,6 +26,114 @@ fn is_closed(response: &Response) -> bool {
         .map(|(_, value)| value.as_str())
         .collect();
     values == ["close"]
+}
+
+#[test]
+fn streaming_envelope_preserves_zero_and_refuses_unrepresentable_configuration() {
+    let parser_and_trailers = 272 * 1024;
+    assert_eq!(
+        IncomingRequestBodyWriter::streaming_request_reservation(0),
+        Some(parser_and_trailers)
+    );
+    assert_eq!(
+        IncomingRequestBodyWriter::streaming_request_reservation(512 * 1024),
+        Some(784 * 1024)
+    );
+    assert_eq!(
+        IncomingRequestBodyWriter::streaming_request_reservation(usize::MAX - parser_and_trailers),
+        Some(usize::MAX)
+    );
+    assert_eq!(
+        IncomingRequestBodyWriter::streaming_request_reservation(
+            usize::MAX - parser_and_trailers + 1,
+        ),
+        None
+    );
+
+    let budget = Arc::new(BodyBudget::default());
+    let mut config =
+        Http1StreamingConfig::default().with_streaming_body_budget(Arc::clone(&budget));
+    config.incoming_body_queued_bytes = 0;
+    let zero = reserve_streaming_request_body(&config, &head(Method::Get, "/"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(zero.bytes(), parser_and_trailers);
+    assert_eq!(config.incoming_body_queued_bytes, 0);
+    drop(zero);
+    config.incoming_body_queued_bytes = usize::MAX;
+    let refusal = reserve_streaming_request_body(&config, &head(Method::Post, "/")).unwrap_err();
+    assert_eq!(refusal.status, 503);
+    assert!(is_closed(&refusal));
+    assert_eq!(budget.reserved_bytes(), 0);
+    assert_eq!(
+        budget.refusals(),
+        0,
+        "invalid configuration is not overload"
+    );
+}
+
+#[test]
+fn streaming_envelopes_share_capacity_through_route_clones_and_last_owner_retirement() {
+    let budget = Arc::new(BodyBudget::default());
+    let config = Arc::new(
+        Http1StreamingConfig::default()
+            .incoming_body_queue(1, 64)
+            .with_request_body_policy(|_| Ok(Some(4)))
+            .with_streaming_body_budget(Arc::clone(&budget)),
+    );
+    let bytes = 272 * 1024 + 64;
+    budget.set_limit(NonZeroUsize::new(bytes).unwrap());
+    // Even a validated empty body reserves the complete capacity. The static
+    // route limit changes neither that capacity nor the shared budget identity.
+    let request = head(Method::Get, "/");
+    let admitted = admit_streaming_request_head(&config, &request, BodyKind::Empty).unwrap();
+    assert_eq!(admitted.max_body_size, 4);
+    assert!(!Arc::ptr_eq(&config, &admitted));
+    let first = reserve_streaming_request_body(&admitted, &request)
+        .unwrap()
+        .unwrap();
+    let retained_owner = Arc::clone(&first);
+    assert_eq!(budget.reserved_bytes(), bytes);
+    drop(first);
+    let refused = reserve_streaming_request_body(&config, &head(Method::Head, "/")).unwrap_err();
+    assert_eq!(refused.status, 503);
+    assert!(refused.body.is_empty());
+    assert!(is_closed(&refused));
+    assert_eq!(budget.reserved_bytes(), bytes);
+    assert_eq!(budget.refusals(), 1);
+    drop(retained_owner);
+    assert_eq!(budget.reserved_bytes(), 0);
+    let next = reserve_streaming_request_body(&config, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.bytes(), bytes);
+    drop(next);
+    assert_eq!(budget.reserved_bytes(), 0);
+}
+
+#[test]
+fn streaming_default_budget_tracks_multiple_reservations_without_a_limit() {
+    let untracked = Http1StreamingConfig::default();
+    let request = head(Method::Get, "/");
+    assert!(
+        reserve_streaming_request_body(&untracked, &request)
+            .unwrap()
+            .is_none()
+    );
+    let budget = Arc::new(BodyBudget::default());
+    let config = untracked.with_streaming_body_budget(Arc::clone(&budget));
+    let first = reserve_streaming_request_body(&config, &request)
+        .unwrap()
+        .unwrap();
+    let second = reserve_streaming_request_body(&config, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(budget.reserved_bytes(), 2 * 784 * 1024);
+    assert_eq!(budget.refusals(), 0);
+    drop(first);
+    assert_eq!(budget.reserved_bytes(), 784 * 1024);
+    drop(second);
+    assert_eq!(budget.reserved_bytes(), 0);
 }
 
 #[test]

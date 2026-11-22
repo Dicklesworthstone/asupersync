@@ -6243,6 +6243,22 @@ impl<F> Http2Listener<F> {
         self
     }
 
+    /// Attach the one-port streaming allowance before sharing statistics.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn with_streaming_body_budget(
+        mut self,
+        budget: Arc<BodyBudget>,
+    ) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/2 streaming budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.streaming_body_budget = budget;
+        Ok(self)
+    }
+
     /// Attach a shared protocol budget before publishing the statistics handle.
     pub(crate) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> io::Result<Self> {
         let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {

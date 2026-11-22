@@ -80,6 +80,7 @@ pub struct Http1ListenerStats {
     last_drain_requests_stranded: AtomicU64,
     last_drain_duration_ms: AtomicU64,
     body_budget: Arc<BodyBudget>,
+    streaming_body_budget: Arc<BodyBudget>,
     time_getter: fn() -> Time,
 }
 
@@ -170,6 +171,7 @@ impl Http1ListenerStats {
             last_drain_requests_stranded: AtomicU64::new(0),
             last_drain_duration_ms: AtomicU64::new(0),
             body_budget: Arc::new(BodyBudget::default()),
+            streaming_body_budget: Arc::new(BodyBudget::default()),
             time_getter,
         }
     }
@@ -190,6 +192,25 @@ impl Http1ListenerStats {
     #[must_use]
     pub fn body_budget_refusals_total(&self) -> u64 {
         self.body_budget.refusals()
+    }
+
+    /// Live-body buffering capacity reserved across this listener.
+    ///
+    /// Every admitted streaming, produced-response, or SSE request reserves its
+    /// configured body queue plus parser and trailer allowances, including an
+    /// empty body. This is capacity accounting, not a measurement of allocated
+    /// memory, and is maintained even without an aggregate limit.
+    #[must_use]
+    pub fn reserved_streaming_request_bytes(&self) -> usize {
+        self.streaming_body_budget.reserved_bytes()
+    }
+
+    /// Live requests refused by aggregate streaming capacity admission.
+    /// Static policy, per-request size, and invalid-envelope failures are not
+    /// counted. Buffered request-body admission has its own counter.
+    #[must_use]
+    pub fn streaming_body_budget_refusals_total(&self) -> u64 {
+        self.streaming_body_budget.refusals()
     }
 
     fn record_accepted(&self) {
@@ -918,6 +939,48 @@ impl<F> Http1Listener<F> {
         self
     }
 
+    /// Bound the buffering capacity reserved by live incoming request bodies.
+    ///
+    /// Streaming, produced-response, and SSE requests share this listener-wide
+    /// pool across TCP, Unix, handoff, and TLS connections. After static request
+    /// policy succeeds, every request reserves its configured queue byte limit,
+    /// 256 KiB of parser capacity, and 16 KiB of trailer capacity, including
+    /// requests with empty bodies. The default configuration reserves 784 KiB
+    /// per request. Capacity refusal sends 503 with Connection: close before
+    /// 100 Continue, handler execution, or body-obligation admission.
+    ///
+    /// The reservation remains live through response retirement. Owned serving
+    /// also retains it through actual request descendants and finalizers, even
+    /// if the serving future is abandoned. Observe capacity with
+    /// [`Http1ListenerStats::reserved_streaming_request_bytes`]. The default is
+    /// unlimited aggregate capacity with accounting enabled.
+    ///
+    /// This bounds admitted logical buffering capacity. It excludes connection
+    /// read-ahead, transient copies, allocation and frame overhead, responses,
+    /// and body frames retained by application code after dequeue. The
+    /// separate buffered-body builder does not configure this pool.
+    #[must_use]
+    pub fn max_streaming_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.streaming_body_budget.set_limit(max);
+        self
+    }
+
+    /// Attach the one-port streaming allowance before sharing statistics.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn with_streaming_body_budget(
+        mut self,
+        budget: Arc<BodyBudget>,
+    ) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/1 streaming budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.streaming_body_budget = budget;
+        Ok(self)
+    }
+
     /// Attach a shared protocol budget before publishing the statistics handle.
     pub(crate) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> io::Result<Self> {
         let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
@@ -1520,10 +1583,14 @@ impl<F> Http1Listener<F> {
 
             // Spawn connection handler
             let handler = Arc::clone(&self.handler);
-            let http_config = self.streaming_config.as_ref().map_or_else(
-                || Http1StreamingConfig::from(self.config.http_config.clone()),
-                Clone::clone,
-            );
+            let http_config = self
+                .streaming_config
+                .as_ref()
+                .map_or_else(
+                    || Http1StreamingConfig::from(self.config.http_config.clone()),
+                    Clone::clone,
+                )
+                .with_streaming_body_budget(Arc::clone(&self.stats.streaming_body_budget));
             let shutdown_signal = self.shutdown_signal.clone();
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let handle = match spawn_connection(

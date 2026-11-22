@@ -316,6 +316,7 @@ pub struct Http1StreamingConfig {
     /// Maximum time spent synchronizing unread request-body EOF.
     pub unread_body_drain_timeout: Duration,
     request_body_policy: Option<Http1RequestBodyPolicy>,
+    streaming_body_budget: Option<Arc<BodyBudget>>,
 }
 
 #[derive(Clone)]
@@ -345,6 +346,7 @@ impl From<Http1Config> for Http1StreamingConfig {
             unread_body_drain_bytes: 512 * 1024,
             unread_body_drain_timeout: Duration::from_millis(500),
             request_body_policy: None,
+            streaming_body_budget: None,
         }
     }
 }
@@ -358,6 +360,13 @@ impl std::ops::Deref for Http1StreamingConfig {
 }
 
 impl Http1StreamingConfig {
+    /// Listener-owned capacity is attached after the caller's configuration so
+    /// route-policy clones and every transport retain the same admission pool.
+    pub(crate) fn with_streaming_body_budget(mut self, budget: Arc<BodyBudget>) -> Self {
+        self.streaming_body_budget = Some(budget);
+        self
+    }
+
     /// Resolve static request-body policy from a validated head, before body
     /// allocation, checked obligation admission, or `100 Continue`.
     ///
@@ -475,6 +484,43 @@ fn streaming_admission_refusal(head: &RequestHead, mut response: Response) -> Re
         suppress_response_body_for_head(&mut response);
     }
     response
+}
+
+/// Reserve the complete live-body envelope before publishing Continue or
+/// creating any request task, body channel, or checked body obligation.
+fn reserve_streaming_request_body(
+    config: &Http1StreamingConfig,
+    head: &RequestHead,
+) -> Result<Option<Arc<BodyReservation>>, Response> {
+    let Some(budget) = &config.streaming_body_budget else {
+        return Ok(None);
+    };
+    let Some(bytes) =
+        IncomingRequestBodyWriter::streaming_request_reservation(config.incoming_body_queued_bytes)
+    else {
+        // An unrepresentable envelope is invalid configuration, rather than
+        // shared-capacity pressure, so it does not increment budget refusals.
+        return Err(streaming_admission_refusal(
+            head,
+            hop_error_response(
+                head.version,
+                503,
+                "invalid request body buffering configuration",
+            ),
+        ));
+    };
+    let mut reservation = BodyReservation::new(Arc::clone(budget));
+    reservation.try_grow(bytes).map_err(|BodyBudgetExceeded| {
+        streaming_admission_refusal(
+            head,
+            hop_error_response(
+                head.version,
+                503,
+                "request body admission capacity exhausted",
+            ),
+        )
+    })?;
+    Ok(Some(Arc::new(reservation)))
 }
 
 /// Parses the client `Request-Timeout` header into a duration.
@@ -2191,6 +2237,18 @@ where
                         break;
                     }
                 };
+            let body_reservation = match reserve_streaming_request_body(&request_config, &head) {
+                Ok(reservation) => reservation,
+                Err(response) => {
+                    state.phase = ConnectionPhase::Writing;
+                    response_write
+                        .write_streaming_response(cx, &mut io, response)
+                        .await?;
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            };
             if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
                 let response = expectation_response(head.version, expectation)
                     .expect("100-continue expectation must have a response");
@@ -2229,7 +2287,7 @@ where
                         drain_grace: self.config.request_drain_grace,
                         connection: Some(cx.clone()),
                         shutdown: self.shutdown_signal.clone(),
-                        body_reservation: None,
+                        body_reservation: body_reservation.clone(),
                     },
                 },
             )
@@ -2860,6 +2918,19 @@ where
                 return Ok(state);
             }
         };
+    let body_reservation = match reserve_streaming_request_body(&request_config, &head) {
+        Ok(reservation) => reservation,
+        Err(response) => {
+            state.phase = ConnectionPhase::Writing;
+            response_write
+                .write_streaming_response(cx, &mut io, response)
+                .await?;
+            state.requests_served = 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = response_write.close_transport(&mut io).await;
+            return Ok(state);
+        }
+    };
     if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
         let response = expectation_response(head.version, expectation)
             .expect("100-continue expectation must have a response");
@@ -2898,7 +2969,7 @@ where
                     drain_grace: config.request_drain_grace,
                     connection: Some(cx.clone()),
                     shutdown: shutdown_signal.clone(),
-                    body_reservation: None,
+                    body_reservation: body_reservation.clone(),
                 },
             },
             policy,

@@ -448,6 +448,205 @@ async fn h2_exchange<S: AsyncRead + AsyncWrite + Unpin>(stream: S, secure: bool)
     peer.finish_echo().await;
 }
 
+mod shared_streaming_body_budget {
+    use super::*;
+    use asupersync::http::HttpAutoStreamingListenerStats;
+    use asupersync::server::shutdown::ShutdownSignal;
+
+    const H1_RESERVATION: usize = 64 + 256 * 1024 + 16 * 1024;
+    const H2_RESERVATION: usize = 2 * 65_535 + 16 * 1024;
+    const SHARED_CAPACITY: usize = H1_RESERVATION + H2_RESERVATION;
+
+    struct StopOnDrop(ShutdownSignal);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.trigger_immediate();
+        }
+    }
+
+    async fn wait_reserved(stats: &HttpAutoStreamingListenerStats, expected: usize) {
+        bounded(async {
+            while stats.reserved_streaming_request_bytes() != expected {
+                yield_now().await;
+            }
+        })
+        .await;
+    }
+
+    async fn h1_refusal(address: SocketAddr, path: &str, status: u16) {
+        let mut peer = bounded(TcpStream::connect(address)).await.unwrap();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\nExpect: 100-continue\r\n\r\n"
+        );
+        bounded(peer.write_all(request.as_bytes())).await.unwrap();
+        let response = read_until(&mut peer, b"\r\n\r\n").await;
+        assert!(response.starts_with(format!("HTTP/1.1 {status} ").as_bytes()));
+        assert!(!response.windows(12).any(|part| part == b"100 Continue"));
+        assert!(
+            String::from_utf8_lossy(&response)
+                .to_ascii_lowercase()
+                .contains("connection: close")
+        );
+        let mut remaining = Vec::new();
+        bounded(peer.read_to_end(&mut remaining)).await.unwrap();
+    }
+
+    async fn h2_refusal(address: SocketAddr) {
+        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+        let mut peer = WireH2::new(peer, false).await;
+        peer.post("/echo").await;
+        match peer.next_for().await {
+            Frame::RstStream(frame) => assert_eq!(frame.error_code, ErrorCode::RefusedStream),
+            frame => panic!("capacity must refuse the stream before handler entry: {frame:?}"),
+        }
+    }
+
+    async fn h2_policy_refusal(address: SocketAddr) {
+        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+        let mut peer = WireH2::new(peer, false).await;
+        peer.post("/policy").await;
+        match peer.next_for().await {
+            Frame::Headers(frame) => {
+                let headers = peer.headers(frame);
+                assert!(
+                    headers
+                        .iter()
+                        .any(|header| header.name == ":status" && header.value == "403")
+                );
+            }
+            frame => panic!("static policy must precede shared-capacity admission: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_port_streaming_capacity_spans_protocols_and_is_reusable() {
+        for workers in [1, 2] {
+            for owned in [false, true] {
+                run_lifecycle(
+                    native_runtime(workers).build().unwrap(),
+                    move |handle| async move {
+                        let cx = Cx::current().unwrap();
+                        let service = cx
+                            .open_child_region(ChildRegionSpec::inherit())
+                            .await
+                            .unwrap();
+                        let calls = Arc::new(AtomicUsize::new(0));
+                        let first = Arc::clone(&calls);
+                        let second = Arc::clone(&calls);
+                        let h1 = h1_config().with_request_body_policy(|head| {
+                            if head.uri == "/policy" {
+                                Err(Response::new(403, "Forbidden", Vec::new()))
+                            } else {
+                                Ok(None)
+                            }
+                        });
+                        let mut h2 = Http2StreamingListenerConfig::default()
+                            .with_request_body_policy(|head| {
+                                if head.uri == "/policy" {
+                                    Err(Response::new(403, "Forbidden", Vec::new()))
+                                } else {
+                                    Ok(None)
+                                }
+                            });
+                        h2.listener = config().http2;
+                        h2.connection_request_body_buffer_bytes = nz(3 * H2_RESERVATION);
+                        let listener = HttpAutoStreamingListener::bind(
+                            "127.0.0.1:0",
+                            move |cx, request| {
+                                first.fetch_add(1, Ordering::SeqCst);
+                                h1_handler(cx, request)
+                            },
+                            move |request| {
+                                second.fetch_add(1, Ordering::SeqCst);
+                                h2_handler(request)
+                            },
+                            config(),
+                        )
+                        .await
+                        .unwrap()
+                        .with_http1_streaming_config(h1)
+                        .with_http2_streaming_config(h2)
+                        .max_streaming_request_bytes(nz(SHARED_CAPACITY));
+                        let address = listener.local_addr().unwrap();
+                        let shutdown = listener.shutdown_signal();
+                        let _stop = StopOnDrop(shutdown.clone());
+                        let stats = listener.stats_handle();
+                        let owner = service.cx().clone();
+                        let serving_handle = handle.clone();
+                        let mut run = cx
+                            .spawn(move |_| async move {
+                                if owned {
+                                    listener.run_in(&owner).await
+                                } else {
+                                    listener.run(&serving_handle).await
+                                }
+                            })
+                            .unwrap();
+
+                        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+                        let mut first_h1 = WireH1::new(peer).await;
+                        first_h1.prefix().await;
+                        assert_eq!(stats.reserved_streaming_request_bytes(), H1_RESERVATION);
+                        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+                        let mut first_h2 = WireH2::new(peer, false).await;
+                        first_h2.prefix().await;
+                        assert_eq!(stats.reserved_streaming_request_bytes(), SHARED_CAPACITY);
+                        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+                        // A separate HTTP/2 pool of SHARED_CAPACITY would admit
+                        // this peer. Only the HTTP/1 reservation makes it full.
+                        h2_refusal(address).await;
+                        h1_refusal(address, "/echo", 503).await;
+                        assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+                        assert_eq!(calls.load(Ordering::SeqCst), 2);
+                        h1_refusal(address, "/policy", 403).await;
+                        h2_policy_refusal(address).await;
+                        assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+                        assert_eq!(calls.load(Ordering::SeqCst), 2);
+                        assert_eq!(stats.reserved_streaming_request_bytes(), SHARED_CAPACITY);
+
+                        // Both original producers must survive overload and
+                        // echo their withheld upload suffixes and trailers.
+                        first_h1.finish_echo().await;
+                        wait_reserved(&stats, H2_RESERVATION).await;
+                        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+                        let mut second_h2 = WireH2::new(peer, false).await;
+                        second_h2.prefix().await;
+                        assert_eq!(stats.reserved_streaming_request_bytes(), 2 * H2_RESERVATION);
+                        // There is no live HTTP/1 request now. Its refusal must
+                        // be caused by capacity occupied by HTTP/2 connections.
+                        h1_refusal(address, "/echo", 503).await;
+                        assert_eq!(stats.streaming_body_budget_refusals_total(), 3);
+                        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+                        first_h2.finish_echo().await;
+                        wait_reserved(&stats, H2_RESERVATION).await;
+                        let peer = bounded(TcpStream::connect(address)).await.unwrap();
+                        let mut second_h1 = WireH1::new(peer).await;
+                        second_h1.prefix().await;
+                        assert_eq!(stats.reserved_streaming_request_bytes(), SHARED_CAPACITY);
+                        second_h1.finish_echo().await;
+                        second_h2.finish_echo().await;
+                        wait_reserved(&stats, 0).await;
+                        assert_eq!(calls.load(Ordering::SeqCst), 4);
+                        assert_eq!(stats.streaming_body_budget_refusals_total(), 3);
+                        drop((first_h1, first_h2, second_h1, second_h2));
+
+                        assert!(shutdown.begin_drain(Duration::from_secs(2)));
+                        let final_stats = bounded(run.join(&cx)).await.unwrap().unwrap();
+                        assert!(final_stats.http1.drain_report.unwrap().reached_quiescence);
+                        assert!(final_stats.http2.drain_report.unwrap().reached_quiescence);
+                        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+                        assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+                        bounded(service.close()).await.unwrap();
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn assert_ancestry(handle: &RuntimeHandle, expected: RegionId, observed: &Observations) {
     let parents: BTreeMap<_, _> = handle
         .trace_snapshot()

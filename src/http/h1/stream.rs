@@ -1896,6 +1896,20 @@ impl IncomingRequestBodyWriter {
     /// Maximum default chunk size for yielding data.
     pub const DEFAULT_MAX_CHUNK_SIZE: usize = 64 * 1024;
 
+    /// Conservative retained-byte envelope for a listener-driven incoming body.
+    ///
+    /// A decoded frame waiting for queue credit shares the parser's allowance:
+    /// decoding removes those bytes before another input can be appended. The
+    /// accumulated trailer map can coexist with that parser storage and needs
+    /// its own allowance. Connection read-ahead and allocation overhead are
+    /// outside this logical capacity reservation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn streaming_request_reservation(queued_bytes: usize) -> Option<usize> {
+        queued_bytes
+            .checked_add(DEFAULT_MAX_BUFFERED_BYTES)?
+            .checked_add(DEFAULT_MAX_TRAILERS_SIZE)
+    }
+
     /// Sets the maximum chunk size for yielded frames.
     #[must_use]
     pub fn max_chunk_size(mut self, size: usize) -> Self {

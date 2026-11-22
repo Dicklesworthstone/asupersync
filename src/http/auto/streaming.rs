@@ -6,6 +6,7 @@ use super::{
     acknowledge_coordinator_cancellation,
 };
 use crate::cx::Cx;
+use crate::http::body::admission::BodyBudget;
 use crate::http::h1::server::Http1StreamingConfig;
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h2::listener::{Http2ProducedResponse, Http2StreamingListenerConfig};
@@ -20,6 +21,36 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Live request-body capacity reserved across both protocols on one port.
+///
+/// Obtain a handle with [`HttpAutoStreamingListener::stats_handle`] before
+/// starting the listener. Counters remain readable after service shutdown.
+#[derive(Debug, Default)]
+pub struct HttpAutoStreamingListenerStats {
+    body_budget: Arc<BodyBudget>,
+}
+
+impl HttpAutoStreamingListenerStats {
+    /// Capacity currently reserved for admitted streaming requests.
+    ///
+    /// HTTP/1 reserves its queue, parser buffer, and trailer allowance;
+    /// HTTP/2 reserves its queue, granted receive credit, and trailer allowance.
+    /// This includes requests awaiting payload and descendants still cleaning up.
+    #[must_use]
+    pub fn reserved_streaming_request_bytes(&self) -> usize {
+        self.body_budget.reserved_bytes()
+    }
+
+    /// Requests refused because the shared streaming allowance was exhausted.
+    ///
+    /// Static route policy, per-request size limits, per-connection admission,
+    /// and invalid reservation configurations do not increment this counter.
+    #[must_use]
+    pub fn streaming_body_budget_refusals_total(&self) -> u64 {
+        self.body_budget.refusals()
+    }
+}
 
 /// One port with live request ingress and supervised response producers.
 ///
@@ -47,6 +78,7 @@ pub struct HttpAutoStreamingListener<F1, F2> {
     http1_streaming: Http1StreamingConfig,
     http2_streaming: Http2StreamingListenerConfig,
     http2_options: Http2Options,
+    stats: Arc<HttpAutoStreamingListenerStats>,
 }
 
 impl<F1, F2, Fut1, Fut2> HttpAutoStreamingListener<F1, F2>
@@ -102,6 +134,7 @@ where
             http1_streaming,
             http2_streaming,
             http2_options: Http2Options::default(),
+            stats: Arc::new(HttpAutoStreamingListenerStats::default()),
         }
     }
 
@@ -139,7 +172,8 @@ where
             move |cx: Cx, request: StreamingServerRequest| (*handler)(cx, request),
             self.coordinator.config.http1.clone(),
         )
-        .with_streaming_config(self.http1_streaming);
+        .with_streaming_config(self.http1_streaming)
+        .with_streaming_body_budget(Arc::clone(&self.stats.body_budget))?;
         let handler = self.http2_handler;
         let http2 = self
             .http2_options
@@ -147,7 +181,8 @@ where
                 Arc::clone(&http2_queue),
                 move |request: StreamingServerRequest| (*handler)(request),
                 self.http2_streaming,
-            ));
+            ))
+            .with_streaming_body_budget(Arc::clone(&self.stats.body_budget))?;
         let http1 = ProtocolService {
             queue: http1_queue,
             manager: http1.connection_manager().clone(),
@@ -178,6 +213,36 @@ where
 }
 
 impl<F1, F2> HttpAutoStreamingListener<F1, F2> {
+    /// Bound the live request-body capacity reserved across both protocols.
+    ///
+    /// One allowance covers all connections on this port, including TLS
+    /// handoff. Each accepted request reserves its full protocol envelope at
+    /// head admission, including requests with empty bodies. HTTP/1 reserves
+    /// queued bytes plus its parser and trailer capacities; HTTP/2 reserves
+    /// queued bytes, granted receive credit, and its trailer allowance.
+    ///
+    /// Static route and body-size policy runs first. Exhaustion returns HTTP/1
+    /// 503 with connection close before `100 Continue`, or refuses only the
+    /// HTTP/2 stream with `REFUSED_STREAM`. The reservation remains held through
+    /// actual request-task, descendant, and finalizer retirement, even after
+    /// a stream reset or dropped serving coordinator. Merely consuming the
+    /// upload does not release capacity while the request still owns work.
+    ///
+    /// The default has no listener-wide byte cap. Connection read-ahead,
+    /// transient copies, allocation overhead, application-retained frames, and
+    /// response buffering are outside this admission accounting.
+    #[must_use]
+    pub fn max_streaming_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.body_budget.set_limit(max);
+        self
+    }
+
+    /// Observe the one streaming reservation budget shared by both protocols.
+    #[must_use]
+    pub fn stats_handle(&self) -> Arc<HttpAutoStreamingListenerStats> {
+        Arc::clone(&self.stats)
+    }
+
     /// Preserve the complete HTTP/1.1 streaming and route-admission policy.
     ///
     /// Its connection configuration replaces the HTTP/1.1 connection settings.
