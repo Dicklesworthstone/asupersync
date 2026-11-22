@@ -89,7 +89,10 @@ where
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::new().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     let completed = Arc::new(AtomicBool::new(false));
     let completion = Arc::clone(&completed);
@@ -120,14 +123,27 @@ struct InboxLease {
 
 impl InboxLease {
     fn take(inbox: Arc<Inbox>) -> Self {
-        let receiver = inbox.0.lock().unwrap().take().expect("exclusive generation");
-        Self { inbox, receiver: Some(receiver) }
+        let receiver = inbox
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("exclusive generation");
+        Self {
+            inbox,
+            receiver: Some(receiver),
+        }
     }
 }
 
 impl Drop for InboxLease {
     fn drop(&mut self) {
-        let retired = self.inbox.0.lock().unwrap().replace(self.receiver.take().unwrap());
+        let retired = self
+            .inbox
+            .0
+            .lock()
+            .unwrap()
+            .replace(self.receiver.take().unwrap());
         assert!(retired.is_none(), "generations overlap");
     }
 }
@@ -161,7 +177,11 @@ fn assert_no_ambient_effects(cx: &Cx) {
 async fn resource_journey(cx: Cx) {
     let spec = parse(manifest());
     let declaration = |name: &str| {
-        spec.resources.iter().find(|r| r.name == name).unwrap().clone()
+        spec.resources
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap()
+            .clone()
     };
     let (sender, receiver) = mpsc::channel::<Command>(1);
     let state = Arc::new(State::default());
@@ -169,9 +189,15 @@ async fn resource_journey(cx: Cx) {
     let hidden_drops = Arc::new(AtomicUsize::new(0));
     let resources = vec![
         ManagedAppResourceBinding::new(declaration("requests"), sender.clone()),
-        ManagedAppResourceBinding::new(declaration("inbox"), Inbox(Arc::new(Mutex::new(Some(receiver))))),
+        ManagedAppResourceBinding::new(
+            declaration("inbox"),
+            Inbox(Arc::new(Mutex::new(Some(receiver)))),
+        ),
         ManagedAppResourceBinding::new(declaration("state"), Arc::clone(&state)),
-        ManagedAppResourceBinding::new(declaration("lifetime"), Lifetime(Arc::clone(&lifetime_drops))),
+        ManagedAppResourceBinding::new(
+            declaration("lifetime"),
+            Lifetime(Arc::clone(&lifetime_drops)),
+        ),
         ManagedAppResourceBinding::new(declaration("hidden"), Lifetime(Arc::clone(&hidden_drops))),
     ];
     let tree = spec.bind_managed_groups_with_resources(
@@ -245,27 +271,68 @@ async fn resource_journey(cx: Cx) {
     assert!(state.starts.lock().unwrap().is_empty());
     let router = tree.router();
     let mut tree = tree.start(&cx).unwrap();
-    state.changed.wait_until(|| state.parked.load(Ordering::Acquire) > 0).await;
-    while !tree.routes_ready() { yield_now().await; }
-    let response = router.handle_with_cx(&cx, Request::new("POST", "/add")).await;
+    state
+        .changed
+        .wait_until(|| state.parked.load(Ordering::Acquire) > 0)
+        .await;
+    while !tree.routes_ready() {
+        yield_now().await;
+    }
+    let response = router
+        .handle_with_cx(&cx, Request::new("POST", "/add"))
+        .await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body.as_ref(), b"3");
     assert!(sender.send(&cx, Command::Fail).await.is_ok());
-    state.changed.wait_until(|| state.starts.lock().unwrap().len() == 2 && sender.telemetry_snapshot(0).recv_waiter_count > 0).await;
-    let response = router.handle_with_cx(&cx, Request::new("POST", "/add")).await;
-    assert_eq!(response.body.as_ref(), b"6", "restart must reuse the original state and channel");
+    state
+        .changed
+        .wait_until(|| {
+            state.starts.lock().unwrap().len() == 2
+                && sender.telemetry_snapshot(0).recv_waiter_count > 0
+        })
+        .await;
+    let response = router
+        .handle_with_cx(&cx, Request::new("POST", "/add"))
+        .await;
+    assert_eq!(
+        response.body.as_ref(),
+        b"6",
+        "restart must reuse the original state and channel"
+    );
     let generations = state.starts.lock().unwrap().clone();
-    assert_eq!(generations.iter().map(|g| g.number).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(
+        generations.iter().map(|g| g.number).collect::<Vec<_>>(),
+        [1, 2]
+    );
     assert_ne!(generations[0].task, generations[1].task);
     assert_ne!(generations[0].region, generations[1].region);
-    while sender.telemetry_snapshot(0).recv_waiter_count == 0 { yield_now().await; }
+    while sender.telemetry_snapshot(0).recv_waiter_count == 0 {
+        yield_now().await;
+    }
     tree.abort();
     let mut join = Box::pin(tree.join());
-    poll_fn(|task| { assert!(join.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
-    state.changed.wait_until(|| state.draining.load(Ordering::Acquire)).await;
+    poll_fn(|task| {
+        assert!(join.as_mut().poll(task).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    state
+        .changed
+        .wait_until(|| state.draining.load(Ordering::Acquire))
+        .await;
     assert_eq!(lifetime_drops.load(Ordering::Acquire), 0);
-    poll_fn(|task| { assert!(join.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
-    assert_eq!(router.handle_with_cx(&cx, Request::new("POST", "/add")).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    poll_fn(|task| {
+        assert!(join.as_mut().poll(task).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(
+        router
+            .handle_with_cx(&cx, Request::new("POST", "/add"))
+            .await
+            .status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     state.release.store(true, Ordering::Release);
     state.changed.notify_waiters();
     let report = join.await.unwrap();
@@ -280,7 +347,9 @@ async fn resource_journey(cx: Cx) {
 
 #[test]
 fn named_resources_drive_real_routes_and_worker_restarts_on_native_runtimes() {
-    for workers in [1, 2] { native(workers, resource_journey); }
+    for workers in [1, 2] {
+        native(workers, resource_journey);
+    }
 }
 
 #[test]
@@ -288,15 +357,25 @@ fn named_resources_reach_seeded_lab_quiescence_after_restart_and_held_drain() {
     for seed in [17, 41, 93] {
         let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(8192));
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async {
-            resource_journey(Cx::current().unwrap()).await;
-        }).unwrap();
+        let (task, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                resource_journey(Cx::current().unwrap()).await;
+            })
+            .unwrap();
         lab.scheduler.lock().schedule(task, 0);
         lab.run_with_auto_advance();
         let report = lab.run_until_quiescent_with_report();
-        assert!(matches!(join.try_join(), Ok(Some(()))), "seed={seed}: {report:?}");
+        assert!(
+            matches!(join.try_join(), Ok(Some(()))),
+            "seed={seed}: {report:?}"
+        );
         assert!(lab.state.tasks_is_empty());
-        assert!(lab.state.obligations_iter().all(|(_, obligation)| !obligation.is_pending()));
+        assert!(
+            lab.state
+                .obligations_iter()
+                .all(|(_, obligation)| !obligation.is_pending())
+        );
         assert!(report.lab_test_passed(), "seed={seed}: {report:?}");
     }
 }
@@ -316,9 +395,14 @@ fn simple_manifest() -> Value {
     manifest
 }
 
-fn counted_binding(requirements: Vec<Requirement>, calls: Arc<AtomicUsize>) -> ManagedAppBinding<()> {
+fn counted_binding(
+    requirements: Vec<Requirement>,
+    calls: Arc<AtomicUsize>,
+) -> ManagedAppBinding<()> {
     ManagedAppBinding::worker_with_resources(
-        "worker.actor.run", ManagedRestartMode::Temporary, requirements,
+        "worker.actor.run",
+        ManagedRestartMode::Temporary,
+        requirements,
         move |_: Cx, _: ManagedGeneration, _: ManagedAppResources| {
             calls.fetch_add(1, Ordering::AcqRel);
             async { Outcome::Ok(()) }
@@ -330,8 +414,13 @@ fn counted_binding(requirements: Vec<Requirement>, calls: Arc<AtomicUsize>) -> M
 fn resource_preflight_rejects_missing_duplicate_extra_wrong_type_and_wrong_gate_before_work() {
     for case in 0..10 {
         let mut manifest = simple_manifest();
-        if case == 8 { manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] = json!(["spawn"]); }
-        if case == 9 { manifest["resources"][0]["capability"] = json!("messaging"); }
+        if case == 8 {
+            manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+                json!(["spawn"]);
+        }
+        if case == 9 {
+            manifest["resources"][0]["capability"] = json!("messaging");
+        }
         let spec = parse(manifest);
         let declaration = spec.resources[0].clone();
         let mut resources = vec![ManagedAppResourceBinding::new(declaration.clone(), 7_u64)];
@@ -339,8 +428,16 @@ fn resource_preflight_rejects_missing_duplicate_extra_wrong_type_and_wrong_gate_
         match case {
             0 => resources.clear(),
             1 => resources.push(ManagedAppResourceBinding::new(declaration.clone(), 8_u64)),
-            2 => { let mut extra = declaration.clone(); extra.name = "extra".to_string(); resources.push(ManagedAppResourceBinding::new(extra, 8_u64)); }
-            3 => { let mut wrong = declaration.clone(); wrong.kind = asupersync::app::AppResourceKindV1::Database; resources = vec![ManagedAppResourceBinding::new(wrong, 7_u64)]; }
+            2 => {
+                let mut extra = declaration.clone();
+                extra.name = "extra".to_string();
+                resources.push(ManagedAppResourceBinding::new(extra, 8_u64));
+            }
+            3 => {
+                let mut wrong = declaration.clone();
+                wrong.kind = asupersync::app::AppResourceKindV1::Database;
+                resources = vec![ManagedAppResourceBinding::new(wrong, 7_u64)];
+            }
             4 => requirements = vec![Requirement::of::<u32>("state")],
             5 => requirements.clear(),
             6 => requirements.push(Requirement::of::<u64>("extra")),
@@ -348,8 +445,15 @@ fn resource_preflight_rejects_missing_duplicate_extra_wrong_type_and_wrong_gate_
             _ => {}
         }
         let calls = Arc::new(AtomicUsize::new(0));
-        let result = spec.bind_managed_with_resources(vec![counted_binding(requirements, Arc::clone(&calls))], resources, config());
-        let error = match result { Err(ManagedAppBindError::Resource(error)) => error, _ => panic!("case {case} did not refuse resource preflight") };
+        let result = spec.bind_managed_with_resources(
+            vec![counted_binding(requirements, Arc::clone(&calls))],
+            resources,
+            config(),
+        );
+        let error = match result {
+            Err(ManagedAppBindError::Resource(error)) => error,
+            _ => panic!("case {case} did not refuse resource preflight"),
+        };
         let correct = match case {
             0 => matches!(error, ManagedAppResourceError::MissingBinding(_)),
             1 => matches!(error, ManagedAppResourceError::DuplicateBinding(_)),
@@ -374,17 +478,35 @@ fn resource_handles_do_not_mint_missing_runtime_io_authority() {
         native(workers, |cx| async move {
             let mut manifest = simple_manifest();
             manifest["resources"][0] = resource("state", "file_system", "io");
-            manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] = json!(["io"]);
+            manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+                json!(["io"]);
             let spec = parse(manifest);
-            let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u64)];
+            let resources = vec![ManagedAppResourceBinding::new(
+                spec.resources[0].clone(),
+                7_u64,
+            )];
             let calls = Arc::new(AtomicUsize::new(0));
-            let app = spec.bind_managed_with_resources(
-                vec![counted_binding(vec![Requirement::of::<u64>("state")], Arc::clone(&calls))],
-                resources, config(),
-            ).unwrap();
-            let restriction = cx.restrict::<cap::CapSet<true, true, true, false, true>>().set_current_restricted();
+            let app = spec
+                .bind_managed_with_resources(
+                    vec![counted_binding(
+                        vec![Requirement::of::<u64>("state")],
+                        Arc::clone(&calls),
+                    )],
+                    resources,
+                    config(),
+                )
+                .unwrap();
+            let restriction = cx
+                .restrict::<cap::CapSet<true, true, true, false, true>>()
+                .set_current_restricted();
             let restricted = Cx::current().unwrap();
-            assert!(matches!(app.start(&restricted), Err(ManagedAppBindError::Capability { capability: asupersync::app::AppCxCapabilityV1::Io, .. })));
+            assert!(matches!(
+                app.start(&restricted),
+                Err(ManagedAppBindError::Capability {
+                    capability: asupersync::app::AppCxCapabilityV1::Io,
+                    ..
+                })
+            ));
             assert_eq!(calls.load(Ordering::Acquire), 0);
             drop(restriction);
         });
@@ -393,21 +515,33 @@ fn resource_handles_do_not_mint_missing_runtime_io_authority() {
 
 #[test]
 fn resource_feature_requirements_are_checked_before_any_factory_runs() {
-    for (feature, enabled) in [("sqlite", cfg!(feature = "sqlite")), ("postgres", cfg!(feature = "postgres"))] {
+    for (feature, enabled) in [
+        ("sqlite", cfg!(feature = "sqlite")),
+        ("postgres", cfg!(feature = "postgres")),
+    ] {
         let mut manifest = simple_manifest();
         manifest["resources"][0]["feature_flag"] = json!(feature);
         let spec = parse(manifest);
-        let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u64)];
+        let resources = vec![ManagedAppResourceBinding::new(
+            spec.resources[0].clone(),
+            7_u64,
+        )];
         let calls = Arc::new(AtomicUsize::new(0));
         let result = spec.bind_managed_with_resources(
-            vec![counted_binding(vec![Requirement::of::<u64>("state")], Arc::clone(&calls))],
+            vec![counted_binding(
+                vec![Requirement::of::<u64>("state")],
+                Arc::clone(&calls),
+            )],
             resources,
             config(),
         );
         if enabled {
             assert!(result.is_ok(), "enabled resource feature {feature}");
         } else {
-            assert!(matches!(result, Err(ManagedAppBindError::Feature { .. })), "disabled resource feature {feature}");
+            assert!(
+                matches!(result, Err(ManagedAppBindError::Feature { .. })),
+                "disabled resource feature {feature}"
+            );
         }
         assert_eq!(calls.load(Ordering::Acquire), 0);
     }
@@ -420,17 +554,52 @@ fn service_resource_union_is_explicit_and_legacy_accepted_shape_is_preserved() {
     manifest["services"][0]["actors"][0]["required_capabilities"] = json!({
         "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
     });
-    let plain = || ManagedAppBinding::<()>::worker("worker.actor.run", ManagedRestartMode::Temporary, |_: Cx, _| async { Outcome::Ok(()) });
-    assert!(parse(manifest.clone()).bind_managed(vec![plain()], config()).is_ok());
-    manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] = json!(["trace"]);
+    let plain = || {
+        ManagedAppBinding::<()>::worker(
+            "worker.actor.run",
+            ManagedRestartMode::Temporary,
+            |_: Cx, _| async { Outcome::Ok(()) },
+        )
+    };
+    assert!(
+        parse(manifest.clone())
+            .bind_managed(vec![plain()], config())
+            .is_ok()
+    );
+    manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+        json!(["trace"]);
     let spec = parse(manifest.clone());
-    let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u64)];
-    assert!(matches!(spec.bind_managed_with_resources(vec![plain()], resources, config()), Err(ManagedAppBindError::Resource(ManagedAppResourceError::MissingRequirement { .. }))));
-    manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] = json!(["spawn"]);
+    let resources = vec![ManagedAppResourceBinding::new(
+        spec.resources[0].clone(),
+        7_u64,
+    )];
+    assert!(matches!(
+        spec.bind_managed_with_resources(vec![plain()], resources, config()),
+        Err(ManagedAppBindError::Resource(
+            ManagedAppResourceError::MissingRequirement { .. }
+        ))
+    ));
+    manifest["services"][0]["actors"][0]["required_capabilities"]["cx_capabilities"] =
+        json!(["spawn"]);
     let spec = parse(manifest);
-    let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u64)];
+    let resources = vec![ManagedAppResourceBinding::new(
+        spec.resources[0].clone(),
+        7_u64,
+    )];
     let calls = Arc::new(AtomicUsize::new(0));
-    assert!(matches!(spec.bind_managed_with_resources(vec![counted_binding(vec![Requirement::of::<u64>("state")], Arc::clone(&calls))], resources, config()), Err(ManagedAppBindError::Resource(ManagedAppResourceError::MissingCapability { .. }))));
+    assert!(matches!(
+        spec.bind_managed_with_resources(
+            vec![counted_binding(
+                vec![Requirement::of::<u64>("state")],
+                Arc::clone(&calls)
+            )],
+            resources,
+            config()
+        ),
+        Err(ManagedAppBindError::Resource(
+            ManagedAppResourceError::MissingCapability { .. }
+        ))
+    ));
     assert_eq!(calls.load(Ordering::Acquire), 0);
 }
 
@@ -444,15 +613,23 @@ fn pure_work_refuses_service_inherited_handles_even_when_the_handle_claims_pure(
             "cx_capabilities": ["pure"], "feature_flags": [], "resources": []
         });
         let spec = parse(manifest);
-        let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), 7_u64)];
+        let resources = vec![ManagedAppResourceBinding::new(
+            spec.resources[0].clone(),
+            7_u64,
+        )];
         let calls = Arc::new(AtomicUsize::new(0));
         assert!(matches!(
             spec.bind_managed_with_resources(
-                vec![counted_binding(vec![Requirement::of::<u64>("state")], Arc::clone(&calls))],
+                vec![counted_binding(
+                    vec![Requirement::of::<u64>("state")],
+                    Arc::clone(&calls)
+                )],
                 resources,
                 config(),
             ),
-            Err(ManagedAppBindError::Resource(ManagedAppResourceError::PureWorkHasResources(_)))
+            Err(ManagedAppBindError::Resource(
+                ManagedAppResourceError::PureWorkHasResources(_)
+            ))
         ));
         assert_eq!(calls.load(Ordering::Acquire), 0);
     }
@@ -471,7 +648,10 @@ fn resource_aware_signal_jobs_keep_bounded_serial_delivery() {
             }]);
             let spec = parse(manifest);
             let state = Arc::new(AtomicUsize::new(0));
-            let resources = vec![ManagedAppResourceBinding::new(spec.resources[0].clone(), Arc::clone(&state))];
+            let resources = vec![ManagedAppResourceBinding::new(
+                spec.resources[0].clone(),
+                Arc::clone(&state),
+            )];
             let entered = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&entered);
             let release = Arc::new(AtomicBool::new(false));
@@ -479,34 +659,52 @@ fn resource_aware_signal_jobs_keep_bounded_serial_delivery() {
             let changed = Arc::new(Notify::new());
             let event = Arc::clone(&changed);
             let (sender, receiver) = mpsc::channel(2);
-            let app = spec.bind_managed_with_resources(vec![
-                ManagedAppBinding::<()>::signal_worker_with_resources(
-                    "worker.job.flush", "flush", receiver, ManagedRestartMode::Temporary,
-                    vec![Requirement::of::<Arc<AtomicUsize>>("state")],
-                    move |cx: Cx, _: ManagedGeneration, resources: ManagedAppResources| {
-                        let entered = Arc::clone(&observed);
-                        let release = Arc::clone(&released);
-                        let changed = Arc::clone(&event);
-                        async move {
-                            assert_no_ambient_effects(&cx);
-                            assert_eq!(resources.names().collect::<Vec<_>>(), ["state"]);
-                            let state = resources.get::<Arc<AtomicUsize>>("state").unwrap();
-                            let index = entered.fetch_add(1, Ordering::AcqRel);
-                            assert_eq!(state.load(Ordering::Acquire), index, "invocations overlap");
-                            changed.notify_waiters();
-                            if index == 0 { changed.wait_until(|| release.load(Ordering::Acquire)).await; }
-                            state.fetch_add(1, Ordering::AcqRel);
-                            Outcome::Ok(())
-                        }
-                    },
+            let app = spec
+                .bind_managed_with_resources(
+                    vec![ManagedAppBinding::<()>::signal_worker_with_resources(
+                        "worker.job.flush",
+                        "flush",
+                        receiver,
+                        ManagedRestartMode::Temporary,
+                        vec![Requirement::of::<Arc<AtomicUsize>>("state")],
+                        move |cx: Cx, _: ManagedGeneration, resources: ManagedAppResources| {
+                            let entered = Arc::clone(&observed);
+                            let release = Arc::clone(&released);
+                            let changed = Arc::clone(&event);
+                            async move {
+                                assert_no_ambient_effects(&cx);
+                                assert_eq!(resources.names().collect::<Vec<_>>(), ["state"]);
+                                let state = resources.get::<Arc<AtomicUsize>>("state").unwrap();
+                                let index = entered.fetch_add(1, Ordering::AcqRel);
+                                assert_eq!(
+                                    state.load(Ordering::Acquire),
+                                    index,
+                                    "invocations overlap"
+                                );
+                                changed.notify_waiters();
+                                if index == 0 {
+                                    changed.wait_until(|| release.load(Ordering::Acquire)).await;
+                                }
+                                state.fetch_add(1, Ordering::AcqRel);
+                                Outcome::Ok(())
+                            }
+                        },
+                    )],
+                    resources,
+                    config(),
                 )
-            ], resources, config()).unwrap();
+                .unwrap();
             let mut app = app.start(&cx).unwrap();
             assert!(sender.send(&cx, ()).await.is_ok());
-            changed.wait_until(|| entered.load(Ordering::Acquire) == 1).await;
+            changed
+                .wait_until(|| entered.load(Ordering::Acquire) == 1)
+                .await;
             assert!(sender.try_send(()).is_ok());
             assert!(sender.try_send(()).is_ok());
-            assert!(matches!(sender.try_send(()), Err(mpsc::SendError::Full(()))));
+            assert!(matches!(
+                sender.try_send(()),
+                Err(mpsc::SendError::Full(()))
+            ));
             release.store(true, Ordering::Release);
             changed.notify_waiters();
             drop(sender);

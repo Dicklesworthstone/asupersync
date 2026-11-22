@@ -50,9 +50,7 @@ impl<R: AsyncRead> StreamChunkReader<R> {
                         // Register and then recheck the request to close the
                         // checkpoint/register race. A masked observed request
                         // neither aborts the wait nor starts a self-wake loop.
-                        if cancellation.as_mut().poll(task).is_ready()
-                            && cx.checkpoint().is_err()
-                        {
+                        if cancellation.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
                             return Poll::Ready(Err(cancelled()));
                         }
                         Poll::Pending

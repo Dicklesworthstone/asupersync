@@ -20,10 +20,13 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(45))
+    let result = receive
+        .recv_timeout(Duration::from_secs(45))
         .expect("native drained blocking scenario must terminate");
     worker.join().unwrap();
-    if let Err(payload) = result { std::panic::resume_unwind(payload); }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 fn runtime(workers: usize) -> Runtime {
@@ -49,7 +52,10 @@ fn drained(runtime: &Runtime) {
 fn assert_owned_timeout(runtime: &Runtime) {
     let report = runtime.shutdown_drained(Duration::from_millis(20));
     assert_eq!(report.outcome, RootDrainOutcome::TimedOut, "{report:?}");
-    assert!(report.live_tasks > 0, "unfinished pool work must retain a real task: {report:?}");
+    assert!(
+        report.live_tasks > 0,
+        "unfinished pool work must retain a real task: {report:?}"
+    );
 }
 
 #[test]
@@ -60,12 +66,15 @@ fn running_work_retains_root_and_preserves_typed_cancellation() {
             let (started, mut start) = oneshot::channel();
             let (release, wait_release) = mpsc::channel();
             let handle = runtime.handle();
-            let mut task = handle.spawn_blocking_drained(move |cx| {
-                started.send_blocking(cx.clone()).unwrap();
-                wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
-                cx.checkpoint().expect_err("root close reaches the actual blocking context");
-                Err::<usize, _>(cx.cancel_reason().unwrap().kind)
-            }).unwrap();
+            let mut task = handle
+                .spawn_blocking_drained(move |cx| {
+                    started.send_blocking(cx.clone()).unwrap();
+                    wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
+                    cx.checkpoint()
+                        .expect_err("root close reaches the actual blocking context");
+                    Err::<usize, _>(cx.cancel_reason().unwrap().kind)
+                })
+                .unwrap();
             drop(handle);
             let actual_cx = runtime.block_on(async {
                 let cx = Cx::current().unwrap();
@@ -76,23 +85,36 @@ fn running_work_retains_root_and_preserves_typed_cancellation() {
             runtime.block_on(async {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while inspector.inspect_task(task.task_id()).unwrap().poll_count == 0 {
-                    assert!(Instant::now() < deadline, "controller must reach its Pending wait");
+                    assert!(
+                        Instant::now() < deadline,
+                        "controller must reach its Pending wait"
+                    );
                     yield_now().await;
                 }
             });
             assert_owned_timeout(&runtime);
-            assert_eq!(actual_cx.cancel_reason().unwrap().kind, CancelKind::Shutdown);
+            assert_eq!(
+                actual_cx.cancel_reason().unwrap().kind,
+                CancelKind::Shutdown
+            );
             assert!(!task.is_finished());
             let before = inspector.inspect_task(task.task_id()).unwrap().poll_count;
             assert_owned_timeout(&runtime);
             let after = inspector.inspect_task(task.task_id()).unwrap().poll_count;
-            assert!(after.saturating_sub(before) <= 8,
-                "acknowledged cancellation must park instead of self-repolling: {before} -> {after}");
+            assert!(
+                after.saturating_sub(before) <= 8,
+                "acknowledged cancellation must park instead of self-repolling: {before} -> {after}"
+            );
             release.send(()).unwrap();
             drained(&runtime);
             assert!(task.is_finished());
-            assert_eq!(futures_lite::future::block_on(task.join()).unwrap(), Err(CancelKind::Shutdown));
-            println!("drained_blocking workers={workers} phase=running polls={before}->{after} result=typed_shutdown root=quiescent");
+            assert_eq!(
+                futures_lite::future::block_on(task.join()).unwrap(),
+                Err(CancelKind::Shutdown)
+            );
+            println!(
+                "drained_blocking workers={workers} phase=running polls={before}->{after} result=typed_shutdown root=quiescent"
+            );
         }
     });
 }
@@ -125,12 +147,25 @@ impl Drop for ThreadOfDrop {
     }
 }
 
-fn parked_drop() -> (ParkedDrop, mpsc::Receiver<()>, mpsc::Sender<()>, Arc<AtomicUsize>) {
+fn parked_drop() -> (
+    ParkedDrop,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+    Arc<AtomicUsize>,
+) {
     let (entered, wait_entered) = mpsc::channel();
     let (release, wait_release) = mpsc::channel();
     let dropped = Arc::new(AtomicUsize::new(0));
-    (ParkedDrop { entered: Some(entered), release: wait_release, dropped: Arc::clone(&dropped) },
-     wait_entered, release, dropped)
+    (
+        ParkedDrop {
+            entered: Some(entered),
+            release: wait_release,
+            dropped: Arc::clone(&dropped),
+        },
+        wait_entered,
+        release,
+        dropped,
+    )
 }
 
 #[test]
@@ -141,30 +176,43 @@ fn queued_cancellation_waits_for_capture_destruction_even_after_handle_drop() {
                 let runtime = runtime(workers);
                 let (occupied, wait_occupied) = mpsc::channel();
                 let (release_pool, pool_gate) = mpsc::channel();
-                let occupying = runtime.spawn_blocking(move || {
-                    occupied.send(()).unwrap();
-                    pool_gate.recv_timeout(Duration::from_secs(10)).unwrap();
-                }).unwrap();
+                let occupying = runtime
+                    .spawn_blocking(move || {
+                        occupied.send(()).unwrap();
+                        pool_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                    })
+                    .unwrap();
                 wait_occupied.recv_timeout(Duration::from_secs(5)).unwrap();
                 let (capture, dropping, release_drop, dropped) = parked_drop();
                 let calls = Arc::new(AtomicUsize::new(0));
                 let called = Arc::clone(&calls);
-                let mut task = Some(runtime.spawn_blocking_drained(move |_cx| {
-                    called.fetch_add(1, Ordering::SeqCst);
-                    drop(capture);
-                    99_u8
-                }).unwrap());
+                let mut task = Some(
+                    runtime
+                        .spawn_blocking_drained(move |_cx| {
+                            called.fetch_add(1, Ordering::SeqCst);
+                            drop(capture);
+                            99_u8
+                        })
+                        .unwrap(),
+                );
                 let pool = runtime.blocking_handle().unwrap();
                 runtime.block_on(async {
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while pool.pending_count() == 0 {
-                        assert!(Instant::now() < deadline, "second job must reach the actual pool queue");
+                        assert!(
+                            Instant::now() < deadline,
+                            "second job must reach the actual pool queue"
+                        );
                         yield_now().await;
                     }
                 });
                 assert_eq!(pool.pending_count(), 1);
-                task.as_ref().unwrap().abort_with_reason(CancelReason::user("queued cancellation"));
-                if abandon { drop(task.take()); }
+                task.as_ref()
+                    .unwrap()
+                    .abort_with_reason(CancelReason::user("queued cancellation"));
+                if abandon {
+                    drop(task.take());
+                }
                 assert_owned_timeout(&runtime);
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
@@ -181,7 +229,9 @@ fn queued_cancellation_waits_for_capture_destruction_even_after_handle_drop() {
                 // The controller must await our blocked capture destructor.
                 assert_owned_timeout(&runtime);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
-                if let Some(task) = &task { assert!(!task.is_finished()); }
+                if let Some(task) = &task {
+                    assert!(!task.is_finished());
+                }
                 release_drop.send(()).unwrap();
                 drained(&runtime);
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -191,7 +241,9 @@ fn queued_cancellation_waits_for_capture_destruction_even_after_handle_drop() {
                     assert!(matches!(futures_lite::future::block_on(task.join()),
                         Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
                 }
-                println!("drained_blocking workers={workers} abandon={abandon} phase=queued calls=0 capture_drops=1 root=quiescent");
+                println!(
+                    "drained_blocking workers={workers} abandon={abandon} phase=queued calls=0 capture_drops=1 root=quiescent"
+                );
             }
         }
     });
@@ -205,11 +257,13 @@ fn abandoned_return_value_retires_before_root_closes() {
             let (started, mut start) = oneshot::channel();
             let (release_work, work_gate) = mpsc::channel();
             let (result, dropping, release_drop, dropped) = parked_drop();
-            let task = runtime.spawn_blocking_drained(move |_cx| {
-                started.send_blocking(()).unwrap();
-                work_gate.recv_timeout(Duration::from_secs(10)).unwrap();
-                result
-            }).unwrap();
+            let task = runtime
+                .spawn_blocking_drained(move |_cx| {
+                    started.send_blocking(()).unwrap();
+                    work_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                    result
+                })
+                .unwrap();
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 start.recv(&cx).await.unwrap();
@@ -223,7 +277,9 @@ fn abandoned_return_value_retires_before_root_closes() {
             release_drop.send(()).unwrap();
             drained(&runtime);
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
-            println!("drained_blocking workers={workers} phase=abandoned_result result_drops=1 root=quiescent");
+            println!(
+                "drained_blocking workers={workers} phase=abandoned_result result_drops=1 root=quiescent"
+            );
         }
     });
 }
@@ -319,12 +375,18 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
         let capture = ThreadOfDrop(Arc::clone(&destroyed_on));
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
-            let mut task = cx.spawn_blocking_drained(move |_| {
-                let _capture = &capture;
-                called.fetch_add(1, Ordering::SeqCst);
-            }).unwrap();
+            let mut task = cx
+                .spawn_blocking_drained(move |_| {
+                    let _capture = &capture;
+                    called.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap();
             task.abort();
-            assert_eq!(calls.load(Ordering::SeqCst), 0, "abort precedes first admission poll");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "abort precedes first admission poll"
+            );
             assert!(matches!(task.join().await,
                 Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User));
         });
@@ -344,11 +406,15 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
             .blocking_threads(0, 0)
             .build()
             .unwrap();
-        assert!(matches!(runtime.spawn_blocking_drained(|_| ()),
-            Err(asupersync::runtime::SpawnError::RuntimeUnavailable)));
+        assert!(matches!(
+            runtime.spawn_blocking_drained(|_| ()),
+            Err(asupersync::runtime::SpawnError::RuntimeUnavailable)
+        ));
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-        assert!(matches!(cx.spawn_blocking_drained(|_| ()),
-            Err(asupersync::runtime::SpawnError::RuntimeUnavailable)));
+        assert!(matches!(
+            cx.spawn_blocking_drained(|_| ()),
+            Err(asupersync::runtime::SpawnError::RuntimeUnavailable)
+        ));
         drained(&runtime);
     });
 }
@@ -569,24 +635,31 @@ fn cancellable_drained_join_precancel_and_dropped_wait_fence_queued_closures() {
                 let runtime = runtime(workers);
                 let (occupied, wait_occupied) = mpsc::channel();
                 let (release_pool, pool_gate) = mpsc::channel();
-                let occupying = runtime.spawn_blocking(move || {
-                    occupied.send(()).unwrap();
-                    pool_gate.recv_timeout(Duration::from_secs(10)).unwrap();
-                }).unwrap();
+                let occupying = runtime
+                    .spawn_blocking(move || {
+                        occupied.send(()).unwrap();
+                        pool_gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                    })
+                    .unwrap();
                 wait_occupied.recv_timeout(Duration::from_secs(5)).unwrap();
                 let (capture, dropping, release_drop, dropped) = parked_drop();
                 let calls = Arc::new(AtomicUsize::new(0));
                 let called = Arc::clone(&calls);
-                let mut blocking = runtime.spawn_blocking_drained(move |_| {
-                    called.fetch_add(1, Ordering::SeqCst);
-                    drop(capture);
-                    17_u8
-                }).unwrap();
+                let mut blocking = runtime
+                    .spawn_blocking_drained(move |_| {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        drop(capture);
+                        17_u8
+                    })
+                    .unwrap();
                 let pool = runtime.blocking_handle().unwrap();
                 runtime.block_on(async {
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while pool.pending_count() == 0 {
-                        assert!(Instant::now() < deadline, "closure reaches the occupied pool queue");
+                        assert!(
+                            Instant::now() < deadline,
+                            "closure reaches the occupied pool queue"
+                        );
                         yield_now().await;
                     }
                     let observer = Cx::detached_cancel_context();
@@ -595,21 +668,27 @@ fn cancellable_drained_join_precancel_and_dropped_wait_fence_queued_closures() {
                         poll_fn(|task| {
                             assert!(waiting.as_mut().poll(task).is_pending());
                             Poll::Ready(())
-                        }).await;
+                        })
+                        .await;
                         drop(waiting);
                     } else {
                         let reason = CancelReason::user("precancelled blocking observer");
                         observer.cancel_with_reason(reason.clone());
-                        assert_eq!(blocking.join_cancellable(&observer).await,
-                            Err(JoinError::Cancelled(reason)));
+                        assert_eq!(
+                            blocking.join_cancellable(&observer).await,
+                            Err(JoinError::Cancelled(reason))
+                        );
                     }
                 });
                 assert!(!blocking.is_finished());
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 release_pool.send(()).unwrap();
                 dropping.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert_eq!(calls.load(Ordering::SeqCst), 0,
-                    "a cancelled wait closes the claim gate before the pool is released");
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "a cancelled wait closes the claim gate before the pool is released"
+                );
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
                 assert_owned_timeout(&runtime);
                 release_drop.send(()).unwrap();
@@ -618,7 +697,9 @@ fn cancellable_drained_join_precancel_and_dropped_wait_fence_queued_closures() {
                 assert_eq!(dropped.load(Ordering::SeqCst), 1);
                 assert!(matches!(futures_lite::future::block_on(blocking.join()),
                     Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
-                println!("drained_cancellable_join workers={workers} drop_wait={drop_wait} phase=queued calls=0 capture_drops=1 root=quiescent");
+                println!(
+                    "drained_cancellable_join workers={workers} drop_wait={drop_wait} phase=queued calls=0 capture_drops=1 root=quiescent"
+                );
             }
         }
     });
@@ -633,15 +714,24 @@ fn cancellable_drained_join_ready_result_precedes_caller_cancellation() {
                 let mut blocking = runtime.spawn_blocking_drained(|cx| (73_u8, cx)).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while !blocking.is_finished() {
-                    assert!(Instant::now() < deadline, "the operation retires before cancellation");
+                    assert!(
+                        Instant::now() < deadline,
+                        "the operation retires before cancellation"
+                    );
                     yield_now().await;
                 }
                 let observer = Cx::detached_cancel_context();
                 observer.cancel_with_reason(CancelReason::shutdown());
                 let (value, returned_cx) = blocking.join_cancellable(&observer).await.unwrap();
                 assert_eq!(value, 73);
-                assert!(!returned_cx.is_cancel_requested(), "ready producer is not aborted");
-                assert!(matches!(blocking.join().await, Err(JoinError::PolledAfterCompletion)));
+                assert!(
+                    !returned_cx.is_cancel_requested(),
+                    "ready producer is not aborted"
+                );
+                assert!(matches!(
+                    blocking.join().await,
+                    Err(JoinError::PolledAfterCompletion)
+                ));
             });
             drained(&runtime);
         }

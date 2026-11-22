@@ -698,8 +698,10 @@ async fn explicit_streaming_call(
             let (mut sink, response) = client
                 .client_streaming_with_cx::<Bytes, Bytes>(owner, PATH)
                 .await?;
-            sink.send(Bytes::from_static(FIRST_STREAMING_REQUEST)).await?;
-            sink.send(Bytes::from_static(SECOND_STREAMING_REQUEST)).await?;
+            sink.send(Bytes::from_static(FIRST_STREAMING_REQUEST))
+                .await?;
+            sink.send(Bytes::from_static(SECOND_STREAMING_REQUEST))
+                .await?;
             sink.close().await?;
             observe_parked_response(response, parked).await
         }
@@ -707,8 +709,10 @@ async fn explicit_streaming_call(
             let (mut sink, response) = client
                 .bidi_streaming_with_cx::<Bytes, Bytes>(owner, PATH)
                 .await?;
-            sink.send(Bytes::from_static(FIRST_STREAMING_REQUEST)).await?;
-            sink.send(Bytes::from_static(SECOND_STREAMING_REQUEST)).await?;
+            sink.send(Bytes::from_static(FIRST_STREAMING_REQUEST))
+                .await?;
+            sink.send(Bytes::from_static(SECOND_STREAMING_REQUEST))
+                .await?;
             sink.close().await?;
             finish_explicit_response_stream(response, parked).await
         }
@@ -722,7 +726,10 @@ fn assert_streaming_request(observed: &Observation, shape: StreamingShape) {
         ("x-explicit-owner", "present"),
     ] {
         assert!(
-            observed.headers.iter().any(|h| h.name == name && h.value == value),
+            observed
+                .headers
+                .iter()
+                .any(|h| h.name == name && h.value == value),
             "missing expected native streaming request header {name}"
         );
     }
@@ -739,7 +746,10 @@ fn assert_streaming_request(observed: &Observation, shape: StreamingShape) {
         let length =
             usize::try_from(u32::from_be_bytes(remaining[1..5].try_into().unwrap())).unwrap();
         assert_eq!(length, payload.len());
-        assert!(remaining.len() >= 5 + length, "complete gRPC message payload");
+        assert!(
+            remaining.len() >= 5 + length,
+            "complete gRPC message payload"
+        );
         assert_eq!(&remaining[5..5 + length], *payload);
         remaining = &remaining[5 + length..];
     }

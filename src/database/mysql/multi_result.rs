@@ -41,25 +41,39 @@ impl MySqlMultiResultLimits {
                 "multi-result limits must all be positive".to_string(),
             ));
         }
-        Ok(Self { max_result_sets, max_rows, max_bytes })
+        Ok(Self {
+            max_result_sets,
+            max_rows,
+            max_bytes,
+        })
     }
 
     /// Maximum number of row sets and command statuses combined.
     #[must_use]
-    pub const fn max_result_sets(self) -> usize { self.max_result_sets }
+    pub const fn max_result_sets(self) -> usize {
+        self.max_result_sets
+    }
 
     /// Maximum number of rows across all result sets.
     #[must_use]
-    pub const fn max_rows(self) -> usize { self.max_rows }
+    pub const fn max_rows(self) -> usize {
+        self.max_rows
+    }
 
     /// Maximum wire bytes and decoded-storage charge, independently.
     #[must_use]
-    pub const fn max_bytes(self) -> usize { self.max_bytes }
+    pub const fn max_bytes(self) -> usize {
+        self.max_bytes
+    }
 }
 
 impl Default for MySqlMultiResultLimits {
     fn default() -> Self {
-        Self { max_result_sets: 64, max_rows: 100_000, max_bytes: 16 * 1024 * 1024 }
+        Self {
+            max_result_sets: 64,
+            max_rows: 100_000,
+            max_bytes: 16 * 1024 * 1024,
+        }
     }
 }
 
@@ -92,20 +106,30 @@ impl MySqlMultiResultStreamConfig {
                     .to_string(),
             ));
         }
-        Ok(Self { max_packet_bytes, max_metadata_bytes, max_row_bytes })
+        Ok(Self {
+            max_packet_bytes,
+            max_metadata_bytes,
+            max_row_bytes,
+        })
     }
 
     /// Maximum bytes in one packet, including its fragment headers.
     #[must_use]
-    pub const fn max_packet_bytes(self) -> usize { self.max_packet_bytes }
+    pub const fn max_packet_bytes(self) -> usize {
+        self.max_packet_bytes
+    }
 
     /// Maximum metadata accounting charge for the current result set.
     #[must_use]
-    pub const fn max_metadata_bytes(self) -> usize { self.max_metadata_bytes }
+    pub const fn max_metadata_bytes(self) -> usize {
+        self.max_metadata_bytes
+    }
 
     /// Maximum decoded-storage accounting charge for one row.
     #[must_use]
-    pub const fn max_row_bytes(self) -> usize { self.max_row_bytes }
+    pub const fn max_row_bytes(self) -> usize {
+        self.max_row_bytes
+    }
 }
 
 impl Default for MySqlMultiResultStreamConfig {
@@ -129,11 +153,15 @@ pub struct MySqlResultSetMetadata {
 impl MySqlResultSetMetadata {
     /// Zero-based position among row sets and command statuses combined.
     #[must_use]
-    pub const fn index(&self) -> usize { self.index }
+    pub const fn index(&self) -> usize {
+        self.index
+    }
 
     /// Columns shared with subsequent rows until this result completes.
     #[must_use]
-    pub fn columns(&self) -> &[MySqlColumn] { &self.columns }
+    pub fn columns(&self) -> &[MySqlColumn] {
+        &self.columns
+    }
 
     /// Whether the metadata marks prepared CALL OUT/INOUT parameters.
     #[must_use]
@@ -155,19 +183,27 @@ pub struct MySqlResultSetCompletion {
 impl MySqlResultSetCompletion {
     /// Zero-based position among row sets and command statuses combined.
     #[must_use]
-    pub const fn index(self) -> usize { self.index }
+    pub const fn index(self) -> usize {
+        self.index
+    }
 
     /// Number of rows emitted for this result set.
     #[must_use]
-    pub const fn row_count(self) -> usize { self.row_count }
+    pub const fn row_count(self) -> usize {
+        self.row_count
+    }
 
     /// Affected rows and generated key for an OK-only result.
     #[must_use]
-    pub const fn command_result(self) -> Option<MySqlExecResult> { self.command_result }
+    pub const fn command_result(self) -> Option<MySqlExecResult> {
+        self.command_result
+    }
 
     /// Flags from the row terminator or command OK, without metadata merging.
     #[must_use]
-    pub const fn status_flags(self) -> u16 { self.status_flags }
+    pub const fn status_flags(self) -> u16 {
+        self.status_flags
+    }
 
     /// Whether this result contains prepared CALL OUT/INOUT parameters.
     #[must_use]
@@ -243,18 +279,24 @@ impl MySqlMultiResultStream<'_> {
             // Packet buffers belong to the abandoned future. Never interpret
             // the remaining payload as a new packet header on a later call.
             self.connection.connection.inner.closed = true;
-            let result = self.connection.finish_exchange(
-                cx, Outcome::Err(MySqlError::ConnectionClosed),
-            ).await;
+            let result = self
+                .connection
+                .finish_exchange(cx, Outcome::Err(MySqlError::ConnectionClosed))
+                .await;
             self.finished = true;
             self.read_in_progress = false;
             return result;
         }
         self.read_in_progress = true;
-        let result = self.connection.read_result_event(cx, &mut self.reader).await;
+        let result = self
+            .connection
+            .read_result_event(cx, &mut self.reader)
+            .await;
         let terminal = result.is_err() || self.reader.is_finished();
         let result = if terminal {
-            self.connection.finish_exchange(cx, result_outcome(result)).await
+            self.connection
+                .finish_exchange(cx, result_outcome(result))
+                .await
         } else {
             result_outcome(result)
         };
@@ -307,7 +349,8 @@ impl MySqlMultiResultStream<'_> {
                     Outcome::Panicked(payload) => return Some(Outcome::Panicked(payload)),
                 }
             }
-        }).await;
+        })
+        .await;
         match drained {
             Ok(Some(result)) => result,
             Ok(None) | Err(_) => {
@@ -335,7 +378,10 @@ impl MySqlMultiResultStream<'_> {
         self.read_in_progress = true;
         self.connection.connection.inner.closed = true;
         self.connection.connection.wire_cancel_in_drain(cx).await;
-        self.connection.connection.inner.query_in_flight
+        self.connection
+            .connection
+            .inner
+            .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
         self.finished = true;
         self.read_in_progress = false;
@@ -366,23 +412,33 @@ pub struct MySqlResultSet {
 impl MySqlResultSet {
     /// Column metadata, also present when a SELECT returned no rows.
     #[must_use]
-    pub fn columns(&self) -> &[MySqlColumn] { &self.columns }
+    pub fn columns(&self) -> &[MySqlColumn] {
+        &self.columns
+    }
 
     /// Rows in this result set, in server order.
     #[must_use]
-    pub fn rows(&self) -> &[MySqlRow] { &self.rows }
+    pub fn rows(&self) -> &[MySqlRow] {
+        &self.rows
+    }
 
     /// Take ownership of this result set's rows.
     #[must_use]
-    pub fn into_rows(self) -> Vec<MySqlRow> { self.rows }
+    pub fn into_rows(self) -> Vec<MySqlRow> {
+        self.rows
+    }
 
     /// Affected rows and generated key for an OK-only result.
     #[must_use]
-    pub const fn command_result(&self) -> Option<MySqlExecResult> { self.command_result }
+    pub const fn command_result(&self) -> Option<MySqlExecResult> {
+        self.command_result
+    }
 
     /// Status flags from the final row terminator or command OK packet.
     #[must_use]
-    pub const fn status_flags(&self) -> u16 { self.status_flags }
+    pub const fn status_flags(&self) -> u16 {
+        self.status_flags
+    }
 
     /// Whether this set contains prepared CALL OUT/INOUT parameters.
     #[must_use]
@@ -635,7 +691,8 @@ impl MySqlMultiResultConnection {
                     != MULTI_RESULT_CAPABILITIES
                 {
                     return Outcome::Err(MySqlError::Protocol(
-                        "server did not negotiate text and prepared multi-result support".to_string(),
+                        "server did not negotiate text and prepared multi-result support"
+                            .to_string(),
                     ));
                 }
                 Outcome::Ok(Self { connection, limits })
@@ -656,11 +713,15 @@ impl MySqlMultiResultConnection {
 
     /// Whether this session has closed or become unusable after an abandoned exchange.
     #[must_use]
-    pub fn is_closed(&self) -> bool { self.connection.inner.closed }
+    pub fn is_closed(&self) -> bool {
+        self.connection.inner.closed
+    }
 
     /// The limits applied independently to each query.
     #[must_use]
-    pub const fn limits(&self) -> MySqlMultiResultLimits { self.limits }
+    pub const fn limits(&self) -> MySqlMultiResultLimits {
+        self.limits
+    }
 
     /// Prepare a statement using this session's existing bounded statement cache.
     pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
@@ -749,10 +810,17 @@ impl MySqlMultiResultConnection {
         if let Err(error) = self.connection.reset_pooled_session(cx).await {
             return outcome_from_error(error);
         }
-        if let Err(error) = self.connection.forget_prepared_statements_before(cx, sql).await {
+        if let Err(error) = self
+            .connection
+            .forget_prepared_statements_before(cx, sql)
+            .await
+        {
             return outcome_from_error(error);
         }
-        self.connection.inner.query_in_flight.store(true, std::sync::atomic::Ordering::Release);
+        self.connection
+            .inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
         let setup = if MySqlConnection::is_session_control_statement(sql) {
             Outcome::Ok(())
         } else {
@@ -761,8 +829,12 @@ impl MySqlMultiResultConnection {
         match setup {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return self.finish_exchange(cx, Outcome::Err(error)).await,
-            Outcome::Cancelled(reason) => return self.finish_exchange(cx, Outcome::Cancelled(reason)).await,
-            Outcome::Panicked(payload) => return self.finish_exchange(cx, Outcome::Panicked(payload)).await,
+            Outcome::Cancelled(reason) => {
+                return self.finish_exchange(cx, Outcome::Cancelled(reason)).await;
+            }
+            Outcome::Panicked(payload) => {
+                return self.finish_exchange(cx, Outcome::Panicked(payload)).await;
+            }
         }
         let mut budget = ResultBudget::new(self.limits);
         match self.start_text(cx, sql, &mut budget, config).await {
@@ -827,7 +899,10 @@ impl MySqlMultiResultConnection {
         params: &[&dyn ToSql],
         config: MySqlMultiResultStreamConfig,
     ) -> Outcome<MySqlMultiResultStream<'a>, MySqlError> {
-        match self.begin_prepared(cx, statement, params, Some(config)).await {
+        match self
+            .begin_prepared(cx, statement, params, Some(config))
+            .await
+        {
             Outcome::Ok(reader) => Outcome::Ok(MySqlMultiResultStream {
                 connection: self,
                 reader,
@@ -855,13 +930,17 @@ impl MySqlMultiResultConnection {
         if let Err(error) = self.connection.reset_pooled_session(cx).await {
             return outcome_from_error(error);
         }
-        self.connection.inner.query_in_flight.store(true, std::sync::atomic::Ordering::Release);
+        self.connection
+            .inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
         let mut budget = ResultBudget::new(self.limits);
         let allowance = budget.packet_allowance(config);
         let mut remaining = allowance;
-        let started = self.connection.start_prepared_query_with_budget(
-            cx, statement, params, 0, Some(&mut remaining),
-        ).await;
+        let started = self
+            .connection
+            .start_prepared_query_with_budget(cx, statement, params, 0, Some(&mut remaining))
+            .await;
         budget.wire_bytes -= allowance - remaining;
         match started {
             Outcome::Ok(first) => match self.check_response_packet(first) {
@@ -903,7 +982,8 @@ impl MySqlMultiResultConnection {
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
-        self.query_stream_prepared(cx, &statement, params, config).await
+        self.query_stream_prepared(cx, &statement, params, config)
+            .await
     }
 
     /// Prepare and execute a parameterized statement, including `CALL proc(?)`.
@@ -937,7 +1017,10 @@ impl MySqlMultiResultConnection {
             // KILL ownership until bounded cleanup closes the transport.
             self.connection.wire_cancel_in_drain(cx).await;
         }
-        self.connection.inner.query_in_flight.store(false, std::sync::atomic::Ordering::Release);
+        self.connection
+            .inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
@@ -952,8 +1035,10 @@ impl MySqlMultiResultConnection {
         // an aggregate cap without changing ordinary connection behavior.
         let allowance = budget.packet_allowance(config);
         let mut remaining = allowance;
-        let packet = self.connection
-            .read_packet_with_budget(Some(cx), Some(&mut remaining)).await;
+        let packet = self
+            .connection
+            .read_packet_with_budget(Some(cx), Some(&mut remaining))
+            .await;
         budget.wire_bytes -= allowance - remaining;
         let (data, sequence) = packet?;
         self.connection.inner.sequence = sequence.wrapping_add(1);
@@ -962,7 +1047,9 @@ impl MySqlMultiResultConnection {
 
     fn check_response_packet(&mut self, data: Vec<u8>) -> Result<Vec<u8>, MySqlError> {
         if data.is_empty() {
-            return Err(MySqlError::InvalidPacket("empty multi-result packet".to_string()));
+            return Err(MySqlError::InvalidPacket(
+                "empty multi-result packet".to_string(),
+            ));
         }
         if data[0] == 0xff {
             let error = MySqlConnection::parse_error(&data);
@@ -993,9 +1080,9 @@ impl MySqlMultiResultConnection {
                     });
                 }
                 MySqlMultiResultEvent::Row(row) => {
-                    let result = current.as_mut().ok_or_else(|| MySqlError::Protocol(
-                        "multi-result row without metadata".to_string(),
-                    ))?;
+                    let result = current.as_mut().ok_or_else(|| {
+                        MySqlError::Protocol("multi-result row without metadata".to_string())
+                    })?;
                     result.rows.push(row);
                 }
                 MySqlMultiResultEvent::Complete(completion) => {
@@ -1029,37 +1116,55 @@ impl MySqlMultiResultConnection {
         match state {
             ResponseState::Header(first) => {
                 if reader.results_started >= self.limits.max_result_sets {
-                    return Err(MySqlError::Protocol("multi-result result-set limit exceeded".to_string()));
+                    return Err(MySqlError::Protocol(
+                        "multi-result result-set limit exceeded".to_string(),
+                    ));
                 }
                 let first = match first {
                     Some(first) => first,
-                    None => self.read_response_packet(cx, &mut reader.budget, reader.config).await?,
+                    None => {
+                        self.read_response_packet(cx, &mut reader.budget, reader.config)
+                            .await?
+                    }
                 };
                 // Preserve the collector's aggregate bookkeeping charge even
                 // when a stream immediately releases each completed result.
-                reader.budget.charge_storage(4 * std::mem::size_of::<MySqlResultSet>() + 64)?;
+                reader
+                    .budget
+                    .charge_storage(4 * std::mem::size_of::<MySqlResultSet>() + 64)?;
                 let index = reader.results_started;
                 reader.results_started += 1;
                 if first.first() == Some(&0x00) {
                     let ok = MySqlConnection::parse_ok_packet(&first)?;
-                    return self.complete_result(cx, reader, MySqlResultSetCompletion {
-                        index,
-                        row_count: 0,
-                        command_result: Some(MySqlExecResult {
-                            affected_rows: ok.affected_rows,
-                            last_insert_id: ok.last_insert_id,
-                        }),
-                        metadata_status_flags: 0,
-                        status_flags: ok.status_flags,
-                    }).await.map(Some);
+                    return self
+                        .complete_result(
+                            cx,
+                            reader,
+                            MySqlResultSetCompletion {
+                                index,
+                                row_count: 0,
+                                command_result: Some(MySqlExecResult {
+                                    affected_rows: ok.affected_rows,
+                                    last_insert_id: ok.last_insert_id,
+                                }),
+                                metadata_status_flags: 0,
+                                status_flags: ok.status_flags,
+                            },
+                        )
+                        .await
+                        .map(Some);
                 }
                 if first.first() == Some(&0xfb) {
-                    return Err(MySqlError::Protocol("LOAD DATA LOCAL INFILE remains disabled".to_string()));
+                    return Err(MySqlError::Protocol(
+                        "LOAD DATA LOCAL INFILE remains disabled".to_string(),
+                    ));
                 }
                 let mut packet = PacketReader::new(&first);
                 let count = packet.read_lenenc_int()?;
                 if count == 0 || count > MAX_COLUMN_COUNT || packet.remaining() != 0 {
-                    return Err(MySqlError::InvalidPacket("invalid multi-result column count".to_string()));
+                    return Err(MySqlError::InvalidPacket(
+                        "invalid multi-result column count".to_string(),
+                    ));
                 }
                 let count = count as usize;
                 let mut metadata_bytes = 0;
@@ -1070,7 +1175,9 @@ impl MySqlMultiResultConnection {
                 let mut columns = Vec::with_capacity(count);
                 let mut indices = BTreeMap::new();
                 for column_index in 0..count {
-                    let data = self.read_response_packet(cx, &mut reader.budget, reader.config).await?;
+                    let data = self
+                        .read_response_packet(cx, &mut reader.budget, reader.config)
+                        .await?;
                     reader.charge_metadata(&mut metadata_bytes, data.len().saturating_mul(2))?;
                     let column = MySqlConnection::parse_column_definition(&data)?;
                     indices.entry(column.name.clone()).or_insert(column_index);
@@ -1080,7 +1187,9 @@ impl MySqlMultiResultConnection {
                 let metadata_status_flags = if self.deprecate_eof() {
                     0
                 } else {
-                    let eof = self.read_response_packet(cx, &mut reader.budget, reader.config).await?;
+                    let eof = self
+                        .read_response_packet(cx, &mut reader.budget, reader.config)
+                        .await?;
                     MySqlConnection::parse_eof_packet_status_flags(&eof)?
                 };
                 reader.state = ResponseState::Rows(ActiveRows {
@@ -1090,16 +1199,24 @@ impl MySqlMultiResultConnection {
                     metadata_status_flags,
                     rows: 0,
                 });
-                Ok(Some(MySqlMultiResultEvent::Columns(MySqlResultSetMetadata {
-                    index,
-                    columns,
-                    status_flags: metadata_status_flags,
-                })))
+                Ok(Some(MySqlMultiResultEvent::Columns(
+                    MySqlResultSetMetadata {
+                        index,
+                        columns,
+                        status_flags: metadata_status_flags,
+                    },
+                )))
             }
             ResponseState::Rows(mut rows) => {
-                let data = self.read_response_packet(cx, &mut reader.budget, reader.config).await?;
+                let data = self
+                    .read_response_packet(cx, &mut reader.budget, reader.config)
+                    .await?;
                 let deprecate_eof = self.deprecate_eof();
-                let max_rows_per_result = self.connection.inner.max_result_rows.min(self.limits.max_rows);
+                let max_rows_per_result = self
+                    .connection
+                    .inner
+                    .max_result_rows
+                    .min(self.limits.max_rows);
                 let values = if MySqlConnection::is_eof_packet(&data) {
                     None
                 } else {
@@ -1109,16 +1226,29 @@ impl MySqlMultiResultConnection {
                         reader.check_row_count(rows.rows, max_rows_per_result)?;
                     }
                     if reader.binary {
-                        MySqlConnection::parse_binary_row_or_terminator(&data, &rows.columns, deprecate_eof)?
+                        MySqlConnection::parse_binary_row_or_terminator(
+                            &data,
+                            &rows.columns,
+                            deprecate_eof,
+                        )?
                     } else {
-                        MySqlConnection::parse_data_row_or_terminator(&data, &rows.columns, deprecate_eof)?
+                        MySqlConnection::parse_data_row_or_terminator(
+                            &data,
+                            &rows.columns,
+                            deprecate_eof,
+                        )?
                     }
                 };
                 if let Some(values) = values {
                     reader.check_row_count(rows.rows, max_rows_per_result)?;
                     let storage_bytes = ResultBudget::row_storage_bytes(&values);
-                    if reader.config.is_some_and(|config| storage_bytes > config.max_row_bytes) {
-                        return Err(MySqlError::Protocol("multi-result stream row byte limit exceeded".to_string()));
+                    if reader
+                        .config
+                        .is_some_and(|config| storage_bytes > config.max_row_bytes)
+                    {
+                        return Err(MySqlError::Protocol(
+                            "multi-result stream row byte limit exceeded".to_string(),
+                        ));
                     }
                     reader.budget.charge_storage(storage_bytes)?;
                     reader.budget.rows -= 1;
@@ -1131,14 +1261,21 @@ impl MySqlMultiResultConnection {
                     reader.state = ResponseState::Rows(rows);
                     Ok(Some(MySqlMultiResultEvent::Row(row)))
                 } else {
-                    let status_flags = MySqlConnection::parse_result_set_terminator_status_flags(&data)?;
-                    self.complete_result(cx, reader, MySqlResultSetCompletion {
-                        index: rows.index,
-                        row_count: rows.rows,
-                        command_result: None,
-                        metadata_status_flags: rows.metadata_status_flags,
-                        status_flags,
-                    }).await.map(Some)
+                    let status_flags =
+                        MySqlConnection::parse_result_set_terminator_status_flags(&data)?;
+                    self.complete_result(
+                        cx,
+                        reader,
+                        MySqlResultSetCompletion {
+                            index: rows.index,
+                            row_count: rows.rows,
+                            command_result: None,
+                            metadata_status_flags: rows.metadata_status_flags,
+                            status_flags,
+                        },
+                    )
+                    .await
+                    .map(Some)
                 }
             }
             ResponseState::Finished => Ok(None),
@@ -1154,14 +1291,18 @@ impl MySqlMultiResultConnection {
         self.connection.inner.status_flags = completion.status_flags;
         if completion.has_more_results() {
             if reader.results_started >= self.limits.max_result_sets {
-                return Err(MySqlError::Protocol("multi-result result-set limit exceeded".to_string()));
+                return Err(MySqlError::Protocol(
+                    "multi-result result-set limit exceeded".to_string(),
+                ));
             }
             reader.state = ResponseState::Header(None);
         } else {
             reader.state = ResponseState::Finished;
             self.connection.inner.closed = false;
             if let Some(statement_id) = reader.statement_id {
-                self.connection.forget_prepared_statements_after(cx, statement_id).await?;
+                self.connection
+                    .forget_prepared_statements_after(cx, statement_id)
+                    .await?;
             }
         }
         Ok(MySqlMultiResultEvent::Complete(completion))
@@ -1202,8 +1343,13 @@ impl ResponseReader {
 
     fn charge_metadata(&mut self, current: &mut usize, bytes: usize) -> Result<(), MySqlError> {
         let total = current.saturating_add(bytes);
-        if self.config.is_some_and(|config| total > config.max_metadata_bytes) {
-            return Err(MySqlError::Protocol("multi-result stream metadata byte limit exceeded".to_string()));
+        if self
+            .config
+            .is_some_and(|config| total > config.max_metadata_bytes)
+        {
+            return Err(MySqlError::Protocol(
+                "multi-result stream metadata byte limit exceeded".to_string(),
+            ));
         }
         self.budget.charge_storage(bytes)?;
         *current = total;
@@ -1212,10 +1358,14 @@ impl ResponseReader {
 
     fn check_row_count(&self, rows: usize, per_result_limit: usize) -> Result<(), MySqlError> {
         if self.budget.rows == 0 {
-            return Err(MySqlError::Protocol("multi-result aggregate row limit exceeded".to_string()));
+            return Err(MySqlError::Protocol(
+                "multi-result aggregate row limit exceeded".to_string(),
+            ));
         }
         if rows >= per_result_limit {
-            return Err(MySqlError::Protocol("multi-result per-result row limit exceeded".to_string()));
+            return Err(MySqlError::Protocol(
+                "multi-result per-result row limit exceeded".to_string(),
+            ));
         }
         Ok(())
     }
@@ -1229,11 +1379,17 @@ struct ResultBudget {
 
 impl ResultBudget {
     fn new(limits: MySqlMultiResultLimits) -> Self {
-        Self { wire_bytes: limits.max_bytes, storage_bytes: limits.max_bytes, rows: limits.max_rows }
+        Self {
+            wire_bytes: limits.max_bytes,
+            storage_bytes: limits.max_bytes,
+            rows: limits.max_rows,
+        }
     }
 
     fn packet_allowance(&self, config: Option<MySqlMultiResultStreamConfig>) -> usize {
-        config.map_or(self.wire_bytes, |config| self.wire_bytes.min(config.max_packet_bytes))
+        config.map_or(self.wire_bytes, |config| {
+            self.wire_bytes.min(config.max_packet_bytes)
+        })
     }
 
     fn charge_storage(&mut self, bytes: usize) -> Result<(), MySqlError> {
@@ -1247,7 +1403,9 @@ impl ResultBudget {
         // Binary temporal values and unsigned BIGINTs can expand into text
         // longer than their wire representation. Charge retained capacities,
         // including the value Vec, rather than assuming payload size bounds it.
-        let values_bytes = values.capacity().saturating_mul(std::mem::size_of::<MySqlValue>());
+        let values_bytes = values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<MySqlValue>());
         let heap_bytes = values.iter().fold(0_usize, |bytes, value| {
             bytes.saturating_add(match value {
                 MySqlValue::Text(text) => text.capacity(),
@@ -1255,15 +1413,19 @@ impl ResultBudget {
                 _ => 0,
             })
         });
-        values_bytes.saturating_add(heap_bytes)
+        values_bytes
+            .saturating_add(heap_bytes)
             .saturating_add(4 * std::mem::size_of::<MySqlRow>())
     }
 }
 
 fn check_context(cx: &Cx) -> Result<(), MySqlError> {
-    cx.checkpoint().map_err(|_| MySqlError::Cancelled(
-        cx.cancel_reason().unwrap_or_else(|| CancelReason::user("multi-result query cancelled")),
-    ))
+    cx.checkpoint().map_err(|_| {
+        MySqlError::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("multi-result query cancelled")),
+        )
+    })
 }
 
 fn result_outcome<T>(result: Result<T, MySqlError>) -> Outcome<T, MySqlError> {

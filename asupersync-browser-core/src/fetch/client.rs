@@ -54,23 +54,35 @@ impl FetchBytesClient {
     /// Create one shared admission domain. Zero capacity is a deliberate deny.
     #[must_use]
     pub fn new(limits: FetchBytesLimits, max_in_flight: usize) -> Self {
-        Self { state: Rc::new(ClientState { limits, maximum: max_in_flight, in_flight: Cell::new(0) }) }
+        Self {
+            state: Rc::new(ClientState {
+                limits,
+                maximum: max_in_flight,
+                in_flight: Cell::new(0),
+            }),
+        }
     }
 
     /// Currently admitted calls, including operations still being destroyed.
     #[must_use]
-    pub fn in_flight(&self) -> usize { self.state.in_flight.get() }
+    pub fn in_flight(&self) -> usize {
+        self.state.in_flight.get()
+    }
 
     /// Configured maximum admitted calls across every clone of this client.
     #[must_use]
-    pub fn capacity(&self) -> usize { self.state.maximum }
+    pub fn capacity(&self) -> usize {
+        self.state.maximum
+    }
 
     /// Maximum logical response bytes across admitted calls, or `None` when
     /// that product is not representable. This excludes host/allocator buffers,
     /// caller request storage and bodies handed to callers after completion.
     #[must_use]
     pub fn max_in_flight_response_bytes(&self) -> Option<usize> {
-        self.state.maximum.checked_mul(self.state.limits.max_response_bytes)
+        self.state
+            .maximum
+            .checked_mul(self.state.limits.max_response_bytes)
     }
 
     /// Create a lazy fetch. Admission occurs on first poll, not construction.
@@ -78,10 +90,17 @@ impl FetchBytesClient {
     /// A full client returns [`FetchBytesError::InFlightLimit`] before allocating
     /// a canonical fetch handle or starting host I/O. Retry policy is explicit
     /// at the caller; polling a completed refusal again is not a retry.
-    pub fn fetch(&self, request: WasmFetchRequest, consumer_version: Option<WasmAbiVersion>) -> ClientFetch {
+    pub fn fetch(
+        &self,
+        request: WasmFetchRequest,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> ClientFetch {
         ClientFetch {
-            state: Rc::clone(&self.state), request: Some(request), consumer_version,
-            active: None, finished: false,
+            state: Rc::clone(&self.state),
+            request: Some(request),
+            consumer_version,
+            active: None,
+            finished: false,
         }
     }
 }
@@ -91,7 +110,9 @@ impl Credit {
     fn acquire(state: &Rc<ClientState>) -> Result<Self, FetchBytesError> {
         let current = state.in_flight.get();
         if current >= state.maximum {
-            return Err(FetchBytesError::InFlightLimit { limit: state.maximum });
+            return Err(FetchBytesError::InFlightLimit {
+                limit: state.maximum,
+            });
         }
         // current < maximum <= usize::MAX, so increment cannot overflow.
         state.in_flight.set(current + 1);
@@ -100,7 +121,11 @@ impl Credit {
 }
 impl Drop for Credit {
     fn drop(&mut self) {
-        let next = self.0.in_flight.get().checked_sub(1)
+        let next = self
+            .0
+            .in_flight
+            .get()
+            .checked_sub(1)
             .expect("an admitted fetch owns exactly one client credit");
         self.0.in_flight.set(next);
     }
@@ -148,13 +173,26 @@ impl Future for ClientFetch {
                     return Poll::Ready(Err(error));
                 }
             };
-            let request = this.request.take().expect("unpolled fetch owns its request");
+            let request = this
+                .request
+                .take()
+                .expect("unpolled fetch owns its request");
             this.active = Some(ActiveFetch {
-                future: Box::pin(fetch_bytes(request, this.state.limits, this.consumer_version)),
+                future: Box::pin(fetch_bytes(
+                    request,
+                    this.state.limits,
+                    this.consumer_version,
+                )),
                 _credit: credit,
             });
         }
-        let result = this.active.as_mut().expect("admission owns an active future").future.as_mut().poll(cx);
+        let result = this
+            .active
+            .as_mut()
+            .expect("admission owns an active future")
+            .future
+            .as_mut()
+            .poll(cx);
         if result.is_ready() {
             // Commit terminal state before destruction can reenter or panic.
             this.finished = true;

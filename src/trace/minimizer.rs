@@ -14,9 +14,9 @@
 //! | Scenario-construction dependent (obligation leak, region structure) | `minimizer` |
 
 use crate::record::ObligationKind;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeMap;
 use std::fmt;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// br-asupersync-qu7yet — Pluggable wall-clock for the minimizer.

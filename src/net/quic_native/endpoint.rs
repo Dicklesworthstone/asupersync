@@ -23,11 +23,11 @@ use crate::net::{
     UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram,
     UdpSendBatchStrategy, UdpSocket, UdpSocketCapabilities,
 };
+use crate::sync::atomic::{AtomicU64, Ordering};
 use smallvec::SmallVec;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 

@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
-use futures_lite::future::block_on;
 use crate::sync::atomic::{AtomicU64, Ordering};
+use futures_lite::future::block_on;
 
 fn unique_path(label: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -49,7 +49,10 @@ fn extending_verified_output_requires_new_verification() {
     block_on(writer.verify(&cx, &manifest)).unwrap();
 
     writer.set_expected_size(9).unwrap();
-    assert_eq!(writer.get_stats().verification_state, VerificationState::Pending);
+    assert_eq!(
+        writer.get_stats().verification_state,
+        VerificationState::Pending
+    );
     block_on(writer.write_chunk(&cx, 8, b"!", WriteOptions::default())).unwrap();
     assert!(writer.is_complete());
     assert!(matches!(
@@ -96,7 +99,10 @@ fn committed_writer_cannot_recreate_staging_or_republish() {
         block_on(writer.write_chunk(&cx, 0, b"evil", WriteOptions::default())),
         Outcome::Err(_)
     ));
-    assert!(matches!(block_on(writer.verify(&cx, &manifest)), Outcome::Err(_)));
+    assert!(matches!(
+        block_on(writer.verify(&cx, &manifest)),
+        Outcome::Err(_)
+    ));
     assert!(matches!(block_on(writer.cancel(&cx)), Outcome::Err(_)));
     assert_eq!(block_on(writer.commit(&cx)).unwrap(), destination);
     let state = writer.lock_state();
@@ -104,7 +110,10 @@ fn committed_writer_cannot_recreate_staging_or_republish() {
     assert!(state.temp_file.is_none());
     assert!(state.temp_path.is_none());
     drop(state);
-    assert_eq!(writer.get_stats().total_bytes_written, before.total_bytes_written);
+    assert_eq!(
+        writer.get_stats().total_bytes_written,
+        before.total_bytes_written
+    );
     assert_eq!(std::fs::read(destination).unwrap(), b"data");
 }
 
@@ -120,7 +129,10 @@ fn cancellation_is_idempotent_and_cannot_resurrect_output() {
         block_on(writer.write_chunk(&cx, 0, b"evil", WriteOptions::default())),
         Outcome::Err(_)
     ));
-    assert!(matches!(block_on(writer.verify(&cx, &manifest)), Outcome::Err(_)));
+    assert!(matches!(
+        block_on(writer.verify(&cx, &manifest)),
+        Outcome::Err(_)
+    ));
     assert!(matches!(block_on(writer.commit(&cx)), Outcome::Err(_)));
     let state = writer.lock_state();
     assert_eq!(state.lifecycle, WriterLifecycle::Cancelled);
@@ -146,7 +158,10 @@ fn failed_publication_keeps_evidence_and_refuses_blind_retry() {
         block_on(writer.write_chunk(&cx, 0, b"evil", WriteOptions::default())),
         Outcome::Err(_)
     ));
-    assert!(matches!(block_on(writer.verify(&cx, &manifest)), Outcome::Err(_)));
+    assert!(matches!(
+        block_on(writer.verify(&cx, &manifest)),
+        Outcome::Err(_)
+    ));
     assert!(matches!(block_on(writer.cancel(&cx)), Outcome::Err(_)));
     assert!(matches!(block_on(writer.commit(&cx)), Outcome::Err(_)));
     assert_eq!(std::fs::read(staging).unwrap(), b"data");

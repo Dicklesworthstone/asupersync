@@ -306,13 +306,14 @@ mod tests {
         }
     }
 
-    fn register(
-        driver: &IoDriverHandle,
-        source: &UnixStream,
-    ) -> (IoRegistration, Arc<Counter>) {
+    fn register(driver: &IoDriverHandle, source: &UnixStream) -> (IoRegistration, Arc<Counter>) {
         let counter = Arc::new(Counter::default());
         let registration = driver
-            .register(source, Interest::READABLE, Waker::from(Arc::clone(&counter)))
+            .register(
+                source,
+                Interest::READABLE,
+                Waker::from(Arc::clone(&counter)),
+            )
             .expect("register source");
         (registration, counter)
     }
@@ -329,7 +330,10 @@ mod tests {
         assert_ne!(a.token(), b.token());
         reactor.set_ready(a.token(), Interest::READABLE).unwrap();
         reactor.set_ready(b.token(), Interest::READABLE).unwrap();
-        assert_eq!(second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 2);
+        assert_eq!(
+            second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            2
+        );
         assert_eq!(count_a.0.load(Ordering::SeqCst), 1);
         assert_eq!(count_b.0.load(Ordering::SeqCst), 1);
         assert_eq!(first.stats().unknown_tokens, 0);
@@ -358,11 +362,26 @@ mod tests {
         assert_eq!(second.lock().events.capacity(), 17);
         first.is_polling.store(true, Ordering::Release);
         let held_poll = first._shared_owner.poll_gate.lock();
-        assert_eq!(cloned.try_turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), None);
-        assert_eq!(second.try_turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), Some(0));
+        assert_eq!(
+            cloned
+                .try_turn_with(Some(Duration::ZERO), |_, _| {})
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            second
+                .try_turn_with(Some(Duration::ZERO), |_, _| {})
+                .unwrap(),
+            Some(0)
+        );
         drop(held_poll);
         first.is_polling.store(false, Ordering::Release);
-        assert_eq!(second.try_turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), Some(0));
+        assert_eq!(
+            second
+                .try_turn_with(Some(Duration::ZERO), |_, _| {})
+                .unwrap(),
+            Some(0)
+        );
     }
 
     #[test]
@@ -374,7 +393,11 @@ mod tests {
         let (source, _peer) = UnixStream::pair().unwrap();
         let (ra, _) = register(&a, &source);
         let (rb, _) = register(&b, &source);
-        assert_eq!(ra.token(), rb.token(), "fresh independent reactors retain deterministic tokens");
+        assert_eq!(
+            ra.token(),
+            rb.token(),
+            "fresh independent reactors retain deterministic tokens"
+        );
     }
 
     #[test]
@@ -394,7 +417,9 @@ mod tests {
         assert_ne!(old_token, fresh.token());
         drop(old); // Its obsolete Weak must not deregister the new incarnation.
         assert_eq!(reactor.registration_count(), 1);
-        reactor.set_ready(fresh.token(), Interest::READABLE).unwrap();
+        reactor
+            .set_ready(fresh.token(), Interest::READABLE)
+            .unwrap();
         second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
         assert_eq!(
             old_count.0.load(Ordering::SeqCst),
@@ -413,16 +438,28 @@ mod tests {
         let (old, old_count) = register(&first, &old_source);
         let token = old.token();
         for _ in 0..2 {
-            reactor.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
+            reactor
+                .fail_next(
+                    ReactorOperation::Deregister,
+                    Some(token),
+                    io::ErrorKind::Other,
+                )
+                .unwrap();
         }
         drop(first);
         assert_eq!(old_count.0.load(Ordering::SeqCst), 1);
-        assert_eq!(reactor.registration_count(), 1, "injected cleanup failure retained the old backend token");
+        assert_eq!(
+            reactor.registration_count(),
+            1,
+            "injected cleanup failure retained the old backend token"
+        );
         let second = IoDriverHandle::new(reactor.clone());
         let (fresh, fresh_count) = register(&second, &source);
         assert_ne!(fresh.token(), token);
         reactor.set_ready(token, Interest::READABLE).unwrap();
-        reactor.set_ready(fresh.token(), Interest::READABLE).unwrap();
+        reactor
+            .set_ready(fresh.token(), Interest::READABLE)
+            .unwrap();
         second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
         assert_eq!(
             old_count.0.load(Ordering::SeqCst),
@@ -534,13 +571,23 @@ mod tests {
         // Whichever detached waker runs first panics. Every later distinct
         // waiter must still be notified before that panic is propagated.
         let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(driver)));
-        assert!(retired.is_err(), "retirement must preserve the callback panic");
+        assert!(
+            retired.is_err(),
+            "retirement must preserve the callback panic"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(backend.registration_count(), 0);
         assert!(weak.upgrade().is_none());
-        assert!(registrations.iter().all(|registration| !registration.is_active()));
+        assert!(
+            registrations
+                .iter()
+                .all(|registration| !registration.is_active())
+        );
         let next = IoDriverHandle::new(backend.clone());
-        assert!(next.is_empty(), "a wake panic must not strand the namespace");
+        assert!(
+            next.is_empty(),
+            "a wake panic must not strand the namespace"
+        );
         drop(registrations);
         assert_eq!(backend.registration_count(), 0);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -575,7 +622,10 @@ mod tests {
                 IoDriverHandle::new(reactor)
             }));
         }
-        let handles: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        let handles: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
         for handle in &handles[1..] {
             assert!(Arc::ptr_eq(&handles[0].inner, &handle.inner));
             assert!(Arc::ptr_eq(
@@ -643,10 +693,12 @@ mod tests {
             panic_next: AtomicBool::new(false),
         });
         let driver = IoDriverHandle::new(backend.clone());
-        assert!(backend
-            .slot
-            .set(Arc::downgrade(&driver._shared_owner.slot))
-            .is_ok());
+        assert!(
+            backend
+                .slot
+                .set(Arc::downgrade(&driver._shared_owner.slot))
+                .is_ok()
+        );
         (backend, driver)
     }
 
@@ -667,7 +719,10 @@ mod tests {
             assert!(!backend.published_early.load(Ordering::SeqCst));
             assert_eq!(backend.registration_count(), 0);
             let next = IoDriverHandle::new(backend.clone());
-            assert!(next.is_empty(), "a caught backend panic must not strand construction");
+            assert!(
+                next.is_empty(),
+                "a caught backend panic must not strand construction"
+            );
             drop(a);
             drop(b);
         }
@@ -762,7 +817,9 @@ mod tests {
         let old = old_registration.lock().take();
         drop(old);
         assert_eq!(backend.registration_count(), 1);
-        backend.set_ready(fresh.token(), Interest::READABLE).unwrap();
+        backend
+            .set_ready(fresh.token(), Interest::READABLE)
+            .unwrap();
         assert_eq!(next.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         drop(fresh);
@@ -806,7 +863,10 @@ mod tests {
             .unwrap();
         let token = old.token();
         drop(driver);
-        let next = replacement.lock().take().expect("reentrant constructor completed");
+        let next = replacement
+            .lock()
+            .take()
+            .expect("reentrant constructor completed");
         assert_eq!(backend.registration_count(), 0);
         let (fresh, _) = register(&next, &source);
         assert_ne!(fresh.token(), token);
@@ -848,7 +908,11 @@ mod tests {
         owner
             .turn_with(Some(Duration::from_secs(30)), |_, _| {})
             .unwrap();
-        assert_eq!(backend.now(), before, "the owner's wake must keep its turn nonblocking");
+        assert_eq!(
+            backend.now(),
+            before,
+            "the owner's wake must keep its turn nonblocking"
+        );
         owner
             .turn_with(Some(Duration::from_secs(1)), |_, _| {})
             .unwrap();
@@ -924,11 +988,7 @@ mod tests {
                                     registration.rearm(Interest::READABLE, task_cx.waker())
                                 }
                                 None => driver
-                                    .register(
-                                        &source,
-                                        Interest::READABLE,
-                                        task_cx.waker().clone(),
-                                    )
+                                    .register(&source, Interest::READABLE, task_cx.waker().clone())
                                     .map(|new| {
                                         registration = Some(new);
                                         true
@@ -936,7 +996,9 @@ mod tests {
                             };
                             match armed {
                                 Ok(true) => {}
-                                Ok(false) => return Poll::Ready(Err(io::ErrorKind::NotConnected.into())),
+                                Ok(false) => {
+                                    return Poll::Ready(Err(io::ErrorKind::NotConnected.into()));
+                                }
                                 Err(error) => return Poll::Ready(Err(error)),
                             }
                             if !parked_sent {
@@ -986,9 +1048,8 @@ mod tests {
                 workers.push(std::thread::spawn(move || {
                     let result = match builder.build() {
                         Ok(runtime) => {
-                            let result = runtime.block_on(receive_one(
-                                index, source, parked, timer, rescue,
-                            ));
+                            let result =
+                                runtime.block_on(receive_one(index, source, parked, timer, rescue));
                             // A's runtime is gone before B's byte is written.
                             drop(runtime);
                             result
@@ -1021,7 +1082,10 @@ mod tests {
             let first_parked = first_parked.expect("first runtime reached registered Pending");
             let second_parked = second_parked.expect("second runtime reached registered Pending");
             assert_ne!(first_parked.0, second_parked.0);
-            assert_ne!(first_parked.1, second_parked.1, "shared wire tokens must not collide");
+            assert_ne!(
+                first_parked.1, second_parked.1,
+                "shared wire tokens must not collide"
+            );
             timer.expect("B drives its own timer while A waits in the shared reactor");
             sent_a.unwrap();
             sent_b.unwrap();

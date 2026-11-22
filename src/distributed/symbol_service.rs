@@ -7,13 +7,13 @@
 //! admitted session, never an origin string supplied inside the request payload.
 
 mod batch;
-pub use batch::{
-    EncodedSymbolBatch, SymbolBatchKey, SymbolBatchLimits, SymbolStoreError,
-    decode_symbol_batch, encode_symbol_batch,
-};
 use crate::remote::NodeId;
 use crate::security::AuthKey;
 use crate::types::symbol::ObjectId;
+pub use batch::{
+    EncodedSymbolBatch, SymbolBatchKey, SymbolBatchLimits, SymbolStoreError, decode_symbol_batch,
+    encode_symbol_batch,
+};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -66,32 +66,51 @@ pub struct SymbolReplicaStore {
 
 impl fmt::Debug for SymbolReplicaStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SymbolReplicaStore").field("stats", &self.stats()).finish_non_exhaustive()
+        f.debug_struct("SymbolReplicaStore")
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
     }
 }
 
-fn valid_identity(value: &str) -> bool { !value.is_empty() && value.len() <= 255 }
+fn valid_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255
+}
 
 impl SymbolReplicaStore {
     /// Construct storage with explicit key and bounds. No ambient authority is acquired.
     pub fn new(
-        replica: impl Into<String>, auth_key: AuthKey,
-        batch_limits: SymbolBatchLimits, limits: SymbolStoreLimits,
+        replica: impl Into<String>,
+        auth_key: AuthKey,
+        batch_limits: SymbolBatchLimits,
+        limits: SymbolStoreLimits,
     ) -> Result<Self, SymbolStoreError> {
         let replica = replica.into();
-        if !valid_identity(&replica) { return Err(SymbolStoreError::InvalidIdentity); }
-        Ok(Self { replica, auth_key, batch_limits, limits, state: Mutex::new(State::default()) })
+        if !valid_identity(&replica) {
+            return Err(SymbolStoreError::InvalidIdentity);
+        }
+        Ok(Self {
+            replica,
+            auth_key,
+            batch_limits,
+            limits,
+            state: Mutex::new(State::default()),
+        })
     }
 
     /// Configured receiver identity used in its acknowledgements.
     #[must_use]
-    pub fn replica_id(&self) -> &str { &self.replica }
+    pub fn replica_id(&self) -> &str {
+        &self.replica
+    }
 
     /// Retained storage at this instant. Read handles share, rather than copy, bytes.
     #[must_use]
     pub fn stats(&self) -> SymbolStoreStats {
         let state = self.state.lock();
-        SymbolStoreStats { batches: state.entries.len(), bytes: state.bytes }
+        SymbolStoreStats {
+            batches: state.entries.len(),
+            bytes: state.bytes,
+        }
     }
 
     /// Verify and retain a complete batch in an already-authenticated origin namespace.
@@ -102,24 +121,50 @@ impl SymbolReplicaStore {
     /// both capacity checks are atomic; failed writes leave existing data intact.
     /// An allocation/verification buffer is per-call bounded, separately from the
     /// retained-storage ceilings. Dropping a failed call never removes old entries.
-    pub fn put(&self, peer: &NodeId, bytes: &[u8]) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
-        if !valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
+    pub fn put(
+        &self,
+        peer: &NodeId,
+        bytes: &[u8],
+    ) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+        if !valid_identity(peer.as_str()) {
+            return Err(SymbolStoreError::InvalidIdentity);
+        }
         let batch = batch::verified_bytes(bytes, &self.auth_key, self.batch_limits)?;
         let id = (peer.clone(), batch.key().object_id);
         let mut state = self.state.lock();
         if let Some(existing) = state.entries.get(&id) {
-            return if existing.as_ref().as_ref() == bytes { Ok(Arc::clone(existing)) }
-                else { Err(SymbolStoreError::Conflict) };
+            return if existing.as_ref().as_ref() == bytes {
+                Ok(Arc::clone(existing))
+            } else {
+                Err(SymbolStoreError::Conflict)
+            };
         }
-        if state.entries.len() >= self.limits.max_batches { return Err(SymbolStoreError::Limit("batches")); }
-        let total = state.bytes.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
-        if total > self.limits.max_bytes { return Err(SymbolStoreError::Limit("stored bytes")); }
-        let (peer_count, peer_bytes) = state.entries.iter()
+        if state.entries.len() >= self.limits.max_batches {
+            return Err(SymbolStoreError::Limit("batches"));
+        }
+        let total = state
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(SymbolStoreError::Overflow)?;
+        if total > self.limits.max_bytes {
+            return Err(SymbolStoreError::Limit("stored bytes"));
+        }
+        let (peer_count, peer_bytes) = state
+            .entries
+            .iter()
             .filter(|((origin, _), _)| origin == peer)
-            .fold((0usize, 0usize), |(count, size), (_, entry)| (count + 1, size + entry.as_ref().as_ref().len()));
-        if peer_count >= self.limits.max_batches_per_peer { return Err(SymbolStoreError::Limit("peer batches")); }
-        let peer_total = peer_bytes.checked_add(bytes.len()).ok_or(SymbolStoreError::Overflow)?;
-        if peer_total > self.limits.max_bytes_per_peer { return Err(SymbolStoreError::Limit("peer bytes")); }
+            .fold((0usize, 0usize), |(count, size), (_, entry)| {
+                (count + 1, size + entry.as_ref().as_ref().len())
+            });
+        if peer_count >= self.limits.max_batches_per_peer {
+            return Err(SymbolStoreError::Limit("peer batches"));
+        }
+        let peer_total = peer_bytes
+            .checked_add(bytes.len())
+            .ok_or(SymbolStoreError::Overflow)?;
+        if peer_total > self.limits.max_bytes_per_peer {
+            return Err(SymbolStoreError::Limit("peer bytes"));
+        }
         let batch = Arc::new(batch);
         state.entries.insert(id, Arc::clone(&batch));
         state.bytes = total;
@@ -128,27 +173,51 @@ impl SymbolReplicaStore {
 
     /// Read an exact batch only from its authenticated origin's namespace.
     /// Returned owners keep bytes alive without duplicating the store allocation.
-    pub fn get(&self, peer: &NodeId, key: SymbolBatchKey) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
-        if !valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
+    pub fn get(
+        &self,
+        peer: &NodeId,
+        key: SymbolBatchKey,
+    ) -> Result<Arc<EncodedSymbolBatch>, SymbolStoreError> {
+        if !valid_identity(peer.as_str()) {
+            return Err(SymbolStoreError::InvalidIdentity);
+        }
         let state = self.state.lock();
-        state.entries.get(&(peer.clone(), key.object_id))
+        state
+            .entries
+            .get(&(peer.clone(), key.object_id))
             .filter(|batch| batch.key() == key)
-            .map(Arc::clone).ok_or(SymbolStoreError::NotFound)
+            .map(Arc::clone)
+            .ok_or(SymbolStoreError::NotFound)
     }
 
     // One atomic metadata cut, restricted to an already authenticated origin.
     // The catalog adapter hashes outside this lock and never copies batch data.
-    pub(crate) fn catalog_entries(&self, peer: &NodeId, maximum: usize)
-        -> Result<Vec<(SymbolBatchKey, usize)>, SymbolStoreError>
-    {
-        if !valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
+    pub(crate) fn catalog_entries(
+        &self,
+        peer: &NodeId,
+        maximum: usize,
+    ) -> Result<Vec<(SymbolBatchKey, usize)>, SymbolStoreError> {
+        if !valid_identity(peer.as_str()) {
+            return Err(SymbolStoreError::InvalidIdentity);
+        }
         let state = self.state.lock();
-        let range = (peer.clone(), ObjectId::from_u128(0))..=(peer.clone(), ObjectId::from_u128(u128::MAX));
-        let count = state.entries.range(range.clone()).take(maximum.saturating_add(1)).count();
-        if count > maximum { return Err(SymbolStoreError::Limit("catalog entries")); }
+        let range =
+            (peer.clone(), ObjectId::from_u128(0))..=(peer.clone(), ObjectId::from_u128(u128::MAX));
+        let count = state
+            .entries
+            .range(range.clone())
+            .take(maximum.saturating_add(1))
+            .count();
+        if count > maximum {
+            return Err(SymbolStoreError::Limit("catalog entries"));
+        }
         let mut entries = Vec::new();
-        entries.try_reserve_exact(count).map_err(|_| SymbolStoreError::Allocation)?;
-        if entries.capacity() > maximum { return Err(SymbolStoreError::Limit("catalog capacity")); }
+        entries
+            .try_reserve_exact(count)
+            .map_err(|_| SymbolStoreError::Allocation)?;
+        if entries.capacity() > maximum {
+            return Err(SymbolStoreError::Limit("catalog capacity"));
+        }
         for (_, batch) in state.entries.range(range) {
             entries.push((batch.key(), batch.as_ref().as_ref().len()));
         }
@@ -160,12 +229,13 @@ impl SymbolReplicaStore {
 mod tests;
 
 mod service;
-pub use service::{
-    SYMBOL_SERVICE_COMPUTATION, register_symbol_service, register_symbol_service_with_admission,
-};
 pub use service::chunked::{
     ChunkedSymbolService, SYMBOL_CHUNKED_SERVICE_COMPUTATION, SymbolChunkedLimits,
-    SymbolStagingStats, register_chunked_symbol_service, register_chunked_symbol_service_with_admission,
+    SymbolStagingStats, register_chunked_symbol_service,
+    register_chunked_symbol_service_with_admission,
+};
+pub use service::{
+    SYMBOL_SERVICE_COMPUTATION, register_symbol_service, register_symbol_service_with_admission,
 };
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]

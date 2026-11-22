@@ -18,10 +18,9 @@ use asupersync::cli::output::OutputFormat;
 use asupersync::cli::{
     AtpArchiveAction, AtpArchiveArgs, AtpArchiveRetrieveArgs, AtpArchiveStoreArgs, AtpCiAction,
     AtpCiArgs, AtpCiPullArgs, AtpCiPushArgs, AtpDatasetAction, AtpDatasetArgs, AtpDatasetGetArgs,
-    AtpDatasetListArgs, AtpDatasetPinArgs, AtpDatasetSeedArgs, AtpDatasetUnpinArgs,
-    AtpFuzzAction, AtpFuzzArgs, AtpFuzzMinimizeArgs,
-    AtpFuzzSyncArgs, AtpReleaseAction, AtpReleaseArgs, AtpReleaseInstallArgs,
-    AtpReleasePublishArgs, AtpWorkflowCoordinator, CliError,
+    AtpDatasetListArgs, AtpDatasetPinArgs, AtpDatasetSeedArgs, AtpDatasetUnpinArgs, AtpFuzzAction,
+    AtpFuzzArgs, AtpFuzzMinimizeArgs, AtpFuzzSyncArgs, AtpReleaseAction, AtpReleaseArgs,
+    AtpReleaseInstallArgs, AtpReleasePublishArgs, AtpWorkflowCoordinator, CliError,
 };
 use asupersync::test_utils::run_test_with_cx;
 use std::fs;
@@ -50,13 +49,21 @@ fn write(path: &Path, bytes: &[u8]) {
 }
 
 fn error_type(result: Result<(), CliError>) -> String {
-    result.expect_err("expected the workflow to fail closed").error_type
+    result
+        .expect_err("expected the workflow to fail closed")
+        .error_type
 }
 
 fn file_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .expect("read directory")
-        .map(|entry| entry.expect("directory entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -398,7 +405,10 @@ fn coordinators_with_different_roots_share_nothing() {
         assert_eq!(
             error_type(
                 second
-                    .handle_dataset_command(&cx, get_args("isolated", other.path().join("out"), None))
+                    .handle_dataset_command(
+                        &cx,
+                        get_args("isolated", other.path().join("out"), None)
+                    )
                     .await
             ),
             "not_found"
@@ -417,12 +427,9 @@ fn capability_scoped_workflows() {
         let mut policy = TrustPolicy::local();
         policy.add_authorized_scope("ci:internal-only".to_string());
         policy.add_authorized_scope("research:public".to_string());
-        let mut coordinator = AtpWorkflowCoordinator::with_trust_policy(
-            OutputFormat::Json,
-            &state,
-            policy.clone(),
-        )
-        .expect("explicit scoped coordinator");
+        let mut coordinator =
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy.clone())
+                .expect("explicit scoped coordinator");
 
         coordinator
             .handle_ci_command(
@@ -594,8 +601,7 @@ fn explicit_workflow_policy_denies_ungranted_operations_before_source_reads() {
         let mut policy = TrustPolicy::local();
         policy.add_authorized_scope("team:allowed".to_string());
         let mut coordinator =
-            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
-                .unwrap();
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy).unwrap();
         let missing = dir.path().join("source-does-not-exist");
         let ci_error = coordinator
             .handle_ci_command(
@@ -633,7 +639,10 @@ fn explicit_workflow_policy_denies_ungranted_operations_before_source_reads() {
             )
             .await;
         assert_eq!(error_type(dataset_error), "trust_policy_error");
-        assert!(!state.exists(), "denial must precede every persistent write");
+        assert!(
+            !state.exists(),
+            "denial must precede every persistent write"
+        );
     });
 }
 
@@ -647,8 +656,7 @@ fn scoped_record_grants_survive_downgrade_and_sanitized_alias_attempts() {
         let mut policy = TrustPolicy::local();
         policy.add_authorized_scope("team:allowed".to_string());
         let mut owner =
-            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
-                .unwrap();
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy).unwrap();
         let ci_push = |build_id: &str, scope: Option<&str>| AtpCiArgs {
             action: AtpCiAction::Push(AtpCiPushArgs {
                 paths: vec![source.clone()],
@@ -786,8 +794,7 @@ fn explicit_policy_enforces_legacy_dataset_scope_and_seals_it_on_pin() {
         let mut policy = TrustPolicy::default();
         policy.add_authorized_scope("research:ml".to_string());
         let mut authorized =
-            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy)
-                .unwrap();
+            AtpWorkflowCoordinator::with_trust_policy(OutputFormat::Json, &state, policy).unwrap();
         authorized
             .handle_dataset_command(
                 &cx,
@@ -965,6 +972,9 @@ fn integrated_workflow_pipeline() {
             )
             .await
             .expect("pipeline archive retrieve");
-        assert_eq!(file_names(&out), ["pipeline-artifact", "pipeline-proof.atp"]);
+        assert_eq!(
+            file_names(&out),
+            ["pipeline-artifact", "pipeline-proof.atp"]
+        );
     });
 }

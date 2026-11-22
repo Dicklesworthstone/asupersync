@@ -1236,11 +1236,7 @@ fn serve_http2_binds_runs_and_serves_unary_request() {
 
         let server_fut = async move {
             match server_clone
-                .serve_http2(
-                    &serve_runtime,
-                    bind_addr_clone,
-                    HostPolicy::allow_all(),
-                )
+                .serve_http2(&serve_runtime, bind_addr_clone, HostPolicy::allow_all())
                 .await
             {
                 Ok(stats) => Ok(()),
@@ -1284,7 +1280,11 @@ fn serve_http2_binds_runs_and_serves_unary_request() {
                         break;
                     }
                     Err(_) => {
-                        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(20)).await;
+                        asupersync::time::sleep(
+                            asupersync::time::wall_now(),
+                            Duration::from_millis(20),
+                        )
+                        .await;
                     }
                 }
             }
@@ -1346,14 +1346,22 @@ impl ClientInterceptor for OwnedStreamInterceptor {
             request.metadata().get("x-client-id"),
             Some(MetadataValue::Ascii(value)) if value == "owned-stream-client"
         ));
-        assert!(request.metadata_mut().insert("x-intercepted", "owned-stream"));
+        assert!(
+            request
+                .metadata_mut()
+                .insert("x-intercepted", "owned-stream")
+        );
         Ok(())
     }
 }
 
 fn owned_stream_request<T>(message: T) -> Request<T> {
     let mut request = Request::new(message);
-    assert!(request.metadata_mut().insert("x-client-id", "owned-stream-client"));
+    assert!(
+        request
+            .metadata_mut()
+            .insert("x-client-id", "owned-stream-client")
+    );
     assert!(
         request
             .metadata_mut()
@@ -1461,7 +1469,10 @@ impl Streaming for OwnedResponseSource {
         let index = self.index;
         self.index += 1;
         Poll::Ready(match index {
-            0 | 1 => Some(Ok(Bytes::from(vec![0x31 + index; OWNED_STREAM_MESSAGE_BYTES]))),
+            0 | 1 => Some(Ok(Bytes::from(vec![
+                0x31 + index;
+                OWNED_STREAM_MESSAGE_BYTES
+            ]))),
             2 if self.fail => Some(Err(Status::with_details(
                 Code::ResourceExhausted,
                 "stream quota %\n café",
@@ -1577,7 +1588,10 @@ fn public_owned_server_streaming_round_trip(workers: usize, tls: bool) {
                 assert!(message.iter().all(|byte| *byte == marker));
             }
             if fail {
-                let status = stream.message().await.expect_err("error follows both messages");
+                let status = stream
+                    .message()
+                    .await
+                    .expect_err("error follows both messages");
                 assert_eq!(status.code(), Code::ResourceExhausted);
                 assert_eq!(status.message(), "stream quota %\n café");
                 assert_eq!(
@@ -1668,8 +1682,12 @@ impl OwnedDuplexMode {
 fn write_owned_h2_frames(socket: &mut std::net::TcpStream, connection: &mut Connection) {
     while let Some(frame) = connection.next_frame() {
         let mut encoded = BytesMut::new();
-        frame.encode(&mut encoded).expect("encode owned-stream peer frame");
-        socket.write_all(&encoded).expect("write owned-stream peer frame");
+        frame
+            .encode(&mut encoded)
+            .expect("encode owned-stream peer frame");
+        socket
+            .write_all(&encoded)
+            .expect("write owned-stream peer frame");
     }
 }
 
@@ -1708,7 +1726,10 @@ fn owned_duplex_peer(
             match listener.accept() {
                 Ok((socket, _)) => break socket,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < accept_deadline, "owned duplex accept watchdog");
+                    assert!(
+                        Instant::now() < accept_deadline,
+                        "owned duplex accept watchdog"
+                    );
                     std::thread::park_timeout(Duration::from_millis(1));
                 }
                 Err(error) => panic!("accept owned duplex connection: {error}"),
@@ -1723,7 +1744,9 @@ fn owned_duplex_peer(
         connection.queue_initial_settings();
         write_owned_h2_frames(&mut socket, &mut connection);
         let mut preface = [0; 24];
-        socket.read_exact(&mut preface).expect("owned duplex H2 preface");
+        socket
+            .read_exact(&mut preface)
+            .expect("owned duplex H2 preface");
         assert_eq!(&preface, CLIENT_PREFACE);
         let mut frames = FrameCodec::new();
         let mut inbound = BytesMut::new();
@@ -1809,7 +1832,8 @@ fn owned_duplex_peer(
                                         "zero request window forbids DATA"
                                     );
                                 }
-                                let read = socket.read(&mut bytes).expect("parked owned duplex EOF");
+                                let read =
+                                    socket.read(&mut bytes).expect("parked owned duplex EOF");
                                 if read == 0 {
                                     assert_eq!(advertised_stream_window, Some(32 * 1024));
                                     assert_eq!(
@@ -1833,10 +1857,12 @@ fn owned_duplex_peer(
                         while let Some(message) = grpc.decode(&mut request_body).unwrap() {
                             assert!(!message.compressed);
                             assert_eq!(message.data.len(), OWNED_STREAM_MESSAGE_BYTES);
-                            assert!(message
-                                .data
-                                .iter()
-                                .all(|byte| usize::from(*byte) == received_messages));
+                            assert!(
+                                message
+                                    .data
+                                    .iter()
+                                    .all(|byte| usize::from(*byte) == received_messages)
+                            );
                             received_messages += 1;
                             if mode == OwnedDuplexMode::Bidi {
                                 owned_duplex_reply(
@@ -1856,11 +1882,7 @@ fn owned_duplex_peer(
                                 // A real client-streaming service may wait for
                                 // half-close before sending even initial headers.
                                 owned_duplex_response_headers(&mut connection);
-                                owned_duplex_reply(
-                                    &mut connection,
-                                    &mut grpc,
-                                    b"upload-complete",
-                                );
+                                owned_duplex_reply(&mut connection, &mut grpc, b"upload-complete");
                             }
                             let failed = mode == OwnedDuplexMode::UploadError;
                             let mut trailers = vec![
@@ -1877,12 +1899,11 @@ fn owned_duplex_peer(
                             write_owned_h2_frames(&mut socket, &mut connection);
                             // Keep TCP alive until the call owner consumes its
                             // trailers and closes; unread controls must not RST it.
-                            while socket.read(&mut bytes).expect("completed owned duplex EOF") != 0 {}
+                            while socket.read(&mut bytes).expect("completed owned duplex EOF") != 0
+                            {
+                            }
                             assert_eq!(advertised_stream_window, Some(32 * 1024));
-                            assert_eq!(
-                                advertised_connection_increment,
-                                Some(128 * 1024 - 65_535)
-                            );
+                            assert_eq!(advertised_connection_increment, Some(128 * 1024 - 65_535));
                             return received_messages;
                         }
                     }
@@ -1931,11 +1952,7 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
         let client = GrpcClient::with_codec(channel, OwnedCountingCodec(Arc::clone(&codec)))
             .with_interceptor(OwnedStreamInterceptor(Arc::clone(&intercepted)));
         let mut stream = client
-            .into_native_duplex(
-                &cx,
-                "/test.OwnedStream/Exchange",
-                owned_stream_request(()),
-            )
+            .into_native_duplex(&cx, "/test.OwnedStream/Exchange", owned_stream_request(()))
             .await
             .expect("setup must not wait for response headers before upload");
         assert_eq!(codec.encodes.load(Ordering::SeqCst), 0);
@@ -1944,7 +1961,8 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
             Code::FailedPrecondition
         );
         assert_eq!(
-            codec.encodes.load(Ordering::SeqCst), 0,
+            codec.encodes.load(Ordering::SeqCst),
+            0,
             "busy slot never invokes codec"
         );
 
@@ -1997,7 +2015,10 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
                 assert!(stream.next_event().await.unwrap().is_none());
                 drop(stream);
             }
-            assert_eq!(cx.is_cancel_requested(), mode == OwnedDuplexMode::CancelContext);
+            assert_eq!(
+                cx.is_cancel_requested(),
+                mode == OwnedDuplexMode::CancelContext
+            );
             if mode == OwnedDuplexMode::CancelContext {
                 assert_eq!(
                     cx.cancel_reason().unwrap().kind,
@@ -2030,8 +2051,8 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
                 assert!(stream.buffered_data_bytes() <= 64 + 5 + 16 * 1024);
                 // Bidi must deliver ready plus one response per uploaded
                 // message before the next upload or half-close is admitted.
-                let may_send = mode != OwnedDuplexMode::Bidi
-                    || responses.len() == usize::from(queued) + 1;
+                let may_send =
+                    mode != OwnedDuplexMode::Bidi || responses.len() == usize::from(queued) + 1;
                 if stream.request_ready() && !half_closed && may_send {
                     if queued < 3 {
                         stream
@@ -2070,7 +2091,11 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
             let failed = mode == OwnedDuplexMode::UploadError;
             assert_eq!(
                 stream.status().unwrap().code(),
-                if failed { Code::ResourceExhausted } else { Code::Ok }
+                if failed {
+                    Code::ResourceExhausted
+                } else {
+                    Code::Ok
+                }
             );
             assert!(matches!(
                 stream.initial_metadata().unwrap().get("x-initial"),
@@ -2091,7 +2116,10 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
             assert!(stream.next_event().await.unwrap().is_none());
             assert_eq!(stream.buffered_data_bytes(), 0);
             assert_eq!(codec.encodes.load(Ordering::SeqCst), 3);
-            assert_eq!(codec.decodes.load(Ordering::SeqCst), expected_responses.len());
+            assert_eq!(
+                codec.decodes.load(Ordering::SeqCst),
+                expected_responses.len()
+            );
             drop(stream);
             assert!(!cx.is_cancel_requested());
         }
@@ -2101,7 +2129,9 @@ fn public_owned_duplex_round_trip(workers: usize, mode: OwnedDuplexMode) {
     assert_eq!(checked_completed.load(Ordering::Acquire), 1);
     assert_eq!(checked_intercepted.load(Ordering::SeqCst), 1);
     assert_eq!(checked_codec.drops.load(Ordering::SeqCst), 1);
-    let received = peer.join().expect("owned duplex peer terminal and socket EOF");
+    let received = peer
+        .join()
+        .expect("owned duplex peer terminal and socket EOF");
     assert_eq!(received, if mode.parked() { 0 } else { 3 });
     assert!(runtime.shutdown_timeout(OWNED_STREAM_LIMIT));
     log_test_event(
@@ -2127,7 +2157,9 @@ fn public_grpc_client_owned_client_streaming_uploads_before_response_headers() {
 #[test]
 fn public_grpc_client_owned_bidi_receives_replies_before_request_half_close() {
     for workers in [1, 2] {
-        owned_stream_watchdog(move || public_owned_duplex_round_trip(workers, OwnedDuplexMode::Bidi));
+        owned_stream_watchdog(move || {
+            public_owned_duplex_round_trip(workers, OwnedDuplexMode::Bidi)
+        });
     }
 }
 
@@ -2931,7 +2963,9 @@ fn serve_unary_reuse_connection(
     mode: ReusePeer,
     settled: &mpsc::Sender<()>,
 ) {
-    socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
     let mut connection = Connection::server(Settings::server());
     connection.queue_initial_settings();
     write_owned_h2_frames(&mut socket, &mut connection);
@@ -2966,7 +3000,10 @@ fn serve_unary_reuse_connection(
                     data,
                     end_stream,
                 }) => {
-                    bodies.entry(stream_id).or_default().extend_from_slice(&data);
+                    bodies
+                        .entry(stream_id)
+                        .or_default()
+                        .extend_from_slice(&data);
                     (stream_id, end_stream)
                 }
                 _ => continue,
@@ -3994,7 +4031,10 @@ mod scoped_unary_tcp {
                 .max_send_message_size(1024)
                 .stream_idle_timeout(Some(Duration::from_secs(30)))
                 .add_service(ScopedTcpService {
-                    first_cleanup: Mutex::new(Some(CleanupGate { ready, release: released })),
+                    first_cleanup: Mutex::new(Some(CleanupGate {
+                        ready,
+                        release: released,
+                    })),
                     cleanup_cx: cx.clone(),
                     calls: Arc::clone(&calls),
                     drops: Arc::clone(&drops),
@@ -4027,10 +4067,10 @@ mod scoped_unary_tcp {
             .await
             .unwrap();
         let mut client = GrpcClient::new(channel);
-        let mut first = Box::pin(client.unary::<Bytes, Bytes>(
-            UNARY,
-            Request::new(Bytes::from_static(b"first response")),
-        ));
+        let mut first = Box::pin(
+            client
+                .unary::<Bytes, Bytes>(UNARY, Request::new(Bytes::from_static(b"first response"))),
+        );
         let mut cleanup_wait = pin!(cleanup.recv(&cx));
         poll_fn(|task| {
             assert!(
@@ -4069,10 +4109,7 @@ mod scoped_unary_tcp {
         assert_eq!(after_error[0].0, connection_id);
 
         let response = client
-            .unary::<Bytes, Bytes>(
-                UNARY,
-                Request::new(Bytes::from_static(b"after error")),
-            )
+            .unary::<Bytes, Bytes>(UNARY, Request::new(Bytes::from_static(b"after error")))
             .await
             .expect("connection remains reusable after a scoped application error");
         assert_eq!(response.get_ref().as_ref(), b"after error");

@@ -54,6 +54,7 @@ use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
 use crate::observability::entry::LogEntry;
 use crate::observability::level::LogLevel;
 use crate::observability::metrics::{MetricsProvider, OutcomeKind};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
@@ -62,7 +63,6 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,9 +80,8 @@ mod grpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub use grpc::{
     OTLP_GRPC_DEFAULT_TIMEOUT, OTLP_GRPC_MAX_MESSAGE_BYTES, OTLP_GRPC_MAX_METADATA_BYTES,
-    OTLP_GRPC_MAX_RETRIES,
-    OtlpGrpcError, OtlpGrpcErrorKind, OtlpGrpcExportReport, OtlpGrpcExporter,
-    OtlpGrpcResponse, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
+    OTLP_GRPC_MAX_RETRIES, OtlpGrpcError, OtlpGrpcErrorKind, OtlpGrpcExportReport,
+    OtlpGrpcExporter, OtlpGrpcResponse, OtlpGrpcRetryPolicy, OtlpGrpcSignal,
 };
 
 /// Protocol-neutral names for the shared native OTLP acknowledgement model.
@@ -96,26 +95,23 @@ pub use grpc::{
 /// completed full/partial responses are preserved for both native transports.
 #[cfg(not(target_arch = "wasm32"))]
 pub use queued::{
-    OtlpGrpcQueueReceipt as OtlpQueueReceipt,
-    OtlpGrpcQueueReceiptError as OtlpQueueReceiptError,
+    OtlpGrpcQueueReceipt as OtlpQueueReceipt, OtlpGrpcQueueReceiptError as OtlpQueueReceiptError,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 mod export_policy;
 #[cfg(not(target_arch = "wasm32"))]
 pub use export_policy::{
-    OwnedOtlpExportPolicy, OwnedOtlpPolicyError, OwnedOtlpPolicyOutput,
-    OwnedOtlpPolicyReport,
+    OwnedOtlpExportPolicy, OwnedOtlpPolicyError, OwnedOtlpPolicyOutput, OwnedOtlpPolicyReport,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 mod sdk;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sdk::{
-    OtlpSdkHttpLogExporter, OtlpSdkHttpMetricExporter, OtlpSdkHttpSpanExporter,
-    OtlpSdkLogConfig, OtlpSdkLogError, OtlpSdkLogExporter,
-    OtlpSdkMetricExporter, OtlpSdkMetricsConfig, OtlpSdkMetricsError,
-    OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError,
+    OtlpSdkHttpLogExporter, OtlpSdkHttpMetricExporter, OtlpSdkHttpSpanExporter, OtlpSdkLogConfig,
+    OtlpSdkLogError, OtlpSdkLogExporter, OtlpSdkMetricExporter, OtlpSdkMetricsConfig,
+    OtlpSdkMetricsError, OtlpSdkSpanExporter, OtlpSdkTraceConfig, OtlpSdkTraceError,
 };
 
 // =============================================================================
@@ -7066,8 +7062,12 @@ impl OtlpHttpExporter {
         loop {
             let response = if strict_collector {
                 self.send_request_with_compression_checked(
-                    cx, &request_body, self.compression, acknowledged_deadline,
-                ).await
+                    cx,
+                    &request_body,
+                    self.compression,
+                    acknowledged_deadline,
+                )
+                .await
             } else {
                 self.send_request_once(cx, &request_body).await
             };
@@ -7117,7 +7117,10 @@ impl OtlpHttpExporter {
                         // Attempt fallback to uncompressed request
                         match self
                             .send_request_with_compression_checked(
-                                cx, &request_body, false, acknowledged_deadline,
+                                cx,
+                                &request_body,
+                                false,
+                                acknowledged_deadline,
                             )
                             .await
                         {
@@ -7269,9 +7272,9 @@ impl OtlpHttpExporter {
                 cx.checkpoint().map_err(|_| {
                     OtlpError::non_retryable("OTLP request failed: request cancelled")
                 })?;
-                let timer = cx.timer_driver().ok_or_else(|| {
-                    OtlpError::non_retryable("otlp.http.timer_required")
-                })?;
+                let timer = cx
+                    .timer_driver()
+                    .ok_or_else(|| OtlpError::non_retryable("otlp.http.timer_required"))?;
                 if timer.now() >= deadline {
                     return Err(OtlpError::non_retryable("OTLP request timeout"));
                 }
@@ -7338,9 +7341,8 @@ impl OtlpHttpExporter {
                     .await
             };
             let response = if acknowledged_deadline.is_some() {
-                drive_otlp_request_with_deadline(
-                    cx, self.timeout, acknowledged_deadline, request,
-                ).await
+                drive_otlp_request_with_deadline(cx, self.timeout, acknowledged_deadline, request)
+                    .await
             } else {
                 drive_otlp_request_with_timeout(cx, self.timeout, request).await
             }?
@@ -7355,12 +7357,19 @@ impl OtlpHttpExporter {
                     ));
                 }
                 if matches!(response.status, 408 | 415) {
-                    return Err(OtlpError::non_retryable("otlp.response.non_retryable_status"));
+                    return Err(OtlpError::non_retryable(
+                        "otlp.response.non_retryable_status",
+                    ));
                 }
                 if response.status == 200
-                    && !response.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    && !response
+                        .headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                 {
-                    return Err(OtlpError::non_retryable("otlp.response.missing_content_type"));
+                    return Err(OtlpError::non_retryable(
+                        "otlp.response.missing_content_type",
+                    ));
                 }
             }
             // Handle response per OTLP spec
@@ -7478,8 +7487,8 @@ where
         .map_or_else(crate::time::wall_now, |driver| driver.now());
     let timeout_nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
     let request_deadline = now.saturating_add_nanos(timeout_nanos);
-    let request_deadline = acknowledged_deadline
-        .map_or(request_deadline, |total| total.min(request_deadline));
+    let request_deadline =
+        acknowledged_deadline.map_or(request_deadline, |total| total.min(request_deadline));
     let deadline = cx
         .budget()
         .deadline
@@ -7506,7 +7515,8 @@ where
         let expired = || {
             timer_driver
                 .as_ref()
-                .map_or_else(crate::time::wall_now, |driver| driver.now()) >= deadline
+                .map_or_else(crate::time::wall_now, |driver| driver.now())
+                >= deadline
         };
         if acknowledged_deadline.is_some() && expired() {
             return Poll::Ready(Err(OtlpError::non_retryable("OTLP request timeout")));
@@ -8185,9 +8195,9 @@ mod otlp_retry_tests {
 
     #[test]
     fn otlp_retry_backoff_observes_cx_cancellation() {
+        use crate::sync::atomic::{AtomicUsize, Ordering};
         use std::future::Future;
         use std::sync::Arc;
-        use crate::sync::atomic::{AtomicUsize, Ordering};
         use std::task::{Context, Poll, Wake, Waker};
 
         #[derive(Default)]
@@ -10785,6 +10795,7 @@ pub mod span_semantics {
     //! run_span_conformance_tests().expect("All span semantic tests should pass");
     //! ```
 
+    use crate::sync::atomic::{AtomicU64, Ordering};
     use opentelemetry::trace::{
         SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
     };
@@ -10793,7 +10804,6 @@ pub mod span_semantics {
         AnyValue, KeyValue, any_value::Value as ProtoValue,
     };
     use std::collections::HashMap;
-    use crate::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_SPAN_SEED: AtomicU64 = AtomicU64::new(1);

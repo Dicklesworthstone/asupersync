@@ -12,13 +12,13 @@
 //! tagged with both its rank and module, enabling detection of problematic cross-module patterns.
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::cell::RefCell;
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::hash::{Hash, Hasher};
-#[cfg(any(debug_assertions, feature = "lock-metrics"))]
-use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
@@ -568,13 +568,23 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
         // The second group turned 15 lib tests red when the suite first ran with the
         // production feature set, which includes `lock-metrics` (2026-09-29,
         // asupersync-kh02d2).
-        "test_abandon_read" | "test_abandon_write" | "external-tasks" | "reader_fanout"
-        | "close_fanout" | "worker_retirement" | "request_race" | "queued_local_handoff"
-        | "dispatch_tasks" | "external_task_table" | "checked_external_state"
-        | "checked_external_tasks" | "transfer_state" | "transfer_external_tasks"
-        | "confirmed_leak_tasks" | "confirmed_leak_obligations" | "confirmed_leak_state" => {
-            Some(LOCK_ORDER_REASON_TEST_HELPER)
-        }
+        "test_abandon_read"
+        | "test_abandon_write"
+        | "external-tasks"
+        | "reader_fanout"
+        | "close_fanout"
+        | "worker_retirement"
+        | "request_race"
+        | "queued_local_handoff"
+        | "dispatch_tasks"
+        | "external_task_table"
+        | "checked_external_state"
+        | "checked_external_tasks"
+        | "transfer_state"
+        | "transfer_external_tasks"
+        | "confirmed_leak_tasks"
+        | "confirmed_leak_obligations"
+        | "confirmed_leak_state" => Some(LOCK_ORDER_REASON_TEST_HELPER),
         _ => None,
     }
 }
@@ -621,7 +631,11 @@ fn current_held_snapshot() -> (BTreeSet<LockRank>, BTreeMap<LockRank, Vec<LockIn
     let tracker = held_locks_by_owner();
     let mut ranks = BTreeSet::new();
     let mut locks: BTreeMap<LockRank, Vec<LockInfo>> = BTreeMap::new();
-    let owners = if task == thread { vec![thread] } else { vec![thread, task] };
+    let owners = if task == thread {
+        vec![thread]
+    } else {
+        vec![thread, task]
+    };
     for owner in owners {
         let Some(state) = tracker.get(&owner) else {
             continue;
@@ -998,7 +1012,12 @@ pub(crate) fn record_guard_acquire(lock_name: &str, rank: Option<LockRank>) -> G
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         rank.map(|rank| {
-            insert_tracked_lock(current_owner(), lock_name, rank, LockModule::from_name(lock_name))
+            insert_tracked_lock(
+                current_owner(),
+                lock_name,
+                rank,
+                LockModule::from_name(lock_name),
+            )
         })
     }
 

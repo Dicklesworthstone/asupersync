@@ -1,10 +1,15 @@
 //! The browser-owned abort/reader boundary. No background Rust tasks.
 use super::state::{BodyBudget, FetchLease, error_outcome, prepare};
 use super::{FetchBytesError, FetchBytesLimits, FetchBytesResponse, FetchBytesStage};
-use asupersync::types::{WasmAbiOutcomeEnvelope, WasmAbiValue, WasmAbiVersion, WasmFetchRequest, WasmHandleRef};
+use asupersync::types::{
+    WasmAbiOutcomeEnvelope, WasmAbiValue, WasmAbiVersion, WasmFetchRequest, WasmHandleRef,
+};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{AbortController, AbortSignal, ReadableStreamDefaultReader, RequestCredentials, RequestInit, RequestRedirect, Response};
+use web_sys::{
+    AbortController, AbortSignal, ReadableStreamDefaultReader, RequestCredentials, RequestInit,
+    RequestRedirect, Response,
+};
 
 pub(super) mod stream;
 
@@ -22,12 +27,18 @@ struct HostFetch {
 
 impl HostFetch {
     fn new(lease: FetchLease) -> Result<Self, FetchBytesError> {
-        let controller = AbortController::new()
-            .map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Setup })?;
+        let controller = AbortController::new().map_err(|_| FetchBytesError::Host {
+            stage: FetchBytesStage::Setup,
+        })?;
         let handle = lease.handle();
         let signal = controller.signal();
         let operation = Self {
-            lease, handle, controller, signal, reader: None, completed: false,
+            lease,
+            handle,
+            controller,
+            signal,
+            reader: None,
+            completed: false,
         };
         crate::register_inflight_fetch(handle, operation.controller.clone());
         operation.check_active()?;
@@ -60,30 +71,42 @@ impl HostFetch {
         init
     }
 
-    async fn open_response(&mut self, request: &WasmFetchRequest)
-        -> Result<Response, FetchBytesError>
-    {
+    async fn open_response(
+        &mut self,
+        request: &WasmFetchRequest,
+    ) -> Result<Response, FetchBytesError> {
         let init = self.request_init(request);
         self.check_active()?;
-        let promise = crate::host_fetch_with_str_and_init(&request.url, &init)
-            .map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Setup })?;
+        let promise = crate::host_fetch_with_str_and_init(&request.url, &init).map_err(|_| {
+            FetchBytesError::Host {
+                stage: FetchBytesStage::Setup,
+            }
+        })?;
         let result = JsFuture::from(promise).await;
         // Cancellation dominates an already-queued response or rejection.
         self.check_active()?;
-        let value = result.map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Response })?;
-        value.dyn_into::<Response>().map_err(|_| FetchBytesError::InvalidResponse)
+        let value = result.map_err(|_| FetchBytesError::Host {
+            stage: FetchBytesStage::Response,
+        })?;
+        value
+            .dyn_into::<Response>()
+            .map_err(|_| FetchBytesError::InvalidResponse)
     }
 
-    async fn run(&mut self, request: &WasmFetchRequest, limits: FetchBytesLimits)
-        -> Result<FetchBytesResponse, FetchBytesError>
-    {
+    async fn run(
+        &mut self,
+        request: &WasmFetchRequest,
+        limits: FetchBytesLimits,
+    ) -> Result<FetchBytesResponse, FetchBytesError> {
         let response = self.open_response(request).await?;
         self.read_response(response, limits).await
     }
 
-    async fn read_response(&mut self, response: Response, limits: FetchBytesLimits)
-        -> Result<FetchBytesResponse, FetchBytesError>
-    {
+    async fn read_response(
+        &mut self,
+        response: Response,
+        limits: FetchBytesLimits,
+    ) -> Result<FetchBytesResponse, FetchBytesError> {
         self.check_active()?;
         let status = response.status();
         if status == 0 || response.redirected() {
@@ -91,10 +114,15 @@ impl HostFetch {
         }
         let Some(stream) = response.body() else {
             self.check_active()?;
-            return Ok(FetchBytesResponse { status, body: Vec::new() });
+            return Ok(FetchBytesResponse {
+                status,
+                body: Vec::new(),
+            });
         };
-        let reader = ReadableStreamDefaultReader::new(&stream)
-            .map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Reader })?;
+        let reader =
+            ReadableStreamDefaultReader::new(&stream).map_err(|_| FetchBytesError::Host {
+                stage: FetchBytesStage::Reader,
+            })?;
         self.reader = Some(reader);
         let mut budget = BodyBudget::new(limits);
         let mut body = Vec::new();
@@ -103,23 +131,32 @@ impl HostFetch {
             // This charges empty chunks and the EOF read, not merely byteful
             // chunks. An endless empty stream cannot bypass the work budget.
             budget.begin_read()?;
-            let promise = self.reader.as_ref().expect("reader remains owned until retirement").read();
+            let promise = self
+                .reader
+                .as_ref()
+                .expect("reader remains owned until retirement")
+                .read();
             let result = JsFuture::from(promise).await;
             self.check_active()?;
-            let chunk = result.map_err(|_| FetchBytesError::Host { stage: FetchBytesStage::Read })?;
+            let chunk = result.map_err(|_| FetchBytesError::Host {
+                stage: FetchBytesStage::Read,
+            })?;
             let done = js_sys::Reflect::get(&chunk, &JsValue::from_str("done"))
                 .map_err(|_| FetchBytesError::InvalidResponse)?
-                .as_bool().ok_or(FetchBytesError::InvalidResponse)?;
+                .as_bool()
+                .ok_or(FetchBytesError::InvalidResponse)?;
             self.check_active()?;
             if done {
                 return Ok(FetchBytesResponse { status, body });
             }
             let value = js_sys::Reflect::get(&chunk, &JsValue::from_str("value"))
                 .map_err(|_| FetchBytesError::InvalidResponse)?;
-            let bytes = value.dyn_into::<js_sys::Uint8Array>()
+            let bytes = value
+                .dyn_into::<js_sys::Uint8Array>()
                 .map_err(|_| FetchBytesError::InvalidResponse)?;
             self.check_active()?;
-            let length = usize::try_from(bytes.length()).map_err(|_| FetchBytesError::LengthOverflow)?;
+            let length =
+                usize::try_from(bytes.length()).map_err(|_| FetchBytesError::LengthOverflow)?;
             // The limit is enforced BEFORE JS bytes enter the Rust allocation.
             // The host's existing chunk is explicitly outside this byte bound.
             let destination = budget.reserve_chunk(&mut body, length)?;
@@ -127,14 +164,17 @@ impl HostFetch {
         }
     }
 
-    fn finish(mut self, mut result: Result<FetchBytesResponse, FetchBytesError>)
-        -> Result<FetchBytesResponse, FetchBytesError>
-    {
+    fn finish(
+        mut self,
+        mut result: Result<FetchBytesResponse, FetchBytesError>,
+    ) -> Result<FetchBytesResponse, FetchBytesError> {
         if self.check_active().is_err() {
             result = Err(FetchBytesError::Cancelled);
         }
         let summary = match &result {
-            Ok(response) => WasmAbiOutcomeEnvelope::Ok { value: WasmAbiValue::U64(u64::from(response.status)) },
+            Ok(response) => WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::U64(u64::from(response.status)),
+            },
             Err(error) => error_outcome(*error),
         };
         // Do not copy body bytes into the handle ledger. The caller alone owns

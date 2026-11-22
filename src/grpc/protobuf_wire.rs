@@ -1676,13 +1676,14 @@ impl ProtobufWireEncoder {
         let mut payload_len = 0usize;
         for value in values.clone() {
             let (_, length) = pack(value);
-            payload_len = payload_len.checked_add(length).ok_or(
-                ProtobufWireError::FieldLimitExceeded {
-                    offset: self.output.len(),
-                    length: u64::MAX,
-                    limit: self.limits.effective_field_limit(),
-                },
-            )?;
+            payload_len =
+                payload_len
+                    .checked_add(length)
+                    .ok_or(ProtobufWireError::FieldLimitExceeded {
+                        offset: self.output.len(),
+                        length: u64::MAX,
+                        limit: self.limits.effective_field_limit(),
+                    })?;
             self.check_packed_payload(key_len, payload_len)?;
         }
 
@@ -1694,12 +1695,13 @@ impl ProtobufWireEncoder {
             let mut remaining = payload_len;
             for value in values {
                 let (bytes, length) = pack(value);
-                remaining = remaining.checked_sub(length).ok_or(
-                    ProtobufWireError::SchemaInvariant {
-                        offset: self.output.len(),
-                        invariant: "packed iterator changed its encoded length between passes",
-                    },
-                )?;
+                remaining =
+                    remaining
+                        .checked_sub(length)
+                        .ok_or(ProtobufWireError::SchemaInvariant {
+                            offset: self.output.len(),
+                            invariant: "packed iterator changed its encoded length between passes",
+                        })?;
                 self.output.extend_from_slice(&bytes[..length]);
             }
             if remaining != 0 {

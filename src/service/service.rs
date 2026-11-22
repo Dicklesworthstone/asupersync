@@ -143,7 +143,8 @@ impl Drop for ReadinessRelease {
         });
         if let Some(cleanup) = cleanup {
             if std::thread::panicking() {
-                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup))
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup))
                 {
                     std::mem::forget(payload);
                 }

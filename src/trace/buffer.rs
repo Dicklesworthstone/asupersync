@@ -4,10 +4,10 @@
 //! allowing efficient capture without unbounded memory growth.
 
 use super::event::TraceEvent;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{Budget, CancelReason, Severity, TaskId};
 use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// A ring buffer for storing trace events.
@@ -253,10 +253,9 @@ impl TraceBufferHandle {
         cleanup_budget: Option<Budget>,
         unsupported_mutation: bool,
     ) {
-        let (Some(start_sequence), Some(publications)) = (
-            start_sequence,
-            self.inner.cancellation_publications.get(),
-        ) else {
+        let (Some(start_sequence), Some(publications)) =
+            (start_sequence, self.inner.cancellation_publications.get())
+        else {
             return;
         };
         let _buffer = self.inner.buffer.lock();

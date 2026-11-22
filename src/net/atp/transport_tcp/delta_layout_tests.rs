@@ -1,7 +1,7 @@
 //! Regression coverage for the existing TCP v1 emitter/validator contract.
 
-use super::*;
 use super::super::{ManifestEntry, planner_manifest_from_wire};
+use super::*;
 use crate::atp::delta::{CasChunkRef, PersistentChunkManifest};
 use crate::atp::object::ContentId;
 use crate::net::atp::transport_common::DeltaChunkWire;
@@ -9,12 +9,16 @@ use crate::net::atp::transport_common::DeltaChunkWire;
 // The planner is real. It accepts contiguous content sequences without knowing
 // file boundaries; the transport must additionally validate file geometry.
 fn seal(delta: &mut DeltaManifestWire) {
-    let chunks = delta.chunks.iter().map(|chunk| CasChunkRef {
-        index: chunk.index,
-        byte_offset: chunk.stream_offset,
-        size_bytes: chunk.size_bytes,
-        content_id: ContentId::from_bytes(chunk.rel_path.as_bytes()),
-    }).collect();
+    let chunks = delta
+        .chunks
+        .iter()
+        .map(|chunk| CasChunkRef {
+            index: chunk.index,
+            byte_offset: chunk.stream_offset,
+            size_bytes: chunk.size_bytes,
+            content_id: ContentId::from_bytes(chunk.rel_path.as_bytes()),
+        })
+        .collect();
     let planner = PersistentChunkManifest::new(delta.tree_id.clone(), chunks)
         .expect("self-consistent planner layout");
     for (chunk, reference) in delta.chunks.iter_mut().zip(&planner.chunks) {
@@ -26,14 +30,18 @@ fn seal(delta: &mut DeltaManifestWire) {
 
 fn fixture(lengths: &[u64], chunk_size: usize) -> (TransferManifest, DeltaManifestWire) {
     assert!(chunk_size > 0);
-    let entries = lengths.iter().enumerate().map(|(index, size)| ManifestEntry {
-        index: u32::try_from(index).unwrap(),
-        rel_path: format!("file-{index}"),
-        size: *size,
-        sha256_hex: "00".repeat(32),
-        metadata: None,
-        members: Vec::new(),
-    }).collect::<Vec<_>>();
+    let entries = lengths
+        .iter()
+        .enumerate()
+        .map(|(index, size)| ManifestEntry {
+            index: u32::try_from(index).unwrap(),
+            rel_path: format!("file-{index}"),
+            size: *size,
+            sha256_hex: "00".repeat(32),
+            metadata: None,
+            members: Vec::new(),
+        })
+        .collect::<Vec<_>>();
     let mut delta = DeltaManifestWire {
         schema: super::super::ATP_DELTA_CHUNK_MANIFEST_SCHEMA.into(),
         tree_id: "33".repeat(32),
@@ -95,8 +103,10 @@ fn short_nonfinal_chunks_cannot_be_hidden_by_a_valid_planner_root() {
     delta.chunks[1].entry_offset = 8;
     delta.chunks[1].stream_offset = 8;
     seal(&mut delta);
-    assert!(matches!(validate(&manifest, &delta), Err(TransportError::Frame(message))
-        if message.contains("non-canonical geometry")));
+    assert!(
+        matches!(validate(&manifest, &delta), Err(TransportError::Frame(message))
+        if message.contains("non-canonical geometry"))
+    );
 }
 
 #[test]
@@ -109,8 +119,10 @@ fn file_interleaving_cannot_be_hidden_by_contiguous_global_offsets() {
     }
     // Each file's own offsets are still contiguous and every byte is covered.
     seal(&mut delta);
-    assert!(matches!(validate(&manifest, &delta), Err(TransportError::Frame(message))
-        if message.contains("expected chunk")));
+    assert!(
+        matches!(validate(&manifest, &delta), Err(TransportError::Frame(message))
+        if message.contains("expected chunk"))
+    );
 }
 
 #[test]
@@ -176,7 +188,10 @@ fn real_tcp_delta_emission_satisfies_the_stricter_layout_contract() {
         let abs_path = directory.path().join(&rel_path);
         let bytes = vec![u8::try_from(index).unwrap(); len];
         std::fs::write(&abs_path, bytes).expect("source payload");
-        sources.push(SourceEntry { rel_path: rel_path.clone(), abs_path });
+        sources.push(SourceEntry {
+            rel_path: rel_path.clone(),
+            abs_path,
+        });
         let size = u64::try_from(len).unwrap();
         total_bytes += size;
         entries.push(ManifestEntry {
@@ -189,11 +204,14 @@ fn real_tcp_delta_emission_satisfies_the_stricter_layout_contract() {
         });
         metadatas.push(EntryMetadata::default());
     }
-    let runtime = crate::runtime::RuntimeBuilder::current_thread().build().unwrap();
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
     runtime.block_on(runtime.handle().spawn(async move {
         let root = "33".repeat(32);
         let delta = build_delta_manifest_from_entries(root.clone(), &sources, &metadatas, 7)
-            .await.expect("actual TCP emitter");
+            .await
+            .expect("actual TCP emitter");
         let manifest = TransferManifest {
             transfer_id: "emitter".into(),
             root_name: "tree".into(),
@@ -212,7 +230,10 @@ fn real_tcp_delta_emission_satisfies_the_stricter_layout_contract() {
             let bytes = std::fs::read(&source.abs_path).unwrap();
             let start = usize::try_from(chunk.entry_offset).unwrap();
             let len = usize::try_from(chunk.size_bytes).unwrap();
-            assert_eq!(chunk.content_id_hex, ContentId::from_bytes(&bytes[start..start + len]).to_hex());
+            assert_eq!(
+                chunk.content_id_hex,
+                ContentId::from_bytes(&bytes[start..start + len]).to_hex()
+            );
         }
     }));
 }

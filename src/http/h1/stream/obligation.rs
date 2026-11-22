@@ -179,7 +179,10 @@ impl FramedIncomingBodyGuard {
     /// keeps the request alive. Protocol EOF can settle while application
     /// work remains parked. Returning with unread input abandons only that
     /// input; it does not cancel a legitimate early response.
-    pub(crate) fn run<F: std::future::Future>(self, work: F) -> impl std::future::Future<Output = F::Output> {
+    pub(crate) fn run<F: std::future::Future>(
+        self,
+        work: F,
+    ) -> impl std::future::Future<Output = F::Output> {
         // Construct ownership synchronously so even a wrapper dropped before
         // its first poll retires the guard before the captured user future.
         GuardedFramedBodyWork { guard: self, work }
@@ -226,9 +229,9 @@ impl FramedIncomingBodyGuard {
     fn stop_unfinished(&mut self, completed: bool) {
         let error = self.shared.framed_consumer_error.lock().clone();
         let error = error.unwrap_or_else(|| {
-            self.obligation.as_ref().map_or(
-                IncomingBodyError::SourceDisconnected,
-                |obligation| {
+            self.obligation
+                .as_ref()
+                .map_or(IncomingBodyError::SourceDisconnected, |obligation| {
                     if obligation.owner.is_cancel_requested() {
                         IncomingBodyError::cancelled(&obligation.owner)
                     } else if completed {
@@ -236,8 +239,7 @@ impl FramedIncomingBodyGuard {
                     } else {
                         IncomingBodyError::SourceDisconnected
                     }
-                },
-            )
+                })
         });
         // Never hold the consumer-error lock while entering the terminal
         // lock. A concurrent FIN, earlier transport error, or earlier stop

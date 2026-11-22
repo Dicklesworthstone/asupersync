@@ -23,13 +23,13 @@
 //! - Tracks finalizer execution rates and completion times
 //! - Provides early warning for potential resource exhaustion
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for the cancellation debt accumulation monitor.
 #[derive(Debug, Clone)]

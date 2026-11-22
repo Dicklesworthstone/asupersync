@@ -25,8 +25,8 @@
 //! subsequent runtime retirement or memory held by all awaiting callers.
 
 use super::{
-    ChunkRange, Manifest, ManifestChunkCommitment, SparseWriter, SparseWriterConfig, SparseWriterError,
-    SparseWriterStats, WriteOptions,
+    ChunkRange, Manifest, ManifestChunkCommitment, SparseWriter, SparseWriterConfig,
+    SparseWriterError, SparseWriterStats, WriteOptions,
 };
 use crate::atp::object::ObjectId;
 use crate::cx::Cx;
@@ -115,7 +115,10 @@ impl ScopedSparseWriter {
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        Self::create_with(cx, move || SparseWriter::new_blocking(object_id, final_path, config)).await
+        Self::create_with(cx, move || {
+            SparseWriter::new_blocking(object_id, final_path, config)
+        })
+        .await
     }
 
     // Keep constructor placement, domain mapping and abandoned-result ownership
@@ -125,14 +128,16 @@ impl ScopedSparseWriter {
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
         F: FnOnce() -> Outcome<SparseWriter, SparseWriterError> + Send + 'static,
     {
-        cx.scoped_fs().run_io(move |_| {
-            Ok(match create() {
-                Outcome::Ok(writer) => Outcome::Ok(writer.into_scoped()),
-                Outcome::Err(error) => Outcome::Err(error),
-                Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        cx.scoped_fs()
+            .run_io(move |_| {
+                Ok(match create() {
+                    Outcome::Ok(writer) => Outcome::Ok(writer.into_scoped()),
+                    Outcome::Err(error) => Outcome::Err(error),
+                    Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                })
             })
-        }).await
+            .await
     }
 
     // Acquire before submitting any pool job. Observe the explicitly supplied
@@ -152,7 +157,8 @@ impl ScopedSparseWriter {
         // Avoid minting a caller-held obligation before the real pool task is
         // admitted; that task, not this queue entry, owns filesystem work.
         let mut acquiring = pin!(OwnedAcquireFuture::new_uncancelable(
-            Arc::clone(&self.admission), 1,
+            Arc::clone(&self.admission),
+            1,
         ));
         poll_fn(|task| {
             // Register before checking so cancellation between checking and
@@ -164,10 +170,12 @@ impl ScopedSparseWriter {
             if let Err(error) = cx.checkpoint() {
                 return std::task::Poll::Ready(Err(ScopedFsError::Checkpoint(error)));
             }
-            acquiring.as_mut().poll(task).map(|result| {
-                result.map_err(|error| ScopedFsError::Io(io::Error::other(error)))
-            })
-        }).await
+            acquiring
+                .as_mut()
+                .poll(task)
+                .map(|result| result.map_err(|error| ScopedFsError::Io(io::Error::other(error))))
+        })
+        .await
     }
 
     // `ScopedFs` is the single authority/checkpoint/admission/cancel/drain
@@ -181,13 +189,15 @@ impl ScopedSparseWriter {
     {
         let permit = self.reserve(cx).await?;
         let writer = Arc::clone(&self.writer);
-        cx.scoped_fs().run_io(move |_| {
-            // Hold through the operation itself, not merely the borrowing
-            // await. Refusal, queued cancellation, panic and ordinary return
-            // all restore capacity using the permit's existing RAII behavior.
-            let _permit = permit;
-            Ok(operation(&writer))
-        }).await
+        cx.scoped_fs()
+            .run_io(move |_| {
+                // Hold through the operation itself, not merely the borrowing
+                // await. Refusal, queued cancellation, panic and ordinary return
+                // all restore capacity using the permit's existing RAII behavior.
+                let _permit = permit;
+                Ok(operation(&writer))
+            })
+            .await
     }
 
     /// Set the expected file length; any preallocation runs on the pool.
@@ -198,7 +208,8 @@ impl ScopedSparseWriter {
         self.run(cx, move |writer| match writer.set_expected_size(size) {
             Ok(()) => Outcome::Ok(()),
             Err(error) => Outcome::Err(error),
-        }).await
+        })
+        .await
     }
 
     /// Write one owned chunk with the canonical range, hash, and fsync checks.
@@ -217,18 +228,26 @@ impl ScopedSparseWriter {
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.run(cx, move |writer| writer.write_chunk_blocking(offset, &data, options)).await
+        self.run(cx, move |writer| {
+            writer.write_chunk_blocking(offset, &data, options)
+        })
+        .await
     }
 
     /// Verify against a trusted immutable manifest without blocking a scheduler.
     ///
     /// The manifest `Arc` avoids copying its object/chunk tables for each call.
     /// Legacy root-only chunk authentication remains refused by the core.
-    pub async fn verify<Caps>(&self, cx: &Cx<Caps>, manifest: Arc<Manifest>) -> ScopedWriterResult<()>
+    pub async fn verify<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        manifest: Arc<Manifest>,
+    ) -> ScopedWriterResult<()>
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.run(cx, move |writer| writer.verify_inner(&manifest, None)).await
+        self.run(cx, move |writer| writer.verify_inner(&manifest, None))
+            .await
     }
 
     /// Verify every byte using an independently trusted chunk commitment.
@@ -242,7 +261,10 @@ impl ScopedSparseWriter {
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.run(cx, move |writer| writer.verify_inner(&manifest, Some(&expected))).await
+        self.run(cx, move |writer| {
+            writer.verify_inner(&manifest, Some(&expected))
+        })
+        .await
     }
 
     /// Publish using the existing sealed lifecycle and final durability barriers.
@@ -253,7 +275,8 @@ impl ScopedSparseWriter {
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.run(cx, |writer| writer.commit_with_fsync(File::sync_all)).await
+        self.run(cx, |writer| writer.commit_with_fsync(File::sync_all))
+            .await
     }
 
     /// Explicitly quarantine/clean up and permanently cancel an uncommitted writer.
@@ -282,7 +305,8 @@ impl ScopedSparseWriter {
     where
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.run(cx, |writer| Outcome::Ok(writer.is_complete())).await
+        self.run(cx, |writer| Outcome::Ok(writer.is_complete()))
+            .await
     }
 }
 
@@ -371,8 +395,13 @@ mod journal_cancellation {
         where
             Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
         {
-            self.cancel_journal_with(cx, request, persist_cancellation, SparseWriter::cancel_blocking)
-                .await
+            self.cancel_journal_with(
+                cx,
+                request,
+                persist_cancellation,
+                SparseWriter::cancel_blocking,
+            )
+            .await
         }
 
         // Fault seams retain the real admission, authentication, terminal fence
@@ -387,23 +416,33 @@ mod journal_cancellation {
         where
             Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
             P: FnOnce(&mut AppendJournal, JournalRecord) -> Outcome<(), SparseWriterError>
-                + Send + 'static,
+                + Send
+                + 'static,
             C: FnOnce(&SparseWriter) -> Outcome<(), SparseWriterError> + Send + 'static,
         {
             let permit = self.reserve(cx).await?;
             let writer = Arc::clone(&self.writer);
-            cx.scoped_fs().run_io(move |_| {
-                let _permit = permit;
-                let mut cancellation_persisted = false;
-                let mut cleanup_attempted = false;
-                let outcome = cancel_writer(
-                    &writer, &mut request, &mut cancellation_persisted,
-                    &mut cleanup_attempted, persist, cleanup,
-                );
-                Ok(JournalCancelReport {
-                    journal: request.journal, cancellation_persisted, cleanup_attempted, outcome,
+            cx.scoped_fs()
+                .run_io(move |_| {
+                    let _permit = permit;
+                    let mut cancellation_persisted = false;
+                    let mut cleanup_attempted = false;
+                    let outcome = cancel_writer(
+                        &writer,
+                        &mut request,
+                        &mut cancellation_persisted,
+                        &mut cleanup_attempted,
+                        persist,
+                        cleanup,
+                    );
+                    Ok(JournalCancelReport {
+                        journal: request.journal,
+                        cancellation_persisted,
+                        cleanup_attempted,
+                        outcome,
+                    })
                 })
-            }).await
+                .await
         }
     }
 
@@ -430,8 +469,10 @@ mod journal_cancellation {
         let operation = writer.operation.lock();
         value!(validate_cancellation(writer, request));
         let record = JournalRecord::Cancellation {
-            transfer_id: request.transfer_id.clone(), reason: request.reason.clone(),
-            timestamp: request.timestamp, auth_tag: AuthenticationTag::zero(),
+            transfer_id: request.transfer_id.clone(),
+            reason: request.reason.clone(),
+            timestamp: request.timestamp,
+            auth_tag: AuthenticationTag::zero(),
         };
         {
             let mut state = writer.lock_state();
@@ -455,17 +496,24 @@ mod journal_cancellation {
         writer: &SparseWriter,
         request: &JournalCancelRequest,
     ) -> Outcome<(), SparseWriterError> {
-        if request.transfer_id.is_empty() || request.transfer_id.len() > 4096
-            || request.reason.is_empty() || request.reason.len() > 4096
+        if request.transfer_id.is_empty()
+            || request.transfer_id.len() > 4096
+            || request.reason.is_empty()
+            || request.reason.len() > 4096
         {
-            return Outcome::Err(invalid("cancellation requires bounded nonempty ID and reason"));
+            return Outcome::Err(invalid(
+                "cancellation requires bounded nonempty ID and reason",
+            ));
         }
         if let Err(error) = request.manifest.validate() {
             return Outcome::Err(invalid(&format!("cancellation manifest: {error}")));
         }
         let (id, length) = {
             let state = writer.lock_state();
-            if matches!(state.lifecycle, WriterLifecycle::Committed | WriterLifecycle::Committing) {
+            if matches!(
+                state.lifecycle,
+                WriterLifecycle::Committed | WriterLifecycle::Committing
+            ) {
                 return Outcome::Err(SparseWriterError::CommitFailed(
                     "cannot journal cancellation of a committed or unresolved writer".to_owned(),
                 ));
@@ -476,7 +524,8 @@ mod journal_cancellation {
             let Some(length) = object.size_bytes else {
                 return Outcome::Err(invalid("cancellation requires an offered file length"));
             };
-            if object.id != state.object_id || object.kind != ObjectKind::FileObject
+            if object.id != state.object_id
+                || object.kind != ObjectKind::FileObject
                 || state.expected_size != Some(length)
             {
                 return Outcome::Err(invalid("cancellation file identity or length mismatch"));
@@ -485,30 +534,52 @@ mod journal_cancellation {
         };
         // The summary authenticates every indexed transfer record, and refuses
         // a journal whose preceding storage result is unresolved.
-        let summary = value!(request.journal.get_resume_summary(&request.transfer_id)
-            .map_err(journal_error));
-        if !matches!(summary.status,
-            TransferResumeStatus::Resumable | TransferResumeStatus::Cancelled { .. })
-        {
-            return Outcome::Err(invalid("cancellation refuses missing or terminal transfer history"));
+        let summary = value!(
+            request
+                .journal
+                .get_resume_summary(&request.transfer_id)
+                .map_err(journal_error)
+        );
+        if !matches!(
+            summary.status,
+            TransferResumeStatus::Resumable | TransferResumeStatus::Cancelled { .. }
+        ) {
+            return Outcome::Err(invalid(
+                "cancellation refuses missing or terminal transfer history",
+            ));
         }
-        let entries = value!(request.journal.get_transfer_entries(&request.transfer_id)
-            .map_err(journal_error));
+        let entries = value!(
+            request
+                .journal
+                .get_transfer_entries(&request.transfer_id)
+                .map_err(journal_error)
+        );
         let mut offered = false;
         let mut cancelled = false;
         for entry in entries {
             match &entry.record {
-                JournalRecord::Offer { object_id, manifest_root, total_size, .. } => {
-                    if cancelled || object_id != &id
-                        || manifest_root != &request.manifest.merkle_root || *total_size != length
+                JournalRecord::Offer {
+                    object_id,
+                    manifest_root,
+                    total_size,
+                    ..
+                } => {
+                    if cancelled
+                        || object_id != &id
+                        || manifest_root != &request.manifest.merkle_root
+                        || *total_size != length
                     {
-                        return Outcome::Err(invalid("cancellation conflicts with offered identity"));
+                        return Outcome::Err(invalid(
+                            "cancellation conflicts with offered identity",
+                        ));
                     }
                     offered = true;
                 }
                 JournalRecord::Cancellation { reason, .. } => {
                     if !offered || reason != &request.reason {
-                        return Outcome::Err(invalid("cancellation reason or offer is inconsistent"));
+                        return Outcome::Err(invalid(
+                            "cancellation reason or offer is inconsistent",
+                        ));
                     }
                     cancelled = true;
                 }
@@ -517,14 +588,21 @@ mod journal_cancellation {
                 | JournalRecord::ChunkVerified { .. }
                 | JournalRecord::ChunkWritten { .. }
                 | JournalRecord::RepairDecode { .. }
-                | JournalRecord::ProofDigest { .. } if offered && !cancelled => {}
+                | JournalRecord::ProofDigest { .. }
+                    if offered && !cancelled => {}
                 // A last-record-wins summary must not hide an earlier intent,
                 // completion, rollback, or progress added after cancellation.
-                _ => return Outcome::Err(invalid("cancellation history contains a conflicting transition")),
+                _ => {
+                    return Outcome::Err(invalid(
+                        "cancellation history contains a conflicting transition",
+                    ));
+                }
             }
         }
         if !offered {
-            return Outcome::Err(invalid("cancellation requires an authenticated matching offer"));
+            return Outcome::Err(invalid(
+                "cancellation requires an authenticated matching offer",
+            ));
         }
         Outcome::Ok(())
     }
@@ -550,8 +628,13 @@ mod journal_cancellation {
         use std::time::Duration;
 
         fn runtime(workers: usize) -> Runtime {
-            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new()
+                    .worker_threads(workers)
+                    .with_sharded_state(true)
+            };
             builder.blocking_threads(1, 2).build().unwrap()
         }
 
@@ -565,9 +648,12 @@ mod journal_cancellation {
 
         fn config(base: &Path) -> JournalConfig {
             JournalConfig {
-                base_dir: base.join("journal"), force_sync: false,
-                max_journal_size: u64::MAX, max_generations: 0,
-                recent_entries_limit: 1, ..JournalConfig::default()
+                base_dir: base.join("journal"),
+                force_sync: false,
+                max_journal_size: u64::MAX,
+                max_generations: 0,
+                recent_entries_limit: 1,
+                ..JournalConfig::default()
             }
         }
 
@@ -577,42 +663,86 @@ mod journal_cancellation {
 
         fn request(journal: AppendJournal, manifest: Arc<Manifest>) -> JournalCancelRequest {
             JournalCancelRequest {
-                journal, manifest, transfer_id: "cancelled-transfer".to_owned(),
-                reason: "application stopped".to_owned(), timestamp: 20,
+                journal,
+                manifest,
+                transfer_id: "cancelled-transfer".to_owned(),
+                reason: "application stopped".to_owned(),
+                timestamp: 20,
             }
         }
 
         async fn prepared(
-            cx: &Cx, base: &Path, bytes: &[u8], quarantine: bool, cfg: JournalConfig,
+            cx: &Cx,
+            base: &Path,
+            bytes: &[u8],
+            quarantine: bool,
+            cfg: JournalConfig,
         ) -> (ScopedSparseWriter, Arc<Manifest>, AppendJournal, PathBuf) {
             let object = Object::file(bytes.to_vec());
             let id = object.id.clone();
             let mut graph = ObjectGraph::new();
             graph.add_root(object).unwrap();
-            let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
-            let writer = ScopedSparseWriter::new(cx, id, base.join("destination"), SparseWriterConfig {
-                enable_preallocation: false, enable_quarantine: quarantine,
-                fsync_policy: FsyncPolicy::Never, ..SparseWriterConfig::default()
-            }).await.unwrap().unwrap();
-            writer.set_expected_size(cx, bytes.len() as u64).await.unwrap().unwrap();
+            let manifest =
+                Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+            let writer = ScopedSparseWriter::new(
+                cx,
+                id,
+                base.join("destination"),
+                SparseWriterConfig {
+                    enable_preallocation: false,
+                    enable_quarantine: quarantine,
+                    fsync_policy: FsyncPolicy::Never,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            writer
+                .set_expected_size(cx, bytes.len() as u64)
+                .await
+                .unwrap()
+                .unwrap();
             if !bytes.is_empty() {
-                writer.write_chunk(cx, 0, bytes.to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                writer
+                    .write_chunk(cx, 0, bytes.to_vec(), WriteOptions::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
             }
-            let report = writer.checkpoint_to_journal(cx, JournalCheckpointRequest {
-                journal: open(cfg), transfer_id: "cancelled-transfer".to_owned(),
-                manifest: Arc::clone(&manifest), timestamp: 10,
-                limits: JournalRestoreLimits { max_bytes: 64, max_chunks: 8, max_chunk_bytes: 64 },
-            }).await.unwrap();
+            let report = writer
+                .checkpoint_to_journal(
+                    cx,
+                    JournalCheckpointRequest {
+                        journal: open(cfg),
+                        transfer_id: "cancelled-transfer".to_owned(),
+                        manifest: Arc::clone(&manifest),
+                        timestamp: 10,
+                        limits: JournalRestoreLimits {
+                            max_bytes: 64,
+                            max_chunks: 8,
+                            max_chunk_bytes: 64,
+                        },
+                    },
+                )
+                .await
+                .unwrap();
             let path = report.outcome.unwrap().source_path;
-            cx.scoped_fs().write(base.join("destination"), b"existing destination".to_vec()).await.unwrap();
+            cx.scoped_fs()
+                .write(base.join("destination"), b"existing destination".to_vec())
+                .await
+                .unwrap();
             (writer, manifest, report.journal, path)
         }
 
         fn assert_cancelled(journal: &AppendJournal) {
             let summary = journal.get_resume_summary("cancelled-transfer").unwrap();
-            assert_eq!(summary.status, TransferResumeStatus::Cancelled {
-                reason: "application stopped".to_owned(),
-            });
+            assert_eq!(
+                summary.status,
+                TransferResumeStatus::Cancelled {
+                    reason: "application stopped".to_owned(),
+                }
+            );
             assert!(summary.durable_chunks.is_empty());
             assert_eq!(summary.durable_bytes, 0);
         }
@@ -627,20 +757,33 @@ mod journal_cancellation {
                         runtime.block_on(async {
                             let cx = Cx::current().unwrap();
                             let cfg = config(directory.path());
-                            let (writer, manifest, mut journal, staging) = prepared(
-                                &cx, directory.path(), bytes, quarantine, cfg.clone(),
-                            ).await;
-                            journal.append(JournalRecord::Cancellation {
-                                transfer_id: "other".to_owned(), reason: "unrelated".to_owned(),
-                                timestamp: 11, auth_tag: AuthenticationTag::zero(),
-                            }).unwrap();
-                            let report = writer.cancel_to_journal(&cx, request(journal, manifest.clone())).await.unwrap();
+                            let (writer, manifest, mut journal, staging) =
+                                prepared(&cx, directory.path(), bytes, quarantine, cfg.clone())
+                                    .await;
+                            journal
+                                .append(JournalRecord::Cancellation {
+                                    transfer_id: "other".to_owned(),
+                                    reason: "unrelated".to_owned(),
+                                    timestamp: 11,
+                                    auth_tag: AuthenticationTag::zero(),
+                                })
+                                .unwrap();
+                            let report = writer
+                                .cancel_to_journal(&cx, request(journal, manifest.clone()))
+                                .await
+                                .unwrap();
                             assert!(report.cancellation_persisted);
                             assert!(report.cleanup_attempted);
                             report.outcome.unwrap();
                             assert!(!staging.exists());
-                            assert_eq!(std::fs::read(directory.path().join("destination")).unwrap(), b"existing destination");
-                            assert_eq!(writer.writer.lock_state().lifecycle, WriterLifecycle::Cancelled);
+                            assert_eq!(
+                                std::fs::read(directory.path().join("destination")).unwrap(),
+                                b"existing destination"
+                            );
+                            assert_eq!(
+                                writer.writer.lock_state().lifecycle,
+                                WriterLifecycle::Cancelled
+                            );
                             let mut journal = report.journal;
                             assert_cancelled(&journal);
                             journal.compact().unwrap();
@@ -649,7 +792,10 @@ mod journal_cancellation {
                             assert_cancelled(&journal);
                             assert_eq!(journal.get_transfer_entries("other").unwrap().len(), 1);
                             let before = journal.get_stats().sequence;
-                            let retry = writer.cancel_to_journal(&cx, request(journal, manifest)).await.unwrap();
+                            let retry = writer
+                                .cancel_to_journal(&cx, request(journal, manifest))
+                                .await
+                                .unwrap();
                             retry.outcome.unwrap();
                             assert!(retry.cancellation_persisted && retry.cleanup_attempted);
                             assert_eq!(retry.journal.get_stats().sequence, before + 1);
@@ -668,27 +814,51 @@ mod journal_cancellation {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let (writer, manifest, journal, staging) = prepared(
-                    &cx, directory.path(), b"data", false, config(directory.path()),
-                ).await;
+                    &cx,
+                    directory.path(),
+                    b"data",
+                    false,
+                    config(directory.path()),
+                )
+                .await;
                 let saved = staging.clone();
                 let cfg = config(directory.path());
-                let report = writer.cancel_journal_with(&cx, request(journal, manifest.clone()),
-                    move |journal, record| {
-                        assert_eq!(std::fs::read(&saved).unwrap(), b"data");
-                        assert_eq!(journal.get_resume_summary("cancelled-transfer").unwrap().status,
-                            TransferResumeStatus::Resumable);
-                        persist_cancellation(journal, record)
-                    }, move |core| {
-                        assert_eq!(core.lock_state().lifecycle, WriterLifecycle::Cancelling);
-                        assert_cancelled(&open(cfg));
-                        Outcome::Err(SparseWriterError::CommitFailed("cleanup witness".to_owned()))
-                    }).await.unwrap();
+                let report = writer
+                    .cancel_journal_with(
+                        &cx,
+                        request(journal, manifest.clone()),
+                        move |journal, record| {
+                            assert_eq!(std::fs::read(&saved).unwrap(), b"data");
+                            assert_eq!(
+                                journal
+                                    .get_resume_summary("cancelled-transfer")
+                                    .unwrap()
+                                    .status,
+                                TransferResumeStatus::Resumable
+                            );
+                            persist_cancellation(journal, record)
+                        },
+                        move |core| {
+                            assert_eq!(core.lock_state().lifecycle, WriterLifecycle::Cancelling);
+                            assert_cancelled(&open(cfg));
+                            Outcome::Err(SparseWriterError::CommitFailed(
+                                "cleanup witness".to_owned(),
+                            ))
+                        },
+                    )
+                    .await
+                    .unwrap();
                 assert!(report.cancellation_persisted && report.cleanup_attempted);
-                assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::CommitFailed(reason))
-                    if reason == "cleanup witness"));
+                assert!(
+                    matches!(report.outcome, Outcome::Err(SparseWriterError::CommitFailed(reason))
+                    if reason == "cleanup witness")
+                );
                 assert!(staging.exists());
                 let before = report.journal.get_stats().sequence;
-                let retry = writer.cancel_to_journal(&cx, request(report.journal, manifest)).await.unwrap();
+                let retry = writer
+                    .cancel_to_journal(&cx, request(report.journal, manifest))
+                    .await
+                    .unwrap();
                 retry.outcome.unwrap();
                 assert_eq!(retry.journal.get_stats().sequence, before + 1);
                 assert!(!staging.exists());
@@ -704,25 +874,64 @@ mod journal_cancellation {
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let (writer, manifest, journal, staging) = prepared(
-                        &cx, directory.path(), b"data", false, config(directory.path()),
-                    ).await;
+                        &cx,
+                        directory.path(),
+                        b"data",
+                        false,
+                        config(directory.path()),
+                    )
+                    .await;
                     writer.verify(&cx, manifest.clone()).await.unwrap().unwrap();
-                    let report = writer.cancel_journal_with(&cx, request(journal, manifest),
-                        move |journal, record| {
-                            if after_append { journal.append(record).unwrap(); }
-                            Outcome::Err(SparseWriterError::SyncFailed("terminal witness".to_owned()))
-                        }, |_| panic!("uncertain storage reached cleanup")).await.unwrap();
+                    let report = writer
+                        .cancel_journal_with(
+                            &cx,
+                            request(journal, manifest),
+                            move |journal, record| {
+                                if after_append {
+                                    journal.append(record).unwrap();
+                                }
+                                Outcome::Err(SparseWriterError::SyncFailed(
+                                    "terminal witness".to_owned(),
+                                ))
+                            },
+                            |_| panic!("uncertain storage reached cleanup"),
+                        )
+                        .await
+                        .unwrap();
                     assert!(!report.cancellation_persisted && !report.cleanup_attempted);
-                    assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::SyncFailed(reason))
-                        if reason == "terminal witness"));
+                    assert!(
+                        matches!(report.outcome, Outcome::Err(SparseWriterError::SyncFailed(reason))
+                        if reason == "terminal witness")
+                    );
                     assert_eq!(std::fs::read(&staging).unwrap(), b"data");
-                    assert_eq!(writer.writer.lock_state().lifecycle, WriterLifecycle::Committing);
-                    assert_eq!(writer.writer.lock_state().verification_state, VerificationState::Pending);
-                    assert!(matches!(writer.cancel(&cx).await.unwrap(), Outcome::Err(SparseWriterError::CommitFailed(_))));
-                    assert!(matches!(writer.commit(&cx).await.unwrap(), Outcome::Err(SparseWriterError::CommitFailed(_))));
-                    assert!(matches!(writer.set_expected_size(&cx, 8).await.unwrap(), Outcome::Err(SparseWriterError::WriteFailed(_))));
-                    let summary = report.journal.get_resume_summary("cancelled-transfer").unwrap();
-                    assert_eq!(matches!(summary.status, TransferResumeStatus::Cancelled { .. }), after_append);
+                    assert_eq!(
+                        writer.writer.lock_state().lifecycle,
+                        WriterLifecycle::Committing
+                    );
+                    assert_eq!(
+                        writer.writer.lock_state().verification_state,
+                        VerificationState::Pending
+                    );
+                    assert!(matches!(
+                        writer.cancel(&cx).await.unwrap(),
+                        Outcome::Err(SparseWriterError::CommitFailed(_))
+                    ));
+                    assert!(matches!(
+                        writer.commit(&cx).await.unwrap(),
+                        Outcome::Err(SparseWriterError::CommitFailed(_))
+                    ));
+                    assert!(matches!(
+                        writer.set_expected_size(&cx, 8).await.unwrap(),
+                        Outcome::Err(SparseWriterError::WriteFailed(_))
+                    ));
+                    let summary = report
+                        .journal
+                        .get_resume_summary("cancelled-transfer")
+                        .unwrap();
+                    assert_eq!(
+                        matches!(summary.status, TransferResumeStatus::Cancelled { .. }),
+                        after_append
+                    );
                 });
                 drained(&runtime);
             }
@@ -734,22 +943,44 @@ mod journal_cancellation {
             let runtime = runtime(2);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let cfg = JournalConfig { max_journal_size: 1, ..config(directory.path()) };
-                let (writer, manifest, journal, staging) = prepared(
-                    &cx, directory.path(), b"data", false, cfg.clone(),
-                ).await;
-                let collision = cfg.base_dir.join(format!("journal_gen_{:06}.dat", journal.get_stats().generation + 1));
+                let cfg = JournalConfig {
+                    max_journal_size: 1,
+                    ..config(directory.path())
+                };
+                let (writer, manifest, journal, staging) =
+                    prepared(&cx, directory.path(), b"data", false, cfg.clone()).await;
+                let collision = cfg.base_dir.join(format!(
+                    "journal_gen_{:06}.dat",
+                    journal.get_stats().generation + 1
+                ));
                 std::fs::create_dir(&collision).unwrap();
-                let report = writer.cancel_to_journal(&cx, request(journal, manifest)).await.unwrap();
+                let report = writer
+                    .cancel_to_journal(&cx, request(journal, manifest))
+                    .await
+                    .unwrap();
                 assert!(!report.cancellation_persisted && !report.cleanup_attempted);
-                assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::WriteFailed(reason))
-                    if reason.starts_with("cancellation journal:")));
-                assert!(report.journal.get_resume_summary("cancelled-transfer").is_err());
+                assert!(
+                    matches!(report.outcome, Outcome::Err(SparseWriterError::WriteFailed(reason))
+                    if reason.starts_with("cancellation journal:"))
+                );
+                assert!(
+                    report
+                        .journal
+                        .get_resume_summary("cancelled-transfer")
+                        .is_err()
+                );
                 assert_eq!(std::fs::read(&staging).unwrap(), b"data");
                 drop(report.journal);
-                std::fs::rename(collision, directory.path().join("retained-directory-evidence")).unwrap();
+                std::fs::rename(
+                    collision,
+                    directory.path().join("retained-directory-evidence"),
+                )
+                .unwrap();
                 assert_cancelled(&open(cfg));
-                assert!(matches!(writer.cancel(&cx).await.unwrap(), Outcome::Err(SparseWriterError::CommitFailed(_))));
+                assert!(matches!(
+                    writer.cancel(&cx).await.unwrap(),
+                    Outcome::Err(SparseWriterError::CommitFailed(_))
+                ));
             });
             drained(&runtime);
         }
@@ -842,23 +1073,31 @@ mod journal_cancellation {
                 runtime.block_on(async {
                     let cx = Cx::current().unwrap();
                     let cfg = config(directory.path());
-                    let (writer, manifest, journal, staging) = prepared(
-                        &cx, directory.path(), b"data", false, cfg.clone(),
-                    ).await;
-                    let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let (writer, manifest, journal, staging) =
+                        prepared(&cx, directory.path(), b"data", false, cfg.clone()).await;
+                    let region = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
                     let (started, mut start) = oneshot::channel();
                     let (release, wait) = mpsc::channel();
-                    let mut cancelling = Box::pin(writer.cancel_journal_with(region.cx(), request(journal, manifest),
+                    let mut cancelling = Box::pin(writer.cancel_journal_with(
+                        region.cx(),
+                        request(journal, manifest),
                         move |journal, record| {
                             started.send_blocking(()).unwrap();
                             wait.recv_timeout(Duration::from_secs(10)).unwrap();
                             persist_cancellation(journal, record)
-                        }, SparseWriter::cancel_blocking));
+                        },
+                        SparseWriter::cancel_blocking,
+                    ));
                     let mut starting = Box::pin(start.recv(&cx));
                     poll_fn(|task| {
                         assert!(cancelling.as_mut().poll(task).is_pending());
                         starting.as_mut().poll(task)
-                    }).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
                     drop(starting);
                     assert_eq!(writer.admission.available_permits(), 0);
                     assert!(staging.exists());
@@ -866,12 +1105,16 @@ mod journal_cancellation {
                     poll_fn(|task| {
                         assert!(competing.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(cancelling);
                     assert_eq!(writer.admission.available_permits(), 0);
                     release.send(()).unwrap();
                     region.close().await.unwrap();
-                    assert!(matches!(competing.await.unwrap(), Outcome::Err(SparseWriterError::WriteFailed(_))));
+                    assert!(matches!(
+                        competing.await.unwrap(),
+                        Outcome::Err(SparseWriterError::WriteFailed(_))
+                    ));
                     assert!(!staging.exists());
                     assert_cancelled(&open(cfg));
                     assert_eq!(writer.admission.available_permits(), 1);
@@ -887,13 +1130,26 @@ mod journal_cancellation {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let (writer, manifest, journal, staging) = prepared(
-                    &cx, directory.path(), b"data", false, config(directory.path()),
-                ).await;
-                let result = writer.cancel_journal_with(&cx, request(journal, manifest),
-                    |_, _| panic!("terminal persistence witness"),
-                    |_| panic!("panic reached cleanup")).await;
+                    &cx,
+                    directory.path(),
+                    b"data",
+                    false,
+                    config(directory.path()),
+                )
+                .await;
+                let result = writer
+                    .cancel_journal_with(
+                        &cx,
+                        request(journal, manifest),
+                        |_, _| panic!("terminal persistence witness"),
+                        |_| panic!("panic reached cleanup"),
+                    )
+                    .await;
                 assert!(matches!(result, Err(ScopedFsError::Join(_))));
-                assert_eq!(writer.writer.lock_state().lifecycle, WriterLifecycle::Committing);
+                assert_eq!(
+                    writer.writer.lock_state().lifecycle,
+                    WriterLifecycle::Committing
+                );
                 assert_eq!(std::fs::read(staging).unwrap(), b"data");
                 assert_eq!(writer.admission.available_permits(), 1);
             });
@@ -907,20 +1163,32 @@ mod journal_cancellation {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let cfg = config(directory.path());
-                let (writer, manifest, journal, staging) = prepared(
-                    &cx, directory.path(), b"data", false, cfg.clone(),
-                ).await;
+                let (writer, manifest, journal, staging) =
+                    prepared(&cx, directory.path(), b"data", false, cfg.clone()).await;
                 let before = journal.get_stats().sequence;
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
-                region.cx().cancel_with(CancelKind::User, Some("before terminal admission"));
-                let refused = writer.cancel_to_journal(region.cx(), request(journal, manifest.clone())).await;
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                region
+                    .cx()
+                    .cancel_with(CancelKind::User, Some("before terminal admission"));
+                let refused = writer
+                    .cancel_to_journal(region.cx(), request(journal, manifest.clone()))
+                    .await;
                 assert!(matches!(refused, Err(ScopedFsError::Checkpoint(_))));
                 region.close().await.unwrap();
                 let journal = open(cfg);
                 assert_eq!(journal.get_stats().sequence, before);
-                cx.scoped_fs().write(staging.clone(), b"bad".to_vec()).await.unwrap();
+                cx.scoped_fs()
+                    .write(staging.clone(), b"bad".to_vec())
+                    .await
+                    .unwrap();
                 // Cancellation authorizes disposal, not successful content verification.
-                let report = writer.cancel_to_journal(&cx, request(journal, manifest)).await.unwrap();
+                let report = writer
+                    .cancel_to_journal(&cx, request(journal, manifest))
+                    .await
+                    .unwrap();
                 report.outcome.unwrap();
                 assert!(report.cancellation_persisted && report.cleanup_attempted);
                 assert_cancelled(&report.journal);

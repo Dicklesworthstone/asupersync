@@ -4203,17 +4203,20 @@ struct CancelTarget {
 }
 
 impl CancelTarget {
-    fn from_connected_stream(options: &PgConnectOptions, stream: &PgStream) -> Result<Self, PgError> {
+    fn from_connected_stream(
+        options: &PgConnectOptions,
+        stream: &PgStream,
+    ) -> Result<Self, PgError> {
         let endpoint = match stream {
             PgStream::Plain(stream) => CancelEndpoint::Tcp(stream.peer_addr()?),
             #[cfg(feature = "tls")]
             PgStream::Tls(stream) => CancelEndpoint::Tcp(stream.get_ref().peer_addr()?),
             #[cfg(unix)]
-            PgStream::Unix(_) => CancelEndpoint::Unix(
-                unix_socket_path(&options.host, options.port).ok_or_else(|| {
-                    PgError::Protocol("Unix connection has no cancellation socket path".into())
-                })?,
-            ),
+            PgStream::Unix(_) => {
+                CancelEndpoint::Unix(unix_socket_path(&options.host, options.port).ok_or_else(
+                    || PgError::Protocol("Unix connection has no cancellation socket path".into()),
+                )?)
+            }
         };
         // CancelRequest is best-effort signaling — bound the entire exchange
         // to 500ms (or the user's configured connect_timeout, whichever is
@@ -9328,7 +9331,10 @@ impl PgConnection {
         max_message_bytes: usize,
     ) -> PgError {
         let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
-        match self.drain_to_ready_with_body_limit(cx, max_message_bytes).await {
+        match self
+            .drain_to_ready_with_body_limit(cx, max_message_bytes)
+            .await
+        {
             Ok(()) => server_err,
             Err(PgError::Cancelled(reason)) => {
                 self.abort_in_flight_exchange();
@@ -9664,9 +9670,7 @@ impl PgCopyOut<'_> {
         match self.state {
             PgCopyOutState::Completed => return Outcome::Ok(None),
             PgCopyOutState::Failed => {
-                return Outcome::Err(PgError::Protocol(
-                    "COPY OUT stream has failed".to_string(),
-                ));
+                return Outcome::Err(PgError::Protocol("COPY OUT stream has failed".to_string()));
             }
             _ => {}
         }

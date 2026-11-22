@@ -30,8 +30,8 @@
 //!
 //! bd-k4kmq | Parent: bd-pr46z
 
-use std::collections::BTreeMap;
 use crate::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
 
 use crate::monitor::DownReason;
 use crate::types::cancel::{CancelKind, CancelReason};

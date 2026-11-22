@@ -13,6 +13,7 @@ use crate::combinator::{
 };
 use crate::error::{Error, ErrorKind};
 use crate::observability::LogEntry;
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::time::TimeSource;
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
@@ -21,7 +22,6 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 

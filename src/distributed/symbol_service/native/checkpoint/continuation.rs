@@ -153,7 +153,8 @@ pub struct PreparedContinuation<W: RestorableWorkload> {
 }
 impl<W: RestorableWorkload> fmt::Debug for PreparedContinuation<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PreparedContinuation").finish_non_exhaustive()
+        f.debug_struct("PreparedContinuation")
+            .finish_non_exhaustive()
     }
 }
 
@@ -162,27 +163,44 @@ impl<W: RestorableWorkload> fmt::Debug for PreparedContinuation<W> {
 // existing RegionSnapshot ownership contract, not this private temporary guard.
 struct DecodedSnapshot(RegionSnapshot);
 impl Drop for DecodedSnapshot {
-    fn drop(&mut self) { self.0.metadata.zeroize(); }
+    fn drop(&mut self) {
+        self.0.metadata.zeroize();
+    }
 }
 
 fn descriptor<W: RestorableWorkload>() -> Result<(), ContinuationError> {
-    if W::NAME.is_empty() || W::NAME.len() > 255 || W::REVISION == 0
-        || W::STATE_SCHEMA == [0; 32] || W::NAME.chars().any(char::is_control)
-    { return Err(ContinuationError::Workload); }
+    if W::NAME.is_empty()
+        || W::NAME.len() > 255
+        || W::REVISION == 0
+        || W::STATE_SCHEMA == [0; 32]
+        || W::NAME.chars().any(char::is_control)
+    {
+        return Err(ContinuationError::Workload);
+    }
     Ok(())
 }
 fn shape(snapshot: &RegionSnapshot) -> Result<(), ContinuationError> {
-    if snapshot.state != RegionState::Open || !snapshot.tasks.is_empty()
-        || !snapshot.children.is_empty() || snapshot.finalizer_count != 0
-        || snapshot.cancel_reason.is_some() || snapshot.parent.is_some()
-        || snapshot.budget.deadline_nanos.is_some() || snapshot.budget.polls_remaining.is_some()
+    if snapshot.state != RegionState::Open
+        || !snapshot.tasks.is_empty()
+        || !snapshot.children.is_empty()
+        || snapshot.finalizer_count != 0
+        || snapshot.cancel_reason.is_some()
+        || snapshot.parent.is_some()
+        || snapshot.budget.deadline_nanos.is_some()
+        || snapshot.budget.polls_remaining.is_some()
         || snapshot.budget.cost_remaining.is_some()
-    { return Err(ContinuationError::UnsupportedSnapshot); }
+    {
+        return Err(ContinuationError::UnsupportedSnapshot);
+    }
     Ok(())
 }
 fn identity(snapshot: &RegionSnapshot) -> SnapshotIdentity {
-    SnapshotIdentity { region_id: snapshot.region_id, origin_id: snapshot.origin_id,
-        epoch: snapshot.epoch, sequence: snapshot.sequence }
+    SnapshotIdentity {
+        region_id: snapshot.region_id,
+        origin_id: snapshot.origin_id,
+        epoch: snapshot.epoch,
+        sequence: snapshot.sequence,
+    }
 }
 fn add(a: usize, b: usize) -> Result<usize, ContinuationError> {
     a.checked_add(b).ok_or(ContinuationError::Overflow)
@@ -196,13 +214,21 @@ fn state_hash(bytes: &[u8]) -> Result<[u8; 32], ContinuationError> {
     Ok(hash.finalize().into())
 }
 fn canonical<W: RestorableWorkload>(
-    workload: &W, bytes: &[u8], limits: ContinuationLimits,
+    workload: &W,
+    bytes: &[u8],
+    limits: ContinuationLimits,
 ) -> Result<W::State, ContinuationError> {
-    if bytes.len() > limits.max_state_bytes { return Err(ContinuationError::Limit("state bytes")); }
+    if bytes.len() > limits.max_state_bytes {
+        return Err(ContinuationError::Limit("state bytes"));
+    }
     let state = workload.decode_state(bytes)?;
     let roundtrip = Zeroizing::new(workload.encode_state(&state)?);
-    if roundtrip.len() > limits.max_state_bytes { return Err(ContinuationError::Limit("state bytes")); }
-    if roundtrip.as_slice() != bytes { return Err(ContinuationError::NonCanonical); }
+    if roundtrip.len() > limits.max_state_bytes {
+        return Err(ContinuationError::Limit("state bytes"));
+    }
+    if roundtrip.as_slice() != bytes {
+        return Err(ContinuationError::NonCanonical);
+    }
     Ok(state)
 }
 
@@ -220,12 +246,17 @@ fn canonical<W: RestorableWorkload>(
 /// semantics. Temporary codec/serialization buffers zeroize; caller-retained
 /// snapshots, typed state and persisted files require caller-controlled protection.
 pub fn checkpoint_workload<W: RestorableWorkload>(
-    mut snapshot: RegionSnapshot, workload: &W, state: &W::State,
-    snapshot_key: &AuthKey, limits: ContinuationLimits,
+    mut snapshot: RegionSnapshot,
+    workload: &W,
+    state: &W::State,
+    snapshot_key: &AuthKey,
+    limits: ContinuationLimits,
 ) -> Result<RegionSnapshot, ContinuationError> {
     descriptor::<W>()?;
     shape(&snapshot)?;
-    if !snapshot.metadata.is_empty() { return Err(ContinuationError::ExistingMetadata); }
+    if !snapshot.metadata.is_empty() {
+        return Err(ContinuationError::ExistingMetadata);
+    }
     // The caller owns this typed snapshot; size_estimate also encodes its causal
     // clock. Hostile serialized snapshots use prepare_workload's predecode limit.
     if snapshot.size_estimate() > limits.max_snapshot_bytes {
@@ -238,14 +269,20 @@ pub fn checkpoint_workload<W: RestorableWorkload>(
         return Err(ContinuationError::Limit("snapshot bytes"));
     }
     let mut metadata = Zeroizing::new(Vec::new());
-    metadata.try_reserve_exact(length).map_err(|_| ContinuationError::Allocation)?;
+    metadata
+        .try_reserve_exact(length)
+        .map_err(|_| ContinuationError::Allocation)?;
     metadata.extend_from_slice(MAGIC);
     metadata.extend_from_slice(&VERSION.to_le_bytes());
     metadata.extend_from_slice(&W::REVISION.to_le_bytes());
     metadata.extend_from_slice(&(W::NAME.len() as u16).to_le_bytes());
     metadata.extend_from_slice(&0_u16.to_le_bytes()); // Reserved, including effect-profile extensions.
     metadata.extend_from_slice(&W::STATE_SCHEMA);
-    metadata.extend_from_slice(&u64::try_from(bytes.len()).map_err(|_| ContinuationError::Overflow)?.to_le_bytes());
+    metadata.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .map_err(|_| ContinuationError::Overflow)?
+            .to_le_bytes(),
+    );
     metadata.extend_from_slice(&state_hash(&bytes)?);
     metadata.extend_from_slice(W::NAME.as_bytes());
     metadata.extend_from_slice(&bytes);
@@ -253,7 +290,9 @@ pub fn checkpoint_workload<W: RestorableWorkload>(
     let mut snapshot = DecodedSnapshot(snapshot);
     snapshot.0.sign(snapshot_key);
     let encoded = Zeroizing::new(snapshot.0.to_bytes());
-    if encoded.len() > limits.max_snapshot_bytes { return Err(ContinuationError::Limit("snapshot bytes")); }
+    if encoded.len() > limits.max_snapshot_bytes {
+        return Err(ContinuationError::Limit("snapshot bytes"));
+    }
     // Preserve existing SNAP admission, including its arena-ID and metadata caps.
     // Do not author an encoding our actual restore decoder refuses.
     Ok(RegionSnapshot::from_bytes_with_key(&encoded, snapshot_key)?)
@@ -267,41 +306,75 @@ pub fn checkpoint_workload<W: RestorableWorkload>(
 /// workload/revision/schema, exact metadata framing and state digest precede the
 /// trusted codec. Canonical re-encoding must match before a runnable value escapes.
 pub fn prepare_workload<W: RestorableWorkload>(
-    snapshot_bytes: &[u8], expected: SnapshotIdentity, snapshot_key: &AuthKey,
-    limits: ContinuationLimits, workload: Arc<W>,
+    snapshot_bytes: &[u8],
+    expected: SnapshotIdentity,
+    snapshot_key: &AuthKey,
+    limits: ContinuationLimits,
+    workload: Arc<W>,
 ) -> Result<PreparedContinuation<W>, ContinuationError> {
     descriptor::<W>()?;
-    if snapshot_bytes.len() > limits.max_snapshot_bytes { return Err(ContinuationError::Limit("snapshot bytes")); }
-    let snapshot = DecodedSnapshot(RegionSnapshot::from_bytes_with_key(snapshot_bytes, snapshot_key)?);
-    if identity(&snapshot.0) != expected { return Err(ContinuationError::Identity); }
+    if snapshot_bytes.len() > limits.max_snapshot_bytes {
+        return Err(ContinuationError::Limit("snapshot bytes"));
+    }
+    let snapshot = DecodedSnapshot(RegionSnapshot::from_bytes_with_key(
+        snapshot_bytes,
+        snapshot_key,
+    )?);
+    if identity(&snapshot.0) != expected {
+        return Err(ContinuationError::Identity);
+    }
     shape(&snapshot.0)?;
     let metadata = &snapshot.0.metadata;
-    if metadata.len() < HEADER || &metadata[..8] != MAGIC
-        || metadata[8..12] != VERSION.to_le_bytes() || metadata[18..20] != [0; 2]
-    { return Err(ContinuationError::Format); }
-    let name_len = usize::from(u16::from_le_bytes(metadata[16..18].try_into().expect("name length")));
-    let state_len = usize::try_from(u64::from_le_bytes(metadata[52..60].try_into().expect("state length")))
-        .map_err(|_| ContinuationError::Overflow)?;
-    if state_len > limits.max_state_bytes { return Err(ContinuationError::Limit("state bytes")); }
+    if metadata.len() < HEADER
+        || &metadata[..8] != MAGIC
+        || metadata[8..12] != VERSION.to_le_bytes()
+        || metadata[18..20] != [0; 2]
+    {
+        return Err(ContinuationError::Format);
+    }
+    let name_len = usize::from(u16::from_le_bytes(
+        metadata[16..18].try_into().expect("name length"),
+    ));
+    let state_len = usize::try_from(u64::from_le_bytes(
+        metadata[52..60].try_into().expect("state length"),
+    ))
+    .map_err(|_| ContinuationError::Overflow)?;
+    if state_len > limits.max_state_bytes {
+        return Err(ContinuationError::Limit("state bytes"));
+    }
     let state_start = add(HEADER, name_len)?;
     if name_len == 0 || name_len > 255 || add(state_start, state_len)? != metadata.len() {
         return Err(ContinuationError::Format);
     }
-    if metadata[12..16] != W::REVISION.to_le_bytes() || metadata[20..52] != W::STATE_SCHEMA
+    if metadata[12..16] != W::REVISION.to_le_bytes()
+        || metadata[20..52] != W::STATE_SCHEMA
         || &metadata[HEADER..state_start] != W::NAME.as_bytes()
-    { return Err(ContinuationError::Workload); }
+    {
+        return Err(ContinuationError::Workload);
+    }
     let state_bytes = &metadata[state_start..];
     let digest = state_hash(state_bytes)?;
-    if metadata[60..HEADER] != digest { return Err(ContinuationError::Format); }
+    if metadata[60..HEADER] != digest {
+        return Err(ContinuationError::Format);
+    }
     let state = canonical(workload.as_ref(), state_bytes, limits)?;
-    Ok(PreparedContinuation { workload, state, source: expected, state_digest: digest })
+    Ok(PreparedContinuation {
+        workload,
+        state,
+        source: expected,
+        state_digest: digest,
+    })
 }
 
 impl<W: RestorableWorkload> PreparedContinuation<W> {
     /// Source provenance only. It is NEVER installed as a destination runtime ID.
-    pub const fn source(&self) -> SnapshotIdentity { self.source }
+    pub const fn source(&self) -> SnapshotIdentity {
+        self.source
+    }
     /// Domain-framed state digest, not authorization or an exactly-once token.
-    pub const fn state_digest(&self) -> [u8; 32] { self.state_digest }
+    pub const fn state_digest(&self) -> [u8; 32] {
+        self.state_digest
+    }
 
     /// Consume validated state and run its factory under a fresh membership lease.
     ///
@@ -313,26 +386,54 @@ impl<W: RestorableWorkload> PreparedContinuation<W> {
     /// Application errors inside W::Output remain application-level outcomes.
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
-        self, owner: &OwnedMembershipController, cx: &Cx, node: &NodeId,
-        incarnation: u64, duration: Duration, spec: ChildRegionSpec,
+        self,
+        owner: &OwnedMembershipController,
+        cx: &Cx,
+        node: &NodeId,
+        incarnation: u64,
+        duration: Duration,
+        spec: ChildRegionSpec,
     ) -> Result<MembershipWorkReport<W::Output>, MembershipWorkError> {
-        let Self { workload, state, .. } = self;
-        owner.run_scoped(cx, node, incarnation, duration, spec, move |child| async move {
-            workload.resume(child, state).await
-        }).await
+        let Self {
+            workload, state, ..
+        } = self;
+        owner
+            .run_scoped(
+                cx,
+                node,
+                incarnation,
+                duration,
+                spec,
+                move |child| async move { workload.resume(child, state).await },
+            )
+            .await
     }
 
     /// The same execution contract using restart-persistent membership policy.
     /// This does not persist or deduplicate the resumed application's effects.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_persistent(
-        self, owner: &PersistentMembershipController, cx: &Cx, node: &NodeId,
-        incarnation: u64, duration: Duration, spec: ChildRegionSpec,
+        self,
+        owner: &PersistentMembershipController,
+        cx: &Cx,
+        node: &NodeId,
+        incarnation: u64,
+        duration: Duration,
+        spec: ChildRegionSpec,
     ) -> Result<MembershipWorkReport<W::Output>, MembershipWorkError> {
-        let Self { workload, state, .. } = self;
-        owner.run_scoped(cx, node, incarnation, duration, spec, move |child| async move {
-            workload.resume(child, state).await
-        }).await
+        let Self {
+            workload, state, ..
+        } = self;
+        owner
+            .run_scoped(
+                cx,
+                node,
+                incarnation,
+                duration,
+                spec,
+                move |child| async move { workload.resume(child, state).await },
+            )
+            .await
     }
 }
 

@@ -304,13 +304,19 @@ impl PbftAuthenticator {
             return Err(PbftAuthError::Membership);
         }
         let sender = u32::from_be_bytes(
-            packet[40..44].try_into().map_err(|_| PbftAuthError::Framing)?,
+            packet[40..44]
+                .try_into()
+                .map_err(|_| PbftAuthError::Framing)?,
         );
         let audience = u32::from_be_bytes(
-            packet[44..48].try_into().map_err(|_| PbftAuthError::Framing)?,
+            packet[44..48]
+                .try_into()
+                .map_err(|_| PbftAuthError::Framing)?,
         );
         let length = u32::from_be_bytes(
-            packet[48..52].try_into().map_err(|_| PbftAuthError::Framing)?,
+            packet[48..52]
+                .try_into()
+                .map_err(|_| PbftAuthError::Framing)?,
         );
         let length = usize::try_from(length).map_err(|_| PbftAuthError::PayloadTooLarge)?;
         if length > self.max_payload_bytes {
@@ -344,7 +350,9 @@ impl PbftAuthenticator {
         match message {
             // This authenticates the forwarding replica, NOT the client_id.
             PbftMessage::Request(_) => Ok(()),
-            PbftMessage::PrePrepare { replica_id, view, .. } => {
+            PbftMessage::PrePrepare {
+                replica_id, view, ..
+            } => {
                 if self.membership.index(replica_id)? != sender
                     || view.primary(self.membership.replica_count()) != sender as usize
                 {

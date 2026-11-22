@@ -6,12 +6,12 @@
 use super::*;
 use crate::atp::sync::{BidirectionalSyncAction, DestructiveAuthorization};
 use crate::runtime::RuntimeBuilder;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::CancelKind;
 use std::ffi::OsString;
 use std::future::Future;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 const WATCHDOG: Duration = Duration::from_secs(15);
@@ -51,7 +51,10 @@ where
             .await
             .expect("native directory test watchdog");
     });
-    assert!(runtime.shutdown_timeout(WATCHDOG), "owned blocking work drains");
+    assert!(
+        runtime.shutdown_timeout(WATCHDOG),
+        "owned blocking work drains"
+    );
 }
 
 fn empty() -> DirectoryManifest {
@@ -59,8 +62,13 @@ fn empty() -> DirectoryManifest {
 }
 
 fn decision<'a>(plan: &'a PreparedNativeDirectorySync, path: &str) -> &'a BidirectionalSyncAction {
-    &plan.preview().decisions.iter().find(|item| item.path.as_str() == path)
-        .expect("expected path decision").action
+    &plan
+        .preview()
+        .decisions
+        .iter()
+        .find(|item| item.path.as_str() == path)
+        .expect("expected path decision")
+        .action
 }
 
 fn mirror_roots(label: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -97,23 +105,39 @@ fn native_mirror_fresh_plan_ids_differ_across_default_runtime_instances() {
             let cx = Cx::current().unwrap();
             crate::time::timeout(cx.now(), WATCHDOG, async {
                 let prepared = prepare_native_directory_mirror(
-                    &cx, &source, &destination, NativeDirectoryLimits::default(),
-                ).await.unwrap();
+                    &cx,
+                    &source,
+                    &destination,
+                    NativeDirectoryLimits::default(),
+                )
+                .await
+                .unwrap();
                 let review_id = prepared.plan_id().to_owned();
                 let decisions = prepared.preview().clone();
                 let attempted = prepared.with_fresh_plan_id(&cx).unwrap();
                 assert_eq!(attempted.preview(), &decisions);
                 assert_ne!(attempted.plan_id(), review_id);
                 (review_id, attempted.plan_id().to_owned())
-            }).await.unwrap()
+            })
+            .await
+            .unwrap()
         });
         assert!(runtime.shutdown_timeout(WATCHDOG));
         identities.push(ids);
     }
-    assert_eq!(identities[0].0, identities[1].0, "unchanged review remains deterministic");
-    assert_ne!(identities[0].1, identities[1].1, "native runtime restart must not reuse entropy");
+    assert_eq!(
+        identities[0].0, identities[1].0,
+        "unchanged review remains deterministic"
+    );
+    assert_ne!(
+        identities[0].1, identities[1].1,
+        "native runtime restart must not reuse entropy"
+    );
     assert_eq!(std::fs::read(source.join("file")).unwrap(), b"new source");
-    assert_eq!(std::fs::read(destination.join("file")).unwrap(), b"old destination");
+    assert_eq!(
+        std::fs::read(destination.join("file")).unwrap(),
+        b"old destination"
+    );
     assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
 }
 
@@ -129,9 +153,11 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
             std::fs::write(destination.join("extra"), b"destination-only").unwrap();
             let limits = NativeDirectoryLimits::default();
             let first = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
+                .await
+                .unwrap();
             let second = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
+                .await
+                .unwrap();
             assert_eq!(first.preview(), second.preview());
             assert_eq!(first.plan_id(), second.plan_id());
             assert_eq!(first.local().root(), source.as_path());
@@ -139,9 +165,15 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
             assert!(!first.preview().has_conflicts());
             assert!(first.preview().has_destructive_actions());
             for path in ["nested", "nested/new", "shared"] {
-                assert_eq!(*decision(&first, path), BidirectionalSyncAction::CopyLocalToRemote);
+                assert_eq!(
+                    *decision(&first, path),
+                    BidirectionalSyncAction::CopyLocalToRemote
+                );
             }
-            assert_eq!(*decision(&first, "extra"), BidirectionalSyncAction::DeleteRemote);
+            assert_eq!(
+                *decision(&first, "extra"),
+                BidirectionalSyncAction::DeleteRemote
+            );
             assert!(first.preview().decisions.iter().all(|item| matches!(
                 item.action,
                 BidirectionalSyncAction::Keep
@@ -151,13 +183,28 @@ fn native_mirror_prepare_is_directional_deterministic_and_read_only() {
             // Equal actions from a three-way comparison still have a distinct
             // review identity: mirror and last-common-baseline intent differ.
             let sync = prepare_native_directory_sync(
-                &cx, first.remote().manifest().clone(), &source, &destination, limits,
-            ).await.unwrap();
+                &cx,
+                first.remote().manifest().clone(),
+                &source,
+                &destination,
+                limits,
+            )
+            .await
+            .unwrap();
             assert_eq!(first.preview(), sync.preview());
             assert_ne!(first.plan_id(), sync.plan_id());
-            assert_eq!(std::fs::read(source.join("shared")).unwrap(), b"authoritative-source");
-            assert_eq!(std::fs::read(destination.join("shared")).unwrap(), b"independent-destination-edit");
-            assert_eq!(std::fs::read(destination.join("extra")).unwrap(), b"destination-only");
+            assert_eq!(
+                std::fs::read(source.join("shared")).unwrap(),
+                b"authoritative-source"
+            );
+            assert_eq!(
+                std::fs::read(destination.join("shared")).unwrap(),
+                b"independent-destination-edit"
+            );
+            assert_eq!(
+                std::fs::read(destination.join("extra")).unwrap(),
+                b"destination-only"
+            );
             assert!(!source.join("extra").exists());
             assert!(!destination.join("nested").exists());
             assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
@@ -179,51 +226,83 @@ fn native_mirror_apply_converges_without_changing_source_and_retains_recovery_in
             std::fs::write(destination.join("shared"), b"retained-old-version").unwrap();
             std::fs::write(destination.join("obsolete/deep/value"), b"retained-extra").unwrap();
             let old_shared = std::fs::metadata(destination.join("shared")).unwrap().ino();
-            let old_extra = std::fs::metadata(destination.join("obsolete/deep/value")).unwrap().ino();
-            let limits = NativeDirectoryLimits { buffer_bytes: 7, ..NativeDirectoryLimits::default() };
+            let old_extra = std::fs::metadata(destination.join("obsolete/deep/value"))
+                .unwrap()
+                .ino();
+            let limits = NativeDirectoryLimits {
+                buffer_bytes: 7,
+                ..NativeDirectoryLimits::default()
+            };
             let before = scan_native_directory(&cx, &source, limits).await.unwrap();
             let prepared = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
+                .await
+                .unwrap();
             let reviewed_id = prepared.plan_id().to_owned();
-            let report = prepared.apply_with_quarantined_deletions(
-                &cx, mirror_authorization(), &staging,
-            ).await.unwrap();
+            let report = prepared
+                .apply_with_quarantined_deletions(&cx, mirror_authorization(), &staging)
+                .await
+                .unwrap();
             assert!(report.complete, "{:?}", report.failure);
             assert!(report.failure.is_none());
             assert_eq!(report.plan_id, reviewed_id);
             assert_eq!(report.verified_baseline.as_ref(), Some(before.manifest()));
-            assert_eq!(std::fs::read(destination.join("new/deep/payload")).unwrap(), payload);
-            assert_eq!(std::fs::read(destination.join("shared")).unwrap(), b"new-source-version");
+            assert_eq!(
+                std::fs::read(destination.join("new/deep/payload")).unwrap(),
+                payload
+            );
+            assert_eq!(
+                std::fs::read(destination.join("shared")).unwrap(),
+                b"new-source-version"
+            );
             assert!(destination.join("empty").is_dir());
             assert!(!destination.join("obsolete").exists());
             for (path, inode, bytes) in [
                 ("shared", old_shared, b"retained-old-version".as_slice()),
-                ("obsolete/deep/value", old_extra, b"retained-extra".as_slice()),
+                (
+                    "obsolete/deep/value",
+                    old_extra,
+                    b"retained-extra".as_slice(),
+                ),
             ] {
-                let receipt = report.actions.iter().find(|item| item.path.as_str() == path).unwrap();
+                let receipt = report
+                    .actions
+                    .iter()
+                    .find(|item| item.path.as_str() == path)
+                    .unwrap();
                 assert!(receipt.durable);
                 let quarantined = receipt.quarantine_path.as_ref().unwrap();
                 assert_eq!(std::fs::metadata(quarantined).unwrap().ino(), inode);
                 assert_eq!(std::fs::read(quarantined).unwrap(), bytes);
             }
             for path in ["obsolete", "obsolete/deep", "obsolete/deep/value"] {
-                let receipt = report.actions.iter().find(|item| item.path.as_str() == path).unwrap();
+                let receipt = report
+                    .actions
+                    .iter()
+                    .find(|item| item.path.as_str() == path)
+                    .unwrap();
                 assert_eq!(receipt.action, BidirectionalSyncAction::DeleteRemote);
                 assert_eq!(receipt.state, NativeDirectoryActionState::Quarantined);
                 assert!(receipt.durable);
             }
             let after = scan_native_directory(&cx, &source, limits).await.unwrap();
             assert_eq!(after.manifest(), before.manifest());
-            assert_eq!(after.guards, before.guards, "mirror must not mutate source objects");
+            assert_eq!(
+                after.guards, before.guards,
+                "mirror must not mutate source objects"
+            );
             assert_eq!(after.root_stamp, before.root_stamp);
-            let destination_after = scan_native_directory(&cx, &destination, limits).await.unwrap();
+            let destination_after = scan_native_directory(&cx, &destination, limits)
+                .await
+                .unwrap();
             assert_eq!(after.manifest(), destination_after.manifest());
             let next = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
+                .await
+                .unwrap();
             assert!(next.preview().is_noop());
-            let repeated = next.apply_with_quarantined_deletions(
-                &cx, mirror_authorization(), staging,
-            ).await.unwrap();
+            let repeated = next
+                .apply_with_quarantined_deletions(&cx, mirror_authorization(), staging)
+                .await
+                .unwrap();
             assert!(repeated.complete);
             assert!(repeated.staging_directory.is_none());
         });
@@ -239,45 +318,88 @@ fn native_mirror_authority_and_stale_observations_refuse_before_effects() {
         std::fs::write(destination.join("extra"), b"retained").unwrap();
         let limits = NativeDirectoryLimits::default();
         for authorization in [
-            DestructiveAuthorization { allow_delete: false, ..mirror_authorization() },
-            DestructiveAuthorization { allow_overwrite: false, ..mirror_authorization() },
-            DestructiveAuthorization { allow_permission_change: false, ..mirror_authorization() },
+            DestructiveAuthorization {
+                allow_delete: false,
+                ..mirror_authorization()
+            },
+            DestructiveAuthorization {
+                allow_overwrite: false,
+                ..mirror_authorization()
+            },
+            DestructiveAuthorization {
+                allow_permission_change: false,
+                ..mirror_authorization()
+            },
         ] {
             let prepared = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
-            let report = prepared.apply_with_quarantined_deletions(&cx, authorization, &staging)
-                .await.unwrap();
+                .await
+                .unwrap();
+            let report = prepared
+                .apply_with_quarantined_deletions(&cx, authorization, &staging)
+                .await
+                .unwrap();
             assert!(!report.complete);
             assert!(report.failure.is_some());
             assert!(report.staging_directory.is_none());
             assert!(report.verified_baseline.is_none());
-            assert!(report.actions.iter().all(|item| item.state == NativeDirectoryActionState::NotStarted));
-            assert_eq!(std::fs::read(destination.join("shared")).unwrap(), b"destination");
-            assert_eq!(std::fs::read(destination.join("extra")).unwrap(), b"retained");
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|item| item.state == NativeDirectoryActionState::NotStarted)
+            );
+            assert_eq!(
+                std::fs::read(destination.join("shared")).unwrap(),
+                b"destination"
+            );
+            assert_eq!(
+                std::fs::read(destination.join("extra")).unwrap(),
+                b"retained"
+            );
         }
         let prepared = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-            .await.unwrap();
-        let dry_run = prepared.apply_with_quarantined_deletions(
-            &cx, DestructiveAuthorization::default(), &staging,
-        ).await.unwrap();
+            .await
+            .unwrap();
+        let dry_run = prepared
+            .apply_with_quarantined_deletions(&cx, DestructiveAuthorization::default(), &staging)
+            .await
+            .unwrap();
         assert!(dry_run.dry_run);
         assert!(!dry_run.complete);
         assert!(dry_run.failure.is_none());
         assert!(dry_run.staging_directory.is_none());
-        assert!(dry_run.actions.iter().all(|item| item.state == NativeDirectoryActionState::NotStarted));
+        assert!(
+            dry_run
+                .actions
+                .iter()
+                .all(|item| item.state == NativeDirectoryActionState::NotStarted)
+        );
 
         for changed_root in [&source, &destination] {
             let prepared = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-                .await.unwrap();
+                .await
+                .unwrap();
             std::fs::write(changed_root.join("shared"), b"changed after review").unwrap();
-            let report = prepared.apply_with_quarantined_deletions(
-                &cx, mirror_authorization(), &staging,
-            ).await.unwrap();
+            let report = prepared
+                .apply_with_quarantined_deletions(&cx, mirror_authorization(), &staging)
+                .await
+                .unwrap();
             assert!(!report.complete);
-            assert!(matches!(report.failure, Some(NativeDirectoryError::Changed { .. })));
+            assert!(matches!(
+                report.failure,
+                Some(NativeDirectoryError::Changed { .. })
+            ));
             assert!(report.staging_directory.is_none());
-            assert!(report.actions.iter().all(|item| item.state == NativeDirectoryActionState::NotStarted));
-            assert_eq!(std::fs::read(destination.join("extra")).unwrap(), b"retained");
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .all(|item| item.state == NativeDirectoryActionState::NotStarted)
+            );
+            assert_eq!(
+                std::fs::read(destination.join("extra")).unwrap(),
+                b"retained"
+            );
         }
         assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
     });
@@ -295,28 +417,46 @@ fn native_mirror_keeps_native_confinement_limits_and_type_change_refusal() {
         ));
         assert!(matches!(
             prepare_native_directory_mirror(
-                &cx, &source, &destination,
-                NativeDirectoryLimits { max_file_bytes: 1, ..limits },
-            ).await,
-            Err(NativeDirectoryError::Limit { limit: "max_file_bytes", .. }),
+                &cx,
+                &source,
+                &destination,
+                NativeDirectoryLimits {
+                    max_file_bytes: 1,
+                    ..limits
+                },
+            )
+            .await,
+            Err(NativeDirectoryError::Limit {
+                limit: "max_file_bytes",
+                ..
+            }),
         ));
         // An incompatible entry kind stays reviewable, but application must
         // not treat its child tree as permission to replace a directory.
         std::fs::create_dir(destination.join("value")).unwrap();
         std::fs::write(destination.join("value/child"), b"must remain").unwrap();
         let prepared = prepare_native_directory_mirror(&cx, &source, &destination, limits)
-            .await.unwrap();
-        let report = prepared.apply_with_quarantined_deletions(
-            &cx, mirror_authorization(), &staging,
-        ).await.unwrap();
+            .await
+            .unwrap();
+        let report = prepared
+            .apply_with_quarantined_deletions(&cx, mirror_authorization(), &staging)
+            .await
+            .unwrap();
         assert!(!report.complete);
         assert!(report.failure.is_some());
         assert!(report.staging_directory.is_none());
-        assert_eq!(std::fs::read(destination.join("value/child")).unwrap(), b"must remain");
+        assert_eq!(
+            std::fs::read(destination.join("value/child")).unwrap(),
+            b"must remain"
+        );
         let outside = fixture("mirror-outside");
         std::fs::write(outside.join("secret"), b"outside").unwrap();
         symlink(outside.join("secret"), destination.join("link")).unwrap();
-        assert!(prepare_native_directory_mirror(&cx, &source, &destination, limits).await.is_err());
+        assert!(
+            prepare_native_directory_mirror(&cx, &source, &destination, limits)
+                .await
+                .is_err()
+        );
         assert_eq!(std::fs::read(outside.join("secret")).unwrap(), b"outside");
         assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
     });
@@ -335,19 +475,37 @@ fn native_inventory_converges_across_inodes_and_keeps_explicit_ancestors() {
                 std::fs::write(root.join("empty"), []).unwrap();
             }
             assert_ne!(
-                std::fs::metadata(left.join("nested/deeper/value")).unwrap().ino(),
-                std::fs::metadata(right.join("nested/deeper/value")).unwrap().ino(),
+                std::fs::metadata(left.join("nested/deeper/value"))
+                    .unwrap()
+                    .ino(),
+                std::fs::metadata(right.join("nested/deeper/value"))
+                    .unwrap()
+                    .ino(),
             );
             let local = scan_native_directory(&cx, &left, NativeDirectoryLimits::default())
-                .await.unwrap();
+                .await
+                .unwrap();
             let remote = scan_native_directory(&cx, &right, NativeDirectoryLimits::default())
-                .await.unwrap();
+                .await
+                .unwrap();
             assert_eq!(local.manifest(), remote.manifest());
             assert_eq!(local.total_bytes(), 3);
-            let paths: Vec<_> = local.manifest().entries.keys().map(DirectoryPath::as_str).collect();
-            assert_eq!(paths, ["empty", "nested", "nested/deeper", "nested/deeper/value"]);
-            let value = local.manifest().entries.values()
-                .find(|entry| entry.path.as_str() == "nested/deeper/value").unwrap();
+            let paths: Vec<_> = local
+                .manifest()
+                .entries
+                .keys()
+                .map(DirectoryPath::as_str)
+                .collect();
+            assert_eq!(
+                paths,
+                ["empty", "nested", "nested/deeper", "nested/deeper/value"]
+            );
+            let value = local
+                .manifest()
+                .entries
+                .values()
+                .find(|entry| entry.path.as_str() == "nested/deeper/value")
+                .unwrap();
             assert_eq!(
                 value.content_id.as_deref(),
                 Some("sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
@@ -356,11 +514,20 @@ fn native_inventory_converges_across_inodes_and_keeps_explicit_ancestors() {
             assert_eq!(value.metadata.stable_identity, None);
             assert_eq!(value.metadata.unix_mode, None);
             let prepared = prepare_native_directory_sync(
-                &cx, local.manifest().clone(), &left, &right, NativeDirectoryLimits::default(),
-            ).await.unwrap();
+                &cx,
+                local.manifest().clone(),
+                &left,
+                &right,
+                NativeDirectoryLimits::default(),
+            )
+            .await
+            .unwrap();
             assert!(prepared.preview().is_noop());
             assert_eq!(prepared.plan_id().len(), 64);
-            assert_eq!(std::fs::read(left.join("nested/deeper/value")).unwrap(), b"abc");
+            assert_eq!(
+                std::fs::read(left.join("nested/deeper/value")).unwrap(),
+                b"abc"
+            );
         });
     }
 }
@@ -377,15 +544,30 @@ fn native_prepare_plans_both_directions_from_actual_trees_without_publication() 
                 std::fs::write(root.join("shared"), b"baseline").unwrap();
             }
             let baseline = scan_native_directory(&cx, &left, NativeDirectoryLimits::default())
-                .await.unwrap().manifest().clone();
+                .await
+                .unwrap()
+                .manifest()
+                .clone();
             std::fs::write(left.join("shared"), b"local-edit").unwrap();
             std::fs::write(right.join("remote-only"), b"remote-created").unwrap();
             let prepared = prepare_native_directory_sync(
-                &cx, baseline, &left, &right, NativeDirectoryLimits::default(),
-            ).await.unwrap();
+                &cx,
+                baseline,
+                &left,
+                &right,
+                NativeDirectoryLimits::default(),
+            )
+            .await
+            .unwrap();
             assert!(!prepared.preview().has_conflicts());
-            assert!(matches!(decision(&prepared, "shared"), BidirectionalSyncAction::CopyLocalToRemote));
-            assert!(matches!(decision(&prepared, "remote-only"), BidirectionalSyncAction::CopyRemoteToLocal));
+            assert!(matches!(
+                decision(&prepared, "shared"),
+                BidirectionalSyncAction::CopyLocalToRemote
+            ));
+            assert!(matches!(
+                decision(&prepared, "remote-only"),
+                BidirectionalSyncAction::CopyRemoteToLocal
+            ));
             assert!(prepared.preview().has_destructive_actions());
             assert_eq!(std::fs::read(right.join("shared")).unwrap(), b"baseline");
             assert!(!left.join("remote-only").exists());
@@ -404,14 +586,26 @@ fn native_prepare_preserves_concurrent_edit_conflicts() {
             std::fs::write(root.join("value"), b"baseline").unwrap();
         }
         let baseline = scan_native_directory(&cx, &left, NativeDirectoryLimits::default())
-            .await.unwrap().manifest().clone();
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
         std::fs::write(left.join("value"), b"left-change").unwrap();
         std::fs::write(right.join("value"), b"right-change").unwrap();
         let prepared = prepare_native_directory_sync(
-            &cx, baseline, &left, &right, NativeDirectoryLimits::default(),
-        ).await.unwrap();
+            &cx,
+            baseline,
+            &left,
+            &right,
+            NativeDirectoryLimits::default(),
+        )
+        .await
+        .unwrap();
         assert!(prepared.preview().has_conflicts());
-        assert!(matches!(decision(&prepared, "value"), BidirectionalSyncAction::Conflict { .. }));
+        assert!(matches!(
+            decision(&prepared, "value"),
+            BidirectionalSyncAction::Conflict { .. }
+        ));
         assert_eq!(std::fs::read(left.join("value")).unwrap(), b"left-change");
         assert_eq!(std::fs::read(right.join("value")).unwrap(), b"right-change");
     });
@@ -432,7 +626,11 @@ fn native_inventory_refuses_symlinks_hardlinks_and_unrepresentable_names() {
         ));
         let root_alias = outside.join("root-alias");
         symlink(&symbolic, &root_alias).unwrap();
-        assert!(scan_native_directory(&cx, root_alias, NativeDirectoryLimits::default()).await.is_err());
+        assert!(
+            scan_native_directory(&cx, root_alias, NativeDirectoryLimits::default())
+                .await
+                .is_err()
+        );
 
         let hardlinked = fixture("hardlink");
         std::fs::write(hardlinked.join("a"), b"linked").unwrap();
@@ -443,7 +641,11 @@ fn native_inventory_refuses_symlinks_hardlinks_and_unrepresentable_names() {
         ));
 
         let invalid = fixture("nonutf8");
-        std::fs::write(invalid.join(OsString::from_vec(b"bad\xff".to_vec())), b"bytes").unwrap();
+        std::fs::write(
+            invalid.join(OsString::from_vec(b"bad\xff".to_vec())),
+            b"bytes",
+        )
+        .unwrap();
         assert!(matches!(
             scan_native_directory(&cx, invalid, NativeDirectoryLimits::default()).await,
             Err(NativeDirectoryError::Refused { .. }),
@@ -466,9 +668,27 @@ fn native_inventory_enforces_file_total_entry_and_depth_bounds() {
         std::fs::write(root.join("a"), b"1234").unwrap();
         std::fs::write(root.join("b"), b"5678").unwrap();
         for (limits, expected) in [
-            (NativeDirectoryLimits { max_file_bytes: 3, ..NativeDirectoryLimits::default() }, "max_file_bytes"),
-            (NativeDirectoryLimits { max_total_bytes: 7, ..NativeDirectoryLimits::default() }, "max_total_bytes"),
-            (NativeDirectoryLimits { max_entries: 1, ..NativeDirectoryLimits::default() }, "max_entries"),
+            (
+                NativeDirectoryLimits {
+                    max_file_bytes: 3,
+                    ..NativeDirectoryLimits::default()
+                },
+                "max_file_bytes",
+            ),
+            (
+                NativeDirectoryLimits {
+                    max_total_bytes: 7,
+                    ..NativeDirectoryLimits::default()
+                },
+                "max_total_bytes",
+            ),
+            (
+                NativeDirectoryLimits {
+                    max_entries: 1,
+                    ..NativeDirectoryLimits::default()
+                },
+                "max_entries",
+            ),
         ] {
             match scan_native_directory(&cx, &root, limits).await {
                 Err(NativeDirectoryError::Limit { limit, .. }) => assert_eq!(limit, expected),
@@ -480,14 +700,29 @@ fn native_inventory_enforces_file_total_entry_and_depth_bounds() {
         std::fs::write(nested.join("parent/child"), b"x").unwrap();
         assert!(matches!(
             scan_native_directory(
-                &cx, nested, NativeDirectoryLimits { max_depth: 1, ..NativeDirectoryLimits::default() },
-            ).await,
-            Err(NativeDirectoryError::Limit { limit: "max_depth", .. }),
+                &cx,
+                nested,
+                NativeDirectoryLimits {
+                    max_depth: 1,
+                    ..NativeDirectoryLimits::default()
+                },
+            )
+            .await,
+            Err(NativeDirectoryError::Limit {
+                limit: "max_depth",
+                ..
+            }),
         ));
         assert!(matches!(
             scan_native_directory(
-                &cx, &root, NativeDirectoryLimits { buffer_bytes: 0, ..NativeDirectoryLimits::default() },
-            ).await,
+                &cx,
+                &root,
+                NativeDirectoryLimits {
+                    buffer_bytes: 0,
+                    ..NativeDirectoryLimits::default()
+                },
+            )
+            .await,
             Err(NativeDirectoryError::Refused { .. }),
         ));
         assert_eq!(std::fs::read(root.join("a")).unwrap(), b"1234");
@@ -505,19 +740,38 @@ fn native_prepare_refuses_metadata_it_cannot_preserve_and_overlapping_roots() {
         std::fs::create_dir(&right).unwrap();
         std::fs::write(left.join("value"), b"abc").unwrap();
         let mut baseline = scan_native_directory(&cx, &left, NativeDirectoryLimits::default())
-            .await.unwrap().manifest().clone();
-        baseline.entries.values_mut().next().unwrap().metadata.unix_mode = Some(0o755);
+            .await
+            .unwrap()
+            .manifest()
+            .clone();
+        baseline
+            .entries
+            .values_mut()
+            .next()
+            .unwrap()
+            .metadata
+            .unix_mode = Some(0o755);
         assert!(matches!(
             prepare_native_directory_sync(
-                &cx, baseline, &left, &right, NativeDirectoryLimits::default(),
-            ).await,
+                &cx,
+                baseline,
+                &left,
+                &right,
+                NativeDirectoryLimits::default(),
+            )
+            .await,
             Err(NativeDirectoryError::Refused { .. }),
         ));
         for other in [&left, &base] {
             assert!(matches!(
                 prepare_native_directory_sync(
-                    &cx, empty(), &left, other, NativeDirectoryLimits::default(),
-                ).await,
+                    &cx,
+                    empty(),
+                    &left,
+                    other,
+                    NativeDirectoryLimits::default(),
+                )
+                .await,
                 Err(NativeDirectoryError::Refused { .. }),
             ));
         }
@@ -534,14 +788,24 @@ fn native_inventory_guards_detect_changed_file_and_replaced_root() {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("value"), b"old").unwrap();
         let captured = scan_native_directory(&cx, &root, NativeDirectoryLimits::default())
-            .await.unwrap();
+            .await
+            .unwrap();
         std::fs::write(root.join("value"), b"changed-size").unwrap();
-        assert!(matches!(revalidate_stamps(&cx, &captured), Err(NativeDirectoryError::Changed { .. })));
+        assert!(matches!(
+            revalidate_stamps(&cx, &captured),
+            Err(NativeDirectoryError::Changed { .. })
+        ));
         let original = base.join("retained-original");
         std::fs::rename(&root, &original).unwrap();
         std::fs::create_dir(&root).unwrap();
-        assert!(matches!(captured.root.revalidate(), Err(NativeDirectoryError::Changed { .. })));
-        assert_eq!(std::fs::read(original.join("value")).unwrap(), b"changed-size");
+        assert!(matches!(
+            captured.root.revalidate(),
+            Err(NativeDirectoryError::Changed { .. })
+        ));
+        assert_eq!(
+            std::fs::read(original.join("value")).unwrap(),
+            b"changed-size"
+        );
         assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
     });
 }
@@ -552,25 +816,35 @@ fn native_inventory_refuses_missing_authority_runtime_and_predispatch_cancellati
     let no_runtime = Cx::for_testing();
     assert!(matches!(
         futures_lite::future::block_on(scan_native_directory(
-            &no_runtime, &root, NativeDirectoryLimits::default(),
+            &no_runtime,
+            &root,
+            NativeDirectoryLimits::default(),
         )),
         Err(NativeDirectoryError::Runtime(ScopedFsError::Admission(_))),
     ));
     let restricted = {
-        let _guard = Cx::for_testing().restrict::<crate::cx::NoCaps>().set_current_restricted();
+        let _guard = Cx::for_testing()
+            .restrict::<crate::cx::NoCaps>()
+            .set_current_restricted();
         Cx::current().unwrap()
     };
     assert!(matches!(
         futures_lite::future::block_on(scan_native_directory(
-            &restricted, &root, NativeDirectoryLimits::default(),
+            &restricted,
+            &root,
+            NativeDirectoryLimits::default(),
         )),
-        Err(NativeDirectoryError::Runtime(ScopedFsError::CapabilityDenied)),
+        Err(NativeDirectoryError::Runtime(
+            ScopedFsError::CapabilityDenied
+        )),
     ));
     let cancelled = Cx::for_testing();
     cancelled.cancel_with(CancelKind::User, Some("before directory dispatch"));
     assert!(matches!(
         futures_lite::future::block_on(scan_native_directory(
-            &cancelled, &root, NativeDirectoryLimits::default(),
+            &cancelled,
+            &root,
+            NativeDirectoryLimits::default(),
         )),
         Err(NativeDirectoryError::Runtime(ScopedFsError::Checkpoint(_))),
     ));

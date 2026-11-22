@@ -363,13 +363,19 @@ fn invalid_policy_never_reaches_readiness_or_creates_an_inbox_sink() {
 }
 
 fn session_policy_bytes(generation: u64, client: &str, nonces: &[u8]) -> Vec<u8> {
-    let sessions: Vec<_> = nonces.iter().map(|nonce| json!({
-        "certificate_sha256": client, "stream_nonce": hex::encode([*nonce; 32]),
-    })).collect();
+    let sessions: Vec<_> = nonces
+        .iter()
+        .map(|nonce| {
+            json!({
+                "certificate_sha256": client, "stream_nonce": hex::encode([*nonce; 32]),
+            })
+        })
+        .collect();
     serde_json::to_vec(&json!({
         "schema_version": 2, "generation": generation,
         "revoked_certificates": [], "revoked_sessions": sessions,
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 fn assert_session_refused(
@@ -405,7 +411,11 @@ fn sighup_revokes_one_acknowledged_session_while_its_same_certificate_sibling_fi
         bytes.sort();
         assert_eq!(bytes, vec![b"abc".to_vec(), b"xyz".to_vec()]);
         let retained = fixture.entries();
-        replace_policy(&fixture, &policy, &session_policy_bytes(2, &fixture.allowed, &[71]));
+        replace_policy(
+            &fixture,
+            &policy,
+            &session_policy_bytes(2, &fixture.allowed, &[71]),
+        );
         reload(&process);
         let applied = process.event("revocation_policy_applied");
         assert_eq!(applied["schema_version"], 2);
@@ -417,7 +427,10 @@ fn sighup_revokes_one_acknowledged_session_while_its_same_certificate_sibling_fi
         assert_eq!(applied["retained_sessions"], 1);
         assert_eq!(applied["drained"], false);
         let cancelled = completion(&mut process);
-        assert_eq!(cancelled["session"]["client_certificate_sha256"], fixture.allowed);
+        assert_eq!(
+            cancelled["session"]["client_certificate_sha256"],
+            fixture.allowed
+        );
         assert_eq!(cancelled["session"]["stream_nonce"], hex::encode([71; 32]));
         assert_eq!(cancelled["transfer"]["status"], "cancelled");
         assert_eq!(cancelled["transfer"]["flushed_prefix_bytes"], 3);
@@ -440,8 +453,13 @@ fn sighup_revokes_one_acknowledged_session_while_its_same_certificate_sibling_fi
         assert_eq!(complete["session"]["stream_nonce"], hex::encode([72; 32]));
         assert_eq!(complete["transfer"]["status"], "complete");
         assert_eq!(complete["publication"]["state"], "durable");
-        assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"xyz")));
-        let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+        assert_eq!(
+            complete["transfer"]["receipt"]["sha256"],
+            hex::encode(Sha256::digest(b"xyz"))
+        );
+        let published = fixture
+            .inbox
+            .join(complete["publication"]["filename"].as_str().unwrap());
         assert_eq!(std::fs::read(&published).unwrap(), b"xyz");
         drop(sibling);
 
@@ -452,8 +470,13 @@ fn sighup_revokes_one_acknowledged_session_while_its_same_certificate_sibling_fi
         next.finish(&prefix, b"new");
         let complete = completion(&mut process);
         assert_eq!(complete["transfer"]["status"], "complete");
-        assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"new")));
-        let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+        assert_eq!(
+            complete["transfer"]["receipt"]["sha256"],
+            hex::encode(Sha256::digest(b"new"))
+        );
+        let published = fixture
+            .inbox
+            .join(complete["publication"]["filename"].as_str().unwrap());
         assert_eq!(std::fs::read(published).unwrap(), b"new");
         reload(&process);
         let same = process.event("revocation_policy_applied");
@@ -481,15 +504,24 @@ fn persisted_session_denial_blocks_its_historical_proof_but_allows_a_sibling_aft
     let complete = completion(&mut process);
     assert_eq!(complete["transfer"]["status"], "complete");
     let receipt = complete["transfer"]["receipt"].clone();
-    let published = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+    let published = fixture
+        .inbox
+        .join(complete["publication"]["filename"].as_str().unwrap());
     assert_eq!(std::fs::read(&published).unwrap(), b"abc");
     let inode = std::fs::metadata(&published).unwrap();
     let history = std::fs::read(&ledger).unwrap();
     let retained = fixture.entries();
     assert_eq!(records(&ledger).len(), 2);
-    replace_policy(&fixture, &policy, &session_policy_bytes(2, &fixture.allowed, &[91]));
+    replace_policy(
+        &fixture,
+        &policy,
+        &session_policy_bytes(2, &fixture.allowed, &[91]),
+    );
     reload(&process);
-    assert_eq!(process.event("revocation_policy_applied")["signalled_connections"], 0);
+    assert_eq!(
+        process.event("revocation_policy_applied")["signalled_connections"],
+        0
+    );
     let retired = process.event("session_retired");
     assert_eq!(retired["reason"], "session_revoked");
     assert_eq!(retired["snapshot"]["completed_receipt"], receipt);
@@ -511,8 +543,13 @@ fn persisted_session_denial_blocks_its_historical_proof_but_allows_a_sibling_aft
     sibling.finish(&prefix, b"xyz");
     let complete = completion(&mut restarted);
     assert_eq!(complete["transfer"]["status"], "complete");
-    assert_eq!(complete["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(b"xyz")));
-    let new_path = fixture.inbox.join(complete["publication"]["filename"].as_str().unwrap());
+    assert_eq!(
+        complete["transfer"]["receipt"]["sha256"],
+        hex::encode(Sha256::digest(b"xyz"))
+    );
+    let new_path = fixture
+        .inbox
+        .join(complete["publication"]["filename"].as_str().unwrap());
     assert_eq!(std::fs::read(new_path).unwrap(), b"xyz");
     let extended = std::fs::read(&ledger).unwrap();
     assert!(extended.starts_with(&history));
@@ -555,7 +592,9 @@ fn removing_a_session_denial_or_downgrading_v2_fails_closed_after_owned_work_dra
         assert!(peer.receive().is_err());
         drop(peer);
         assert!(!process.exit().success());
-        assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err());
+        assert!(
+            std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err()
+        );
         assert_eq!(fixture.entries(), retained);
         assert_eq!(staged_bytes(&fixture.inbox), vec![b"abc".to_vec()]);
     }

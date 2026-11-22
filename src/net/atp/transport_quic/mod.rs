@@ -69,15 +69,15 @@
 //! path.
 
 mod delta_cdc;
-mod tree_delta;
 #[cfg(any(feature = "tls", test))]
 mod delta_chunks;
-#[cfg(any(feature = "tls", test))]
-mod resume;
 #[cfg(feature = "tls")]
 pub mod native_link;
+#[cfg(any(feature = "tls", test))]
+mod resume;
 pub mod symbol_datagram;
 pub mod symbol_envelope;
+mod tree_delta;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -118,8 +118,7 @@ use crate::net::atp::transport_common::metadata::refuse_if_blocking_forbidden;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
     commit_symlink_transactionally, create_directory_tree_durably, path_is_link_or_reparse,
-    validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive,
+    validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
 };
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
@@ -4533,13 +4532,22 @@ async fn build_quic_delta_manifest_for_file(
     chunk_size: usize,
 ) -> Result<DeltaManifestWire, QuicTransportError> {
     build_quic_delta_manifest_with_layout(
-        cx, tree_id, path, entry_index, rel_path, expected_size,
-        expected_sha256_hex, chunk_size, false,
+        cx,
+        tree_id,
+        path,
+        entry_index,
+        rel_path,
+        expected_size,
+        expected_sha256_hex,
+        chunk_size,
+        false,
     )
     .await?
-    .ok_or_else(|| QuicTransportError::Control(
-        "QUIC fixed delta manifest exceeds its chunk-count budget".to_string(),
-    ))
+    .ok_or_else(|| {
+        QuicTransportError::Control(
+            "QUIC fixed delta manifest exceeds its chunk-count budget".to_string(),
+        )
+    })
 }
 
 /// None means the actual bounded chunk index cannot represent this file.
@@ -4582,9 +4590,11 @@ async fn build_quic_delta_manifest_with_layout(
     let mut content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let Some(bytes) = reader.next_chunk().await.map_err(|error| {
-            QuicTransportError::Source(format!("{}: {error}", path.display()))
-        })? else {
+        let Some(bytes) = reader
+            .next_chunk()
+            .await
+            .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?
+        else {
             break;
         };
         let size_bytes = u64::try_from(bytes.len())
@@ -4594,7 +4604,8 @@ async fn build_quic_delta_manifest_with_layout(
         })?;
         if end > expected_size {
             return Err(QuicTransportError::Source(format!(
-                "{} grew while building its QUIC delta manifest", path.display(),
+                "{} grew while building its QUIC delta manifest",
+                path.display(),
             )));
         }
         if u64::try_from(chunks.len()).unwrap_or(u64::MAX) >= QUIC_DELTA_MAX_MANIFEST_CHUNKS {
@@ -4653,7 +4664,8 @@ async fn build_quic_delta_manifest_with_layout(
             delta_cdc::MANIFEST_SCHEMA
         } else {
             ATP_DELTA_CHUNK_MANIFEST_SCHEMA
-        }.to_string(),
+        }
+        .to_string(),
         tree_id: tree_id.to_string(),
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
@@ -4775,9 +4787,11 @@ async fn validate_quic_prepared_delta_source_unchanged(
         delta_cdc::is_cdc(manifest),
     )
     .await?
-    .ok_or_else(|| QuicTransportError::Integrity(
-        "prepared QUIC source exceeded its negotiated delta chunk budget".to_string(),
-    ))?;
+    .ok_or_else(|| {
+        QuicTransportError::Integrity(
+            "prepared QUIC source exceeded its negotiated delta chunk budget".to_string(),
+        )
+    })?;
     if current != *delta
         || read_entry_metadata(&source.abs_path, &config.metadata_policy).await?
             != expected_metadata
@@ -7871,7 +7885,9 @@ async fn build_quic_receiver_delta_request(
             session,
             manifest,
             DeltaObjectRequest::full(
-                delta.merkle_root_hex.clone(), None, "tree_reconstruction_required",
+                delta.merkle_root_hex.clone(),
+                None,
+                "tree_reconstruction_required",
             ),
         ));
     }
@@ -8005,7 +8021,8 @@ fn validate_quic_delta_request(
         DeltaWireMode::AlreadyInSync => {
             if tree_delta::is_tree(manifest) {
                 return Err(QuicTransportError::Control(
-                    "QUIC tree reuse requires staged reconstruction, including metadata".to_string(),
+                    "QUIC tree reuse requires staged reconstruction, including metadata"
+                        .to_string(),
                 ));
             }
             let expected_shared = u64::try_from(delta_manifest.chunks.len()).unwrap_or(u64::MAX);
@@ -10201,7 +10218,8 @@ fn validate_quic_delta_manifest_with_cdc(
             || chunk.size_bytes == 0
             || chunk.size_bytes > max_chunk_size
             || (!content_defined && !is_final && chunk.size_bytes != max_chunk_size)
-            || (content_defined && !is_final
+            || (content_defined
+                && !is_final
                 && chunk.size_bytes
                     < crate::net::atp::transport_common::delta::cdc::MIN_CHUNK_BYTES as u64)
         {
@@ -10822,14 +10840,22 @@ fn quic_directory_metadata_syncs_the_tree_before_applying_mode_zero() {
         delta_manifest: None,
     };
     futures_lite::future::block_on(apply_quic_directory_metadata(
-        &Cx::for_testing(), &base, &manifest,
+        &Cx::for_testing(),
+        &base,
+        &manifest,
     ))
     .expect("sync all directory names before restrictive replay");
     for path in [base.clone(), base.join("nested"), base.join("nested/deep")] {
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0
+        );
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    assert_eq!(std::fs::read_dir(base.join("nested/deep")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(base.join("nested/deep")).unwrap().count(),
+        0
+    );
 }
 
 #[cfg(feature = "tls")]
@@ -11035,10 +11061,8 @@ async fn commit_decoded_entries_with_options(
         } else {
             base.clone()
         };
-        match commit_quic_metadata_entry(
-            cx, &base, &out_path, entry, config, &mut parent_syncs,
-        )
-        .await?
+        match commit_quic_metadata_entry(cx, &base, &out_path, entry, config, &mut parent_syncs)
+            .await?
         {
             QuicMetadataCommit::Committed => {
                 committed_paths.push(out_path);
@@ -11274,17 +11298,18 @@ async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
                     decoder.object_id,
                     symbol_auth.as_ref(),
                 )?;
-                stats.accepted = stats.accepted.saturating_add(
-                    feed_aggregated_symbol_for_entry_deferred(
-                        cx,
-                        decoders,
-                        envelope.entry,
-                        auth_symbol,
-                        receive,
-                        config,
-                        decode_stats,
-                    )?,
-                );
+                stats.accepted =
+                    stats
+                        .accepted
+                        .saturating_add(feed_aggregated_symbol_for_entry_deferred(
+                            cx,
+                            decoders,
+                            envelope.entry,
+                            auth_symbol,
+                            receive,
+                            config,
+                            decode_stats,
+                        )?);
                 let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
             }
         }
@@ -11296,7 +11321,11 @@ async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
 #[allow(dead_code)]
 async fn receive_native_multi_peer_symbol_round(
     cx: &Cx,
-    peers: &mut [(PathId, &mut NativeQuicConnection, &mut NativeQuicFrameTransport)],
+    peers: &mut [(
+        PathId,
+        &mut NativeQuicConnection,
+        &mut NativeQuicFrameTransport,
+    )],
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
@@ -11342,7 +11371,8 @@ async fn receive_native_multi_peer_symbol_round(
             pending: pending.len(),
         });
     }
-    let round_loss_fraction = receiver_round_loss_fraction(round_stats.observed, total_symbols_sent);
+    let round_loss_fraction =
+        receiver_round_loss_fraction(round_stats.observed, total_symbols_sent);
     let round = (*feedback_rounds).saturating_add(1);
     let repair_symbol_round_cap = quic_repair_symbol_round_cap(config, round_loss_fraction);
     let (repair_blocks, source_symbols, repair_accounting) = quic_feedback_requests(

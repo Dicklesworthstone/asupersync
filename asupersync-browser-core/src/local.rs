@@ -58,7 +58,10 @@ pub struct LocalExecutorConfig {
 
 impl Default for LocalExecutorConfig {
     fn default() -> Self {
-        Self { max_tasks: 1024, polls_per_turn: 64 }
+        Self {
+            max_tasks: 1024,
+            polls_per_turn: 64,
+        }
     }
 }
 
@@ -103,14 +106,22 @@ impl fmt::Debug for LocalTask {
 impl LocalTask {
     /// Canonical generation-checked browser task handle.
     #[must_use]
-    pub const fn handle(&self) -> WasmHandleRef { self.handle }
+    pub const fn handle(&self) -> WasmHandleRef {
+        self.handle
+    }
 
     /// Request drop-cancellation. A future being polled is retired when that
     /// poll returns; a parked future is retired immediately. Already completed
     /// tasks need no further cancellation and return successfully.
     pub fn cancel(&self, kind: impl Into<String>, message: Option<String>) -> Result<(), String> {
-        if self.completed || self.join.borrow().completion.is_some() { return Ok(()); }
-        let request = WasmTaskCancelRequest { task: self.handle, kind: kind.into(), message };
+        if self.completed || self.join.borrow().completion.is_some() {
+            return Ok(());
+        }
+        let request = WasmTaskCancelRequest {
+            task: self.handle,
+            kind: kind.into(),
+            message,
+        };
         ensure_cancellable(&request.task)?;
         with_dispatcher(|dispatcher| dispatcher.task_cancel(&request, self.consumer_version))?;
         cancel_registered(&request);
@@ -133,14 +144,12 @@ impl Future for LocalTask {
                 (None, std::mem::replace(&mut join.waiter, incoming.take()))
             }
         };
-        if completion.is_some() { self.completed = true; }
+        if completion.is_some() {
+            self.completed = true;
+        }
         drop(retired);
         drop(incoming);
-        if let Some(completion) = completion {
-            Poll::Ready(completion)
-        } else {
-            Poll::Pending
-        }
+        completion.map_or(Poll::Pending, Poll::Ready)
     }
 }
 
@@ -152,24 +161,39 @@ impl Drop for LocalTask {
 }
 
 #[derive(Default)]
-struct DriverSignal { waiter: Mutex<Option<Arc<Waker>>> }
+struct DriverSignal {
+    waiter: Mutex<Option<Arc<Waker>>>,
+}
 
 impl DriverSignal {
     fn register(&self, waker: &Waker) {
         let incoming = Arc::new(waker.clone());
-        let retired = self.waiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        let retired = self
+            .waiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(incoming);
         drop(retired);
     }
 
     fn notify(&self) {
         // Only Arc cloning occurs under this lock, never RawWaker callbacks.
-        let waiter = self.waiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        if let Some(waiter) = waiter { waiter.wake_by_ref(); }
+        let waiter = self
+            .waiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(waiter) = waiter {
+            waiter.wake_by_ref();
+        }
     }
 
     fn clear(&self) {
-        let retired = self.waiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let retired = self
+            .waiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         drop(retired);
     }
 }
@@ -181,7 +205,9 @@ struct TaskWake {
 }
 
 impl Wake for TaskWake {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
     fn wake_by_ref(self: &Arc<Self>) {
         if !self.retired.load(Ordering::Acquire)
             && !self.ready.swap(true, Ordering::AcqRel)
@@ -224,8 +250,13 @@ struct Executor {
 impl Default for Executor {
     fn default() -> Self {
         Self {
-            tasks: BTreeMap::new(), finishing: HashSet::new(), next_id: 0,
-            cursor: 0, polling: false, failure: None, config: LocalExecutorConfig::default(),
+            tasks: BTreeMap::new(),
+            finishing: HashSet::new(),
+            next_id: 0,
+            cursor: 0,
+            polling: false,
+            failure: None,
+            config: LocalExecutorConfig::default(),
             signal: Arc::new(DriverSignal::default()),
             #[cfg(target_arch = "wasm32")]
             driver_running: false,
@@ -237,7 +268,9 @@ impl Default for Executor {
 
 thread_local! { static EXECUTOR: Rc<RefCell<Executor>> = Rc::new(RefCell::new(Executor::default())); }
 
-fn executor() -> Rc<RefCell<Executor>> { EXECUTOR.with(Rc::clone) }
+fn executor() -> Rc<RefCell<Executor>> {
+    EXECUTOR.with(Rc::clone)
+}
 
 /// Configure this realm while it has no live or retiring Rust futures.
 /// This does not change the JS ledger, other realms, or any native runtime.
@@ -273,15 +306,21 @@ pub fn spawn_local_future<F>(
     future: F,
     consumer_version: Option<WasmAbiVersion>,
 ) -> Result<LocalTask, String>
-where F: Future<Output = WasmAbiOutcomeEnvelope> + 'static {
+where
+    F: Future<Output = WasmAbiOutcomeEnvelope> + 'static,
+{
     let executor = executor();
     let (id, signal) = {
         let state = executor.borrow();
-        if let Some(failure) = state.failure { return Err(failure.to_string()); }
+        if let Some(failure) = state.failure {
+            return Err(failure.to_string());
+        }
         if state.tasks.len() + state.finishing.len() >= state.config.max_tasks {
             return Err("local Rust future capacity exhausted".into());
         }
-        let id = state.next_id.checked_add(1)
+        let id = state
+            .next_id
+            .checked_add(1)
             .ok_or_else(|| "local Rust future identity space exhausted".to_string())?;
         (id, Arc::clone(&state.signal))
     };
@@ -290,22 +329,35 @@ where F: Future<Output = WasmAbiOutcomeEnvelope> + 'static {
     let future: LocalFuture = Box::pin(future);
     let join = Rc::new(RefCell::new(JoinState::default()));
     let wake = Arc::new(TaskWake {
-        ready: AtomicBool::new(true), retired: AtomicBool::new(false),
+        ready: AtomicBool::new(true),
+        retired: AtomicBool::new(false),
         signal: Arc::downgrade(&signal),
     });
     let handle = with_dispatcher(|dispatcher| dispatcher.task_spawn(&request, consumer_version))?;
     {
         let mut state = executor.borrow_mut();
         state.next_id = id;
-        state.tasks.insert(id, Task {
-            handle, future: Some(future), wake, join: Rc::clone(&join),
-            consumer_version, cancellation: None,
-        });
+        state.tasks.insert(
+            id,
+            Task {
+                handle,
+                future: Some(future),
+                wake,
+                join: Rc::clone(&join),
+                consumer_version,
+                cancellation: None,
+            },
+        );
     }
     #[cfg(target_arch = "wasm32")]
     host::ensure_driver(&executor);
     signal.notify();
-    Ok(LocalTask { handle, join, consumer_version, completed: false })
+    Ok(LocalTask {
+        handle,
+        join,
+        consumer_version,
+        completed: false,
+    })
 }
 
 /// Current live plus retiring Rust futures in this realm (not JS-only handles).
@@ -321,13 +373,17 @@ pub(crate) fn reject_external_join(handle: &WasmHandleRef) -> Result<(), String>
     let state = executor.borrow();
     if state.finishing.contains(handle) || state.tasks.values().any(|task| task.handle == *handle) {
         Err("Rust-owned task results must be joined through LocalTask".into())
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn ensure_cancellable(handle: &WasmHandleRef) -> Result<(), String> {
     if executor().borrow().finishing.contains(handle) {
         Err("Rust-owned task is already retiring".into())
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn ensure_reset_allowed() -> Result<(), String> {
@@ -342,11 +398,20 @@ pub(crate) fn ensure_close_allowed() -> Result<(), String> {
     let executor = executor();
     let state = executor.borrow();
     if state.polling || !state.finishing.is_empty() {
-        Err("cannot synchronously close browser ownership during a Rust driver turn or destructor".into())
-    } else { Ok(()) }
+        Err(
+            "cannot synchronously close browser ownership during a Rust driver turn or destructor"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
 }
 
-fn cancellation(kind: &str, message: Option<String>, handle: WasmHandleRef) -> WasmAbiOutcomeEnvelope {
+fn cancellation(
+    kind: &str,
+    message: Option<String>,
+    handle: WasmHandleRef,
+) -> WasmAbiOutcomeEnvelope {
     cancelled_outcome(kind, "completed", message, Some(format!("{handle:?}")))
 }
 
@@ -357,24 +422,41 @@ fn extract_task(state: &mut Executor, id: u64) -> Task {
     task
 }
 
-struct Retirement { executor: Rc<RefCell<Executor>>, handle: WasmHandleRef }
+struct Retirement {
+    executor: Rc<RefCell<Executor>>,
+    handle: WasmHandleRef,
+}
 impl Drop for Retirement {
-    fn drop(&mut self) { self.executor.borrow_mut().finishing.remove(&self.handle); }
+    fn drop(&mut self) {
+        self.executor.borrow_mut().finishing.remove(&self.handle);
+    }
 }
 
 fn panic_outcome(payload: &(dyn Any + Send), stage: &str) -> WasmAbiOutcomeEnvelope {
-    let detail = payload.downcast_ref::<&str>().copied()
+    let detail = payload
+        .downcast_ref::<&str>()
+        .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("non-string panic payload");
     let detail: String = detail.chars().take(512).collect();
-    WasmAbiOutcomeEnvelope::Panicked { message: format!("local Rust task {stage}: {detail}") }
+    WasmAbiOutcomeEnvelope::Panicked {
+        message: format!("local Rust task {stage}: {detail}"),
+    }
 }
 
 // Retain panic payloads until state publication and all selected retirements
 // complete. A payload's destructor is arbitrary code, just like a Waker's.
-fn finish_task(executor: &Rc<RefCell<Executor>>, mut task: Task,
-    mut outcome: WasmAbiOutcomeEnvelope, payloads: &mut Vec<Panic>, wakes: &mut Vec<Waker>) {
-    let _retirement = Retirement { executor: Rc::clone(executor), handle: task.handle };
+fn finish_task(
+    executor: &Rc<RefCell<Executor>>,
+    mut task: Task,
+    mut outcome: WasmAbiOutcomeEnvelope,
+    payloads: &mut Vec<Panic>,
+    wakes: &mut Vec<Waker>,
+) {
+    let _retirement = Retirement {
+        executor: Rc::clone(executor),
+        handle: task.handle,
+    };
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(task.future.take()))) {
         if !matches!(outcome, WasmAbiOutcomeEnvelope::Panicked { .. }) {
             outcome = panic_outcome(payload.as_ref(), "cleanup panicked");
@@ -382,16 +464,24 @@ fn finish_task(executor: &Rc<RefCell<Executor>>, mut task: Task,
         payloads.push(payload);
     }
     let publication_error = if dispatcher_handle_is_live(&task.handle) {
-        with_dispatcher(|dispatcher| dispatcher.task_join(
-            &task.handle, outcome.clone(), task.consumer_version,
-        )).err()
-    } else { None };
+        with_dispatcher(|dispatcher| {
+            dispatcher.task_join(&task.handle, outcome.clone(), task.consumer_version)
+        })
+        .err()
+    } else {
+        None
+    };
     let waiter = {
         let mut join = task.join.borrow_mut();
-        join.completion = Some(LocalTaskCompletion { outcome, publication_error });
+        join.completion = Some(LocalTaskCompletion {
+            outcome,
+            publication_error,
+        });
         join.waiter.take()
     };
-    if let Some(waiter) = waiter { wakes.push(waiter); }
+    if let Some(waiter) = waiter {
+        wakes.push(waiter);
+    }
 }
 
 fn dispatch_join_wakes(wakes: Vec<Waker>, signal: Option<&DriverSignal>) {
@@ -419,9 +509,13 @@ pub(crate) fn cancel_registered(request: &WasmTaskCancelRequest) {
     let outcome = cancellation(&request.kind, request.message.clone(), request.task);
     let task = {
         let mut state = executor.borrow_mut();
-        let id = state.tasks.iter().find_map(|(id, task)|
-            (task.handle == request.task).then_some(*id));
-        let Some(id) = id else { return; };
+        let id = state
+            .tasks
+            .iter()
+            .find_map(|(id, task)| (task.handle == request.task).then_some(*id));
+        let Some(id) = id else {
+            return;
+        };
         let task = state.tasks.get_mut(&id).expect("owned cancellation target");
         if task.future.is_none() {
             task.cancellation = Some(outcome);
@@ -440,15 +534,24 @@ pub(crate) fn cancel_registered(request: &WasmTaskCancelRequest) {
 /// Retire actual Rust work whose canonical owner has been closed.
 pub(crate) fn cleanup_released() {
     let executor = executor();
-    let candidates: Vec<_> = executor.borrow().tasks.iter()
-        .map(|(id, task)| (*id, task.handle)).collect();
-    let retired: Vec<_> = candidates.into_iter()
-        .filter(|(_, handle)| !dispatcher_handle_is_live(handle)).collect();
+    #[allow(clippy::needless_collect)]
+    let candidates: Vec<_> = executor
+        .borrow()
+        .tasks
+        .iter()
+        .map(|(id, task)| (*id, task.handle))
+        .collect();
+    let retired: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, handle)| !dispatcher_handle_is_live(handle))
+        .collect();
     let mut tasks = Vec::new();
     {
         let mut state = executor.borrow_mut();
         for (id, handle) in retired {
-            let Some(task) = state.tasks.get_mut(&id) else { continue; };
+            let Some(task) = state.tasks.get_mut(&id) else {
+                continue;
+            };
             let outcome = cancellation("owner_closed", None, handle);
             if task.future.is_none() {
                 task.cancellation = Some(outcome);
@@ -470,30 +573,43 @@ pub(crate) fn cleanup_released() {
 
 struct PollGuard(Rc<RefCell<Executor>>);
 impl Drop for PollGuard {
-    fn drop(&mut self) { self.0.borrow_mut().polling = false; }
+    fn drop(&mut self) {
+        self.0.borrow_mut().polling = false;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DriveState { Empty, Parked, Runnable }
+enum DriveState {
+    Empty,
+    Parked,
+    Runnable,
+}
 
-fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> DriveState {
+fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &Context<'_>) -> DriveState {
     let (signal, budget) = {
         let mut state = executor.borrow_mut();
-        assert!(!state.polling, "local executor cannot be polled recursively");
+        assert!(
+            !state.polling,
+            "local executor cannot be polled recursively"
+        );
         state.polling = true;
         (Arc::clone(&state.signal), state.config.polls_per_turn)
     };
     let guard = PollGuard(Rc::clone(executor));
     signal.register(cx.waker());
     let mut payloads = Vec::new();
-    let mut wakes = Vec::new();
+    let mut join_wakes = Vec::new();
     for _ in 0..budget {
         let selected = {
             let mut state = executor.borrow_mut();
-            let id = state.tasks.range((Excluded(state.cursor), Unbounded))
+            let id = state
+                .tasks
+                .range((Excluded(state.cursor), Unbounded))
                 .chain(state.tasks.range(..=state.cursor))
-                .find_map(|(id, task)| (task.future.is_some()
-                    && task.wake.ready.load(Ordering::Acquire)).then_some(*id));
+                .find_map(|(id, task)| {
+                    (task.future.is_some() && task.wake.ready.load(Ordering::Acquire))
+                        .then_some(*id)
+                });
             id.map(|id| {
                 state.cursor = id;
                 let task = state.tasks.get_mut(&id).expect("selected ready task");
@@ -501,19 +617,31 @@ fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Driv
                 // racing this exchange either precedes this poll or leaves
                 // ready=true for a subsequent turn.
                 let _ = task.wake.ready.swap(false, Ordering::AcqRel);
-                (id, task.future.take().expect("ready future"), Arc::clone(&task.wake), task.handle)
+                (
+                    id,
+                    task.future.take().expect("ready future"),
+                    Arc::clone(&task.wake),
+                    task.handle,
+                )
             })
         };
-        let Some((id, mut future, wake, handle)) = selected else { break; };
+        let Some((id, mut future, wake, handle)) = selected else {
+            break;
+        };
         let waker = Waker::from(wake);
         let result = if dispatcher_handle_is_live(&handle) {
-            catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut Context::from_waker(&waker))))
+            catch_unwind(AssertUnwindSafe(|| {
+                future.as_mut().poll(&mut Context::from_waker(&waker))
+            }))
         } else {
             Ok(Poll::Ready(cancellation("owner_closed", None, handle)))
         };
         let (task, outcome) = {
             let mut state = executor.borrow_mut();
-            let task = state.tasks.get_mut(&id).expect("polled task retains ownership");
+            let task = state
+                .tasks
+                .get_mut(&id)
+                .expect("polled task retains ownership");
             task.future = Some(future);
             let outcome = match result {
                 Err(payload) => {
@@ -521,36 +649,48 @@ fn poll_executor(executor: &Rc<RefCell<Executor>>, cx: &mut Context<'_>) -> Driv
                     payloads.push(payload);
                     Some(outcome)
                 }
-                Ok(Poll::Ready(outcome)) => Some(if matches!(outcome, WasmAbiOutcomeEnvelope::Panicked { .. }) {
-                    outcome
-                } else { task.cancellation.take().unwrap_or(outcome) }),
+                Ok(Poll::Ready(outcome)) => Some(
+                    if matches!(outcome, WasmAbiOutcomeEnvelope::Panicked { .. }) {
+                        outcome
+                    } else {
+                        task.cancellation.take().unwrap_or(outcome)
+                    },
+                ),
                 Ok(Poll::Pending) => task.cancellation.take(),
             };
-            if let Some(outcome) = outcome {
+            outcome.map_or((None, None), |outcome| {
                 (Some(extract_task(&mut state, id)), Some(outcome))
-            } else { (None, None) }
+            })
         };
         if let (Some(task), Some(outcome)) = (task, outcome) {
-            finish_task(executor, task, outcome, &mut payloads, &mut wakes);
+            finish_task(executor, task, outcome, &mut payloads, &mut join_wakes);
         }
     }
     // Keep the driver-turn guard through callbacks: a custom join waker may
     // admit work, but cannot recursively poll an unbounded number of quanta.
-    dispatch_join_wakes(wakes, None);
+    dispatch_join_wakes(join_wakes, None);
     drop(payloads);
     drop(guard);
     // Join wakes and panic-payload destructors may have spawned more work.
     let state = executor.borrow();
-    if state.tasks.is_empty() { DriveState::Empty }
-    else if state.tasks.values().any(|task| task.wake.ready.load(Ordering::Acquire)) {
+    if state.tasks.is_empty() {
+        DriveState::Empty
+    } else if state
+        .tasks
+        .values()
+        .any(|task| task.wake.ready.load(Ordering::Acquire))
+    {
         DriveState::Runnable
-    } else { DriveState::Parked }
-
+    } else {
+        DriveState::Parked
+    }
 }
 
 /// Drive at most one configured quantum on a native host, parking when no task
-/// is ready. `Ready(())` means no retained Rust futures, not that every task
-/// succeeded. Inspect the individual [`LocalTaskCompletion`] values.
+/// is ready.
+///
+/// `Ready(())` means no retained Rust futures, not that every task succeeded.
+/// Inspect the individual [`LocalTaskCompletion`] values.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn poll_local_tasks(cx: &mut Context<'_>) -> Poll<()> {
     let executor = executor();
@@ -559,11 +699,19 @@ pub fn poll_local_tasks(cx: &mut Context<'_>) -> Poll<()> {
             let signal = Arc::clone(&executor.borrow().signal);
             signal.clear();
             // Waker destruction is another reentrant callback boundary.
-            if executor.borrow().tasks.is_empty() { Poll::Ready(()) }
-            else { signal.register(cx.waker()); cx.waker().wake_by_ref(); Poll::Pending }
-        },
+            if executor.borrow().tasks.is_empty() {
+                Poll::Ready(())
+            } else {
+                signal.register(cx.waker());
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
         DriveState::Parked => Poll::Pending,
-        DriveState::Runnable => { cx.waker().wake_by_ref(); Poll::Pending }
+        DriveState::Runnable => {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
     }
 }
 
@@ -573,7 +721,9 @@ fn fail_all(executor: &Rc<RefCell<Executor>>, message: &'static str) {
         let mut state = executor.borrow_mut();
         state.failure = Some(message);
         let ids: Vec<_> = state.tasks.keys().copied().collect();
-        ids.into_iter().map(|id| extract_task(&mut state, id)).collect::<Vec<_>>()
+        ids.into_iter()
+            .map(|id| extract_task(&mut state, id))
+            .collect::<Vec<_>>()
     };
     let mut payloads = Vec::new();
     let mut wakes = Vec::new();

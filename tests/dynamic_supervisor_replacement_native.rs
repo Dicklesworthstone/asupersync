@@ -74,7 +74,10 @@ async fn cancellation_worker(cx: Cx) -> Outcome<(), &'static str> {
         stopped.recv(&cx).await,
         Err(mpsc::RecvError::Cancelled)
     ));
-    Outcome::Cancelled(cx.cancel_reason().expect("worker cancellation is attributed"))
+    Outcome::Cancelled(
+        cx.cancel_reason()
+            .expect("worker cancellation is attributed"),
+    )
 }
 
 fn runtime_case<F, Fut>(parallel: bool, case: F)
@@ -192,14 +195,10 @@ fn replacement_waits_for_old_cleanup_and_stales_the_old_generation() {
             let stale_counted = Arc::clone(&stale_calls);
             assert!(matches!(
                 owner
-                    .replace_worker(
-                        &old,
-                        policy(),
-                        move |_: Cx, _: ManagedGeneration| {
-                            stale_counted.fetch_add(1, Ordering::SeqCst);
-                            async { Outcome::Ok(()) }
-                        },
-                    )
+                    .replace_worker(&old, policy(), move |_: Cx, _: ManagedGeneration| {
+                        stale_counted.fetch_add(1, Ordering::SeqCst);
+                        async { Outcome::Ok(()) }
+                    },)
                     .await,
                 Err(DynamicSupervisorError::StaleChild)
             ));
@@ -256,14 +255,10 @@ fn failed_replacement_admission_preserves_the_old_completion_receipt() {
                 previous,
                 replacement,
             } = owner
-                .replace_worker(
-                    &old,
-                    invalid,
-                    move |_: Cx, _: ManagedGeneration| {
-                        counted.fetch_add(1, Ordering::SeqCst);
-                        async { Outcome::Ok(()) }
-                    },
-                )
+                .replace_worker(&old, invalid, move |_: Cx, _: ManagedGeneration| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    async { Outcome::Ok(()) }
+                })
                 .await
                 .unwrap();
             assert!(previous.stop_requested);
@@ -282,18 +277,19 @@ fn failed_replacement_admission_preserves_the_old_completion_receipt() {
                 0,
                 "invalid replacement configuration cannot invoke its factory"
             );
-            assert!(owner.is_empty(), "failed admission does not reserve the name");
+            assert!(
+                owner.is_empty(),
+                "failed admission does not reserve the name"
+            );
             assert!(matches!(
                 owner.request_stop(&old),
                 Err(DynamicSupervisorError::StaleChild)
             ));
 
             let next = owner
-                .start_worker(
-                    "service",
-                    policy(),
-                    |_: Cx, _: ManagedGeneration| async { Outcome::Ok(()) },
-                )
+                .start_worker("service", policy(), |_: Cx, _: ManagedGeneration| async {
+                    Outcome::Ok(())
+                })
                 .await
                 .unwrap();
             assert_ne!(old.generation(), next.generation());

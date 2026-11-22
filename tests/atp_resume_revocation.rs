@@ -411,11 +411,15 @@ impl Denial {
     ) -> Result<ResumeClientRevocation, ResumeRevokeError> {
         match self {
             Self::Client => service.revoke_client(key.client, reason),
-            Self::Session => service.revoke_session(key, reason).map(|change| ResumeClientRevocation {
-                newly_revoked: change.newly_revoked,
-                signalled_connections: change.signalled_connections,
-                retained_sessions: change.retained_sessions,
-            }),
+            Self::Session => {
+                service
+                    .revoke_session(key, reason)
+                    .map(|change| ResumeClientRevocation {
+                        newly_revoked: change.newly_revoked,
+                        signalled_connections: change.signalled_connections,
+                        retained_sessions: change.retained_sessions,
+                    })
+            }
         }
     }
     fn assert_denied(self, service: &ResumableService<Sink>, key: ResumeSessionKey) {
@@ -433,8 +437,13 @@ impl Denial {
     fn assert_rejected(self, outcome: ResumeServiceOutcome) {
         assert!(matches!(
             (self, outcome),
-            (Self::Client, ResumeServiceOutcome::Rejected(ResumeServiceRejection::Revoked))
-                | (Self::Session, ResumeServiceOutcome::Rejected(ResumeServiceRejection::SessionRevoked))
+            (
+                Self::Client,
+                ResumeServiceOutcome::Rejected(ResumeServiceRejection::Revoked)
+            ) | (
+                Self::Session,
+                ResumeServiceOutcome::Rejected(ResumeServiceRejection::SessionRevoked)
+            )
         ));
     }
 }
@@ -738,7 +747,7 @@ fn revocation_preserves_completed_receipts_but_refuses_their_reconnects() {
             let again = denial
                 .revoke(
                     &mut service,
-                key,
+                    key,
                     CancelReason::user("must not change prior attribution"),
                 )
                 .unwrap();
@@ -767,7 +776,11 @@ fn revocation_preserves_completed_receipts_but_refuses_their_reconnects() {
             denial.assert_denied(&service, key);
             assert!(
                 !denial
-                    .revoke(&mut service, key, CancelReason::user("duplicate after drain"))
+                    .revoke(
+                        &mut service,
+                        key,
+                        CancelReason::user("duplicate after drain")
+                    )
                     .unwrap()
                     .newly_revoked
             );
@@ -775,7 +788,10 @@ fn revocation_preserves_completed_receipts_but_refuses_their_reconnects() {
                 denial
                     .revoke(
                         &mut service,
-                        ResumeSessionKey { client: id("unlisted"), ..key },
+                        ResumeSessionKey {
+                            client: id("unlisted"),
+                            ..key
+                        },
                         CancelReason::user("already drained"),
                     )
                     .unwrap_err(),
@@ -796,11 +812,15 @@ fn revoked_client_never_invokes_a_historical_receipt_restoration_factory() {
                 .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
                 .await
                 .unwrap();
-            let key = ResumeSessionKey { client: id("allowed"), nonce: [9; 32] };
+            let key = ResumeSessionKey {
+                client: id("allowed"),
+                nonce: [9; 32],
+            };
             assert!(
                 denial
                     .revoke(
-                        &mut service, key,
+                        &mut service,
+                        key,
                         CancelReason::user("old receipts do not renew authority")
                     )
                     .unwrap()
@@ -874,7 +894,11 @@ fn revocation_cancels_a_parked_factory_without_recreating_its_session() {
             let reason = CancelReason::user("revoke during factory");
             assert_eq!(
                 denial
-                    .revoke(&mut service, observed.lock().unwrap().unwrap(), reason.clone())
+                    .revoke(
+                        &mut service,
+                        observed.lock().unwrap().unwrap(),
+                        reason.clone()
+                    )
                     .unwrap()
                     .signalled_connections,
                 1
@@ -1071,10 +1095,9 @@ fn session_revocation_drains_only_one_parked_transfer_from_the_same_certificate(
             let reason = CancelReason::user("cancel just the requested transfer");
             let changed = service.revoke_session(key, reason.clone()).unwrap();
             assert!(changed.newly_revoked);
-            let duplicate = service.revoke_session(
-                key,
-                CancelReason::user("must not replace the first reason"),
-            ).unwrap();
+            let duplicate = service
+                .revoke_session(key, CancelReason::user("must not replace the first reason"))
+                .unwrap();
             assert!(!duplicate.newly_revoked);
             assert_eq!(duplicate.signalled_connections, 0);
             assert_eq!(service.revoked_clients(), 0);
@@ -1124,13 +1147,22 @@ fn session_revocation_drains_only_one_parked_transfer_from_the_same_certificate(
             // same-certificate sibling remains genuinely parked and owned.
             let address = service.local_addr();
             let (refused, completion) = zip(
-                async { Wire::connect(address, "allowed").await.hello(key.nonce).await },
+                async {
+                    Wire::connect(address, "allowed")
+                        .await
+                        .hello(key.nonce)
+                        .await
+                },
                 service.next(&cx, &scope, store.factory()),
-            ).await;
+            )
+            .await;
             assert!(refused.is_err());
             Denial::Session.assert_rejected(completion.unwrap().unwrap().outcome);
             assert_eq!(store.calls.load(Ordering::SeqCst), 2);
-            assert_eq!(service.session_status(&other_key), Some(ResumeSessionStatus::Active));
+            assert_eq!(
+                service.session_status(&other_key),
+                Some(ResumeSessionStatus::Active)
+            );
             assert_eq!(&*probe.bytes.lock().unwrap(), b"abc");
             assert_eq!(probe.commits.load(Ordering::SeqCst), 0);
             other_probe.release();
@@ -1168,7 +1200,10 @@ fn session_denial_rechecks_an_authenticated_pending_hello_and_keeps_other_identi
             .await
             .unwrap();
         let store = Store::default();
-        let key = ResumeSessionKey { client: id("allowed"), nonce: [7; 32] };
+        let key = ResumeSessionKey {
+            client: id("allowed"),
+            nonce: [7; 32],
+        };
         let address = service.local_addr();
         let mut wire = or(
             async {
@@ -1176,20 +1211,27 @@ fn session_denial_rechecks_an_authenticated_pending_hello_and_keeps_other_identi
                 panic!("no authenticated hello exists yet: {early:?}");
             },
             Wire::connect(address, "allowed"),
-        ).await;
+        )
+        .await;
         assert_eq!(
-            service.revoke_session(key, CancelReason::user("deny pending hello"))
-                .unwrap().signalled_connections,
+            service
+                .revoke_session(key, CancelReason::user("deny pending hello"))
+                .unwrap()
+                .signalled_connections,
             0
         );
         let (refused, completion) = zip(
             wire.hello(key.nonce),
             service.next(&cx, &scope, store.factory()),
-        ).await;
+        )
+        .await;
         assert!(refused.is_err());
         Denial::Session.assert_rejected(completion.unwrap().unwrap().outcome);
         assert_eq!(store.calls.load(Ordering::SeqCst), 0);
-        assert_eq!((service.resident_sessions(), service.retained_keys()), (0, 0));
+        assert_eq!(
+            (service.resident_sessions(), service.retained_keys()),
+            (0, 0)
+        );
         drop(wire);
 
         // The nonce is not an authority: a distinct authenticated certificate
@@ -1202,10 +1244,14 @@ fn session_denial_rechecks_an_authenticated_pending_hello_and_keeps_other_identi
                 reply
             },
             service.next(&cx, &scope, store.factory()),
-        ).await;
+        )
+        .await;
         assert!(accepted.is_ok());
         let complete = completion.unwrap().unwrap();
-        let other = ResumeSessionKey { client: id("unlisted"), ..key };
+        let other = ResumeSessionKey {
+            client: id("unlisted"),
+            ..key
+        };
         assert_eq!(complete.session, Some(other));
         let report = transfer(complete.outcome);
         assert_eq!(report.sink_written_bytes, 0);
@@ -1228,7 +1274,10 @@ fn full_session_denial_budget_refuses_a_whole_policy_before_cancelling_any_owner
             .bind_resumable_service::<Sink>(&cx, "127.0.0.1:0".parse().unwrap(), limits())
             .await
             .unwrap();
-        let store = Store { pause_write: true, ..Store::default() };
+        let store = Store {
+            pause_write: true,
+            ..Store::default()
+        };
         let _release = ReleaseAll(store.clone());
         let mut sending = start(&cx, &scope, service.local_addr(), "allowed", b"abcdefgh");
         or(
@@ -1236,29 +1285,48 @@ fn full_session_denial_budget_refuses_a_whole_policy_before_cancelling_any_owner
                 let early = service.next(&cx, &scope, store.factory()).await;
                 panic!("sink must remain parked: {early:?}");
             },
-            witness(&cx, || store.client(id("allowed"))
-                .is_some_and(|(_, probe)| probe.write_parked.load(Ordering::SeqCst))),
-        ).await;
+            witness(&cx, || {
+                store
+                    .client(id("allowed"))
+                    .is_some_and(|(_, probe)| probe.write_parked.load(Ordering::SeqCst))
+            }),
+        )
+        .await;
         let (active_key, probe) = store.client(id("allowed")).unwrap();
         let absent_client = NativeClientCertificateId::from_sha256([0; 32]);
-        let denials: Vec<_> = (0..MAX_REVOKED_RESUME_SESSIONS as u32).map(|number| {
-            let mut nonce = [0; 32];
-            nonce[..4].copy_from_slice(&number.to_be_bytes());
-            ResumeSessionKey { client: absent_client, nonce }
-        }).collect();
-        let full = service.apply_revocations(
-            &[], &denials, CancelReason::user("bounded retained session policy"),
-        ).unwrap();
+        let denials: Vec<_> = (0..MAX_REVOKED_RESUME_SESSIONS as u32)
+            .map(|number| {
+                let mut nonce = [0; 32];
+                nonce[..4].copy_from_slice(&number.to_be_bytes());
+                ResumeSessionKey {
+                    client: absent_client,
+                    nonce,
+                }
+            })
+            .collect();
+        let full = service
+            .apply_revocations(
+                &[],
+                &denials,
+                CancelReason::user("bounded retained session policy"),
+            )
+            .unwrap();
         assert_eq!(full.newly_revoked_sessions, MAX_REVOKED_RESUME_SESSIONS);
         assert_eq!(full.signalled_connections, 0);
         assert_eq!(
-            service.check_revocations(&[active_key.client], &[active_key]).unwrap_err(),
+            service
+                .check_revocations(&[active_key.client], &[active_key])
+                .unwrap_err(),
             ResumeRevokeError::Capacity
         );
         assert_eq!(
-            service.apply_revocations(
-                &[active_key.client], &[active_key], CancelReason::user("must be atomic"),
-            ).unwrap_err(),
+            service
+                .apply_revocations(
+                    &[active_key.client],
+                    &[active_key],
+                    CancelReason::user("must be atomic"),
+                )
+                .unwrap_err(),
             ResumeRevokeError::Capacity
         );
         assert_eq!(service.revoked_clients(), 0);
@@ -1266,21 +1334,43 @@ fn full_session_denial_budget_refuses_a_whole_policy_before_cancelling_any_owner
         assert!(!service.is_session_revoked(&active_key));
         assert!(!service.is_client_revoked(&active_key.client));
         assert!(service.is_session_revoked(&denials[0]));
-        let duplicate = service.apply_revocations(
-            &[], &denials, CancelReason::user("idempotent at capacity"),
-        ).unwrap();
+        let duplicate = service
+            .apply_revocations(&[], &denials, CancelReason::user("idempotent at capacity"))
+            .unwrap();
         assert_eq!(duplicate.newly_revoked_sessions, 0);
         assert_eq!(duplicate.signalled_connections, 0);
-        assert_eq!((service.resident_sessions(), service.retained_keys()), (1, 1));
-        assert_eq!(service.session_status(&active_key), Some(ResumeSessionStatus::Active));
+        assert_eq!(
+            (service.resident_sessions(), service.retained_keys()),
+            (1, 1)
+        );
+        assert_eq!(
+            service.session_status(&active_key),
+            Some(ResumeSessionStatus::Active)
+        );
         probe.release();
-        let report = transfer(service.next(&cx, &scope, store.factory())
-            .await.unwrap().unwrap().outcome);
+        let report = transfer(
+            service
+                .next(&cx, &scope, store.factory())
+                .await
+                .unwrap()
+                .unwrap()
+                .outcome,
+        );
         let receipt = report.outcome.unwrap();
-        assert_eq!(receipt.source_sha256.as_slice(), Sha256::digest(b"abcdefgh").as_slice());
+        assert_eq!(
+            receipt.source_sha256.as_slice(),
+            Sha256::digest(b"abcdefgh").as_slice()
+        );
         assert_eq!(&*probe.bytes.lock().unwrap(), b"abcdefgh");
         assert_eq!(probe.commits.load(Ordering::SeqCst), 1);
-        assert_eq!(poll_fn(|ctx| sending.poll_join(ctx)).await.unwrap().outcome.unwrap(), receipt);
+        assert_eq!(
+            poll_fn(|ctx| sending.poll_join(ctx))
+                .await
+                .unwrap()
+                .outcome
+                .unwrap(),
+            receipt
+        );
         assert!(service.drain_next().await.is_none());
     });
 }

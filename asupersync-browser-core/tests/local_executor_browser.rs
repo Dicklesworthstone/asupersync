@@ -91,12 +91,14 @@ async fn real_js_promise_resumes_a_non_send_rust_future_and_returns_its_value() 
     )
     .unwrap();
     assert!(!entered.get(), "admission must not poll inline");
-    assert!(task_join(
-        serde_json::to_string(&task.handle()).unwrap(),
-        serde_json::to_string(&ok(999)).unwrap(),
-        None,
-    )
-    .is_err());
+    assert!(
+        task_join(
+            serde_json::to_string(&task.handle()).unwrap(),
+            serde_json::to_string(&ok(999)).unwrap(),
+            None,
+        )
+        .is_err()
+    );
     let result = task.await;
     assert!(entered.get());
     assert_eq!(result.outcome, ok(37));
@@ -129,12 +131,22 @@ async fn scope_close_destroys_a_real_parked_js_future_without_another_poll() {
     )
     .unwrap();
     next_host_task().await.unwrap();
-    assert!(entered.get(), "the actual Rust future must have reached its Promise await");
+    assert!(
+        entered.get(),
+        "the actual Rust future must have reached its Promise await"
+    );
     assert_eq!(drops.get(), 0);
     scope_close(serde_json::to_string(&owners.scope).unwrap(), None).unwrap();
-    assert_eq!(drops.get(), 1, "close must retire the pinned future synchronously");
+    assert_eq!(
+        drops.get(),
+        1,
+        "close must retire the pinned future synchronously"
+    );
     let result = task.await;
-    assert!(matches!(result.outcome, WasmAbiOutcomeEnvelope::Cancelled { .. }));
+    assert!(matches!(
+        result.outcome,
+        WasmAbiOutcomeEnvelope::Cancelled { .. }
+    ));
     assert!(result.publication_error.is_none());
 }
 
@@ -173,7 +185,11 @@ async fn a_self_waking_future_cannot_starve_a_real_host_task_callback() {
     )
     .unwrap();
     let result = task.await;
-    assert_eq!(result.outcome, ok(1), "host callback was starved by Rust polling");
+    assert_eq!(
+        result.outcome,
+        ok(1),
+        "host callback was starved by Rust polling"
+    );
     assert!(host_ran.get());
     assert!(polled.get() < ceiling);
     assert!(result.publication_error.is_none());

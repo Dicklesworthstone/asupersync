@@ -18,7 +18,10 @@ fn runtime(workers: usize) -> Runtime {
     } else {
         RuntimeBuilder::multi_thread().worker_threads(workers)
     };
-    builder.with_reactor(crate::runtime::reactor::create_reactor().unwrap()).build().unwrap()
+    builder
+        .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+        .build()
+        .unwrap()
 }
 
 /// The owned cancellation-Waker registrations on `cx`, by token.
@@ -41,7 +44,10 @@ fn cancel_waker_tokens(cx: &Cx) -> Vec<u64> {
 fn listener() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("postgres://replica@{}/application?sslmode=disable", listener.local_addr().unwrap());
+    let url = format!(
+        "postgres://replica@{}/application?sslmode=disable",
+        listener.local_addr().unwrap()
+    );
     (listener, url)
 }
 
@@ -50,8 +56,12 @@ fn accept(listener: &TcpListener) -> TcpStream {
     loop {
         match listener.accept() {
             Ok((socket, _)) => {
-                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 return socket;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < until => {
@@ -88,9 +98,18 @@ fn startup(socket: &mut TcpStream) {
     bytes.resize(len as usize, 0);
     socket.read_exact(&mut bytes[4..]).unwrap();
     let startup = parse_startup_message(&bytes).unwrap();
-    assert_eq!(startup.parameters.get("replication").map(String::as_str), Some("database"));
-    assert_eq!(startup.parameters.get("database").map(String::as_str), Some("application"));
-    assert_eq!(startup.parameters.get("user").map(String::as_str), Some("replica"));
+    assert_eq!(
+        startup.parameters.get("replication").map(String::as_str),
+        Some("database")
+    );
+    assert_eq!(
+        startup.parameters.get("database").map(String::as_str),
+        Some("application")
+    );
+    assert_eq!(
+        startup.parameters.get("user").map(String::as_str),
+        Some("replica")
+    );
 }
 
 fn authenticate(socket: &mut TcpStream) {
@@ -157,7 +176,10 @@ fn assert_feedback(socket: &mut TcpStream, positions: [u64; 3]) {
     assert_eq!(data[0], b'r');
     for (index, expected) in positions.into_iter().enumerate() {
         let begin = 1 + 8 * index;
-        assert_eq!(u64::from_be_bytes(data[begin..begin + 8].try_into().unwrap()), expected);
+        assert_eq!(
+            u64::from_be_bytes(data[begin..begin + 8].try_into().unwrap()),
+            expected
+        );
     }
     assert_eq!(data[33], 0);
 }
@@ -190,19 +212,39 @@ fn ok<T: fmt::Debug>(outcome: Outcome<T, PgError>) -> T {
 
 #[test]
 fn lsn_configuration_and_feedback_validate_without_sql_injection() {
-    for (text, value) in [("0/0", 0), ("1/0", 1u64 << 32), ("FFFFFFFF/FFFFFFFF", u64::MAX)] {
+    for (text, value) in [
+        ("0/0", 0),
+        ("1/0", 1u64 << 32),
+        ("FFFFFFFF/FFFFFFFF", u64::MAX),
+    ] {
         assert_eq!(text.parse::<PgLsn>().unwrap().as_u64(), value);
         assert_eq!(PgLsn::new(value).to_string(), text);
     }
-    for invalid in ["", "/", "+1/0", "0/100000000", "0/0/0", " 0/1", "0/1\0", "G/0"] {
+    for invalid in [
+        "",
+        "/",
+        "+1/0",
+        "0/100000000",
+        "0/0/0",
+        " 0/1",
+        "0/1\0",
+        "G/0",
+    ] {
         assert!(invalid.parse::<PgLsn>().is_err(), "{invalid:?}");
     }
     for invalid in ["", "UPPER", "slot;DROP", "slot\0name"] {
         assert!(PgReplicationConfig::new(invalid, ["pub"], PgLsn::new(0)).is_err());
     }
     let command = PgReplicationConfig::new("safe", ["pub,one", "a\"b's\\c"], PgLsn::new(0))
-        .unwrap().binary(true).messages(true).start_command().unwrap();
-    assert_eq!(command, "START_REPLICATION SLOT \"safe\" LOGICAL 0/0 (proto_version '1', publication_names '\"pub,one\",\"a\"\"b''s\\c\"', binary 'true', messages 'true')");
+        .unwrap()
+        .binary(true)
+        .messages(true)
+        .start_command()
+        .unwrap();
+    assert_eq!(
+        command,
+        "START_REPLICATION SLOT \"safe\" LOGICAL 0/0 (proto_version '1', publication_names '\"pub,one\",\"a\"\"b''s\\c\"', binary 'true', messages 'true')"
+    );
     assert_eq!(
         config().pgoutput_decoder().protocol_version(),
         PgOutputProtocolVersion::V1
@@ -225,7 +267,11 @@ fn lsn_configuration_and_feedback_validate_without_sql_injection() {
         config().start_command().unwrap()
     );
     assert!(config().with_max_message_bytes(24).is_err());
-    assert!(config().with_max_message_bytes(MAX_BACKEND_MESSAGE_LEN as usize).is_err());
+    assert!(
+        config()
+            .with_max_message_bytes(MAX_BACKEND_MESSAGE_LEN as usize)
+            .is_err()
+    );
     assert!(PgReplicationFeedback::new(PgLsn::new(1), PgLsn::new(2), PgLsn::new(0)).is_err());
     assert!(PgReplicationFeedback::new(PgLsn::new(2), PgLsn::new(1), PgLsn::new(2)).is_err());
 }
@@ -241,16 +287,28 @@ fn replication_envelopes_are_strict_and_retain_signed_timestamps() {
     assert!(matches!(&event, PgReplicationEvent::XLogData {
         wal_start, wal_end, server_time_micros: -5, ..
     } if *wal_start == PgLsn::new(0x10) && *wal_end == PgLsn::new(0x200)));
-    assert!(matches!(event.pgoutput().unwrap(), Some(PgOutputMessage::Begin {
-        xid: 42, commit_time_micros: -7, ..
-    })));
+    assert!(matches!(
+        event.pgoutput().unwrap(),
+        Some(PgOutputMessage::Begin {
+            xid: 42,
+            commit_time_micros: -7,
+            ..
+        })
+    ));
     let keepalive = keepalive(0x300, true);
     let data = &keepalive[5..];
-    for length in 0..data.len() { assert!(parse_event(data[..length].to_vec()).is_err()); }
+    for length in 0..data.len() {
+        assert!(parse_event(data[..length].to_vec()).is_err());
+    }
     let event = parse_event(data.to_vec()).unwrap();
-    assert!(matches!(event, PgReplicationEvent::PrimaryKeepAlive {
-        reply_requested: true, server_time_micros: -5, ..
-    }));
+    assert!(matches!(
+        event,
+        PgReplicationEvent::PrimaryKeepAlive {
+            reply_requested: true,
+            server_time_micros: -5,
+            ..
+        }
+    ));
     let mut bad = data.to_vec();
     bad[17] = 2;
     assert!(parse_event(bad).is_err());
@@ -267,15 +325,25 @@ struct ShortWriter {
 }
 
 impl AsyncWrite for ShortWriter {
-    fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.calls += 1;
-        if self.calls == 2 && self.park_write { return Poll::Pending; }
+        if self.calls == 2 && self.park_write {
+            return Poll::Pending;
+        }
         let count = bytes.len().min(3);
         self.output.extend_from_slice(&bytes[..count]);
         Poll::Ready(Ok(count))
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.park_flush { Poll::Pending } else { Poll::Ready(Ok(())) }
+        if self.park_flush {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
@@ -285,24 +353,42 @@ impl AsyncWrite for ShortWriter {
 #[test]
 fn pending_feedback_resumes_short_writes_and_flush_without_replaying_bytes() {
     let expected = frame(b'd', b"r0123456789");
-    let mut pending = PendingWrite::new(expected.clone(), WriteKind::Feedback(PgReplicationFeedback::default()));
-    let mut writer = ShortWriter { output: Vec::new(), calls: 0, park_write: true, park_flush: true };
+    let mut pending = PendingWrite::new(
+        expected.clone(),
+        WriteKind::Feedback(PgReplicationFeedback::default()),
+    );
+    let mut writer = ShortWriter {
+        output: Vec::new(),
+        calls: 0,
+        park_write: true,
+        park_flush: true,
+    };
     let mut task = Context::from_waker(Waker::noop());
     {
-        let mut first = Box::pin(poll_fn(|cx| poll_pending_write(&mut pending, &mut writer, cx)));
+        let mut first = Box::pin(poll_fn(|cx| {
+            poll_pending_write(&mut pending, &mut writer, cx)
+        }));
         assert!(first.as_mut().poll(&mut task).is_pending());
     }
     assert_eq!(pending.offset, 3);
     writer.park_write = false;
     {
-        let mut second = Box::pin(poll_fn(|cx| poll_pending_write(&mut pending, &mut writer, cx)));
+        let mut second = Box::pin(poll_fn(|cx| {
+            poll_pending_write(&mut pending, &mut writer, cx)
+        }));
         assert!(second.as_mut().poll(&mut task).is_pending());
     }
     assert_eq!(pending.offset, expected.len());
     assert_eq!(writer.output, expected);
     writer.park_flush = false;
-    assert!(matches!(poll_pending_write(&mut pending, &mut writer, &mut task), Poll::Ready(Ok(()))));
-    assert_eq!(writer.output, expected, "resuming a pending flush cannot resend its frame");
+    assert!(matches!(
+        poll_pending_write(&mut pending, &mut writer, &mut task),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(
+        writer.output, expected,
+        "resuming a pending flush cannot resend its frame"
+    );
 }
 
 #[test]
@@ -324,18 +410,38 @@ fn native_replication_negotiates_mode_decodes_changes_and_acknowledges_only_conf
         let cx = runtime.block_on(async {
             let cx = Cx::current().unwrap();
             let driver_wake = cancel_waker_tokens(&cx);
-            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
+            assert_eq!(
+                driver_wake.len(),
+                1,
+                "the drive registers only its caller wake"
+            );
             let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
             let mut stream = ok(connection.start(&cx, config()).await);
             let event = ok(stream.next(&cx).await).unwrap();
-            assert!(matches!(event.pgoutput().unwrap(), Some(PgOutputMessage::Begin { xid: 42, .. })));
+            assert!(matches!(
+                event.pgoutput().unwrap(),
+                Some(PgOutputMessage::Begin { xid: 42, .. })
+            ));
             assert_eq!(stream.feedback(), PgReplicationFeedback::default());
-            assert!(matches!(ok(stream.next(&cx).await), Some(PgReplicationEvent::PrimaryKeepAlive { reply_requested: true, .. })));
+            assert!(matches!(
+                ok(stream.next(&cx).await),
+                Some(PgReplicationEvent::PrimaryKeepAlive {
+                    reply_requested: true,
+                    ..
+                })
+            ));
             assert_eq!(stream.feedback().flushed(), PgLsn::new(0));
-            let feedback = PgReplicationFeedback::new(PgLsn::new(0x30), PgLsn::new(0x30), PgLsn::new(0x20)).unwrap();
+            let feedback =
+                PgReplicationFeedback::new(PgLsn::new(0x30), PgLsn::new(0x30), PgLsn::new(0x20))
+                    .unwrap();
             ok(stream.send_feedback(&cx, feedback).await);
             assert_eq!(stream.feedback(), feedback);
-            assert!(matches!(stream.send_feedback(&cx, PgReplicationFeedback::default()).await, Outcome::Err(PgError::Protocol(_))));
+            assert!(matches!(
+                stream
+                    .send_feedback(&cx, PgReplicationFeedback::default())
+                    .await,
+                Outcome::Err(PgError::Protocol(_))
+            ));
             ok(stream.finish(&cx).await);
             assert_eq!(cancel_waker_tokens(&cx), driver_wake);
             cx
@@ -464,7 +570,11 @@ fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
         let cx = runtime.block_on(async {
             let cx = Cx::current().unwrap();
             let driver_wake = cancel_waker_tokens(&cx);
-            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
+            assert_eq!(
+                driver_wake.len(),
+                1,
+                "the drive registers only its caller wake"
+            );
             let connection = ok(PgReplicationConnection::connect(&cx, &url).await);
             let mut stream = ok(connection.start(&cx, config()).await);
             let progress = Arc::new(AtomicUsize::new(0));
@@ -473,13 +583,23 @@ fn native_partial_wal_wait_can_be_dropped_to_send_feedback_then_resumed() {
                 let mut waiting = Box::pin(stream.next(&cx));
                 poll_fn(|task| {
                     assert!(waiting.as_mut().poll(task).is_pending());
-                    if progress.load(Ordering::Acquire) == 7 { Poll::Ready(()) } else { Poll::Pending }
-                }).await;
+                    if progress.load(Ordering::Acquire) == 7 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
             }
             assert_eq!(cancel_waker_tokens(&cx), driver_wake);
-            ok(stream.send_feedback(&cx, PgReplicationFeedback::default()).await);
+            ok(stream
+                .send_feedback(&cx, PgReplicationFeedback::default())
+                .await);
             let event = ok(stream.next(&cx).await).unwrap();
-            assert!(matches!(event.pgoutput().unwrap(), Some(PgOutputMessage::Begin { xid: 42, .. })));
+            assert!(matches!(
+                event.pgoutput().unwrap(),
+                Some(PgOutputMessage::Begin { xid: 42, .. })
+            ));
             ok(stream.finish(&cx).await);
             assert_eq!(cancel_waker_tokens(&cx), driver_wake);
             cx
@@ -527,15 +647,24 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
         let poller = runtime.block_on(async {
             let poller = Cx::current().unwrap();
             let driver_wake = cancel_waker_tokens(&poller);
-            assert_eq!(driver_wake.len(), 1, "the drive registers only its caller wake");
+            assert_eq!(
+                driver_wake.len(),
+                1,
+                "the drive registers only its caller wake"
+            );
             let connection = ok(PgReplicationConnection::connect(&owner, &url).await);
             let config = config().streaming(streaming);
             let mut decoder = config.pgoutput_decoder();
             let mut stream = ok(connection.start(&owner, config).await);
             if streaming {
                 let event = ok(stream.next(&poller).await).unwrap();
-                assert_eq!(event.pgoutput_with(&mut decoder).unwrap(),
-                    Some(PgOutputEvent::StreamStart { xid: 42, first_segment: true }));
+                assert_eq!(
+                    event.pgoutput_with(&mut decoder).unwrap(),
+                    Some(PgOutputEvent::StreamStart {
+                        xid: 42,
+                        first_segment: true
+                    })
+                );
             }
             let mut witnessed = false;
             let outcome = {
@@ -547,7 +676,8 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
                         parked_tx.send(()).unwrap();
                     }
                     result
-                }).await
+                })
+                .await
             };
             assert!(witnessed);
             match outcome {
@@ -557,7 +687,10 @@ fn native_parked_replication_retains_original_owner_cancellation_and_delivers_ca
             assert!(poller.checkpoint().is_ok());
             assert_eq!(decoder.active_stream_xid(), streaming.then_some(42));
             assert_eq!(stream.feedback(), PgReplicationFeedback::default());
-            assert!(matches!(stream.next(&poller).await, Outcome::Err(PgError::Protocol(_))));
+            assert!(matches!(
+                stream.next(&poller).await,
+                Outcome::Err(PgError::Protocol(_))
+            ));
             drop(stream);
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());
             assert_eq!(cancel_waker_tokens(&poller), driver_wake);
@@ -625,13 +758,20 @@ fn native_replication_connect_retains_original_poller_cancellation_during_parked
                     parked_tx.send(()).unwrap();
                 }
                 result
-            }).await;
+            })
+            .await;
             assert!(witnessed);
             assert!(matches!(result, Outcome::Cancelled(actual) if actual == reason));
             drop(future);
             assert!(owner.checkpoint().is_ok());
             assert!(owner.inner.read().cancel_waker_registrations.is_empty());
-            assert!(initial_poller.inner.read().cancel_waker_registrations.is_empty());
+            assert!(
+                initial_poller
+                    .inner
+                    .read()
+                    .cancel_waker_registrations
+                    .is_empty()
+            );
         });
         controller.join().unwrap();
         peer.join().unwrap();
@@ -650,7 +790,12 @@ fn native_replication_bounds_protocol_errors_and_unconsumed_drop_close_the_socke
                 match case {
                     0 => socket.write_all(&[b'd', 0, 0, 4, 4]).unwrap(),
                     1 => socket.write_all(&frame(b'd', b"kbad")).unwrap(),
-                    2 => socket.write_all(&frame(b'E', b"SERROR\0C55000\0Mreplication slot unavailable\0\0")).unwrap(),
+                    2 => socket
+                        .write_all(&frame(
+                            b'E',
+                            b"SERROR\0C55000\0Mreplication slot unavailable\0\0",
+                        ))
+                        .unwrap(),
                     _ => {}
                 }
                 closed(&mut socket);
@@ -704,24 +849,41 @@ fn control_observes_a_different_poller_after_the_same_future_has_parked() {
     next.cancel_with_reason(reason.clone());
     {
         let _ambient = Cx::set_current(Some(next.clone()));
-        assert!(matches!(future.as_mut().poll(&mut task), Poll::Ready(Err(PgError::Cancelled(actual))) if actual == reason));
+        assert!(
+            matches!(future.as_mut().poll(&mut task), Poll::Ready(Err(PgError::Cancelled(actual))) if actual == reason)
+        );
     }
     drop(future);
-    for cx in [owner, first, next] { assert!(cx.inner.read().cancel_waker_registrations.is_empty()); }
+    for cx in [owner, first, next] {
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    }
 }
 
 #[test]
 fn control_translates_poller_deadlines_to_the_original_clock() {
-    let owner_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(1_000)));
+    let owner_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(
+        1_000,
+    )));
     let owner = Cx::new_with_drivers(
-        RegionId::new_for_test(0, 1), TaskId::new_for_test(88, 0), Budget::INFINITE,
-        None, None, None, Some(TimerDriverHandle::with_virtual_clock(owner_clock.clone())), None,
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(88, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(TimerDriverHandle::with_virtual_clock(owner_clock.clone())),
+        None,
     );
     let poller_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_nanos(10)));
     let poller = Cx::new_with_drivers(
-        RegionId::new_for_test(0, 1), TaskId::new_for_test(89, 0),
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(89, 0),
         Budget::INFINITE.with_deadline(Time::from_nanos(17)),
-        None, None, None, Some(TimerDriverHandle::with_virtual_clock(poller_clock)), None,
+        None,
+        None,
+        None,
+        Some(TimerDriverHandle::with_virtual_clock(poller_clock)),
+        None,
     );
     let mut control = {
         let _ambient = Cx::set_current(Some(owner.clone()));
@@ -732,7 +894,10 @@ fn control_translates_poller_deadlines_to_the_original_clock() {
     let mut task = Context::from_waker(Waker::noop());
     assert!(future.as_mut().poll(&mut task).is_pending());
     owner_clock.advance(7);
-    assert!(matches!(future.as_mut().poll(&mut task), Poll::Ready(Err(PgError::Cancelled(_)))));
+    assert!(matches!(
+        future.as_mut().poll(&mut task),
+        Poll::Ready(Err(PgError::Cancelled(_)))
+    ));
     drop(future);
     assert_eq!(control.deadline, Some(Time::from_nanos(1_007)));
     assert!(owner.inner.read().cancel_waker_registrations.is_empty());

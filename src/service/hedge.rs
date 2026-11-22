@@ -9,13 +9,13 @@
 
 use super::{Layer, Service};
 use crate::combinator::PeakEwmaHedgeController;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::time::{Sleep, wall_now};
 use crate::types::Time;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 

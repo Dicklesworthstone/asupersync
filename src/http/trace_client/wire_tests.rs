@@ -149,7 +149,9 @@ fn read_request(
             break index + 4;
         }
         if pending.len() > 64 * 1024 {
-            return Err(io::Error::other("test request headers exceeded their bound"));
+            return Err(io::Error::other(
+                "test request headers exceeded their bound",
+            ));
         }
         let count = stream.read(&mut scratch)?;
         if count == 0 {
@@ -189,10 +191,9 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 fn parent() -> W3CTraceContext {
-    let mut parent: W3CTraceContext =
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-            .parse()
-            .unwrap();
+    let mut parent: W3CTraceContext = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        .parse()
+        .unwrap();
     parent.tracestate = Some("vendor=preserved".into());
     parent.baggage.insert("tenant", "sensitive").unwrap();
     parent
@@ -232,7 +233,10 @@ fn cloned_requests_get_distinct_children_and_reuse_the_shared_pool() {
     assert_eq!(second.response.body, b"ok");
     assert_ne!(first.context.span_id, second.context.span_id);
     let (requests, connections) = server.finish();
-    assert_eq!(connections, 1, "the cloned client observes the same live pool");
+    assert_eq!(
+        connections, 1,
+        "the cloned client observes the same live pool"
+    );
     assert_eq!(requests.len(), 2);
     for (request, result) in requests.iter().zip([&first, &second]) {
         let traceparent = result.context.to_traceparent();
@@ -292,7 +296,10 @@ fn cross_origin_redirect_returns_without_contacting_the_other_origin() {
     let (other_requests, other_connections) = other.finish();
     assert_eq!(result.response.status, 302);
     assert_eq!(requests.len(), 1);
-    assert!(other_requests.is_empty(), "trace context escaped its origin");
+    assert!(
+        other_requests.is_empty(),
+        "trace context escaped its origin"
+    );
     assert_eq!(other_connections, 0);
 }
 
@@ -350,8 +357,7 @@ async fn collect_streamed(
         body: Vec::new(),
         trailers: Vec::new(),
     };
-    while let Some(frame) =
-        poll_fn(|cx| Pin::new(&mut streamed.response.body).poll_frame(cx)).await
+    while let Some(frame) = poll_fn(|cx| Pin::new(&mut streamed.response.body).poll_frame(cx)).await
     {
         match frame? {
             Frame::Data(mut data) => {
@@ -412,7 +418,10 @@ fn streaming_preserves_chunked_body_trailers_and_request_owned_context() {
     assert_eq!(connections, 1);
     assert_eq!(requests.len(), 1);
     let traceparent = context.to_traceparent();
-    assert_eq!(requests[0].values("traceparent"), vec![traceparent.as_str()]);
+    assert_eq!(
+        requests[0].values("traceparent"),
+        vec![traceparent.as_str()]
+    );
     assert_eq!(requests[0].values("tracestate"), vec!["vendor=preserved"]);
     assert_eq!(requests[0].values("baggage"), vec!["tenant=sensitive"]);
     assert_eq!(requests[0].values("X-Request"), vec!["kept"]);
@@ -503,7 +512,11 @@ fn cancelled_streaming_request_never_contacts_the_server() {
     let client = TracedHttpClient::new();
     let cx = Cx::for_testing();
     cx.cancel_fast(CancelKind::User);
-    let result = block_on(client.get_streaming(server.url("/cancelled"), &parent).send(&cx));
+    let result = block_on(
+        client
+            .get_streaming(server.url("/cancelled"), &parent)
+            .send(&cx),
+    );
     assert!(matches!(result, Err(TracedClientError::Http(error)) if error.is_cancelled()));
     let (requests, connections) = server.finish();
     assert!(requests.is_empty());

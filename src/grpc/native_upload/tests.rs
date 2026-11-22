@@ -70,9 +70,10 @@ struct Source<'a> {
 impl Streaming for Source<'_> {
     type Message = Bytes;
 
-    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>)
-        -> Poll<Option<Result<Bytes, Status>>>
-    {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         let this = self.as_ref().get_ref();
         assert!(!this.label.is_empty());
         assert_eq!(Cx::current().unwrap().task_id(), this.owner);
@@ -88,7 +89,11 @@ impl Streaming for Source<'_> {
             }
             return Poll::Pending;
         }
-        assert_eq!(this.stats.eof.load(Ordering::SeqCst), 0, "source repolled after EOF");
+        assert_eq!(
+            this.stats.eof.load(Ordering::SeqCst),
+            0,
+            "source repolled after EOF"
+        );
         if let Some(item) = state.items.pop_front() {
             this.stats.produced.fetch_add(1, Ordering::SeqCst);
             Poll::Ready(Some(item))
@@ -146,15 +151,23 @@ fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) 
 
 fn message(connection: &mut Connection, codec: &mut FramedCodec<IdentityCodec>, value: &[u8]) {
     let mut bytes = BytesMut::new();
-    codec.encode_message(&Bytes::copy_from_slice(value), &mut bytes).unwrap();
+    codec
+        .encode_message(&Bytes::copy_from_slice(value), &mut bytes)
+        .unwrap();
     connection.send_data(1, bytes.freeze(), false).unwrap();
 }
 
 fn closed_read(socket: &mut std::net::TcpStream, buffer: &mut [u8]) -> usize {
     match socket.read(buffer) {
         Ok(n) => n,
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::BrokenPipe) => 0,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            0
+        }
         Err(error) => panic!("native upload peer read: {error}"),
     }
 }
@@ -179,7 +192,11 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
         socket.set_read_timeout(Some(LIMIT)).unwrap();
         socket.set_write_timeout(Some(LIMIT)).unwrap();
         let mut connection = Connection::server(Settings {
-            initial_window_size: if matches!(mode, Mode::ZeroWindow) { 0 } else { 65535 },
+            initial_window_size: if matches!(mode, Mode::ZeroWindow) {
+                0
+            } else {
+                65535
+            },
             ..Settings::server()
         });
         connection.queue_initial_settings();
@@ -190,9 +207,8 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
         let mut frames = FrameCodec::new();
         let mut input = BytesMut::new();
         let mut body = BytesMut::new();
-        let mut codec = FramedCodec::with_message_size_limits(
-            IdentityCodec, MESSAGE_BYTES, MESSAGE_BYTES,
-        );
+        let mut codec =
+            FramedCodec::with_message_size_limits(IdentityCodec, MESSAGE_BYTES, MESSAGE_BYTES);
         let mut count = 0;
         let mut headers = false;
         let mut half_closed = false;
@@ -205,7 +221,11 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
             input.extend_from_slice(&buffer[..n]);
             while let Some(frame) = frames.decode(&mut input).unwrap() {
                 match connection.process_frame(frame).unwrap() {
-                    Some(ReceivedFrame::Headers { stream_id, end_stream, .. }) => {
+                    Some(ReceivedFrame::Headers {
+                        stream_id,
+                        end_stream,
+                        ..
+                    }) => {
                         assert_eq!(stream_id, 1);
                         assert!(!headers && !end_stream);
                         headers = true;
@@ -213,18 +233,31 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
                         producer_parked.recv_timeout(LIMIT).unwrap();
                         response_gate.recv_timeout(LIMIT).unwrap();
                         if !matches!(mode, Mode::Quiet) {
-                            connection.send_headers(1, vec![
-                                Header::new(":status", "200"),
-                                Header::new("content-type", "application/grpc"),
-                                Header::new("x-initial", "upload"),
-                            ], false).unwrap();
+                            connection
+                                .send_headers(
+                                    1,
+                                    vec![
+                                        Header::new(":status", "200"),
+                                        Header::new("content-type", "application/grpc"),
+                                        Header::new("x-initial", "upload"),
+                                    ],
+                                    false,
+                                )
+                                .unwrap();
                             message(&mut connection, &mut codec, b"ready");
                         }
                     }
-                    Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                    Some(ReceivedFrame::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    }) => {
                         assert_eq!(stream_id, 1);
                         assert!(headers && !half_closed);
-                        assert!(matches!(mode, Mode::Echo), "parked upload must send no DATA");
+                        assert!(
+                            matches!(mode, Mode::Echo),
+                            "parked upload must send no DATA"
+                        );
                         body.extend_from_slice(&data);
                         while let Some(value) = codec.decode_message(&mut body).unwrap() {
                             assert_eq!(value.len(), MESSAGE_BYTES);
@@ -236,10 +269,16 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
                             assert!(body.is_empty());
                             assert_eq!(count, 3);
                             half_closed = true;
-                            connection.send_headers(1, vec![
-                                Header::new("grpc-status", "0"),
-                                Header::new("x-terminal", "complete"),
-                            ], true).unwrap();
+                            connection
+                                .send_headers(
+                                    1,
+                                    vec![
+                                        Header::new("grpc-status", "0"),
+                                        Header::new("x-terminal", "complete"),
+                                    ],
+                                    true,
+                                )
+                                .unwrap();
                         }
                     }
                     _ => {}
@@ -248,7 +287,11 @@ fn peer(mode: Mode, producer_parked: mpsc::Receiver<()>) -> Peer {
             }
         }
     });
-    Peer { address, worker, respond }
+    Peer {
+        address,
+        worker,
+        respond,
+    }
 }
 
 fn bounded(test: impl FnOnce() + Send + 'static) {
@@ -257,7 +300,8 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         let _ = send.send(result);
     });
-    let result = receive.recv_timeout(Duration::from_secs(30))
+    let result = receive
+        .recv_timeout(Duration::from_secs(30))
         .expect("native upload scenario must terminate");
     worker.join().unwrap();
     if let Err(payload) = result {
@@ -266,8 +310,11 @@ fn bounded(test: impl FnOnce() + Send + 'static) {
 }
 
 fn runtime(workers: usize) -> crate::runtime::Runtime {
-    let builder = if workers == 1 { RuntimeBuilder::current_thread() }
-        else { RuntimeBuilder::new().worker_threads(workers) };
+    let builder = if workers == 1 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::new().worker_threads(workers)
+    };
     builder.build().unwrap()
 }
 
@@ -279,15 +326,25 @@ fn assert_drained(runtime: &crate::runtime::Runtime) {
     assert_eq!(report.pending_obligations, 0);
 }
 
-fn source<'a>(label: &'a str, owner: &Cx, witness: mpsc::Sender<()>,
-    items: VecDeque<Result<Bytes, Status>>) -> (Source<'a>, Arc<Gate>, Arc<SourceStats>)
-{
+fn source<'a>(
+    label: &'a str,
+    owner: &Cx,
+    witness: mpsc::Sender<()>,
+    items: VecDeque<Result<Bytes, Status>>,
+) -> (Source<'a>, Arc<Gate>, Arc<SourceStats>) {
     let gate = Arc::new(Gate::default());
     let stats = Arc::new(SourceStats::default());
     let source = Source {
-        label, owner: owner.task_id(), gate: Arc::clone(&gate),
-        state: Mutex::new(SourceState { items, witness: Some(witness), address: None }),
-        stats: Arc::clone(&stats), _pin: PhantomPinned,
+        label,
+        owner: owner.task_id(),
+        gate: Arc::clone(&gate),
+        state: Mutex::new(SourceState {
+            items,
+            witness: Some(witness),
+            address: None,
+        }),
+        stats: Arc::clone(&stats),
+        _pin: PhantomPinned,
     };
     (source, gate, stats)
 }
@@ -301,28 +358,38 @@ fn echo_case(drop_first_wait: bool) {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let label = String::from("borrowed pinned upload source");
-                let items = (0..3).map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES]))).collect();
+                let items = (0..3)
+                    .map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES])))
+                    .collect();
                 let (source, gate, stats) = source(&label, &cx, witness, items);
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).max_send_message_size(MESSAGE_BYTES)
-                    .connect().await.unwrap();
+                    .timeout(LIMIT)
+                    .max_send_message_size(MESSAGE_BYTES)
+                    .connect()
+                    .await
+                    .unwrap();
                 let mut responses = GrpcClient::new(channel)
                     .into_native_bidi_streaming(&cx, "/test.Upload/Exchange", Request::new(source))
-                    .await.unwrap();
+                    .await
+                    .unwrap();
                 assert_eq!(stats.produced.load(Ordering::SeqCst), 0);
                 if drop_first_wait {
                     let mut wait = Box::pin(responses.message());
                     poll_fn(|task| {
                         assert!(wait.as_mut().poll(task).is_pending());
                         Poll::Ready(())
-                    }).await;
+                    })
+                    .await;
                     drop(wait);
                     assert_eq!(stats.dropped.load(Ordering::SeqCst), 0);
                 }
                 peer.respond.send(()).unwrap();
                 // Peer sends this only AFTER the producer parks. A missing read
                 // registration after RequestFlushed makes this wait time out.
-                assert_eq!(responses.message().await.unwrap().unwrap().as_ref(), b"ready");
+                assert_eq!(
+                    responses.message().await.unwrap().unwrap().as_ref(),
+                    b"ready"
+                );
                 assert_eq!(stats.produced.load(Ordering::SeqCst), 0);
                 gate.release();
                 let mut values = Vec::new();
@@ -334,7 +401,13 @@ fn echo_case(drop_first_wait: bool) {
                     assert_eq!(value.as_ref(), &[(index + 1) as u8]);
                 }
                 assert_eq!(responses.status().unwrap().code(), Code::Ok);
-                assert!(responses.initial_metadata().unwrap().get("x-initial").is_some());
+                assert!(
+                    responses
+                        .initial_metadata()
+                        .unwrap()
+                        .get("x-initial")
+                        .is_some()
+                );
                 assert!(responses.trailers().unwrap().get("x-terminal").is_some());
                 assert!(responses.message().await.unwrap().is_none());
                 assert_eq!(stats.produced.load(Ordering::SeqCst), 3);
@@ -367,13 +440,19 @@ fn zero_upload_credit_stops_source_read_ahead_and_cancel_retires_everything() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let items = (0..3).map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES]))).collect();
+                let items = (0..3)
+                    .map(|i| Ok(Bytes::from(vec![i; MESSAGE_BYTES])))
+                    .collect();
                 let (source, gate, stats) = source("bounded read ahead", &cx, witness, items);
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
                 let mut call = GrpcClient::new(channel)
                     .into_native_bidi_streaming(&cx, "/test.Upload/Exchange", Request::new(source))
-                    .await.unwrap();
+                    .await
+                    .unwrap();
                 peer.respond.send(()).unwrap();
                 assert_eq!(call.message().await.unwrap().unwrap().as_ref(), b"ready");
                 gate.release();
@@ -386,7 +465,8 @@ fn zero_upload_credit_stops_source_read_ahead_and_cancel_retires_everything() {
                         } else {
                             Poll::Pending
                         }
-                    }).await;
+                    })
+                    .await;
                 }
                 assert_eq!(stats.produced.load(Ordering::SeqCst), 1);
                 call.cancel();
@@ -412,13 +492,21 @@ fn producer_failure_is_not_half_close_and_keeps_its_exact_status() {
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
                 let error = Status::resource_exhausted("application upload quota");
-                let (source, gate, stats) = source("failed producer", &cx, witness,
-                    VecDeque::from([Err(error.clone())]));
+                let (source, gate, stats) = source(
+                    "failed producer",
+                    &cx,
+                    witness,
+                    VecDeque::from([Err(error.clone())]),
+                );
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
                 let mut call = GrpcClient::new(channel)
                     .into_native_bidi_streaming(&cx, "/test.Upload/Exchange", Request::new(source))
-                    .await.unwrap();
+                    .await
+                    .unwrap();
                 peer.respond.send(()).unwrap();
                 assert_eq!(call.message().await.unwrap().unwrap().as_ref(), b"ready");
                 gate.release();
@@ -487,15 +575,26 @@ fn owner_cancellation_wakes_a_call_with_a_never_ready_source() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let owner = region.cx();
-                let (source, _gate, stats) = source("cancel parked producer", owner, witness,
-                    VecDeque::new());
+                let (source, _gate, stats) =
+                    source("cancel parked producer", owner, witness, VecDeque::new());
                 let channel = Channel::builder(format!("http://{}", peer.address))
-                    .timeout(LIMIT).connect().await.unwrap();
+                    .timeout(LIMIT)
+                    .connect()
+                    .await
+                    .unwrap();
                 let mut call = GrpcClient::new(channel)
-                    .into_native_bidi_streaming(owner, "/test.Upload/Exchange", Request::new(source))
-                    .await.unwrap();
+                    .into_native_bidi_streaming(
+                        owner,
+                        "/test.Upload/Exchange",
+                        Request::new(source),
+                    )
+                    .await
+                    .unwrap();
                 peer.respond.send(()).unwrap();
                 {
                     let mut wait = Box::pin(call.message());
@@ -506,7 +605,8 @@ fn owner_cancellation_wakes_a_call_with_a_never_ready_source() {
                         } else {
                             Poll::Pending
                         }
-                    }).await;
+                    })
+                    .await;
                 }
                 owner.cancel_with(CancelKind::User, Some("stop native source"));
                 assert_eq!(call.message().await.unwrap_err().code(), Code::Cancelled);
@@ -532,7 +632,8 @@ fn source_is_not_polled_when_native_setup_refuses() {
             let channel = Channel::connect("http://loopback:50051").await.unwrap();
             let error = GrpcClient::new(channel)
                 .into_native_bidi_streaming(&cx, "/test.Upload/Exchange", Request::new(source))
-                .await.unwrap_err();
+                .await
+                .unwrap_err();
             assert_eq!(error.code(), Code::FailedPrecondition);
             assert_eq!(stats.produced.load(Ordering::SeqCst), 0);
             assert_eq!(stats.dropped.load(Ordering::SeqCst), 1);

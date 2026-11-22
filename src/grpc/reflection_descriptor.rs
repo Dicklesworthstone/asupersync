@@ -6,8 +6,8 @@
 //! unknown fields. It is not a protobuf type checker or a source compiler.
 //! Loading a catalog performs no I/O and grants no network access.
 
-use crate::bytes::Bytes;
 use super::Status;
+use crate::bytes::Bytes;
 use prost::Message as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -59,12 +59,16 @@ impl ReflectionDescriptorSet {
     /// type-checked; use descriptors produced by the protobuf compiler.
     pub fn decode(encoded: &[u8]) -> Result<Self, Status> {
         if encoded.len() > MAX_REFLECTION_DESCRIPTOR_BYTES {
-            return Err(Status::resource_exhausted("reflection descriptor bytes exceeded"));
+            return Err(Status::resource_exhausted(
+                "reflection descriptor bytes exceeded",
+            ));
         }
         let set = WireSet::decode(encoded)
             .map_err(|_| Status::invalid_argument("invalid protobuf descriptor set"))?;
         if set.files.len() > MAX_FILES {
-            return Err(Status::resource_exhausted("reflection descriptor file limit exceeded"));
+            return Err(Status::resource_exhausted(
+                "reflection descriptor file limit exceeded",
+            ));
         }
         let mut catalog = Self {
             files: BTreeMap::new(),
@@ -77,7 +81,8 @@ impl ReflectionDescriptorSet {
             let info = FileInfo::decode(raw.as_slice())
                 .map_err(|_| Status::invalid_argument("invalid protobuf file descriptor"))?;
             let name = info.name.as_deref().unwrap_or_default();
-            if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
+            if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control)
+            {
                 return Err(Status::invalid_argument("invalid reflection file name"));
             }
             if catalog.files.contains_key(name) {
@@ -104,14 +109,23 @@ impl ReflectionDescriptorSet {
             for extension in &info.extensions {
                 catalog.index_extension(package, extension, name)?;
             }
-            catalog.files.insert(name.to_owned(), File {
-                bytes: Bytes::from(raw),
-                imports: info.imports,
-            });
+            catalog.files.insert(
+                name.to_owned(),
+                File {
+                    bytes: Bytes::from(raw),
+                    imports: info.imports,
+                },
+            );
         }
         catalog.validate_imports()?;
-        if catalog.extensions.keys().any(|name| !catalog.messages.contains(name)) {
-            return Err(Status::invalid_argument("extension target is not a known message"));
+        if catalog
+            .extensions
+            .keys()
+            .any(|name| !catalog.messages.contains(name))
+        {
+            return Err(Status::invalid_argument(
+                "extension target is not a known message",
+            ));
         }
         Ok(catalog)
     }
@@ -149,14 +163,22 @@ impl ReflectionDescriptorSet {
     /// Find a service, method, message, field, oneof, enum, enum value or extension.
     /// An optional single leading dot is accepted for fully qualified type names.
     pub fn file_containing_symbol(&self, symbol: &str) -> Result<Vec<Bytes>, Status> {
-        let file = self.symbols.get(without_root_dot(symbol))
+        let file = self
+            .symbols
+            .get(without_root_dot(symbol))
             .ok_or_else(|| Status::not_found("reflection symbol not found"))?;
         self.file_by_name(file)
     }
 
     /// Find the file declaring an extension of a message, plus that file's imports.
-    pub fn file_containing_extension(&self, message: &str, number: i32) -> Result<Vec<Bytes>, Status> {
-        let file = self.extensions.get(without_root_dot(message))
+    pub fn file_containing_extension(
+        &self,
+        message: &str,
+        number: i32,
+    ) -> Result<Vec<Bytes>, Status> {
+        let file = self
+            .extensions
+            .get(without_root_dot(message))
             .and_then(|extensions| extensions.get(&number))
             .ok_or_else(|| Status::not_found("reflection extension not found"))?;
         self.file_by_name(file)
@@ -169,14 +191,18 @@ impl ReflectionDescriptorSet {
         if !self.messages.contains(message) {
             return Err(Status::not_found("reflection message type not found"));
         }
-        Ok(self.extensions.get(message)
+        Ok(self
+            .extensions
+            .get(message)
             .map(|extensions| extensions.keys().copied().collect())
             .unwrap_or_default())
     }
 
     fn insert_symbol(&mut self, name: String, file: &str) -> Result<(), Status> {
         if self.symbols.len() >= MAX_SYMBOLS {
-            return Err(Status::resource_exhausted("reflection symbol limit exceeded"));
+            return Err(Status::resource_exhausted(
+                "reflection symbol limit exceeded",
+            ));
         }
         if self.symbols.insert(name, file.to_owned()).is_some() {
             return Err(Status::invalid_argument("duplicate protobuf symbol"));
@@ -184,9 +210,17 @@ impl ReflectionDescriptorSet {
         Ok(())
     }
 
-    fn index_message(&mut self, parent: &str, message: &MessageInfo, file: &str, depth: usize) -> Result<(), Status> {
+    fn index_message(
+        &mut self,
+        parent: &str,
+        message: &MessageInfo,
+        file: &str,
+        depth: usize,
+    ) -> Result<(), Status> {
         if depth >= MAX_DEPTH {
-            return Err(Status::resource_exhausted("reflection message nesting exceeded"));
+            return Err(Status::resource_exhausted(
+                "reflection message nesting exceeded",
+            ));
         }
         let name = join_name(parent, message.name.as_deref())?;
         self.insert_symbol(name.clone(), file)?;
@@ -209,7 +243,12 @@ impl ReflectionDescriptorSet {
         Ok(())
     }
 
-    fn index_enum(&mut self, parent: &str, enumeration: &EnumInfo, file: &str) -> Result<(), Status> {
+    fn index_enum(
+        &mut self,
+        parent: &str,
+        enumeration: &EnumInfo,
+        file: &str,
+    ) -> Result<(), Status> {
         self.insert_symbol(join_name(parent, enumeration.name.as_deref())?, file)?;
         // Protobuf enum values live in the ENUM'S ENCLOSING scope, not under its name.
         for value in &enumeration.values {
@@ -218,22 +257,37 @@ impl ReflectionDescriptorSet {
         Ok(())
     }
 
-    fn index_extension(&mut self, parent: &str, extension: &FieldInfo, file: &str) -> Result<(), Status> {
+    fn index_extension(
+        &mut self,
+        parent: &str,
+        extension: &FieldInfo,
+        file: &str,
+    ) -> Result<(), Status> {
         self.insert_symbol(join_name(parent, extension.name.as_deref())?, file)?;
         let target = extension.extendee.as_deref().unwrap_or_default();
         // protoc emits an absolute extendee; do not guess how a relative name resolves.
-        let target = target.strip_prefix('.')
+        let target = target
+            .strip_prefix('.')
             .filter(|name| qualified_name(name))
             .ok_or_else(|| Status::invalid_argument("extension target must be fully qualified"))?;
         let number = extension.number.unwrap_or_default();
         // Protobuf standard field numbers are 1..=536_870_911, but message_set_wire_format
         // extensions can use any positive int32 up to 2^31 - 1 (RFC / descriptor.proto).
         if !(1..=i32::MAX).contains(&number) || (19_000..=19_999).contains(&number) {
-            return Err(Status::invalid_argument("invalid protobuf extension number"));
+            return Err(Status::invalid_argument(
+                "invalid protobuf extension number",
+            ));
         }
-        if self.extensions.entry(target.to_owned()).or_default()
-            .insert(number, file.to_owned()).is_some() {
-            return Err(Status::invalid_argument("duplicate protobuf extension number"));
+        if self
+            .extensions
+            .entry(target.to_owned())
+            .or_default()
+            .insert(number, file.to_owned())
+            .is_some()
+        {
+            return Err(Status::invalid_argument(
+                "duplicate protobuf extension number",
+            ));
         }
         Ok(())
     }
@@ -246,7 +300,9 @@ impl ReflectionDescriptorSet {
             let mut unique = BTreeSet::new();
             for import in &file.imports {
                 if !self.files.contains_key(import) || !unique.insert(import) {
-                    return Err(Status::invalid_argument("missing or duplicate protobuf import"));
+                    return Err(Status::invalid_argument(
+                        "missing or duplicate protobuf import",
+                    ));
                 }
                 dependents.entry(import).or_default().push(name);
             }
@@ -277,7 +333,9 @@ impl ReflectionDescriptorSet {
 
 fn identifier(name: &str) -> bool {
     let mut bytes = name.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
@@ -286,11 +344,18 @@ fn qualified_name(name: &str) -> bool {
 }
 
 fn join_name(parent: &str, name: Option<&str>) -> Result<String, Status> {
-    let name = name.filter(|name| identifier(name))
+    let name = name
+        .filter(|name| identifier(name))
         .ok_or_else(|| Status::invalid_argument("invalid protobuf symbol name"))?;
-    let full = if parent.is_empty() { name.to_owned() } else { format!("{parent}.{name}") };
+    let full = if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent}.{name}")
+    };
     if full.len() > MAX_NAME_BYTES {
-        return Err(Status::resource_exhausted("protobuf symbol name limit exceeded"));
+        return Err(Status::resource_exhausted(
+            "protobuf symbol name limit exceeded",
+        ));
     }
     Ok(full)
 }

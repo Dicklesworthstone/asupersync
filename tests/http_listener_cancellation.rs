@@ -61,11 +61,7 @@ async fn answer(_: Request) -> Response {
     Response::new(200, "OK", b"unrelated-listener-alive".to_vec())
 }
 
-async fn bind(
-    protocol: Protocol,
-    runtime: RuntimeHandle,
-    owner: Option<Cx>,
-) -> BoundListener {
+async fn bind(protocol: Protocol, runtime: RuntimeHandle, owner: Option<Cx>) -> BoundListener {
     match protocol {
         Protocol::Http1 => {
             let config = Http1ListenerConfig::default()
@@ -181,10 +177,18 @@ async fn assert_unrelated_request(cx: &Cx, address: SocketAddr) {
 fn assert_retired(runtime: &Runtime) {
     let started = Instant::now();
     while !runtime.is_quiescent() {
-        assert!(started.elapsed() < WATCHDOG, "all listener and owner tasks retire");
+        assert!(
+            started.elapsed() < WATCHDOG,
+            "all listener and owner tasks retire"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert_eq!(runtime.draining_region_count(), 0);
 }
@@ -193,7 +197,10 @@ fn exercise(protocol: Protocol, trigger: Trigger, workers: usize) {
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     let runtime_handle = runtime.handle();
     runtime.block_on(async move {

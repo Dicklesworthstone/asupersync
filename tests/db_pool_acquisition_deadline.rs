@@ -159,11 +159,16 @@ impl Drop for Watchdog {
 
 fn runtime(multithread: bool, timer: TimerDriverHandle) -> Runtime {
     let builder = if multithread {
-        RuntimeBuilder::new().worker_threads(2).with_sharded_state(true)
+        RuntimeBuilder::new()
+            .worker_threads(2)
+            .with_sharded_state(true)
     } else {
         RuntimeBuilder::current_thread()
     };
-    builder.with_timer_driver(timer).build().expect("native runtime")
+    builder
+        .with_timer_driver(timer)
+        .build()
+        .expect("native runtime")
 }
 
 async fn acquire<'a>(
@@ -234,7 +239,9 @@ fn parked_acquisition(multithread: bool, stage: Stage, client_scoped: bool, canc
                             .get_for_client_with_deadline_outcome(&child_cx, "tenant", deadline)
                             .await
                     } else {
-                        child_pool.get_with_deadline_outcome(&child_cx, deadline).await
+                        child_pool
+                            .get_with_deadline_outcome(&child_cx, deadline)
+                            .await
                     }
                 };
                 let mut operation = std::pin::pin!(operation);
@@ -272,9 +279,18 @@ fn parked_acquisition(multithread: bool, stage: Stage, client_scoped: bool, canc
 
         let joined = child.join(&cx).await;
         let after = pool.stats();
-        assert!(reached_pending, "{stage:?} must park before its stop boundary");
-        assert_eq!(pending_operations, 1, "{stage:?} manager operation must be pending");
-        assert_eq!(reserved.total, 1, "the pending operation owns one pool slot");
+        assert!(
+            reached_pending,
+            "{stage:?} must park before its stop boundary"
+        );
+        assert_eq!(
+            pending_operations, 1,
+            "{stage:?} manager operation must be pending"
+        );
+        assert_eq!(
+            reserved.total, 1,
+            "the pending operation owns one pool slot"
+        );
         if cancel {
             assert!(
                 matches!(&joined, Ok(Outcome::Cancelled(actual)) if actual == &reason),
@@ -297,7 +313,10 @@ fn parked_acquisition(multithread: bool, stage: Stage, client_scoped: bool, canc
             controls.disconnects.load(Ordering::SeqCst),
             usize::from(matches!(stage, Stage::Validate))
         );
-        assert!(timers.is_empty(), "terminal acquisition must retire its timer");
+        assert!(
+            timers.is_empty(),
+            "terminal acquisition must retire its timer"
+        );
 
         // A same-client checkout proves both physical capacity and its private
         // quota recovered, without reaching into the pool's internal mutex.
@@ -311,7 +330,10 @@ fn parked_acquisition(multithread: bool, stage: Stage, client_scoped: bool, canc
     }));
 
     drop(watchdog);
-    assert!(!fired.load(Ordering::Acquire), "a manager completion must not be needed to wake the caller");
+    assert!(
+        !fired.load(Ordering::Acquire),
+        "a manager completion must not be needed to wake the caller"
+    );
     assert!(check_timers.is_empty());
     assert_eq!(check_controls.live.load(Ordering::SeqCst), 0);
     let drain = runtime.shutdown_drained(Duration::from_secs(3));

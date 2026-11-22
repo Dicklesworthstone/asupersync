@@ -1,1019 +1,1006 @@
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::expect_fun_call,
-        clippy::map_unwrap_or,
-        clippy::cast_possible_wrap,
-        clippy::future_not_send
-    )]
-    use super::*;
-    use std::cell::Cell;
-    use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
-    use std::thread;
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::expect_fun_call,
+    clippy::map_unwrap_or,
+    clippy::cast_possible_wrap,
+    clippy::future_not_send
+)]
+use super::*;
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 
-    use crate::bytes::Bytes;
-    use crate::runtime::RuntimeBuilder;
-    use crate::time::TimerDriverHandle;
-    use crate::types::Budget;
-    use crate::web::extract::{
-        Accept, ExtractionError, Header, Json, Path, Query, State, UserAgent,
-    };
-    use crate::web::response::StatusCode;
+use crate::bytes::Bytes;
+use crate::runtime::RuntimeBuilder;
+use crate::time::TimerDriverHandle;
+use crate::types::Budget;
+use crate::web::extract::{Accept, ExtractionError, Header, Json, Path, Query, State, UserAgent};
+use crate::web::response::StatusCode;
 
-    struct LegacyFinal(String);
+struct LegacyFinal(String);
 
-    impl FromRequest for LegacyFinal {
-        fn from_request(req: Request) -> Result<Self, ExtractionError> {
-            Ok(Self(req.path))
-        }
+impl FromRequest for LegacyFinal {
+    fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        Ok(Self(req.path))
+    }
+}
+
+#[derive(Clone)]
+struct AsyncExtractionTrace(Arc<Mutex<Vec<u8>>>);
+
+impl AsyncExtractionTrace {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
     }
 
-    #[derive(Clone)]
-    struct AsyncExtractionTrace(Arc<Mutex<Vec<u8>>>);
-
-    impl AsyncExtractionTrace {
-        fn new() -> Self {
-            Self(Arc::new(Mutex::new(Vec::new())))
-        }
-
-        fn request(&self) -> Request {
-            let mut req = Request::new("POST", "/async-extractor");
-            req.extensions.insert_typed(self.clone());
-            req
-        }
-
-        fn assert_order(&self, expected: &[u8]) {
-            assert_eq!(
-                self.0
-                    .lock()
-                    .expect("async extraction trace lock")
-                    .as_slice(),
-                expected
-            );
-        }
+    fn request(&self) -> Request {
+        let mut req = Request::new("POST", "/async-extractor");
+        req.extensions.insert_typed(self.clone());
+        req
     }
 
-    struct OrderedPart<const INDEX: u8>;
+    fn assert_order(&self, expected: &[u8]) {
+        assert_eq!(
+            self.0
+                .lock()
+                .expect("async extraction trace lock")
+                .as_slice(),
+            expected
+        );
+    }
+}
 
-    impl<const INDEX: u8> FromRequestParts for OrderedPart<INDEX> {
-        fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+struct OrderedPart<const INDEX: u8>;
+
+impl<const INDEX: u8> FromRequestParts for OrderedPart<INDEX> {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let trace = req
+            .extensions
+            .get_typed::<AsyncExtractionTrace>()
+            .ok_or_else(|| ExtractionError::bad_request("missing async extraction trace"))?;
+        trace
+            .0
+            .lock()
+            .expect("async extraction trace lock")
+            .push(INDEX);
+        Ok(Self)
+    }
+}
+
+struct AsyncFinal {
+    value: Cell<u8>,
+    request_task: String,
+}
+
+impl FromRequest for AsyncFinal {
+    fn from_request(_req: Request) -> Result<Self, ExtractionError> {
+        Err(ExtractionError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "legacy final extraction path must not run",
+        ))
+    }
+
+    // Written in the trait's desugared shape on purpose: the `Send + 'a`
+    // bound on the returned future is the contract under test.
+    #[allow(clippy::manual_async_fn)]
+    fn from_request_with_cx<'a>(
+        cx: &'a Cx,
+        req: Request,
+    ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        async move {
             let trace = req
                 .extensions
-                .get_typed::<AsyncExtractionTrace>()
+                .get_typed_cloned::<AsyncExtractionTrace>()
                 .ok_or_else(|| ExtractionError::bad_request("missing async extraction trace"))?;
             trace
                 .0
                 .lock()
                 .expect("async extraction trace lock")
-                .push(INDEX);
-            Ok(Self)
+                .push(99);
+
+            let mut yielded_pending = false;
+            std::future::poll_fn(move |task_cx| {
+                if yielded_pending {
+                    Poll::Ready(())
+                } else {
+                    yielded_pending = true;
+                    task_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+
+            Ok(Self {
+                value: Cell::new(7),
+                request_task: format!("{:?}", cx.task_id()),
+            })
         }
     }
+}
 
-    struct AsyncFinal {
-        value: Cell<u8>,
-        request_task: String,
+struct FailingAsyncFinal;
+
+impl FromRequest for FailingAsyncFinal {
+    fn from_request(_req: Request) -> Result<Self, ExtractionError> {
+        Err(ExtractionError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "legacy failure must not win",
+        ))
     }
 
-    impl FromRequest for AsyncFinal {
-        fn from_request(_req: Request) -> Result<Self, ExtractionError> {
-            Err(ExtractionError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "legacy final extraction path must not run",
-            ))
-        }
+    fn from_request_with_cx<'a>(
+        _cx: &'a Cx,
+        _req: Request,
+    ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        std::future::ready(Err(ExtractionError::bad_request(
+            "async final extraction failed",
+        )))
+    }
+}
 
-        // Written in the trait's desugared shape on purpose: the `Send + 'a`
-        // bound on the returned future is the contract under test.
-        #[allow(clippy::manual_async_fn)]
-        fn from_request_with_cx<'a>(
-            cx: &'a Cx,
-            req: Request,
-        ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
-        where
-            Self: Send + 'a,
-        {
-            async move {
-                let trace = req
-                    .extensions
-                    .get_typed_cloned::<AsyncExtractionTrace>()
-                    .ok_or_else(|| {
-                        ExtractionError::bad_request("missing async extraction trace")
-                    })?;
-                trace
-                    .0
-                    .lock()
-                    .expect("async extraction trace lock")
-                    .push(99);
+fn assert_async_final(cx: &Cx, body: &AsyncFinal) {
+    assert_eq!(body.value.get(), 7);
+    assert_eq!(body.request_task, format!("{:?}", cx.task_id()));
+    assert!(
+        cx.timer_driver().is_some(),
+        "extractor and handler must share the runtime-backed request Cx"
+    );
+}
 
-                let mut yielded_pending = false;
-                std::future::poll_fn(move |task_cx| {
-                    if yielded_pending {
-                        Poll::Ready(())
-                    } else {
-                        yielded_pending = true;
-                        task_cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                })
-                .await;
-
-                Ok(Self {
-                    value: Cell::new(7),
-                    request_task: format!("{:?}", cx.task_id()),
-                })
-            }
-        }
+#[test]
+fn handler_no_extractors() {
+    fn index() -> &'static str {
+        "hello"
     }
 
-    struct FailingAsyncFinal;
+    let handler = FnHandler::new(index);
+    let cx = Cx::for_testing();
+    let req = Request::new("GET", "/");
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+}
 
-    impl FromRequest for FailingAsyncFinal {
-        fn from_request(_req: Request) -> Result<Self, ExtractionError> {
-            Err(ExtractionError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "legacy failure must not win",
-            ))
-        }
-
-        fn from_request_with_cx<'a>(
-            _cx: &'a Cx,
-            _req: Request,
-        ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
-        where
-            Self: Send + 'a,
-        {
-            std::future::ready(Err(ExtractionError::bad_request(
-                "async final extraction failed",
-            )))
-        }
+#[test]
+fn handler_one_extractor() {
+    fn get_user(Path(id): Path<String>) -> String {
+        format!("user:{id}")
     }
 
-    fn assert_async_final(cx: &Cx, body: &AsyncFinal) {
-        assert_eq!(body.value.get(), 7);
-        assert_eq!(body.request_task, format!("{:?}", cx.task_id()));
+    let handler = FnHandler1::<_, Path<String>>::new(get_user);
+    let cx = Cx::for_testing();
+    let mut params = std::collections::HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let req = Request::new("GET", "/users/42").with_path_params(params);
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[test]
+fn handler_extraction_failure_returns_error() {
+    fn get_user(Path(_id): Path<String>) -> &'static str {
+        "ok"
+    }
+
+    let handler = FnHandler1::<_, Path<String>>::new(get_user);
+    let cx = Cx::for_testing();
+    let req = Request::new("GET", "/"); // no path params
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn handler_three_extractors() {
+    #[allow(clippy::needless_pass_by_value)]
+    fn audit(
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+        mut headers: HashMap<String, String>,
+    ) -> String {
+        let req_id = headers
+            .remove("x-request-id")
+            .expect("x-request-id header present");
+        let tenant = query.get("tenant").expect("tenant query");
+        format!("{req_id}:{tenant}:{id}")
+    }
+
+    let handler = FnHandler3::<
+        _,
+        Path<String>,
+        Query<HashMap<String, String>>,
+        HashMap<String, String>,
+    >::new(audit);
+
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let req = Request::new("GET", "/users/42/audit")
+        .with_path_params(params)
+        .with_query("tenant=green")
+        .with_header("x-request-id", "req-123");
+
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "req-123:green:42"
+    );
+}
+
+#[test]
+fn handler_four_extractors() {
+    #[allow(clippy::needless_pass_by_value)]
+    fn audit(
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+        mut headers: HashMap<String, String>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> String {
+        let req_id = headers
+            .remove("x-request-id")
+            .expect("x-request-id header present");
+        let tenant = query.get("tenant").expect("tenant query");
+        let event = payload.get("event").expect("event key");
+        format!("{req_id}:{tenant}:{id}:{event}")
+    }
+
+    let handler = FnHandler4::<
+        _,
+        Path<String>,
+        Query<HashMap<String, String>>,
+        HashMap<String, String>,
+        Json<HashMap<String, String>>,
+    >::new(audit);
+
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let req = Request::new("POST", "/users/42/audit")
+        .with_path_params(params)
+        .with_query("tenant=green")
+        .with_header("x-request-id", "req-123")
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from_static(br#"{"event":"created"}"#));
+
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "req-123:green:42:created"
+    );
+}
+
+#[test]
+fn handler_five_extractors() {
+    #[allow(clippy::needless_pass_by_value)]
+    fn audit(
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+        Header(agent): Header<UserAgent>,
+        mut headers: HashMap<String, String>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> String {
+        let req_id = headers
+            .remove("x-request-id")
+            .expect("x-request-id header present");
+        let tenant = query.get("tenant").expect("tenant query");
+        let event = payload.get("event").expect("event key");
+        format!("{req_id}:{tenant}:{id}:{}:{event}", agent.as_str())
+    }
+
+    let handler = FnHandler5::<
+        _,
+        Path<String>,
+        Query<HashMap<String, String>>,
+        Header<UserAgent>,
+        HashMap<String, String>,
+        Json<HashMap<String, String>>,
+    >::new(audit);
+
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let req = Request::new("POST", "/users/42/audit")
+        .with_path_params(params)
+        .with_query("tenant=green")
+        .with_header("user-agent", "asupersync-test/1")
+        .with_header("x-request-id", "req-123")
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from_static(br#"{"event":"created"}"#));
+
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(handler.handler_name(), "FnHandler5");
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "req-123:green:42:asupersync-test/1:created"
+    );
+}
+
+#[test]
+fn handler_eight_extractors() {
+    #[derive(Clone)]
+    struct TenantConfig {
+        name: &'static str,
+    }
+
+    #[derive(Clone)]
+    struct FeatureFlags {
+        audit_enabled: bool,
+    }
+
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    fn audit(
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+        Header(agent): Header<UserAgent>,
+        Header(accept): Header<Accept>,
+        State(config): State<TenantConfig>,
+        State(flags): State<FeatureFlags>,
+        mut headers: HashMap<String, String>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> String {
+        let req_id = headers
+            .remove("x-request-id")
+            .expect("x-request-id header present");
+        let tenant = query.get("tenant").expect("tenant query");
+        let event = payload.get("event").expect("event key");
+        format!(
+            "{req_id}:{tenant}:{id}:{}:{}:{}:{event}:{}",
+            agent.as_str(),
+            accept.as_str(),
+            config.name,
+            flags.audit_enabled
+        )
+    }
+
+    let handler = FnHandler8::<
+        _,
+        Path<String>,
+        Query<HashMap<String, String>>,
+        Header<UserAgent>,
+        Header<Accept>,
+        State<TenantConfig>,
+        State<FeatureFlags>,
+        HashMap<String, String>,
+        Json<HashMap<String, String>>,
+    >::new(audit);
+
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let mut req = Request::new("POST", "/users/42/audit")
+        .with_path_params(params)
+        .with_query("tenant=green")
+        .with_header("user-agent", "asupersync-test/2")
+        .with_header("accept", "application/json")
+        .with_header("x-request-id", "req-456")
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from_static(br#"{"event":"updated"}"#));
+    req.extensions.insert_typed(TenantConfig { name: "green" });
+    req.extensions.insert_typed(FeatureFlags {
+        audit_enabled: true,
+    });
+
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(handler.handler_name(), "FnHandler8");
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "req-456:green:42:asupersync-test/2:application/json:green:updated:true"
+    );
+}
+
+#[test]
+fn async_cx_handler_no_extractors() {
+    async fn index(cx: Cx) -> &'static str {
+        cx.checkpoint().expect("checkpoint");
+        "async-hello"
+    }
+
+    let handler = AsyncCxFnHandler::new(index);
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/")));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "async-hello"
+    );
+}
+
+#[test]
+fn async_cx_handler_installs_runtime_backed_current_cx() {
+    async fn inspect(cx: Cx) -> &'static str {
         assert!(
             cx.timer_driver().is_some(),
-            "extractor and handler must share the runtime-backed request Cx"
+            "async handler should receive the runtime timer driver"
         );
-    }
-
-    #[test]
-    fn handler_no_extractors() {
-        fn index() -> &'static str {
-            "hello"
-        }
-
-        let handler = FnHandler::new(index);
-        let cx = Cx::for_testing();
-        let req = Request::new("GET", "/");
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-    }
-
-    #[test]
-    fn handler_one_extractor() {
-        fn get_user(Path(id): Path<String>) -> String {
-            format!("user:{id}")
-        }
-
-        let handler = FnHandler1::<_, Path<String>>::new(get_user);
-        let cx = Cx::for_testing();
-        let mut params = std::collections::HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let req = Request::new("GET", "/users/42").with_path_params(params);
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-    }
-
-    #[test]
-    fn handler_extraction_failure_returns_error() {
-        fn get_user(Path(_id): Path<String>) -> &'static str {
-            "ok"
-        }
-
-        let handler = FnHandler1::<_, Path<String>>::new(get_user);
-        let cx = Cx::for_testing();
-        let req = Request::new("GET", "/"); // no path params
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn handler_three_extractors() {
-        #[allow(clippy::needless_pass_by_value)]
-        fn audit(
-            Path(id): Path<String>,
-            Query(query): Query<HashMap<String, String>>,
-            mut headers: HashMap<String, String>,
-        ) -> String {
-            let req_id = headers
-                .remove("x-request-id")
-                .expect("x-request-id header present");
-            let tenant = query.get("tenant").expect("tenant query");
-            format!("{req_id}:{tenant}:{id}")
-        }
-
-        let handler = FnHandler3::<
-            _,
-            Path<String>,
-            Query<HashMap<String, String>>,
-            HashMap<String, String>,
-        >::new(audit);
-
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let req = Request::new("GET", "/users/42/audit")
-            .with_path_params(params)
-            .with_query("tenant=green")
-            .with_header("x-request-id", "req-123");
-
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "req-123:green:42"
+        let current = Cx::current().expect("async handler should install CURRENT_CX");
+        assert_eq!(current.region_id(), cx.region_id());
+        assert_eq!(current.task_id(), cx.task_id());
+        assert!(
+            current.timer_driver().is_some(),
+            "ambient CURRENT_CX should expose the runtime timer driver"
         );
+        "ok"
     }
 
-    #[test]
-    fn handler_four_extractors() {
-        #[allow(clippy::needless_pass_by_value)]
-        fn audit(
-            Path(id): Path<String>,
-            Query(query): Query<HashMap<String, String>>,
-            mut headers: HashMap<String, String>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> String {
-            let req_id = headers
-                .remove("x-request-id")
-                .expect("x-request-id header present");
-            let tenant = query.get("tenant").expect("tenant query");
-            let event = payload.get("event").expect("event key");
-            format!("{req_id}:{tenant}:{id}:{event}")
-        }
+    let handler = AsyncCxFnHandler::new(inspect);
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/inspect")));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+}
 
-        let handler = FnHandler4::<
-            _,
-            Path<String>,
-            Query<HashMap<String, String>>,
-            HashMap<String, String>,
-            Json<HashMap<String, String>>,
-        >::new(audit);
+#[test]
+fn async_cx_helper_deadline_wakes_a_parked_handler_and_preserves_its_response() {
+    use crate::channel::mpsc as async_mpsc;
+    use crate::types::CancelKind;
+    use std::time::Duration;
 
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let req = Request::new("POST", "/users/42/audit")
-            .with_path_params(params)
-            .with_query("tenant=green")
-            .with_header("x-request-id", "req-123")
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from_static(br#"{"event":"created"}"#));
-
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "req-123:green:42:created"
+    let (sender, receiver) = async_mpsc::channel::<u8>(1);
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        // Initialize the actual thread-local helper before starting the
+        // relative request budget; runtime startup is outside the deadline.
+        let now = ASYNC_HANDLER_HELPER_RUNTIME
+            .with(|runtime| runtime.request_cx_with_budget(Budget::INFINITE).now());
+        let caller =
+            Cx::for_testing_with_budget(Budget::INFINITE.with_timeout(now, Duration::from_secs(1)));
+        assert!(
+            caller.timer_driver().is_none(),
+            "exercise the helper fallback"
         );
-    }
-
-    #[test]
-    fn handler_five_extractors() {
-        #[allow(clippy::needless_pass_by_value)]
-        fn audit(
-            Path(id): Path<String>,
-            Query(query): Query<HashMap<String, String>>,
-            Header(agent): Header<UserAgent>,
-            mut headers: HashMap<String, String>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> String {
-            let req_id = headers
-                .remove("x-request-id")
-                .expect("x-request-id header present");
-            let tenant = query.get("tenant").expect("tenant query");
-            let event = payload.get("event").expect("event key");
-            format!("{req_id}:{tenant}:{id}:{}:{event}", agent.as_str())
-        }
-
-        let handler = FnHandler5::<
-            _,
-            Path<String>,
-            Query<HashMap<String, String>>,
-            Header<UserAgent>,
-            HashMap<String, String>,
-            Json<HashMap<String, String>>,
-        >::new(audit);
-
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let req = Request::new("POST", "/users/42/audit")
-            .with_path_params(params)
-            .with_query("tenant=green")
-            .with_header("user-agent", "asupersync-test/1")
-            .with_header("x-request-id", "req-123")
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from_static(br#"{"event":"created"}"#));
-
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(handler.handler_name(), "FnHandler5");
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "req-123:green:42:asupersync-test/1:created"
-        );
-    }
-
-    #[test]
-    fn handler_eight_extractors() {
-        #[derive(Clone)]
-        struct TenantConfig {
-            name: &'static str,
-        }
-
-        #[derive(Clone)]
-        struct FeatureFlags {
-            audit_enabled: bool,
-        }
-
-        #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-        fn audit(
-            Path(id): Path<String>,
-            Query(query): Query<HashMap<String, String>>,
-            Header(agent): Header<UserAgent>,
-            Header(accept): Header<Accept>,
-            State(config): State<TenantConfig>,
-            State(flags): State<FeatureFlags>,
-            mut headers: HashMap<String, String>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> String {
-            let req_id = headers
-                .remove("x-request-id")
-                .expect("x-request-id header present");
-            let tenant = query.get("tenant").expect("tenant query");
-            let event = payload.get("event").expect("event key");
-            format!(
-                "{req_id}:{tenant}:{id}:{}:{}:{}:{event}:{}",
-                agent.as_str(),
-                accept.as_str(),
-                config.name,
-                flags.audit_enabled
-            )
-        }
-
-        let handler = FnHandler8::<
-            _,
-            Path<String>,
-            Query<HashMap<String, String>>,
-            Header<UserAgent>,
-            Header<Accept>,
-            State<TenantConfig>,
-            State<FeatureFlags>,
-            HashMap<String, String>,
-            Json<HashMap<String, String>>,
-        >::new(audit);
-
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let mut req = Request::new("POST", "/users/42/audit")
-            .with_path_params(params)
-            .with_query("tenant=green")
-            .with_header("user-agent", "asupersync-test/2")
-            .with_header("accept", "application/json")
-            .with_header("x-request-id", "req-456")
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from_static(br#"{"event":"updated"}"#));
-        req.extensions.insert_typed(TenantConfig { name: "green" });
-        req.extensions.insert_typed(FeatureFlags {
-            audit_enabled: true,
-        });
-
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(handler.handler_name(), "FnHandler8");
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "req-456:green:42:asupersync-test/2:application/json:green:updated:true"
-        );
-    }
-
-    #[test]
-    fn async_cx_handler_no_extractors() {
-        async fn index(cx: Cx) -> &'static str {
-            cx.checkpoint().expect("checkpoint");
-            "async-hello"
-        }
-
-        let handler = AsyncCxFnHandler::new(index);
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/")));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "async-hello"
-        );
-    }
-
-    #[test]
-    fn async_cx_handler_installs_runtime_backed_current_cx() {
-        async fn inspect(cx: Cx) -> &'static str {
-            assert!(
-                cx.timer_driver().is_some(),
-                "async handler should receive the runtime timer driver"
-            );
-            let current = Cx::current().expect("async handler should install CURRENT_CX");
-            assert_eq!(current.region_id(), cx.region_id());
-            assert_eq!(current.task_id(), cx.task_id());
-            assert!(
-                current.timer_driver().is_some(),
-                "ambient CURRENT_CX should expose the runtime timer driver"
-            );
-            "ok"
-        }
-
-        let handler = AsyncCxFnHandler::new(inspect);
-        let cx = Cx::for_testing();
-        let resp =
-            futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/inspect")));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
-    }
-
-    #[test]
-    fn async_cx_helper_deadline_wakes_a_parked_handler_and_preserves_its_response() {
-        use crate::channel::mpsc as async_mpsc;
-        use crate::types::CancelKind;
-        use std::time::Duration;
-
-        let (sender, receiver) = async_mpsc::channel::<u8>(1);
-        let (parked_tx, parked_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let join = thread::spawn(move || {
-            // Initialize the actual thread-local helper before starting the
-            // relative request budget; runtime startup is outside the deadline.
-            let now = ASYNC_HANDLER_HELPER_RUNTIME.with(|runtime| {
-                runtime.request_cx_with_budget(Budget::INFINITE).now()
-            });
-            let caller = Cx::for_testing_with_budget(
-                Budget::INFINITE.with_timeout(now, Duration::from_secs(1)),
-            );
-            assert!(
-                caller.timer_driver().is_none(),
-                "exercise the helper fallback"
-            );
-            let receiver = Arc::new(Mutex::new(Some(receiver)));
-            let handler = AsyncCxFnHandler::new(move |cx: Cx| {
-                let mut receiver = receiver.lock().unwrap().take().expect("one request");
-                let parked_tx = parked_tx.clone();
-                async move {
-                    let mut parked_tx = Some(parked_tx);
-                    let result = std::future::poll_fn(|task_cx| {
-                        let result = receiver.poll_recv(&cx, task_cx);
-                        if result.is_pending()
-                            && let Some(tx) = parked_tx.take()
-                        {
-                            tx.send(()).unwrap();
-                        }
-                        result
-                    })
-                    .await;
-                    match (result, cx.cancel_reason().map(|reason| reason.kind)) {
-                        (Err(async_mpsc::RecvError::Cancelled), Some(CancelKind::Deadline)) => {
-                            (StatusCode::GATEWAY_TIMEOUT, "application deadline response")
-                        }
-                        _ => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "unexpected receive outcome",
-                        ),
+        let receiver = Arc::new(Mutex::new(Some(receiver)));
+        let handler = AsyncCxFnHandler::new(move |cx: Cx| {
+            let mut receiver = receiver.lock().unwrap().take().expect("one request");
+            let parked_tx = parked_tx.clone();
+            async move {
+                let mut parked_tx = Some(parked_tx);
+                let result = std::future::poll_fn(|task_cx| {
+                    let result = receiver.poll_recv(&cx, task_cx);
+                    if result.is_pending()
+                        && let Some(tx) = parked_tx.take()
+                    {
+                        tx.send(()).unwrap();
                     }
+                    result
+                })
+                .await;
+                match (result, cx.cancel_reason().map(|reason| reason.kind)) {
+                    (Err(async_mpsc::RecvError::Cancelled), Some(CancelKind::Deadline)) => {
+                        (StatusCode::GATEWAY_TIMEOUT, "application deadline response")
+                    }
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "unexpected receive outcome",
+                    ),
                 }
-            });
-            let response = futures_lite::future::block_on(
-                handler.call(&caller, Request::new("GET", "/parked-deadline")),
-            );
-            done_tx.send(response).unwrap();
+            }
         });
+        let response = futures_lite::future::block_on(
+            handler.call(&caller, Request::new("GET", "/parked-deadline")),
+        );
+        done_tx.send(response).unwrap();
+    });
 
-        let parked = parked_rx.recv_timeout(Duration::from_secs(2));
-        let completed = done_rx.recv_timeout(Duration::from_secs(2));
-        let deadline_woke_it = completed.is_ok();
-        // Rescue a missing deadline wake with a separate data wake so this
-        // regression reports a failure instead of leaving a thread parked.
-        drop(sender);
-        let response = completed
-            .or_else(|_| done_rx.recv_timeout(Duration::from_secs(2)))
-            .expect("handler finishes after rescue");
-        join.join().unwrap();
+    let parked = parked_rx.recv_timeout(Duration::from_secs(2));
+    let completed = done_rx.recv_timeout(Duration::from_secs(2));
+    let deadline_woke_it = completed.is_ok();
+    // Rescue a missing deadline wake with a separate data wake so this
+    // regression reports a failure instead of leaving a thread parked.
+    drop(sender);
+    let response = completed
+        .or_else(|_| done_rx.recv_timeout(Duration::from_secs(2)))
+        .expect("handler finishes after rescue");
+    join.join().unwrap();
 
-        parked.expect("handler returned Pending before its deadline");
-        assert!(deadline_woke_it, "the helper must wake the parked request");
-        assert_eq!(response.status, StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(&response.body[..], b"application deadline response");
+    parked.expect("handler returned Pending before its deadline");
+    assert!(deadline_woke_it, "the helper must wake the parked request");
+    assert_eq!(response.status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(&response.body[..], b"application deadline response");
+}
+
+#[test]
+fn async_cx_handler_keeps_a_capability_restricted_caller_context() {
+    // asupersync-bi2462.46: a TIME-masked caller has no timer driver, and
+    // the handler used to swap in a fresh runtime request context. That
+    // restored every capability the caller had been denied.
+    use crate::cx::cap::{self, CapSetRuntimeMask};
+
+    async fn inspect(cx: Cx) -> &'static str {
+        let caps = cx.capabilities();
+        if caps.time || caps.spawn {
+            "escaped"
+        } else {
+            "restricted"
+        }
     }
 
-    #[test]
-    fn async_cx_handler_keeps_a_capability_restricted_caller_context() {
-        // asupersync-bi2462.46: a TIME-masked caller has no timer driver, and
-        // the handler used to swap in a fresh runtime request context. That
-        // restored every capability the caller had been denied.
-        use crate::cx::cap::{self, CapSetRuntimeMask};
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let resp = runtime.block_on(async {
+        let mut restricted = Cx::current().expect("runtime task context");
+        restricted.runtime_mask = restricted
+            .runtime_mask
+            .intersect(<cap::CapSet<false, false, true, true, true>>::MASK);
+        assert!(restricted.timer_driver().is_none());
+        let handler = AsyncCxFnHandler::new(inspect);
+        handler
+            .call(&restricted, Request::new("GET", "/pure"))
+            .await
+    });
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
+}
 
-        async fn inspect(cx: Cx) -> &'static str {
-            let caps = cx.capabilities();
-            if caps.time || caps.spawn {
+#[test]
+fn async_cx_handler_keeps_a_capability_restricted_ambient_context() {
+    // asupersync-mkybj0: an unrestricted, timerless caller (a test Cx)
+    // under a TIME-restricted ambient context used to receive a fresh,
+    // fully capable runtime request context.
+    use crate::cx::cap::{self, CapSetRuntimeMask};
+
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let resp = runtime.block_on(async {
+        let ambient_task = Cx::current().expect("runtime task context").task_id();
+        let _restriction = Cx::push_restriction(<cap::CapSet<true, false, true, true, true>>::MASK);
+        let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
+            if cx.capabilities().time || cx.task_id() != ambient_task {
                 "escaped"
             } else {
                 "restricted"
             }
-        }
-
-        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
-        let resp = runtime.block_on(async {
-            let mut restricted = Cx::current().expect("runtime task context");
-            restricted.runtime_mask = restricted
-                .runtime_mask
-                .intersect(<cap::CapSet<false, false, true, true, true>>::MASK);
-            assert!(restricted.timer_driver().is_none());
-            let handler = AsyncCxFnHandler::new(inspect);
-            handler
-                .call(&restricted, Request::new("GET", "/pure"))
-                .await
         });
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
-    }
+        handler
+            .call(&Cx::for_testing(), Request::new("GET", "/pure-ambient"))
+            .await
+    });
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
+}
 
-    #[test]
-    fn async_cx_handler_keeps_a_capability_restricted_ambient_context() {
-        // asupersync-mkybj0: an unrestricted, timerless caller (a test Cx)
-        // under a TIME-restricted ambient context used to receive a fresh,
-        // fully capable runtime request context.
-        use crate::cx::cap::{self, CapSetRuntimeMask};
-
-        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
-        let resp = runtime.block_on(async {
-            let ambient_task = Cx::current().expect("runtime task context").task_id();
-            let _restriction =
-                Cx::push_restriction(<cap::CapSet<true, false, true, true, true>>::MASK);
-            let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
-                if cx.capabilities().time || cx.task_id() != ambient_task {
-                    "escaped"
-                } else {
-                    "restricted"
-                }
-            });
-            handler
-                .call(&Cx::for_testing(), Request::new("GET", "/pure-ambient"))
-                .await
-        });
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
-    }
-
-    #[test]
-    fn async_cx_handler_reuses_ambient_request_cx() {
-        async fn inspect(cx: Cx) -> &'static str {
-            let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
-            assert_eq!(
-                cx.task_id(),
-                current.task_id(),
-                "async web handler should reuse the ambient request task"
-            );
-            assert_eq!(
-                cx.region_id(),
-                current.region_id(),
-                "async web handler should stay in the ambient request region"
-            );
-            assert_eq!(
-                cx.budget().deadline,
-                current.budget().deadline,
-                "async web handler should inherit the ambient request deadline"
-            );
-            "ok"
-        }
-
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("build current-thread runtime");
-        let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
-        let deadline_budget = Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7));
-        let request_cx = runtime.request_cx_with_budget(deadline_budget);
-        let expected_task = request_cx.task_id();
-        let expected_region = request_cx.region_id();
-        let expected_deadline = request_cx.budget().deadline;
-        let handler_cx = request_cx.clone();
-
-        runtime.block_on_with_cx(request_cx, async move {
-            let handler = AsyncCxFnHandler::new(inspect);
-            let resp = handler
-                .call(&handler_cx, Request::new("GET", "/ambient"))
-                .await;
-            assert_eq!(resp.status, StatusCode::OK);
-            assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
-
-            let after = Cx::current().expect("ambient CURRENT_CX should still be installed");
-            assert_eq!(after.task_id(), expected_task);
-            assert_eq!(after.region_id(), expected_region);
-            assert_eq!(after.budget().deadline, expected_deadline);
-        });
-    }
-
-    #[test]
-    fn async_cx_handler_runtime_cache_is_thread_local() {
-        let (tx, rx) = mpsc::channel::<TimerDriverHandle>();
-
-        let spawn_handler_thread = |tx: mpsc::Sender<TimerDriverHandle>| {
-            thread::spawn(move || {
-                let handler = AsyncCxFnHandler::new(move |cx: Cx| {
-                    let tx = tx.clone();
-                    async move {
-                        let timer = cx
-                            .timer_driver()
-                            .expect("async handler should receive a timer driver")
-                            .clone();
-                        tx.send(timer).expect("send timer handle");
-                        "ok"
-                    }
-                });
-
-                let cx = Cx::for_testing();
-                let resp = futures_lite::future::block_on(
-                    handler.call(&cx, Request::new("GET", "/thread-local-runtime")),
-                );
-                assert_eq!(resp.status, StatusCode::OK);
-            })
-        };
-
-        let first = spawn_handler_thread(tx.clone());
-        let second = spawn_handler_thread(tx);
-
-        first.join().expect("first handler thread should complete");
-        second
-            .join()
-            .expect("second handler thread should complete");
-
-        let timer_a = rx.recv().expect("first timer handle");
-        let timer_b = rx.recv().expect("second timer handle");
-        assert!(
-            !timer_a.ptr_eq(&timer_b),
-            "different caller threads must not share the same cached current-thread runtime"
+#[test]
+fn async_cx_handler_reuses_ambient_request_cx() {
+    async fn inspect(cx: Cx) -> &'static str {
+        let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
+        assert_eq!(
+            cx.task_id(),
+            current.task_id(),
+            "async web handler should reuse the ambient request task"
         );
+        assert_eq!(
+            cx.region_id(),
+            current.region_id(),
+            "async web handler should stay in the ambient request region"
+        );
+        assert_eq!(
+            cx.budget().deadline,
+            current.budget().deadline,
+            "async web handler should inherit the ambient request deadline"
+        );
+        "ok"
     }
 
-    #[test]
-    fn async_cx_handler_preserves_ambient_nonruntime_cx_without_runtime() {
-        let ambient = Cx::for_testing();
-        let expected_task = ambient.task_id();
-        let expected_region = ambient.region_id();
-        let _guard = Cx::set_current(Some(ambient));
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+    let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
+    let deadline_budget = Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7));
+    let request_cx = runtime.request_cx_with_budget(deadline_budget);
+    let expected_task = request_cx.task_id();
+    let expected_region = request_cx.region_id();
+    let expected_deadline = request_cx.budget().deadline;
+    let handler_cx = request_cx.clone();
 
-        let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
-            assert_eq!(cx.task_id(), expected_task);
-            assert_eq!(cx.region_id(), expected_region);
-            let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
-            assert_eq!(current.task_id(), expected_task);
-            assert_eq!(current.region_id(), expected_region);
-            "ok"
-        });
-
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(
-            handler.call(&cx, Request::new("GET", "/ambient-no-runtime")),
-        );
+    runtime.block_on_with_cx(request_cx, async move {
+        let handler = AsyncCxFnHandler::new(inspect);
+        let resp = handler
+            .call(&handler_cx, Request::new("GET", "/ambient"))
+            .await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
 
-        let restored = Cx::current().expect("ambient CURRENT_CX should still be installed");
-        assert_eq!(restored.task_id(), expected_task);
-        assert_eq!(restored.region_id(), expected_region);
+        let after = Cx::current().expect("ambient CURRENT_CX should still be installed");
+        assert_eq!(after.task_id(), expected_task);
+        assert_eq!(after.region_id(), expected_region);
+        assert_eq!(after.budget().deadline, expected_deadline);
+    });
+}
+
+#[test]
+fn async_cx_handler_runtime_cache_is_thread_local() {
+    let (tx, rx) = mpsc::channel::<TimerDriverHandle>();
+
+    let spawn_handler_thread = |tx: mpsc::Sender<TimerDriverHandle>| {
+        thread::spawn(move || {
+            let handler = AsyncCxFnHandler::new(move |cx: Cx| {
+                let tx = tx.clone();
+                async move {
+                    let timer = cx
+                        .timer_driver()
+                        .expect("async handler should receive a timer driver")
+                        .clone();
+                    tx.send(timer).expect("send timer handle");
+                    "ok"
+                }
+            });
+
+            let cx = Cx::for_testing();
+            let resp = futures_lite::future::block_on(
+                handler.call(&cx, Request::new("GET", "/thread-local-runtime")),
+            );
+            assert_eq!(resp.status, StatusCode::OK);
+        })
+    };
+
+    let first = spawn_handler_thread(tx.clone());
+    let second = spawn_handler_thread(tx);
+
+    first.join().expect("first handler thread should complete");
+    second
+        .join()
+        .expect("second handler thread should complete");
+
+    let timer_a = rx.recv().expect("first timer handle");
+    let timer_b = rx.recv().expect("second timer handle");
+    assert!(
+        !timer_a.ptr_eq(&timer_b),
+        "different caller threads must not share the same cached current-thread runtime"
+    );
+}
+
+#[test]
+fn async_cx_handler_preserves_ambient_nonruntime_cx_without_runtime() {
+    let ambient = Cx::for_testing();
+    let expected_task = ambient.task_id();
+    let expected_region = ambient.region_id();
+    let _guard = Cx::set_current(Some(ambient));
+
+    let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
+        assert_eq!(cx.task_id(), expected_task);
+        assert_eq!(cx.region_id(), expected_region);
+        let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
+        assert_eq!(current.task_id(), expected_task);
+        assert_eq!(current.region_id(), expected_region);
+        "ok"
+    });
+
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(
+        handler.call(&cx, Request::new("GET", "/ambient-no-runtime")),
+    );
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+
+    let restored = Cx::current().expect("ambient CURRENT_CX should still be installed");
+    assert_eq!(restored.task_id(), expected_task);
+    assert_eq!(restored.region_id(), expected_region);
+}
+
+#[test]
+fn async_cx_handler_one_extractor() {
+    async fn get_user(cx: Cx, Path(id): Path<String>) -> String {
+        cx.checkpoint().expect("checkpoint");
+        format!("async-user:{id}")
     }
 
-    #[test]
-    fn async_cx_handler_one_extractor() {
-        async fn get_user(cx: Cx, Path(id): Path<String>) -> String {
-            cx.checkpoint().expect("checkpoint");
-            format!("async-user:{id}")
-        }
+    let handler = AsyncCxFnHandler1::<_, Path<String>>::new(get_user);
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "7".to_string());
+    let req = Request::new("GET", "/users/7").with_path_params(params);
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "async-user:7"
+    );
+}
 
-        let handler = AsyncCxFnHandler1::<_, Path<String>>::new(get_user);
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "7".to_string());
-        let req = Request::new("GET", "/users/7").with_path_params(params);
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "async-user:7"
+#[test]
+fn async_cx_handler_two_extractors() {
+    async fn save(
+        cx: Cx,
+        Query(query): Query<HashMap<String, String>>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> StatusCode {
+        cx.checkpoint().expect("checkpoint");
+        assert_eq!(query.get("tenant"), Some(&"blue".to_string()));
+        assert_eq!(payload.get("name"), Some(&"alice".to_string()));
+        StatusCode::CREATED
+    }
+
+    let handler =
+        AsyncCxFnHandler2::<_, Query<HashMap<String, String>>, Json<HashMap<String, String>>>::new(
+            save,
         );
+    let req = Request::new("POST", "/users")
+        .with_query("tenant=blue")
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::CREATED);
+}
+
+#[test]
+fn async_cx_handler_json_body_requires_content_type() {
+    async fn save(
+        cx: Cx,
+        Query(query): Query<HashMap<String, String>>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> StatusCode {
+        cx.checkpoint().expect("checkpoint");
+        assert_eq!(query.get("tenant"), Some(&"blue".to_string()));
+        assert_eq!(payload.get("name"), Some(&"alice".to_string()));
+        StatusCode::CREATED
     }
 
-    #[test]
-    fn async_cx_handler_two_extractors() {
-        async fn save(
-            cx: Cx,
-            Query(query): Query<HashMap<String, String>>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> StatusCode {
-            cx.checkpoint().expect("checkpoint");
-            assert_eq!(query.get("tenant"), Some(&"blue".to_string()));
-            assert_eq!(payload.get("name"), Some(&"alice".to_string()));
-            StatusCode::CREATED
-        }
-
-        let handler = AsyncCxFnHandler2::<
-            _,
-            Query<HashMap<String, String>>,
-            Json<HashMap<String, String>>,
-        >::new(save);
-        let req = Request::new("POST", "/users")
-            .with_query("tenant=blue")
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::CREATED);
-    }
-
-    #[test]
-    fn async_cx_handler_json_body_requires_content_type() {
-        async fn save(
-            cx: Cx,
-            Query(query): Query<HashMap<String, String>>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> StatusCode {
-            cx.checkpoint().expect("checkpoint");
-            assert_eq!(query.get("tenant"), Some(&"blue".to_string()));
-            assert_eq!(payload.get("name"), Some(&"alice".to_string()));
-            StatusCode::CREATED
-        }
-
-        let handler = AsyncCxFnHandler2::<
-            _,
-            Query<HashMap<String, String>>,
-            Json<HashMap<String, String>>,
-        >::new(save);
-        let req = Request::new("POST", "/users")
-            .with_query("tenant=blue")
-            .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "Json requires Content-Type: application/json"
+    let handler =
+        AsyncCxFnHandler2::<_, Query<HashMap<String, String>>, Json<HashMap<String, String>>>::new(
+            save,
         );
+    let req = Request::new("POST", "/users")
+        .with_query("tenant=blue")
+        .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "Json requires Content-Type: application/json"
+    );
+}
+
+#[test]
+fn async_cx_handler_four_extractors() {
+    async fn audit(
+        cx: Cx,
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+        headers: HashMap<String, String>,
+        Json(payload): Json<HashMap<String, String>>,
+    ) -> String {
+        cx.checkpoint().expect("checkpoint");
+        let req_id = headers
+            .get("x-request-id")
+            .expect("x-request-id header present");
+        let tenant = query.get("tenant").expect("tenant query");
+        let event = payload.get("event").expect("event key");
+        format!("{req_id}:{tenant}:{id}:{event}")
     }
 
-    #[test]
-    fn async_cx_handler_four_extractors() {
-        async fn audit(
-            cx: Cx,
-            Path(id): Path<String>,
-            Query(query): Query<HashMap<String, String>>,
-            headers: HashMap<String, String>,
-            Json(payload): Json<HashMap<String, String>>,
-        ) -> String {
-            cx.checkpoint().expect("checkpoint");
-            let req_id = headers
-                .get("x-request-id")
-                .expect("x-request-id header present");
-            let tenant = query.get("tenant").expect("tenant query");
-            let event = payload.get("event").expect("event key");
-            format!("{req_id}:{tenant}:{id}:{event}")
-        }
+    let handler = AsyncCxFnHandler4::<
+        _,
+        Path<String>,
+        Query<HashMap<String, String>>,
+        HashMap<String, String>,
+        Json<HashMap<String, String>>,
+    >::new(audit);
 
-        let handler = AsyncCxFnHandler4::<
-            _,
-            Path<String>,
-            Query<HashMap<String, String>>,
-            HashMap<String, String>,
-            Json<HashMap<String, String>>,
-        >::new(audit);
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), "42".to_string());
+    let req = Request::new("POST", "/users/42/audit")
+        .with_path_params(params)
+        .with_query("tenant=green")
+        .with_header("x-request-id", "req-123")
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from_static(br#"{"event":"created"}"#));
 
-        let mut params = HashMap::new();
-        params.insert("id".to_string(), "42".to_string());
-        let req = Request::new("POST", "/users/42/audit")
-            .with_path_params(params)
-            .with_query("tenant=green")
-            .with_header("x-request-id", "req-123")
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from_static(br#"{"event":"created"}"#));
+    let cx = Cx::for_testing();
+    let resp = futures_lite::future::block_on(handler.call(&cx, req));
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        std::str::from_utf8(&resp.body).expect("utf8"),
+        "req-123:green:42:created"
+    );
+}
 
-        let cx = Cx::for_testing();
-        let resp = futures_lite::future::block_on(handler.call(&cx, req));
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            std::str::from_utf8(&resp.body).expect("utf8"),
-            "req-123:green:42:created"
-        );
-    }
+#[test]
+fn async_cx_handler_default_hook_preserves_legacy_from_request() {
+    let handler = AsyncCxFnHandler1::<_, LegacyFinal>::new(
+        |_cx: Cx, body: LegacyFinal| async move { body.0 },
+    );
+    let cx = Cx::for_testing();
+    let response =
+        futures_lite::future::block_on(handler.call(&cx, Request::new("POST", "/legacy-default")));
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body.as_ref(), b"/legacy-default");
+}
 
-    #[test]
-    fn async_cx_handler_default_hook_preserves_legacy_from_request() {
-        let handler = AsyncCxFnHandler1::<_, LegacyFinal>::new(
-            |_cx: Cx, body: LegacyFinal| async move { body.0 },
-        );
-        let cx = Cx::for_testing();
-        let response = futures_lite::future::block_on(
-            handler.call(&cx, Request::new("POST", "/legacy-default")),
-        );
-        assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.body.as_ref(), b"/legacy-default");
-    }
+#[test]
+fn async_cx_handlers_await_send_not_sync_final_for_all_arities() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+    let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
+    let request_cx = runtime.request_cx_with_budget(
+        Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7)),
+    );
+    let handler_cx = request_cx.clone();
 
-    #[test]
-    fn async_cx_handlers_await_send_not_sync_final_for_all_arities() {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("build current-thread runtime");
-        let now = runtime.request_cx_with_budget(Budget::INFINITE).now();
-        let request_cx = runtime.request_cx_with_budget(
-            Budget::INFINITE.with_timeout(now, std::time::Duration::from_secs(7)),
-        );
-        let handler_cx = request_cx.clone();
+    runtime.block_on_with_cx(request_cx, async move {
+        let trace = AsyncExtractionTrace::new();
+        let handler =
+            AsyncCxFnHandler1::<_, AsyncFinal>::new(|cx: Cx, body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            });
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[99]);
 
-        runtime.block_on_with_cx(request_cx, async move {
-            let trace = AsyncExtractionTrace::new();
-            let handler =
-                AsyncCxFnHandler1::<_, AsyncFinal>::new(|cx: Cx, body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                });
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler2::<_, OrderedPart<1>, AsyncFinal>::new(
-                |cx: Cx, _p1: OrderedPart<1>, body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler3::<_, OrderedPart<1>, OrderedPart<2>, AsyncFinal>::new(
-                |cx: Cx, _p1: OrderedPart<1>, _p2: OrderedPart<2>, body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler4::<
-                _,
-                OrderedPart<1>,
-                OrderedPart<2>,
-                OrderedPart<3>,
-                AsyncFinal,
-            >::new(
-                |cx: Cx,
-                 _p1: OrderedPart<1>,
-                 _p2: OrderedPart<2>,
-                 _p3: OrderedPart<3>,
-                 body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 3, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler5::<
-                _,
-                OrderedPart<1>,
-                OrderedPart<2>,
-                OrderedPart<3>,
-                OrderedPart<4>,
-                AsyncFinal,
-            >::new(
-                |cx: Cx,
-                 _p1: OrderedPart<1>,
-                 _p2: OrderedPart<2>,
-                 _p3: OrderedPart<3>,
-                 _p4: OrderedPart<4>,
-                 body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 3, 4, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler6::<
-                _,
-                OrderedPart<1>,
-                OrderedPart<2>,
-                OrderedPart<3>,
-                OrderedPart<4>,
-                OrderedPart<5>,
-                AsyncFinal,
-            >::new(
-                |cx: Cx,
-                 _p1: OrderedPart<1>,
-                 _p2: OrderedPart<2>,
-                 _p3: OrderedPart<3>,
-                 _p4: OrderedPart<4>,
-                 _p5: OrderedPart<5>,
-                 body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 3, 4, 5, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler7::<
-                _,
-                OrderedPart<1>,
-                OrderedPart<2>,
-                OrderedPart<3>,
-                OrderedPart<4>,
-                OrderedPart<5>,
-                OrderedPart<6>,
-                AsyncFinal,
-            >::new(
-                |cx: Cx,
-                 _p1: OrderedPart<1>,
-                 _p2: OrderedPart<2>,
-                 _p3: OrderedPart<3>,
-                 _p4: OrderedPart<4>,
-                 _p5: OrderedPart<5>,
-                 _p6: OrderedPart<6>,
-                 body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 3, 4, 5, 6, 99]);
-
-            let trace = AsyncExtractionTrace::new();
-            let handler = AsyncCxFnHandler8::<
-                _,
-                OrderedPart<1>,
-                OrderedPart<2>,
-                OrderedPart<3>,
-                OrderedPart<4>,
-                OrderedPart<5>,
-                OrderedPart<6>,
-                OrderedPart<7>,
-                AsyncFinal,
-            >::new(
-                |cx: Cx,
-                 _p1: OrderedPart<1>,
-                 _p2: OrderedPart<2>,
-                 _p3: OrderedPart<3>,
-                 _p4: OrderedPart<4>,
-                 _p5: OrderedPart<5>,
-                 _p6: OrderedPart<6>,
-                 _p7: OrderedPart<7>,
-                 body: AsyncFinal| async move {
-                    assert_async_final(&cx, &body);
-                    StatusCode::NO_CONTENT
-                },
-            );
-            let response = handler.call(&handler_cx, trace.request()).await;
-            assert_eq!(response.status, StatusCode::NO_CONTENT);
-            trace.assert_order(&[1, 2, 3, 4, 5, 6, 7, 99]);
-        });
-    }
-
-    #[test]
-    fn async_cx_handler_final_extraction_failure_short_circuits_handler() {
-        let handler_calls = Arc::new(AtomicUsize::new(0));
-        let handler_calls_for_fn = Arc::clone(&handler_calls);
-        let handler = AsyncCxFnHandler1::<_, FailingAsyncFinal>::new(
-            move |_cx: Cx, _body: FailingAsyncFinal| {
-                handler_calls_for_fn.fetch_add(1, Ordering::AcqRel);
-                async { StatusCode::NO_CONTENT }
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler2::<_, OrderedPart<1>, AsyncFinal>::new(
+            |cx: Cx, _p1: OrderedPart<1>, body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
             },
         );
-        let cx = Cx::for_testing();
-        let response = futures_lite::future::block_on(
-            handler.call(&cx, Request::new("POST", "/async-failure")),
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler3::<_, OrderedPart<1>, OrderedPart<2>, AsyncFinal>::new(
+            |cx: Cx, _p1: OrderedPart<1>, _p2: OrderedPart<2>, body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
         );
-        assert_eq!(response.status, StatusCode::BAD_REQUEST);
-        assert_eq!(response.body.as_ref(), b"async final extraction failed");
-        assert_eq!(handler_calls.load(Ordering::Acquire), 0);
-    }
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler4::<
+            _,
+            OrderedPart<1>,
+            OrderedPart<2>,
+            OrderedPart<3>,
+            AsyncFinal,
+        >::new(
+            |cx: Cx,
+             _p1: OrderedPart<1>,
+             _p2: OrderedPart<2>,
+             _p3: OrderedPart<3>,
+             body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
+        );
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 3, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler5::<
+            _,
+            OrderedPart<1>,
+            OrderedPart<2>,
+            OrderedPart<3>,
+            OrderedPart<4>,
+            AsyncFinal,
+        >::new(
+            |cx: Cx,
+             _p1: OrderedPart<1>,
+             _p2: OrderedPart<2>,
+             _p3: OrderedPart<3>,
+             _p4: OrderedPart<4>,
+             body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
+        );
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 3, 4, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler6::<
+            _,
+            OrderedPart<1>,
+            OrderedPart<2>,
+            OrderedPart<3>,
+            OrderedPart<4>,
+            OrderedPart<5>,
+            AsyncFinal,
+        >::new(
+            |cx: Cx,
+             _p1: OrderedPart<1>,
+             _p2: OrderedPart<2>,
+             _p3: OrderedPart<3>,
+             _p4: OrderedPart<4>,
+             _p5: OrderedPart<5>,
+             body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
+        );
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 3, 4, 5, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler7::<
+            _,
+            OrderedPart<1>,
+            OrderedPart<2>,
+            OrderedPart<3>,
+            OrderedPart<4>,
+            OrderedPart<5>,
+            OrderedPart<6>,
+            AsyncFinal,
+        >::new(
+            |cx: Cx,
+             _p1: OrderedPart<1>,
+             _p2: OrderedPart<2>,
+             _p3: OrderedPart<3>,
+             _p4: OrderedPart<4>,
+             _p5: OrderedPart<5>,
+             _p6: OrderedPart<6>,
+             body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
+        );
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 3, 4, 5, 6, 99]);
+
+        let trace = AsyncExtractionTrace::new();
+        let handler = AsyncCxFnHandler8::<
+            _,
+            OrderedPart<1>,
+            OrderedPart<2>,
+            OrderedPart<3>,
+            OrderedPart<4>,
+            OrderedPart<5>,
+            OrderedPart<6>,
+            OrderedPart<7>,
+            AsyncFinal,
+        >::new(
+            |cx: Cx,
+             _p1: OrderedPart<1>,
+             _p2: OrderedPart<2>,
+             _p3: OrderedPart<3>,
+             _p4: OrderedPart<4>,
+             _p5: OrderedPart<5>,
+             _p6: OrderedPart<6>,
+             _p7: OrderedPart<7>,
+             body: AsyncFinal| async move {
+                assert_async_final(&cx, &body);
+                StatusCode::NO_CONTENT
+            },
+        );
+        let response = handler.call(&handler_cx, trace.request()).await;
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        trace.assert_order(&[1, 2, 3, 4, 5, 6, 7, 99]);
+    });
+}
+
+#[test]
+fn async_cx_handler_final_extraction_failure_short_circuits_handler() {
+    let handler_calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls_for_fn = Arc::clone(&handler_calls);
+    let handler =
+        AsyncCxFnHandler1::<_, FailingAsyncFinal>::new(move |_cx: Cx, _body: FailingAsyncFinal| {
+            handler_calls_for_fn.fetch_add(1, Ordering::AcqRel);
+            async { StatusCode::NO_CONTENT }
+        });
+    let cx = Cx::for_testing();
+    let response =
+        futures_lite::future::block_on(handler.call(&cx, Request::new("POST", "/async-failure")));
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.body.as_ref(), b"async final extraction failed");
+    assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+}

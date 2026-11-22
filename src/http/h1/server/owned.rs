@@ -6,10 +6,9 @@
 
 use super::{
     Http1Response, HttpError, IntoHttp1Response, ProducedHopOutcome, ProducedRequestExecution,
-    Request, RequestExecutionConfig,
-    ServerHopOutcome, ServerRequestRegion, ShutdownPhase, StreamingRequestExecution,
-    StreamingRequestOutcome, drive_incoming_body, execute_produced_request_flow,
-    join_streaming_handler_and_body,
+    Request, RequestExecutionConfig, ServerHopOutcome, ServerRequestRegion, ShutdownPhase,
+    StreamingRequestExecution, StreamingRequestOutcome, drive_incoming_body,
+    execute_produced_request_flow, join_streaming_handler_and_body,
 };
 use crate::bytes::BytesMut;
 use crate::cx::{ChildRegion, ChildRegionSpec, Cx};
@@ -34,10 +33,14 @@ pub(in crate::http::h1) struct OwnedRequests {
 impl OwnedRequests {
     pub(in crate::http::h1) fn new(owner: Cx) -> Result<Self, HttpError> {
         if owner.timer_driver().is_none() {
-            return Err(ownership_error("owned HTTP/1 serving requires a runtime timer"));
+            return Err(ownership_error(
+                "owned HTTP/1 serving requires a runtime timer",
+            ));
         }
         if owner.spawn_gateway_handle().is_none() {
-            return Err(ownership_error("owned HTTP/1 serving requires a runtime gateway"));
+            return Err(ownership_error(
+                "owned HTTP/1 serving requires a runtime gateway",
+            ));
         }
         Ok(Self { owner })
     }
@@ -59,16 +62,11 @@ impl OwnedRequests {
         let drain_grace = config.drain_grace;
         run_owned_request(&self.owner, config, move |body_cx, region| async move {
             region
-                .run_with_protocol_drain(
-                    source,
-                    Some(body_cx),
-                    drain_grace,
-                    async move {
-                        // Factory invocation and response conversion stay
-                        // inside the task's protocol drain/panic boundary.
-                        handler(request).await.into_h1_response()
-                    },
-                )
+                .run_with_protocol_drain(source, Some(body_cx), drain_grace, async move {
+                    // Factory invocation and response conversion stay
+                    // inside the task's protocol drain/panic boundary.
+                    handler(request).await.into_h1_response()
+                })
                 .await
         })
         .await
@@ -120,18 +118,21 @@ impl OwnedRequests {
                                 StreamingRequestOutcome::BodyFailed(error)
                             }
                             IncomingBodyAdmissionError::Cancelled { kind } => {
-                                let hop = if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) {
-                                    ServerHopOutcome::DeadlineExceeded
-                                } else {
-                                    ServerHopOutcome::Cancelled
-                                };
+                                let hop =
+                                    if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) {
+                                        ServerHopOutcome::DeadlineExceeded
+                                    } else {
+                                        ServerHopOutcome::Cancelled
+                                    };
                                 StreamingRequestOutcome::Complete { hop, drain: None }
                             }
                             IncomingBodyAdmissionError::Runtime(_)
                             | IncomingBodyAdmissionError::RuntimeRequired => {
                                 StreamingRequestOutcome::Complete {
                                     hop: ServerHopOutcome::Ok(super::hop_error_response(
-                                        head.version, 503, "request body admission unavailable",
+                                        head.version,
+                                        503,
+                                        "request body admission unavailable",
                                     )),
                                     drain: None,
                                 }
@@ -188,8 +189,12 @@ impl OwnedRequests {
             Some(ServerHopOutcome::Ok(outcome)) => outcome,
             Some(ServerHopOutcome::Cancelled) => terminal(ServerHopOutcome::Cancelled),
             Some(ServerHopOutcome::ConnectionLost) => terminal(ServerHopOutcome::ConnectionLost),
-            Some(ServerHopOutcome::DeadlineExceeded) => terminal(ServerHopOutcome::DeadlineExceeded),
-            Some(ServerHopOutcome::Panicked(message)) => terminal(ServerHopOutcome::Panicked(message)),
+            Some(ServerHopOutcome::DeadlineExceeded) => {
+                terminal(ServerHopOutcome::DeadlineExceeded)
+            }
+            Some(ServerHopOutcome::Panicked(message)) => {
+                terminal(ServerHopOutcome::Panicked(message))
+            }
         };
         Ok((io, read_buffer, outcome))
     }
@@ -217,9 +222,8 @@ impl OwnedRequests {
             // close. Reclaim it only after the whole request subtree retires.
             let mut transport = StreamingTransport::take(task_transport);
             let (io, read_buffer) = transport.parts();
-            let flow = execute_produced_request_flow(
-                &body_cx, io, read_buffer, handler, execution, true,
-            );
+            let flow =
+                execute_produced_request_flow(&body_cx, io, read_buffer, handler, execution, true);
             let outcome = region
                 .run_with_protocol_drain(source, Some(body_cx.clone()), drain_grace, flow)
                 .await;
@@ -378,11 +382,14 @@ where
     let body_publication = Arc::clone(&publication);
     let started_at = config.started_at;
     let signal = config.shutdown.clone();
-    let region = owner.region.as_ref().expect("admitted HTTP/1 request region");
+    let region = owner
+        .region
+        .as_ref()
+        .expect("admitted HTTP/1 request region");
     let scope = region.cx().scope();
-    let spawned = region.cx().spawn_in_cancellation_dominant(
-        &scope,
-        move |body_cx| async move {
+    let spawned = region
+        .cx()
+        .spawn_in_cancellation_dominant(&scope, move |body_cx| async move {
             let region = ServerRequestRegion::from_body_cx("h1", body_cx.clone(), started_at);
             if signal
                 .as_ref()
@@ -416,8 +423,7 @@ where
                 (Ok(outcome), Ok(())) => outcome,
             };
             *body_publication.lock() = Some(outcome);
-        },
-    );
+        });
     match spawned {
         Ok(body) => owner.body = Some(body),
         Err(error) => {
@@ -499,9 +505,7 @@ where
         ))));
     }
     let outcome = match (task_outcome, returned) {
-        (Err(JoinError::Panicked(payload)), _) => {
-            ServerHopOutcome::Panicked(payload.to_string())
-        }
+        (Err(JoinError::Panicked(payload)), _) => ServerHopOutcome::Panicked(payload.to_string()),
         (_, Some(outcome)) => outcome,
         (Err(JoinError::Cancelled(reason)), None)
             if matches!(reason.kind, CancelKind::Deadline | CancelKind::Timeout) =>

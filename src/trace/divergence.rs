@@ -401,9 +401,7 @@ pub fn diagnose_replay_trace_divergence(
     let actual_order = canonical_replay_order(&actual.events);
     let shared_len = expected_order.len().min(actual_order.len());
     let idx = (0..shared_len)
-        .find(|&index| {
-            expected.events[expected_order[index]] != actual.events[actual_order[index]]
-        })
+        .find(|&index| expected.events[expected_order[index]] != actual.events[actual_order[index]])
         .or_else(|| (expected_order.len() != actual_order.len()).then_some(shared_len))?;
     let expected_index = expected_order.get(idx).copied().unwrap_or(expected.len());
     let actual_index = actual_order.get(idx).copied().unwrap_or(actual.len());
@@ -474,7 +472,11 @@ pub fn diagnose_replay_trace_divergence(
         actual: actual_summary,
         explanation,
         suggestion,
-        context_before: build_context_before(&expected.events, expected_index, config.context_before),
+        context_before: build_context_before(
+            &expected.events,
+            expected_index,
+            config.context_before,
+        ),
         context_after: build_context_after(&expected.events, expected_index, config.context_after),
         context_after_actual: build_context_after(
             &actual.events,
@@ -714,17 +716,15 @@ fn canonical_replay_order(events: &[ReplayEvent]) -> Vec<usize> {
         layered.push((layer, source_index));
     }
 
-    layered.sort_by(
-        |(left_layer, left_index), (right_layer, right_index)| {
-            left_layer
-                .cmp(right_layer)
-                .then_with(|| {
-                    replay_event_sort_key(&events[*left_index])
-                        .cmp(&replay_event_sort_key(&events[*right_index]))
-                })
-                .then_with(|| left_index.cmp(right_index))
-        },
-    );
+    layered.sort_by(|(left_layer, left_index), (right_layer, right_index)| {
+        left_layer
+            .cmp(right_layer)
+            .then_with(|| {
+                replay_event_sort_key(&events[*left_index])
+                    .cmp(&replay_event_sort_key(&events[*right_index]))
+            })
+            .then_with(|| left_index.cmp(right_index))
+    });
 
     layered.into_iter().map(|(_, index)| index).collect()
 }

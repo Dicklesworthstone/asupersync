@@ -39,15 +39,15 @@
 //!   satisfied for API compatibility
 
 use super::{Events, Interest, Reactor, Source, Token};
+#[cfg(target_arch = "wasm32")]
+use crate::sync::atomic::AtomicU64;
+use crate::sync::atomic::{AtomicBool, Ordering};
 use crate::sync::pl::{Mutex, MutexGuard};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
-use crate::sync::atomic::AtomicU64;
-use crate::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};

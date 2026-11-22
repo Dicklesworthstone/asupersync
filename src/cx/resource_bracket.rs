@@ -26,8 +26,7 @@ use std::sync::Arc;
 use std::task::Poll;
 
 /// The use future may borrow the single resource, but its output must be owned.
-pub type BracketUseFuture<'a, T, E> =
-    Pin<Box<dyn Future<Output = Outcome<T, E>> + Send + 'a>>;
+pub type BracketUseFuture<'a, T, E> = Pin<Box<dyn Future<Output = Outcome<T, E>> + Send + 'a>>;
 
 /// Explicit region and cancellation policy; parent budgets are never relaxed.
 #[derive(Debug, Clone)]
@@ -130,16 +129,25 @@ pub struct BracketReport<R, T, E, C> {
 impl<R, T, E, C> BracketReport<R, T, E, C> {
     fn empty() -> Self {
         Self {
-            region: None, acquisition: None, usage: None, body_task: None,
-            close: None, release: None, unreleased: None, infrastructure: Vec::new(),
-            cancellation: None, controller_task: Ok(()),
+            region: None,
+            acquisition: None,
+            usage: None,
+            body_task: None,
+            close: None,
+            release: None,
+            unreleased: None,
+            infrastructure: Vec::new(),
+            cancellation: None,
+            controller_task: Ok(()),
         }
     }
 
     /// Conservative whole-operation success, including both task joins and cleanup.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.acquisition.as_ref().is_some_and(BracketPhase::is_success)
+        self.acquisition
+            .as_ref()
+            .is_some_and(BracketPhase::is_success)
             && self.usage.as_ref().is_some_and(BracketPhase::is_success)
             && self.release.as_ref().is_some_and(BracketPhase::is_success)
             && matches!(&self.body_task, Some(Ok(())))
@@ -164,7 +172,8 @@ pub struct BracketHandle<R, T, E, C> {
 
 impl<R, T, E, C> fmt::Debug for BracketHandle<R, T, E, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BracketHandle").field("task", &self.task.task_id())
+        f.debug_struct("BracketHandle")
+            .field("task", &self.task.task_id())
             .finish_non_exhaustive()
     }
 }
@@ -172,10 +181,14 @@ impl<R, T, E, C> fmt::Debug for BracketHandle<R, T, E, C> {
 impl<R, T, E, C> BracketHandle<R, T, E, C> {
     /// Registered controller identity once admission publishes it.
     #[must_use]
-    pub fn task_id(&self) -> TaskId { self.task.task_id() }
+    pub fn task_id(&self) -> TaskId {
+        self.task.task_id()
+    }
 
     /// Request cancellation. The controller still joins/drains before release.
-    pub fn abort(&self) { self.task.abort(); }
+    pub fn abort(&self) {
+        self.task.abort();
+    }
 
     /// Uninterruptibly join the controller; dropping this borrowing wait neither
     /// aborts the controller nor loses a report. Dropping the HANDLE requests stop.
@@ -188,13 +201,17 @@ impl<R, T, E, C> BracketHandle<R, T, E, C> {
         }
         match terminal {
             Err(error) => Err(error),
-            Ok(()) => Err(JoinError::Panicked(PanicPayload::new("bracket omitted its report"))),
+            Ok(()) => Err(JoinError::Panicked(PanicPayload::new(
+                "bracket omitted its report",
+            ))),
         }
     }
 }
 
 impl<R, T, E, C> Drop for BracketHandle<R, T, E, C> {
-    fn drop(&mut self) { self.task.abort(); }
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Cx {
@@ -213,10 +230,17 @@ impl Cx {
     /// Cleanup waits are asynchronous and masked only by the supplied allowance.
     /// Neither a poll budget nor Drop promises termination of arbitrary code.
     pub fn spawn_bracket<R, T, E, C, A, AF, U, F, FF>(
-        &self, config: BracketConfig, acquire: A, use_resource: U, release: F,
+        &self,
+        config: BracketConfig,
+        acquire: A,
+        use_resource: U,
+        release: F,
     ) -> Result<BracketHandle<R, T, E, C>, SpawnError>
     where
-        R: Send + 'static, T: Send + 'static, E: Send + 'static, C: Send + 'static,
+        R: Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+        C: Send + 'static,
         A: FnOnce(Cx) -> AF + Send + 'static,
         AF: Future<Output = Outcome<R, E>> + Send + 'static,
         U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E> + Send + 'static,
@@ -231,10 +255,17 @@ impl Cx {
     // The exit decision is private: existing bracket users always release, while
     // a saga must decide whether to commit only AFTER actual child quiescence.
     fn spawn_bracket_with_exit<R, T, E, C, A, AF, U, F, FF>(
-        &self, config: BracketConfig, acquire: A, use_resource: U, release: F,
+        &self,
+        config: BracketConfig,
+        acquire: A,
+        use_resource: U,
+        release: F,
     ) -> Result<BracketHandle<R, T, E, C>, SpawnError>
     where
-        R: Send + 'static, T: Send + 'static, E: Send + 'static, C: Send + 'static,
+        R: Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+        C: Send + 'static,
         A: FnOnce(Cx) -> AF + Send + 'static,
         AF: Future<Output = Outcome<R, E>> + Send + 'static,
         U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E> + Send + 'static,
@@ -271,39 +302,64 @@ fn panic_payload(payload: Box<dyn Any + Send>) -> PanicPayload {
 }
 
 fn under_mask<T>(mask: Option<&Cx>, action: impl FnOnce() -> T) -> T {
-    match mask { Some(cx) => cx.masked(action), None => action() }
+    match mask {
+        Some(cx) => cx.masked(action),
+        None => action(),
+    }
 }
 
-async fn evaluate<T, E, F, Fut>(
-    factory: F, mask: Option<(&Cx, u32)>,
-) -> BracketPhase<T, E>
+async fn evaluate<T, E, F, Fut>(factory: F, mask: Option<(&Cx, u32)>) -> BracketPhase<T, E>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Outcome<T, E>>,
 {
     let callback_mask = mask.filter(|(_, limit)| *limit != 0).map(|(cx, _)| cx);
+    let mut wake_guard = callback_mask.map(Cx::masked_poll_guard);
     let constructed = catch_unwind(AssertUnwindSafe(|| under_mask(callback_mask, factory)));
     let mut future = match constructed {
         Ok(future) => Box::pin(future),
-        Err(payload) => return BracketPhase {
-            outcome: Outcome::Panicked(panic_payload(payload)), retirement_panic: None,
-        },
+        Err(payload) => {
+            return BracketPhase {
+                outcome: Outcome::Panicked(panic_payload(payload)),
+                retirement_panic: None,
+            };
+        }
     };
     let mut masked_polls = 0;
     let outcome = poll_fn(|task_cx| {
-        let poll_mask = mask.filter(|(_, limit)| masked_polls < *limit).map(|(cx, _)| cx);
-        if poll_mask.is_some() { masked_polls += 1; }
-        match catch_unwind(AssertUnwindSafe(|| {
-            under_mask(poll_mask, || future.as_mut().poll(task_cx))
-        })) {
-            Ok(poll) => poll,
-            Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+        if let Some((cx, limit)) = mask.filter(|(_, limit)| masked_polls < *limit) {
+            masked_polls += 1;
+            let keep_parked = masked_polls < limit;
+            let (polled, suppressed) = cx.masked_poll(keep_parked, || {
+                match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task_cx))) {
+                    Ok(poll) => poll,
+                    Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+                }
+            });
+            if let Some(guard) = wake_guard.as_mut() {
+                guard.set_suppressed(suppressed);
+            }
+            polled
+        } else {
+            if let Some(guard) = wake_guard.as_mut() {
+                guard.set_suppressed(false);
+            }
+            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(task_cx))) {
+                Ok(poll) => poll,
+                Err(payload) => Poll::Ready(Outcome::Panicked(panic_payload(payload))),
+            }
         }
-    }).await;
+    })
+    .await;
     let retirement_panic = catch_unwind(AssertUnwindSafe(|| {
         under_mask(callback_mask, || drop(future));
-    })).err().map(panic_payload);
-    BracketPhase { outcome, retirement_panic }
+    }))
+    .err()
+    .map(panic_payload);
+    BracketPhase {
+        outcome,
+        retirement_panic,
+    }
 }
 
 struct Work<R, T, E> {
@@ -330,20 +386,26 @@ impl<R, T, E> Drop for ResourceReturn<R, T, E> {
 }
 
 async fn body<R, T, E, A, AF, U>(
-    cx: Cx, work: Arc<Mutex<Work<R, T, E>>>, acquire: A, use_resource: U,
-)
-where
+    cx: Cx,
+    work: Arc<Mutex<Work<R, T, E>>>,
+    acquire: A,
+    use_resource: U,
+) where
     A: FnOnce(Cx) -> AF,
     AF: Future<Output = Outcome<R, E>>,
     U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E>,
 {
     if cx.checkpoint().is_err() {
         work.lock().acquisition = Some(BracketPhase {
-            outcome: Outcome::Cancelled(cancel_reason(&cx)), retirement_panic: None,
+            outcome: Outcome::Cancelled(cancel_reason(&cx)),
+            retirement_panic: None,
         });
         return;
     }
-    let BracketPhase { outcome, retirement_panic } = evaluate(|| acquire(cx.clone()), None).await;
+    let BracketPhase {
+        outcome,
+        retirement_panic,
+    } = evaluate(|| acquire(cx.clone()), None).await;
     let clean_acquire = retirement_panic.is_none();
     let resource = match outcome {
         Outcome::Ok(resource) => resource,
@@ -354,17 +416,33 @@ where
                 Outcome::Panicked(payload) => Outcome::Panicked(payload),
                 Outcome::Ok(_) => unreachable!(),
             };
-            work.lock().acquisition = Some(BracketPhase { outcome, retirement_panic });
+            work.lock().acquisition = Some(BracketPhase {
+                outcome,
+                retirement_panic,
+            });
             return;
         }
     };
-    let mut resource = ResourceReturn { value: Some(resource), work: Arc::clone(&work) };
-    work.lock().acquisition = Some(BracketPhase { outcome: Outcome::Ok(()), retirement_panic });
+    let mut resource = ResourceReturn {
+        value: Some(resource),
+        work: Arc::clone(&work),
+    };
+    work.lock().acquisition = Some(BracketPhase {
+        outcome: Outcome::Ok(()),
+        retirement_panic,
+    });
     if clean_acquire {
         let usage = if cx.checkpoint().is_err() {
-            BracketPhase { outcome: Outcome::Cancelled(cancel_reason(&cx)), retirement_panic: None }
+            BracketPhase {
+                outcome: Outcome::Cancelled(cancel_reason(&cx)),
+                retirement_panic: None,
+            }
         } else {
-            evaluate(|| use_resource(cx.clone(), resource.value.as_mut().expect("owned resource")), None).await
+            evaluate(
+                || use_resource(cx.clone(), resource.value.as_mut().expect("owned resource")),
+                None,
+            )
+            .await
         };
         work.lock().usage = Some(usage);
     }
@@ -372,19 +450,32 @@ where
 }
 
 fn cancel_reason(cx: &Cx) -> CancelReason {
-    cx.cancel_reason().unwrap_or_else(|| CancelReason::user("bracket cancelled"))
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("bracket cancelled"))
 }
 
-struct Cancellation<'a> { cx: &'a Cx, token: Option<CancelWakerToken> }
+struct Cancellation<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
 impl Drop for Cancellation<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
-struct BodyTask { task: TaskHandle<()>, joined: bool }
+struct BodyTask {
+    task: TaskHandle<()>,
+    joined: bool,
+}
 impl Drop for BodyTask {
-    fn drop(&mut self) { if !self.joined { self.task.abort(); } }
+    fn drop(&mut self) {
+        if !self.joined {
+            self.task.abort();
+        }
+    }
 }
 
 struct BracketExit {
@@ -396,10 +487,17 @@ struct BracketExit {
 }
 
 async fn drive<R, T, E, C, A, AF, U, F, FF>(
-    cx: Cx, config: BracketConfig, acquire: A, use_resource: U, release: F,
+    cx: Cx,
+    config: BracketConfig,
+    acquire: A,
+    use_resource: U,
+    release: F,
 ) -> BracketReport<R, T, E, C>
 where
-    R: Send + 'static, T: Send + 'static, E: Send + 'static, C: Send + 'static,
+    R: Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    C: Send + 'static,
     A: FnOnce(Cx) -> AF + Send + 'static,
     AF: Future<Output = Outcome<R, E>> + Send + 'static,
     U: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E> + Send + 'static,
@@ -410,35 +508,58 @@ where
     let region = match cx.open_child_region(config.region).await {
         Ok(region) => region,
         Err(error) => {
-            report.infrastructure.push(BracketInfrastructureError::Region(error));
+            report
+                .infrastructure
+                .push(BracketInfrastructureError::Region(error));
             return report;
         }
     };
     report.region = Some(region.region_id());
-    let work = Arc::new(Mutex::new(Work { resource: None, acquisition: None, usage: None }));
-    let mut cancellation = Cancellation { cx: &cx, token: None };
+    let work = Arc::new(Mutex::new(Work {
+        resource: None,
+        acquisition: None,
+        usage: None,
+    }));
+    let mut cancellation = Cancellation {
+        cx: &cx,
+        token: None,
+    };
     if cx.checkpoint().is_err() {
         report.cancellation = Some(cancel_reason(&cx));
     } else {
         let publication = Arc::clone(&work);
-        match region.cx().spawn(move |cx| body(cx, publication, acquire, use_resource)) {
-            Err(error) => report.infrastructure.push(BracketInfrastructureError::Spawn(error)),
+        match region
+            .cx()
+            .spawn(move |cx| body(cx, publication, acquire, use_resource))
+        {
+            Err(error) => report
+                .infrastructure
+                .push(BracketInfrastructureError::Spawn(error)),
             Ok(task) => {
-                let mut body = BodyTask { task, joined: false };
+                let mut body = BodyTask {
+                    task,
+                    joined: false,
+                };
                 let mut stop_sent = false;
                 let terminal = poll_fn(|task_cx| {
-                    cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token, task_cx.waker()));
+                    cancellation.token =
+                        Some(cx.refresh_cancel_waker(cancellation.token, task_cx.waker()));
                     if !stop_sent && cx.checkpoint().is_err() {
                         stop_sent = true;
                         let reason = cancel_reason(&cx);
                         report.cancellation = Some(reason.clone());
-                        if let Err(error) = region.cancel_with_budget(reason, config.shutdown_budget) {
-                            report.infrastructure.push(BracketInfrastructureError::Cancellation(error));
+                        if let Err(error) =
+                            region.cancel_with_budget(reason, config.shutdown_budget)
+                        {
+                            report
+                                .infrastructure
+                                .push(BracketInfrastructureError::Cancellation(error));
                             body.task.abort();
                         }
                     }
                     body.task.poll_join(task_cx)
-                }).await;
+                })
+                .await;
                 body.joined = true;
                 report.body_task = Some(terminal);
             }
@@ -447,7 +568,11 @@ where
     let close = region.close_with_outcome().await;
     let (resource, acquisition, usage) = {
         let mut work = work.lock();
-        (work.resource.take(), work.acquisition.take(), work.usage.take())
+        (
+            work.resource.take(),
+            work.acquisition.take(),
+            work.usage.take(),
+        )
     };
     report.acquisition = acquisition;
     report.usage = usage;
@@ -459,13 +584,19 @@ where
         Ok(close) => {
             let descendant_panic = close.descendant_panic;
             report.close = Some(Ok(BracketRegionOutcome {
-                outcome: close.outcome, cleanup_outcome: close.cleanup_outcome,
+                outcome: close.outcome,
+                cleanup_outcome: close.cleanup_outcome,
             }));
             if let Some(resource) = resource {
                 // Acknowledge before masking; preserve an independently observed reason.
-                if cx.checkpoint().is_err() { report.cancellation = Some(cancel_reason(&cx)); }
+                if cx.checkpoint().is_err() {
+                    report.cancellation = Some(cancel_reason(&cx));
+                }
                 let exit = BracketExit {
-                    clean: report.acquisition.as_ref().is_some_and(BracketPhase::is_success)
+                    clean: report
+                        .acquisition
+                        .as_ref()
+                        .is_some_and(BracketPhase::is_success)
                         && report.usage.as_ref().is_some_and(BracketPhase::is_success)
                         && matches!(&report.body_task, Some(Ok(())))
                         && matches!(&report.close, Some(Ok(close))
@@ -476,13 +607,19 @@ where
                         && descendant_panic.is_none(),
                     descendant_panic,
                 };
-                report.release = Some(evaluate(
-                    || release(cx.clone(), resource, exit), Some((&cx, config.release_masked_polls)),
-                ).await);
+                report.release = Some(
+                    evaluate(
+                        || release(cx.clone(), resource, exit),
+                        Some((&cx, config.release_masked_polls)),
+                    )
+                    .await,
+                );
             }
         }
     }
-    if cx.checkpoint().is_err() { report.cancellation = Some(cancel_reason(&cx)); }
+    if cx.checkpoint().is_err() {
+        report.cancellation = Some(cancel_reason(&cx));
+    }
     report
 }
 

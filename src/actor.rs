@@ -1622,8 +1622,9 @@ impl Cx {
                         &mut factory,
                         child_cx,
                         &mut cell,
-                        crate::supervision::Supervisor::new(strategy)
-                            .with_max_evidence_entries(crate::supervision::Supervisor::DEFAULT_ACTOR_EVIDENCE_CAPACITY),
+                        crate::supervision::Supervisor::new(strategy).with_max_evidence_entries(
+                            crate::supervision::Supervisor::DEFAULT_ACTOR_EVIDENCE_CAPACITY,
+                        ),
                         task_id,
                         region_id,
                     )

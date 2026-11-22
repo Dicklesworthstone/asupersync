@@ -220,7 +220,9 @@ impl RecordedSession {
             )));
         }
         if clock_len > limits.clock.max_encoded_bytes {
-            return Err(SessionTapeError::Clock(TimeTapeError::Limit("encoded bytes")));
+            return Err(SessionTapeError::Clock(TimeTapeError::Limit(
+                "encoded bytes",
+            )));
         }
         let mut expected = checksum(&bytes[..body_end]);
         let matches = expected.as_slice() == &bytes[body_end..];
@@ -229,7 +231,8 @@ impl RecordedSession {
             return Err(SessionTapeError::Checksum);
         }
         let io = IoTape::from_canonical_bytes(&bytes[HEADER..io_end], limits.io)?;
-        let entropy = EntropyTape::from_canonical_bytes(&bytes[io_end..entropy_end], limits.entropy)?;
+        let entropy =
+            EntropyTape::from_canonical_bytes(&bytes[io_end..entropy_end], limits.entropy)?;
         let clock = TimeTape::from_canonical_bytes(&bytes[entropy_end..body_end], limits.clock)?;
         Ok(Self { io, entropy, clock })
     }

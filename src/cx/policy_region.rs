@@ -141,7 +141,10 @@ impl<P> SharedPolicy<P> {
         self.stopped.store(true, Ordering::Release);
         if self
             .gateway
-            .enqueue_region_command(RegionCommand::Cancel { region_id: region, reason })
+            .enqueue_region_command(RegionCommand::Cancel {
+                region_id: region,
+                reason,
+            })
             .is_err()
         {
             self.control.lock().cancellation_dispatch_failed = true;
@@ -157,7 +160,9 @@ impl<P> SharedPolicy<P> {
             PolicyAction::CancelSiblings(reason) => (self.region, reason.clone()),
             PolicyAction::Escalate => (
                 self.parent,
-                CancelReason::fail_fast().with_region(self.region).with_task(child),
+                CancelReason::fail_fast()
+                    .with_region(self.region)
+                    .with_task(child),
             ),
         };
         {
@@ -196,14 +201,14 @@ where
     fn on_terminal(&self, child: TaskId, result: &Result<Outcome<T, P::Error>, JoinError>) {
         let action = catch_unwind(AssertUnwindSafe(|| match result {
             Ok(outcome) => self.shared.policy.on_child_outcome(child, outcome),
-            Err(JoinError::Cancelled(reason)) => self.shared.policy.on_child_outcome(
-                child,
-                &Outcome::<T, P::Error>::Cancelled(reason.clone()),
-            ),
-            Err(JoinError::Panicked(payload)) => self.shared.policy.on_child_outcome(
-                child,
-                &Outcome::<T, P::Error>::Panicked(payload.clone()),
-            ),
+            Err(JoinError::Cancelled(reason)) => self
+                .shared
+                .policy
+                .on_child_outcome(child, &Outcome::<T, P::Error>::Cancelled(reason.clone())),
+            Err(JoinError::Panicked(payload)) => self
+                .shared
+                .policy
+                .on_child_outcome(child, &Outcome::<T, P::Error>::Panicked(payload.clone())),
             Err(JoinError::PolledAfterCompletion) => self.shared.policy.on_child_outcome(
                 child,
                 &Outcome::<T, P::Error>::Panicked(PanicPayload::new(
@@ -219,7 +224,9 @@ where
                 self.shared.apply(
                     child,
                     PolicyAction::CancelSiblings(
-                        CancelReason::fail_fast().with_region(self.shared.region).with_task(child),
+                        CancelReason::fail_fast()
+                            .with_region(self.shared.region)
+                            .with_task(child),
                     ),
                 );
                 let payload = contained_panic_payload(payload);
@@ -383,7 +390,9 @@ where
             return Err(PolicyRegionSpawnError::Stopped);
         }
         if self.members.len() == self.limit.get() {
-            return Err(PolicyRegionSpawnError::AtCapacity { limit: self.limit.get() });
+            return Err(PolicyRegionSpawnError::AtCapacity {
+                limit: self.limit.get(),
+            });
         }
         self.members
             .try_reserve(1)
@@ -394,8 +403,13 @@ where
         self.outcomes
             .try_reserve(self.members.len() + 1)
             .map_err(|_| PolicyRegionSpawnError::Allocation)?;
-        let region = self.region.as_ref().expect("an unconsumed policy owner has its region");
-        let observer = MemberObserver { shared: Arc::clone(&self.shared) };
+        let region = self
+            .region
+            .as_ref()
+            .expect("an unconsumed policy owner has its region");
+        let observer = MemberObserver {
+            shared: Arc::clone(&self.shared),
+        };
         let handle = region
             .cx()
             .spawn_with_terminal_observer(f, observer)
@@ -429,7 +443,8 @@ where
         poll_fn(|task| {
             if !forwarded && cancelled.as_mut().poll(task).is_ready() {
                 forwarded = true;
-                let reason = opener.cancel_reason()
+                let reason = opener
+                    .cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("policy region opener cancelled"));
                 let _ = opener.checkpoint();
                 let _ = self.cancel(reason);
@@ -452,23 +467,30 @@ where
                 task.waker().wake_by_ref();
                 Poll::Pending
             }
-        }).await;
+        })
+        .await;
 
         let shared = Arc::clone(&self.shared);
-        let region = self.region.take().expect("policy region closes exactly once");
+        let region = self
+            .region
+            .take()
+            .expect("policy region closes exactly once");
         let mut closing = pin!(region.close_with_outcome());
         let close = poll_fn(|task| {
             // Keep acknowledgement live while descendants or finalizers
             // are still draining, not only while direct members are joined.
             if !forwarded && cancelled.as_mut().poll(task).is_ready() {
                 forwarded = true;
-                let reason = opener.cancel_reason()
+                let reason = opener
+                    .cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("policy region opener cancelled"));
                 let _ = opener.checkpoint();
                 let _ = shared.dispatch(shared.region, reason);
             }
             closing.as_mut().poll(task)
-        }).await.map(|receipt| PolicyRegionClose {
+        })
+        .await
+        .map(|receipt| PolicyRegionClose {
             outcome: receipt.outcome,
             cleanup_outcome: receipt.cleanup_outcome,
             descendant_panic: receipt.descendant_panic,
@@ -490,7 +512,8 @@ where
             Some(payload) => Err(payload),
             None => catch_unwind(AssertUnwindSafe(|| {
                 self.shared.policy.aggregate_outcomes(&self.outcomes)
-            })).map_err(contained_panic_payload),
+            }))
+            .map_err(contained_panic_payload),
         };
         PolicyRegionReport {
             region: self.shared.region,

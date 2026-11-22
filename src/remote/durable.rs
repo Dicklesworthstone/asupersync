@@ -150,7 +150,9 @@ pub enum DurableRemoteError {
 }
 
 impl From<io::Error> for DurableRemoteError {
-    fn from(error: io::Error) -> Self { Self::Io(error) }
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// One synced permission to execute. Dropping it leaves the key in doubt.
@@ -167,7 +169,8 @@ pub struct DurableRemoteReservation {
 
 impl fmt::Debug for DurableRemoteReservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DurableRemoteReservation").finish_non_exhaustive()
+        f.debug_struct("DurableRemoteReservation")
+            .finish_non_exhaustive()
     }
 }
 
@@ -206,7 +209,8 @@ pub struct DurableRemoteReconciliationPermit {
 
 impl fmt::Debug for DurableRemoteReconciliationPermit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DurableRemoteReconciliationPermit").finish_non_exhaustive()
+        f.debug_struct("DurableRemoteReconciliationPermit")
+            .finish_non_exhaustive()
     }
 }
 
@@ -240,46 +244,72 @@ impl DurableRemoteJournal {
     /// Sync a new authenticated header in an empty caller-owned regular file.
     /// The caller must durably link the file before exposing the service.
     pub fn create<I: HasSchema, O: HasSchema>(
-        file: File, computation: impl Into<String>, application_version: [u8; 32],
-        journal_key: AuthKey, limits: DurableRemoteLimits,
+        file: File,
+        computation: impl Into<String>,
+        application_version: [u8; 32],
+        journal_key: AuthKey,
+        limits: DurableRemoteLimits,
     ) -> Result<Self, DurableRemoteError> {
-        let config = Config::new::<I, O>(computation.into(), application_version, journal_key, limits)?;
+        let config =
+            Config::new::<I, O>(computation.into(), application_version, journal_key, limits)?;
         lock(&file)?;
-        Ok(Self { core: Journal::create(file, config)? })
+        Ok(Self {
+            core: Journal::create(file, config)?,
+        })
     }
 
     /// Authenticate and replay every bounded complete record, then sync before
     /// exposing outcomes. Provisioning must match the original header exactly.
     pub fn open<I: HasSchema, O: HasSchema>(
-        file: File, computation: impl Into<String>, application_version: [u8; 32],
-        journal_key: AuthKey, limits: DurableRemoteLimits,
+        file: File,
+        computation: impl Into<String>,
+        application_version: [u8; 32],
+        journal_key: AuthKey,
+        limits: DurableRemoteLimits,
     ) -> Result<Self, DurableRemoteError> {
-        let config = Config::new::<I, O>(computation.into(), application_version, journal_key, limits)?;
+        let config =
+            Config::new::<I, O>(computation.into(), application_version, journal_key, limits)?;
         lock(&file)?;
-        Ok(Self { core: Journal::open(file, config)? })
+        Ok(Self {
+            core: Journal::open(file, config)?,
+        })
     }
 
     /// Immutable registered computation name.
     #[must_use]
-    pub fn computation(&self) -> &str { &self.core.config.computation }
+    pub fn computation(&self) -> &str {
+        &self.core.config.computation
+    }
     /// Full fingerprint of this computation's name and canonical input/output schemas.
     #[must_use]
-    pub fn schema_fingerprint(&self) -> ComputationRegistryFingerprint { self.core.config.schema }
+    pub fn schema_fingerprint(&self) -> ComputationRegistryFingerprint {
+        self.core.config.schema
+    }
     /// Header-bound limits, unchanged across all reopenings.
     #[must_use]
-    pub fn limits(&self) -> DurableRemoteLimits { self.core.config.limits }
+    pub fn limits(&self) -> DurableRemoteLimits {
+        self.core.config.limits
+    }
     /// Current append posture without a file operation.
     #[must_use]
-    pub fn status(&self) -> DurableRemoteJournalStatus { self.core.status }
+    pub fn status(&self) -> DurableRemoteJournalStatus {
+        self.core.status
+    }
     /// End of the authenticated synced prefix, excluding an incomplete tail.
     #[must_use]
-    pub fn committed_bytes(&self) -> u64 { self.core.offset }
+    pub fn committed_bytes(&self) -> u64 {
+        self.core.offset
+    }
     /// Persisted records, including compaction clock floors; replay does not append.
     #[must_use]
-    pub fn records(&self) -> u64 { self.core.sequence }
+    pub fn records(&self) -> u64 {
+        self.core.sequence
+    }
     /// Pending and unexpired terminal entries as of the last observed timestamp.
     #[must_use]
-    pub fn retained_entries(&self) -> usize { self.core.entries.len() }
+    pub fn retained_entries(&self) -> usize {
+        self.core.entries.len()
+    }
 
     /// Reserve before executing, or replay an exact retained outcome.
     ///
@@ -288,7 +318,11 @@ impl DurableRemoteJournal {
     /// digests, not retained plaintext. An unresolved key never expires, even
     /// after restart. Zero capacities refuse before any reservation is written.
     pub fn admit(
-        &mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now_millis: u64,
+        &mut self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        input: &[u8],
+        now_millis: u64,
     ) -> Result<DurableRemoteAdmission, DurableRemoteError> {
         self.core.admit(peer, key, input, now_millis)
     }
@@ -299,7 +333,10 @@ impl DurableRemoteJournal {
     /// Write/sync uncertainty additionally poisons this owner. Neither case
     /// authorizes repeating the handler; reopening may recover a complete write.
     pub fn complete(
-        &mut self, reservation: DurableRemoteReservation, outcome: RemoteOutcome, now_millis: u64,
+        &mut self,
+        reservation: DurableRemoteReservation,
+        outcome: RemoteOutcome,
+        now_millis: u64,
     ) -> Result<RemoteOutcome, DurableRemoteError> {
         self.core.complete(reservation, outcome, now_millis)
     }
@@ -318,9 +355,14 @@ impl DurableRemoteJournal {
     /// cross-system exactly-once effects. `peer` is trusted local authority,
     /// subject to the same authentication requirement as [`Self::admit`].
     pub fn prepare_reconciliation(
-        &mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now_millis: u64,
+        &mut self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        input: &[u8],
+        now_millis: u64,
     ) -> Result<DurableRemoteReconciliation, DurableRemoteError> {
-        self.core.prepare_reconciliation(peer, key, input, now_millis)
+        self.core
+            .prepare_reconciliation(peer, key, input, now_millis)
     }
 
     /// Sync an independently established result without running the original work.
@@ -331,10 +373,13 @@ impl DurableRemoteJournal {
     /// record format, so ordinary admission replays the reconciled result after
     /// restart. The retention window begins at this durable completion.
     pub fn complete_reconciliation(
-        &mut self, permit: DurableRemoteReconciliationPermit,
-        outcome: RemoteOutcome, now_millis: u64,
+        &mut self,
+        permit: DurableRemoteReconciliationPermit,
+        outcome: RemoteOutcome,
+        now_millis: u64,
     ) -> Result<RemoteOutcome, DurableRemoteError> {
-        self.core.complete_reconciliation(permit, outcome, now_millis)
+        self.core
+            .complete_reconciliation(permit, outcome, now_millis)
     }
 }
 
@@ -349,25 +394,41 @@ struct Config {
 
 impl Config {
     fn new<I: HasSchema, O: HasSchema>(
-        computation: String, application_version: [u8; 32], key: AuthKey, limits: DurableRemoteLimits,
+        computation: String,
+        application_version: [u8; 32],
+        key: AuthKey,
+        limits: DurableRemoteLimits,
     ) -> Result<Self, DurableRemoteError> {
         if !valid_label(&computation) || limits.retention_ms == 0 {
             return Err(DurableRemoteError::Configuration);
         }
         let mut registry = ComputationSchemaRegistry::new();
-        registry.register_typed::<I, O>(computation.clone()).map_err(|_| DurableRemoteError::Configuration)?;
-        let config = Self { computation, schema: registry.fingerprint(), application_version, key, limits };
+        registry
+            .register_typed::<I, O>(computation.clone())
+            .map_err(|_| DurableRemoteError::Configuration)?;
+        let config = Self {
+            computation,
+            schema: registry.fingerprint(),
+            application_version,
+            key,
+            limits,
+        };
         let _ = config.max_body_bytes()?;
         Ok(config)
     }
 
     fn max_body_bytes(&self) -> Result<usize, DurableRemoteError> {
-        add(add(COMMON_BYTES, 255)?, RESERVATION_BYTES.max(add(TERMINAL_BYTES, self.limits.max_outcome_bytes)?))
+        add(
+            add(COMMON_BYTES, 255)?,
+            RESERVATION_BYTES.max(add(TERMINAL_BYTES, self.limits.max_outcome_bytes)?),
+        )
     }
 
     fn header(&self) -> Result<Zeroizing<Vec<u8>>, DurableRemoteError> {
         let size = add(165, self.computation.len())?;
-        if size64(size)? > self.limits.max_journal_bytes { return Err(DurableRemoteError::Limit); }
+        if size64(size)? > self.limits.max_journal_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         let mut bytes = buffer(size)?;
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&1_u32.to_le_bytes());
@@ -375,9 +436,15 @@ impl Config {
         bytes.extend_from_slice(self.computation.as_bytes());
         bytes.extend_from_slice(self.schema.as_bytes());
         bytes.extend_from_slice(&self.application_version);
-        for value in [self.limits.max_entries, self.limits.max_peer_entries, self.limits.max_input_bytes,
-            self.limits.max_outcome_bytes, self.limits.max_retained_bytes]
-        { bytes.extend_from_slice(&size64(value)?.to_le_bytes()); }
+        for value in [
+            self.limits.max_entries,
+            self.limits.max_peer_entries,
+            self.limits.max_input_bytes,
+            self.limits.max_outcome_bytes,
+            self.limits.max_retained_bytes,
+        ] {
+            bytes.extend_from_slice(&size64(value)?.to_le_bytes());
+        }
         bytes.extend_from_slice(&self.limits.max_journal_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.limits.retention_ms.to_le_bytes());
         let tag = AuthenticationTag::compute_for_domain_payload(&self.key, HEADER_DOMAIN, &bytes);
@@ -389,7 +456,11 @@ impl Config {
 
 enum EntryState {
     Pending,
-    Terminal { expires_at: u64, completion_sequence: u64, outcome: Zeroizing<Vec<u8>> },
+    Terminal {
+        expires_at: u64,
+        completion_sequence: u64,
+        outcome: Zeroizing<Vec<u8>>,
+    },
 }
 
 struct Entry {
@@ -407,8 +478,12 @@ trait JournalIo: Read + Write + Seek {
 }
 
 impl JournalIo for File {
-    fn length(&self) -> io::Result<u64> { Ok(self.metadata()?.len()) }
-    fn sync(&mut self) -> io::Result<()> { self.sync_all() }
+    fn length(&self) -> io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+    fn sync(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
 }
 
 struct Journal<F> {
@@ -428,7 +503,9 @@ struct Journal<F> {
     read_only_source_len: Option<u64>,
 }
 
-fn valid_label(value: &str) -> bool { !value.is_empty() && value.len() <= 255 }
+fn valid_label(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255
+}
 fn add(left: usize, right: usize) -> Result<usize, DurableRemoteError> {
     left.checked_add(right).ok_or(DurableRemoteError::Limit)
 }
@@ -440,7 +517,9 @@ fn size64(value: usize) -> Result<u64, DurableRemoteError> {
 }
 fn buffer(capacity: usize) -> Result<Zeroizing<Vec<u8>>, DurableRemoteError> {
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes.try_reserve_exact(capacity).map_err(|_| DurableRemoteError::Allocation)?;
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| DurableRemoteError::Allocation)?;
     Ok(bytes)
 }
 fn copy_bytes(source: &[u8]) -> Result<Zeroizing<Vec<u8>>, DurableRemoteError> {
@@ -454,11 +533,16 @@ fn lock(file: &File) -> Result<(), DurableRemoteError> {
         Err(TryLockError::WouldBlock) => return Err(DurableRemoteError::Locked),
         Err(TryLockError::Error(error)) => return Err(error.into()),
     }
-    if !file.metadata()?.is_file() { return Err(DurableRemoteError::NotRegular); }
+    if !file.metadata()?.is_file() {
+        return Err(DurableRemoteError::NotRegular);
+    }
     Ok(())
 }
 fn record_size(peer_len: usize, payload_len: usize) -> Result<u64, DurableRemoteError> {
-    size64(add(add(PREFIX_BYTES + COMMON_BYTES + TAG_BYTES, peer_len)?, payload_len)?)
+    size64(add(
+        add(PREFIX_BYTES + COMMON_BYTES + TAG_BYTES, peer_len)?,
+        payload_len,
+    )?)
 }
 fn prefix_payload(length: u64, sequence: u64, previous: AuthenticationTag) -> [u8; 48] {
     let mut bytes = [0; 48];
@@ -487,10 +571,15 @@ impl Write for OutcomeWriter {
         let length = self.bytes.len().checked_add(input.len());
         let Some(length) = length.filter(|length| *length <= self.limit) else {
             self.error = Some(DurableRemoteError::Limit);
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bounded remote outcome exceeded"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bounded remote outcome exceeded",
+            ));
         };
         if self.bytes.capacity() < length {
-            let capacity = length.max(self.bytes.capacity().saturating_mul(2)).min(self.limit);
+            let capacity = length
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(self.limit);
             let additional = capacity - self.bytes.len();
             if self.bytes.try_reserve_exact(additional).is_err() {
                 self.error = Some(DurableRemoteError::Allocation);
@@ -500,45 +589,67 @@ impl Write for OutcomeWriter {
         self.bytes.extend_from_slice(input);
         Ok(input.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn decode_outcome(bytes: &[u8]) -> Result<RemoteOutcome, DurableRemoteError> {
     serde_json::from_slice::<RemoteServiceWireOutcome>(bytes)
-        .map(RemoteOutcome::from).map_err(|_| DurableRemoteError::OutcomeEncoding)
+        .map(RemoteOutcome::from)
+        .map_err(|_| DurableRemoteError::OutcomeEncoding)
 }
 
-fn encode_outcome(outcome: RemoteOutcome, limit: usize)
-    -> Result<(Zeroizing<Vec<u8>>, RemoteOutcome), DurableRemoteError>
-{
+fn encode_outcome(
+    outcome: RemoteOutcome,
+    limit: usize,
+) -> Result<(Zeroizing<Vec<u8>>, RemoteOutcome), DurableRemoteError> {
     let wire = RemoteServiceWireOutcome::from(outcome);
-    let mut writer = OutcomeWriter { bytes: buffer(limit.min(1024))?, limit, error: None };
+    let mut writer = OutcomeWriter {
+        bytes: buffer(limit.min(1024))?,
+        limit,
+        error: None,
+    };
     if serde_json::to_writer(&mut writer, &wire).is_err() {
         return Err(writer.error.unwrap_or(DurableRemoteError::OutcomeEncoding));
     }
     let decoded = serde_json::from_slice::<RemoteServiceWireOutcome>(&writer.bytes)
         .map_err(|_| DurableRemoteError::OutcomeEncoding)?;
-    if decoded != wire { return Err(DurableRemoteError::OutcomeEncoding); }
+    if decoded != wire {
+        return Err(DurableRemoteError::OutcomeEncoding);
+    }
     // The writer grows geometrically while encoding. Retain a compact bounded
     // allocation, and account for its reported capacity rather than just its
     // logical length so terminal caching cannot hide spare allocated bytes.
     let encoded = copy_bytes(&writer.bytes)?;
-    if encoded.capacity() > limit { return Err(DurableRemoteError::Limit); }
+    if encoded.capacity() > limit {
+        return Err(DurableRemoteError::Limit);
+    }
     Ok((encoded, decoded.into()))
 }
 
-struct Cursor<'a> { bytes: &'a [u8], position: usize }
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
 impl<'a> Cursor<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], DurableRemoteError> {
         let end = add(self.position, length)?;
-        let result = self.bytes.get(self.position..end).ok_or(DurableRemoteError::Format)?;
+        let result = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(DurableRemoteError::Format)?;
         self.position = end;
         Ok(result)
     }
     fn number(&mut self) -> Result<u64, DurableRemoteError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("eight bytes"),
+        ))
     }
-    fn done(&self) -> bool { self.position == self.bytes.len() }
+    fn done(&self) -> bool {
+        self.position == self.bytes.len()
+    }
 }
 
 impl<F: JournalIo> Journal<F> {
@@ -560,9 +671,15 @@ impl<F: JournalIo> Journal<F> {
     }
 
     fn create(mut file: F, config: Config) -> Result<Self, DurableRemoteError> {
-        if file.length()? != 0 { return Err(DurableRemoteError::NotEmpty); }
+        if file.length()? != 0 {
+            return Err(DurableRemoteError::NotEmpty);
+        }
         let header = config.header()?;
-        let last = AuthenticationTag::from_bytes(header[header.len() - TAG_BYTES..].try_into().expect("header tag"));
+        let last = AuthenticationTag::from_bytes(
+            header[header.len() - TAG_BYTES..]
+                .try_into()
+                .expect("header tag"),
+        );
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&header)?;
         file.sync()?;
@@ -571,9 +688,13 @@ impl<F: JournalIo> Journal<F> {
 
     fn open(mut file: F, config: Config) -> Result<Self, DurableRemoteError> {
         let length = file.length()?;
-        if length > config.limits.max_journal_bytes { return Err(DurableRemoteError::Limit); }
+        if length > config.limits.max_journal_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         let expected = config.header()?;
-        if length < size64(expected.len())? { return Err(DurableRemoteError::Format); }
+        if length < size64(expected.len())? {
+            return Err(DurableRemoteError::Format);
+        }
         let mut header = buffer(expected.len())?;
         header.resize(expected.len(), 0);
         file.seek(SeekFrom::Start(0))?;
@@ -583,25 +704,40 @@ impl<F: JournalIo> Journal<F> {
         if !last.verify_domain_payload(&config.key, HEADER_DOMAIN, &header[..signed]) {
             return Err(DurableRemoteError::Authentication);
         }
-        if header[..signed] != expected[..signed] { return Err(DurableRemoteError::Configuration); }
+        if header[..signed] != expected[..signed] {
+            return Err(DurableRemoteError::Configuration);
+        }
         let mut log = Self::empty(file, config, size64(header.len())?, last);
         while log.offset < length {
             let remaining = length - log.offset;
-            if remaining < PREFIX_BYTES as u64 { log.status = DurableRemoteJournalStatus::ReadOnlyTail; break; }
+            if remaining < PREFIX_BYTES as u64 {
+                log.status = DurableRemoteJournalStatus::ReadOnlyTail;
+                break;
+            }
             let mut prefix = [0; PREFIX_BYTES];
             log.file.read_exact(&mut prefix)?;
             let body_len = u64::from_le_bytes(prefix[..8].try_into().expect("length"));
             let next = add64(log.sequence, 1)?;
-            let length_tag = AuthenticationTag::from_bytes(prefix[8..].try_into().expect("length tag"));
-            if !length_tag.verify_domain_payload(&log.config.key, LENGTH_DOMAIN, &prefix_payload(body_len, next, log.last)) {
+            let length_tag =
+                AuthenticationTag::from_bytes(prefix[8..].try_into().expect("length tag"));
+            if !length_tag.verify_domain_payload(
+                &log.config.key,
+                LENGTH_DOMAIN,
+                &prefix_payload(body_len, next, log.last),
+            ) {
                 return Err(DurableRemoteError::Authentication);
             }
             if (body_len != COMMON_BYTES as u64
                 && body_len < (COMMON_BYTES + 1 + TERMINAL_BYTES) as u64)
                 || body_len > size64(log.config.max_body_bytes()?)?
-            { return Err(DurableRemoteError::Format); }
+            {
+                return Err(DurableRemoteError::Format);
+            }
             let size = add64(body_len, (PREFIX_BYTES + TAG_BYTES) as u64)?;
-            if size > remaining { log.status = DurableRemoteJournalStatus::ReadOnlyTail; break; }
+            if size > remaining {
+                log.status = DurableRemoteJournalStatus::ReadOnlyTail;
+                break;
+            }
             let size_usize = usize::try_from(size).map_err(|_| DurableRemoteError::Limit)?;
             let mut record = buffer(size_usize)?;
             record.extend_from_slice(&prefix);
@@ -617,7 +753,9 @@ impl<F: JournalIo> Journal<F> {
             log.sequence = next;
             log.last = tag;
         }
-        if log.file.length()? != length { return Err(DurableRemoteError::Changed); }
+        if log.file.length()? != length {
+            return Err(DurableRemoteError::Changed);
+        }
         log.file.sync()?;
         if log.status == DurableRemoteJournalStatus::ReadOnlyTail {
             log.read_only_source_len = Some(length);
@@ -626,88 +764,158 @@ impl<F: JournalIo> Journal<F> {
     }
 
     fn observe(&mut self, now: u64) -> Result<(), DurableRemoteError> {
-        if now < self.last_time { return Err(DurableRemoteError::ClockRegression); }
+        if now < self.last_time {
+            return Err(DurableRemoteError::ClockRegression);
+        }
         self.last_time = now;
         let retained_bytes = &mut self.retained_bytes;
         self.entries.retain(|_, entry| {
-            if let EntryState::Terminal { expires_at, outcome, .. } = &entry.state
+            if let EntryState::Terminal {
+                expires_at,
+                outcome,
+                ..
+            } = &entry.state
                 && now >= *expires_at
             {
                 *retained_bytes -= outcome.capacity();
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         Ok(())
     }
 
     fn terminal_reservation(&self, peer: &NodeId) -> Result<u64, DurableRemoteError> {
-        record_size(peer.as_str().len(), add(TERMINAL_BYTES, self.config.limits.max_outcome_bytes)?)
+        record_size(
+            peer.as_str().len(),
+            add(TERMINAL_BYTES, self.config.limits.max_outcome_bytes)?,
+        )
     }
 
-    fn pending_capacity(&self, peer: &NodeId, reservation_bytes: u64) -> Result<(usize, u64), DurableRemoteError> {
+    fn pending_capacity(
+        &self,
+        peer: &NodeId,
+        reservation_bytes: u64,
+    ) -> Result<(usize, u64), DurableRemoteError> {
         let limits = self.config.limits;
-        if limits.max_outcome_bytes == 0 || self.entries.len() >= limits.max_entries
-            || self.entries.keys().filter(|(origin, _)| origin == peer).count() >= limits.max_peer_entries
-        { return Err(DurableRemoteError::Limit); }
+        if limits.max_outcome_bytes == 0
+            || self.entries.len() >= limits.max_entries
+            || self
+                .entries
+                .keys()
+                .filter(|(origin, _)| origin == peer)
+                .count()
+                >= limits.max_peer_entries
+        {
+            return Err(DurableRemoteError::Limit);
+        }
         let retained = add(self.retained_bytes, limits.max_outcome_bytes)?;
-        if retained > limits.max_retained_bytes { return Err(DurableRemoteError::Limit); }
-        let reserved = add64(self.reserved_terminal_bytes, self.terminal_reservation(peer)?)?;
+        if retained > limits.max_retained_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
+        let reserved = add64(
+            self.reserved_terminal_bytes,
+            self.terminal_reservation(peer)?,
+        )?;
         let required = add64(add64(self.offset, reservation_bytes)?, reserved)?;
-        if required > limits.max_journal_bytes { return Err(DurableRemoteError::Limit); }
+        if required > limits.max_journal_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         Ok((retained, reserved))
     }
 
-    fn admit(&mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now: u64)
-        -> Result<DurableRemoteAdmission, DurableRemoteError>
-    {
-        if self.status == DurableRemoteJournalStatus::Poisoned { return Err(DurableRemoteError::NotWritable(self.status)); }
-        self.observe(now)?;
-        if !valid_label(peer.as_str()) { return Err(DurableRemoteError::Configuration); }
-        if input.len() > self.config.limits.max_input_bytes { return Err(DurableRemoteError::Limit); }
-        let (input_len, digest) = input_digest(input)?;
-        let id = (peer.clone(), key.raw());
-        if let Some(entry) = self.entries.get(&id) {
-            if entry.input_len != input_len || entry.digest != digest { return Err(DurableRemoteError::Conflict); }
-            return match &entry.state {
-                EntryState::Pending => Err(DurableRemoteError::InDoubt),
-                EntryState::Terminal { outcome, .. } => Ok(DurableRemoteAdmission::Replay(decode_outcome(outcome)?)),
-            };
-        }
-        if self.status != DurableRemoteJournalStatus::Writable { return Err(DurableRemoteError::NotWritable(self.status)); }
-        // Check timestamp arithmetic before granting an operation which could
-        // not represent even an immediate completion's retention horizon.
-        let _ = add64(now, self.config.limits.retention_ms)?;
-        let sequence = add64(self.sequence, 1)?;
-        let (retained, reserved) = self.pending_capacity(peer, record_size(peer.as_str().len(), RESERVATION_BYTES)?)?;
-        let mut payload = [0; RESERVATION_BYTES];
-        payload[..8].copy_from_slice(&input_len.to_le_bytes());
-        payload[8..].copy_from_slice(&digest);
-        self.append_record(RESERVE, peer, key, &payload, now)?;
-        self.entries.insert(id, Entry { input_len, digest, reservation_sequence: sequence, state: EntryState::Pending });
-        self.retained_bytes = retained;
-        self.reserved_terminal_bytes = reserved;
-        Ok(DurableRemoteAdmission::Execute(DurableRemoteReservation {
-            instance: Arc::clone(&self.instance), peer: peer.clone(), key, sequence,
-        }))
-    }
-
-    fn prepare_reconciliation(&mut self, peer: &NodeId, key: IdempotencyKey, input: &[u8], now: u64)
-        -> Result<DurableRemoteReconciliation, DurableRemoteError>
-    {
+    fn admit(
+        &mut self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        input: &[u8],
+        now: u64,
+    ) -> Result<DurableRemoteAdmission, DurableRemoteError> {
         if self.status == DurableRemoteJournalStatus::Poisoned {
             return Err(DurableRemoteError::NotWritable(self.status));
         }
         self.observe(now)?;
-        if !valid_label(peer.as_str()) { return Err(DurableRemoteError::Configuration); }
-        if input.len() > self.config.limits.max_input_bytes { return Err(DurableRemoteError::Limit); }
+        if !valid_label(peer.as_str()) {
+            return Err(DurableRemoteError::Configuration);
+        }
+        if input.len() > self.config.limits.max_input_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         let (input_len, digest) = input_digest(input)?;
-        let entry = self.entries.get(&(peer.clone(), key.raw()))
+        let id = (peer.clone(), key.raw());
+        if let Some(entry) = self.entries.get(&id) {
+            if entry.input_len != input_len || entry.digest != digest {
+                return Err(DurableRemoteError::Conflict);
+            }
+            return match &entry.state {
+                EntryState::Pending => Err(DurableRemoteError::InDoubt),
+                EntryState::Terminal { outcome, .. } => {
+                    Ok(DurableRemoteAdmission::Replay(decode_outcome(outcome)?))
+                }
+            };
+        }
+        if self.status != DurableRemoteJournalStatus::Writable {
+            return Err(DurableRemoteError::NotWritable(self.status));
+        }
+        // Check timestamp arithmetic before granting an operation which could
+        // not represent even an immediate completion's retention horizon.
+        let _ = add64(now, self.config.limits.retention_ms)?;
+        let sequence = add64(self.sequence, 1)?;
+        let (retained, reserved) =
+            self.pending_capacity(peer, record_size(peer.as_str().len(), RESERVATION_BYTES)?)?;
+        let mut payload = [0; RESERVATION_BYTES];
+        payload[..8].copy_from_slice(&input_len.to_le_bytes());
+        payload[8..].copy_from_slice(&digest);
+        self.append_record(RESERVE, peer, key, &payload, now)?;
+        self.entries.insert(
+            id,
+            Entry {
+                input_len,
+                digest,
+                reservation_sequence: sequence,
+                state: EntryState::Pending,
+            },
+        );
+        self.retained_bytes = retained;
+        self.reserved_terminal_bytes = reserved;
+        Ok(DurableRemoteAdmission::Execute(DurableRemoteReservation {
+            instance: Arc::clone(&self.instance),
+            peer: peer.clone(),
+            key,
+            sequence,
+        }))
+    }
+
+    fn prepare_reconciliation(
+        &mut self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        input: &[u8],
+        now: u64,
+    ) -> Result<DurableRemoteReconciliation, DurableRemoteError> {
+        if self.status == DurableRemoteJournalStatus::Poisoned {
+            return Err(DurableRemoteError::NotWritable(self.status));
+        }
+        self.observe(now)?;
+        if !valid_label(peer.as_str()) {
+            return Err(DurableRemoteError::Configuration);
+        }
+        if input.len() > self.config.limits.max_input_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
+        let (input_len, digest) = input_digest(input)?;
+        let entry = self
+            .entries
+            .get(&(peer.clone(), key.raw()))
             .ok_or(DurableRemoteError::InvalidReservation)?;
         if entry.input_len != input_len || entry.digest != digest {
             return Err(DurableRemoteError::Conflict);
         }
         if let EntryState::Terminal { outcome, .. } = &entry.state {
-            return Ok(DurableRemoteReconciliation::Replay(decode_outcome(outcome)?));
+            return Ok(DurableRemoteReconciliation::Replay(decode_outcome(
+                outcome,
+            )?));
         }
         if self.status != DurableRemoteJournalStatus::Writable {
             return Err(DurableRemoteError::NotWritable(self.status));
@@ -716,26 +924,44 @@ impl<F: JournalIo> Journal<F> {
         // Once the count reaches one, no outstanding token can reappear while
         // this mutable borrow excludes admission. Refuse live original owners
         // and competing resolvers instead of racing their terminal publication.
-        if Arc::strong_count(&self.instance) != 1 { return Err(DurableRemoteError::Busy); }
+        if Arc::strong_count(&self.instance) != 1 {
+            return Err(DurableRemoteError::Busy);
+        }
         let _ = add64(now, self.config.limits.retention_ms)?;
-        Ok(DurableRemoteReconciliation::Pending(DurableRemoteReconciliationPermit {
-            reservation: DurableRemoteReservation {
-                instance: Arc::clone(&self.instance), peer: peer.clone(), key,
-                sequence: entry.reservation_sequence,
+        Ok(DurableRemoteReconciliation::Pending(
+            DurableRemoteReconciliationPermit {
+                reservation: DurableRemoteReservation {
+                    instance: Arc::clone(&self.instance),
+                    peer: peer.clone(),
+                    key,
+                    sequence: entry.reservation_sequence,
+                },
+                input_len,
+                digest,
+                schema: self.config.schema,
+                application_version: self.config.application_version,
             },
-            input_len, digest, schema: self.config.schema,
-            application_version: self.config.application_version,
-        }))
+        ))
     }
 
-    fn complete_reconciliation(&mut self, permit: DurableRemoteReconciliationPermit,
-        outcome: RemoteOutcome, now: u64) -> Result<RemoteOutcome, DurableRemoteError>
-    {
+    fn complete_reconciliation(
+        &mut self,
+        permit: DurableRemoteReconciliationPermit,
+        outcome: RemoteOutcome,
+        now: u64,
+    ) -> Result<RemoteOutcome, DurableRemoteError> {
         if !Arc::ptr_eq(&permit.reservation.instance, &self.instance)
             || permit.schema != self.config.schema
             || permit.application_version != self.config.application_version
-        { return Err(DurableRemoteError::InvalidReservation); }
-        let entry = self.entries.get(&(permit.reservation.peer.clone(), permit.reservation.key.raw()))
+        {
+            return Err(DurableRemoteError::InvalidReservation);
+        }
+        let entry = self
+            .entries
+            .get(&(
+                permit.reservation.peer.clone(),
+                permit.reservation.key.raw(),
+            ))
             .ok_or(DurableRemoteError::InvalidReservation)?;
         if entry.input_len != permit.input_len || entry.digest != permit.digest {
             return Err(DurableRemoteError::InvalidReservation);
@@ -743,52 +969,92 @@ impl<F: JournalIo> Journal<F> {
         self.complete(permit.reservation, outcome, now)
     }
 
-    fn complete(&mut self, reservation: DurableRemoteReservation, outcome: RemoteOutcome, now: u64)
-        -> Result<RemoteOutcome, DurableRemoteError>
-    {
-        if !Arc::ptr_eq(&reservation.instance, &self.instance) { return Err(DurableRemoteError::InvalidReservation); }
-        if self.status != DurableRemoteJournalStatus::Writable { return Err(DurableRemoteError::NotWritable(self.status)); }
+    fn complete(
+        &mut self,
+        reservation: DurableRemoteReservation,
+        outcome: RemoteOutcome,
+        now: u64,
+    ) -> Result<RemoteOutcome, DurableRemoteError> {
+        if !Arc::ptr_eq(&reservation.instance, &self.instance) {
+            return Err(DurableRemoteError::InvalidReservation);
+        }
+        if self.status != DurableRemoteJournalStatus::Writable {
+            return Err(DurableRemoteError::NotWritable(self.status));
+        }
         self.observe(now)?;
         let id = (reservation.peer.clone(), reservation.key.raw());
-        let entry = self.entries.get(&id).ok_or(DurableRemoteError::InvalidReservation)?;
-        if entry.reservation_sequence != reservation.sequence || !matches!(&entry.state, EntryState::Pending) {
+        let entry = self
+            .entries
+            .get(&id)
+            .ok_or(DurableRemoteError::InvalidReservation)?;
+        if entry.reservation_sequence != reservation.sequence
+            || !matches!(&entry.state, EntryState::Pending)
+        {
             return Err(DurableRemoteError::InvalidReservation);
         }
         let expires_at = add64(now, self.config.limits.retention_ms)?;
         let (encoded, decoded) = encode_outcome(outcome, self.config.limits.max_outcome_bytes)?;
-        let reserved = self.reserved_terminal_bytes.checked_sub(self.terminal_reservation(&reservation.peer)?)
+        let reserved = self
+            .reserved_terminal_bytes
+            .checked_sub(self.terminal_reservation(&reservation.peer)?)
             .ok_or(DurableRemoteError::Format)?;
-        let retained = self.retained_bytes.checked_sub(self.config.limits.max_outcome_bytes)
-            .and_then(|bytes| bytes.checked_add(encoded.capacity())).ok_or(DurableRemoteError::Format)?;
+        let retained = self
+            .retained_bytes
+            .checked_sub(self.config.limits.max_outcome_bytes)
+            .and_then(|bytes| bytes.checked_add(encoded.capacity()))
+            .ok_or(DurableRemoteError::Format)?;
         let payload_size = add(TERMINAL_BYTES, encoded.len())?;
-        let required = add64(add64(self.offset, record_size(reservation.peer.as_str().len(), payload_size)?)?, reserved)?;
-        if required > self.config.limits.max_journal_bytes { return Err(DurableRemoteError::Limit); }
+        let required = add64(
+            add64(
+                self.offset,
+                record_size(reservation.peer.as_str().len(), payload_size)?,
+            )?,
+            reserved,
+        )?;
+        if required > self.config.limits.max_journal_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         let mut payload = buffer(payload_size)?;
         payload.extend_from_slice(&reservation.sequence.to_le_bytes());
         payload.extend_from_slice(&expires_at.to_le_bytes());
         payload.extend_from_slice(&size64(encoded.len())?.to_le_bytes());
         payload.extend_from_slice(&encoded);
         self.append_record(COMPLETE, &reservation.peer, reservation.key, &payload, now)?;
-        self.entries.get_mut(&id).expect("validated pending reservation").state = EntryState::Terminal {
-            expires_at, completion_sequence: self.sequence, outcome: encoded,
+        self.entries
+            .get_mut(&id)
+            .expect("validated pending reservation")
+            .state = EntryState::Terminal {
+            expires_at,
+            completion_sequence: self.sequence,
+            outcome: encoded,
         };
         self.retained_bytes = retained;
         self.reserved_terminal_bytes = reserved;
         Ok(decoded)
     }
 
-    fn append_record(&mut self, kind: u8, peer: &NodeId, key: IdempotencyKey, payload: &[u8], now: u64)
-        -> Result<(), DurableRemoteError>
-    {
+    fn append_record(
+        &mut self,
+        kind: u8,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        payload: &[u8],
+        now: u64,
+    ) -> Result<(), DurableRemoteError> {
         let sequence = add64(self.sequence, 1)?;
         let body_len = add(add(COMMON_BYTES, peer.as_str().len())?, payload.len())?;
         let size = add(PREFIX_BYTES + TAG_BYTES, body_len)?;
         let end = add64(self.offset, size64(size)?)?;
-        if end > self.config.limits.max_journal_bytes { return Err(DurableRemoteError::Limit); }
+        if end > self.config.limits.max_journal_bytes {
+            return Err(DurableRemoteError::Limit);
+        }
         let mut record = buffer(size)?;
         record.extend_from_slice(&size64(body_len)?.to_le_bytes());
-        let length_tag = AuthenticationTag::compute_for_domain_payload(&self.config.key, LENGTH_DOMAIN,
-            &prefix_payload(size64(body_len)?, sequence, self.last));
+        let length_tag = AuthenticationTag::compute_for_domain_payload(
+            &self.config.key,
+            LENGTH_DOMAIN,
+            &prefix_payload(size64(body_len)?, sequence, self.last),
+        );
         record.extend_from_slice(length_tag.as_bytes());
         record.extend_from_slice(&sequence.to_le_bytes());
         record.extend_from_slice(self.last.as_bytes());
@@ -798,7 +1064,8 @@ impl<F: JournalIo> Journal<F> {
         record.extend_from_slice(&key.raw().to_le_bytes());
         record.extend_from_slice(peer.as_str().as_bytes());
         record.extend_from_slice(payload);
-        let tag = AuthenticationTag::compute_for_domain_payload(&self.config.key, RECORD_DOMAIN, &record);
+        let tag =
+            AuthenticationTag::compute_for_domain_payload(&self.config.key, RECORD_DOMAIN, &record);
         record.extend_from_slice(tag.as_bytes());
         debug_assert_eq!(record.len(), size);
         self.status = DurableRemoteJournalStatus::Poisoned;
@@ -814,16 +1081,27 @@ impl<F: JournalIo> Journal<F> {
         Ok(())
     }
 
-    fn replay_record(&mut self, body: &[u8], sequence: u64, size: u64) -> Result<(), DurableRemoteError> {
-        let mut cursor = Cursor { bytes: body, position: 0 };
+    fn replay_record(
+        &mut self,
+        body: &[u8],
+        sequence: u64,
+        size: u64,
+    ) -> Result<(), DurableRemoteError> {
+        let mut cursor = Cursor {
+            bytes: body,
+            position: 0,
+        };
         if cursor.number()? != sequence || cursor.take(TAG_BYTES)? != self.last.as_bytes() {
             return Err(DurableRemoteError::Format);
         }
         let now = cursor.number()?;
         let kind = cursor.take(1)?[0];
         let peer_len = usize::from(cursor.take(1)?[0]);
-        let key = IdempotencyKey::from_raw(u128::from_le_bytes(cursor.take(16)?.try_into().expect("key")));
-        let peer = std::str::from_utf8(cursor.take(peer_len)?).map_err(|_| DurableRemoteError::Format)?;
+        let key = IdempotencyKey::from_raw(u128::from_le_bytes(
+            cursor.take(16)?.try_into().expect("key"),
+        ));
+        let peer =
+            std::str::from_utf8(cursor.take(peer_len)?).map_err(|_| DurableRemoteError::Format)?;
         if kind == CLOCK_FLOOR {
             // A compaction floor has no request identity or payload. Accept
             // only its canonical authenticated encoding, and preserve every
@@ -839,7 +1117,9 @@ impl<F: JournalIo> Journal<F> {
             }
             return Ok(());
         }
-        if !valid_label(peer) { return Err(DurableRemoteError::Format); }
+        if !valid_label(peer) {
+            return Err(DurableRemoteError::Format);
+        }
         let peer = NodeId::new(peer);
         self.observe(now)?;
         let id = (peer.clone(), key.raw());
@@ -847,26 +1127,44 @@ impl<F: JournalIo> Journal<F> {
             RESERVE => {
                 let input_len = cursor.number()?;
                 let digest = cursor.take(32)?.try_into().expect("digest");
-                if !cursor.done() || input_len > size64(self.config.limits.max_input_bytes)? || self.entries.contains_key(&id) {
+                if !cursor.done()
+                    || input_len > size64(self.config.limits.max_input_bytes)?
+                    || self.entries.contains_key(&id)
+                {
                     return Err(DurableRemoteError::Format);
                 }
                 let _ = add64(now, self.config.limits.retention_ms)?;
                 let (retained, reserved) = self.pending_capacity(&peer, size)?;
-                self.entries.insert(id, Entry { input_len, digest, reservation_sequence: sequence, state: EntryState::Pending });
+                self.entries.insert(
+                    id,
+                    Entry {
+                        input_len,
+                        digest,
+                        reservation_sequence: sequence,
+                        state: EntryState::Pending,
+                    },
+                );
                 self.retained_bytes = retained;
                 self.reserved_terminal_bytes = reserved;
             }
             COMPLETE => {
                 let reservation_sequence = cursor.number()?;
                 let expires_at = cursor.number()?;
-                let outcome_len = usize::try_from(cursor.number()?).map_err(|_| DurableRemoteError::Limit)?;
-                if outcome_len > self.config.limits.max_outcome_bytes || expires_at != add64(now, self.config.limits.retention_ms)? {
+                let outcome_len =
+                    usize::try_from(cursor.number()?).map_err(|_| DurableRemoteError::Limit)?;
+                if outcome_len > self.config.limits.max_outcome_bytes
+                    || expires_at != add64(now, self.config.limits.retention_ms)?
+                {
                     return Err(DurableRemoteError::Format);
                 }
                 let outcome = cursor.take(outcome_len)?;
-                if !cursor.done() { return Err(DurableRemoteError::Format); }
+                if !cursor.done() {
+                    return Err(DurableRemoteError::Format);
+                }
                 let entry = self.entries.get(&id).ok_or(DurableRemoteError::Format)?;
-                if entry.reservation_sequence != reservation_sequence || !matches!(&entry.state, EntryState::Pending) {
+                if entry.reservation_sequence != reservation_sequence
+                    || !matches!(&entry.state, EntryState::Pending)
+                {
                     return Err(DurableRemoteError::Format);
                 }
                 let _ = decode_outcome(outcome)?;
@@ -874,15 +1172,27 @@ impl<F: JournalIo> Journal<F> {
                 if encoded.capacity() > self.config.limits.max_outcome_bytes {
                     return Err(DurableRemoteError::Limit);
                 }
-                let reserved = self.reserved_terminal_bytes.checked_sub(self.terminal_reservation(&peer)?)
+                let reserved = self
+                    .reserved_terminal_bytes
+                    .checked_sub(self.terminal_reservation(&peer)?)
                     .ok_or(DurableRemoteError::Format)?;
-                let retained = self.retained_bytes.checked_sub(self.config.limits.max_outcome_bytes)
-                    .and_then(|bytes| bytes.checked_add(encoded.capacity())).ok_or(DurableRemoteError::Format)?;
-                if add64(add64(self.offset, size)?, reserved)? > self.config.limits.max_journal_bytes {
+                let retained = self
+                    .retained_bytes
+                    .checked_sub(self.config.limits.max_outcome_bytes)
+                    .and_then(|bytes| bytes.checked_add(encoded.capacity()))
+                    .ok_or(DurableRemoteError::Format)?;
+                if add64(add64(self.offset, size)?, reserved)?
+                    > self.config.limits.max_journal_bytes
+                {
                     return Err(DurableRemoteError::Limit);
                 }
-                self.entries.get_mut(&id).expect("validated pending entry").state = EntryState::Terminal {
-                    expires_at, completion_sequence: sequence, outcome: encoded,
+                self.entries
+                    .get_mut(&id)
+                    .expect("validated pending entry")
+                    .state = EntryState::Terminal {
+                    expires_at,
+                    completion_sequence: sequence,
+                    outcome: encoded,
                 };
                 self.retained_bytes = retained;
                 self.reserved_terminal_bytes = reserved;

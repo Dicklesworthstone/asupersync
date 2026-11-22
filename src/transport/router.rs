@@ -14,6 +14,7 @@ use crate::messaging::capability::FabricCapability;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::sync::Mutex;
 use crate::sync::OwnedMutexGuard;
+use crate::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, TaskId, Time};
@@ -21,7 +22,6 @@ use parking_lot::{Mutex as ParkingMutex, RwLock};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<EndpointSinkSlot>>;
 

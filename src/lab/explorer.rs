@@ -683,12 +683,8 @@ impl ScheduleExplorer {
         let steps = runtime.steps();
 
         // Compute trace fingerprint.
-        let trace_events = complete_trace(
-            &runtime,
-            seed,
-            "seed-sweep",
-            &mut self.incomplete_capture,
-        );
+        let trace_events =
+            complete_trace(&runtime, seed, "seed-sweep", &mut self.incomplete_capture);
         let fingerprint = if trace_events.is_empty() {
             // Use seed as fingerprint if no trace events (recording disabled).
             seed

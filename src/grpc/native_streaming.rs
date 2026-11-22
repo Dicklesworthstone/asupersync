@@ -15,7 +15,9 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder as _;
 use crate::cx::Cx;
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use crate::http::h2::{Connection, ConnectionState, ErrorCode, Frame, FrameCodec, Header, Settings};
+use crate::http::h2::{
+    Connection, ConnectionState, ErrorCode, Frame, FrameCodec, Header, Settings,
+};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
@@ -161,18 +163,30 @@ where
         let now = clock.now();
         let deadline = call_deadline(cx, request.metadata(), config, now)?;
         if deadline.is_some_and(|at| now >= at) {
-            return Err(Status::deadline_exceeded("gRPC call expired before dispatch"));
+            return Err(Status::deadline_exceeded(
+                "gRPC call expired before dispatch",
+            ));
         }
         let (mut codec, accepted) = configured_codec(codec, config)?;
         let mut body = BytesMut::new();
-        codec.encode_message(request.get_ref(), &mut body).map_err(GrpcError::into_status)?;
+        codec
+            .encode_message(request.get_ref(), &mut body)
+            .map_err(GrpcError::into_status)?;
         // Encoding is synchronous user code and can consume the remaining time.
         caller_status(cx)?;
         if deadline.is_some_and(|at| clock.now() >= at) {
-            return Err(Status::deadline_exceeded("gRPC call expired during encoding"));
+            return Err(Status::deadline_exceeded(
+                "gRPC call expired during encoding",
+            ));
         }
         let headers = request_headers(
-            scheme, authority, path, request.metadata(), config, deadline, clock.now(),
+            scheme,
+            authority,
+            path,
+            request.metadata(),
+            config,
+            deadline,
+            clock.now(),
         )?;
         let mut settings = Settings::client();
         settings.initial_window_size = config.initial_stream_window_size;
@@ -180,16 +194,21 @@ where
         settings.max_concurrent_streams = 1;
         let mut connection = Connection::client(settings);
         connection.queue_initial_settings();
-        connection.set_initial_connection_recv_window(config.initial_connection_window_size)
+        connection
+            .set_initial_connection_recv_window(config.initial_connection_window_size)
             .map_err(|_| Status::invalid_argument("invalid gRPC connection receive window"))?;
-        let stream_id = connection.open_stream(headers, false)
+        let stream_id = connection
+            .open_stream(headers, false)
             .map_err(|_| Status::internal("cannot open gRPC response stream"))?;
-        connection.send_data(stream_id, body.freeze(), true)
+        connection
+            .send_data(stream_id, body.freeze(), true)
             .map_err(|_| Status::internal("cannot queue gRPC request"))?;
         let owner = cx.clone();
         let cancel_owner = owner.clone();
         let header_deadline = now + config.connect_timeout;
-        let max_buffer = config.max_recv_message_size.checked_add(5 + FRAME_BYTES)
+        let max_buffer = config
+            .max_recv_message_size
+            .checked_add(5 + FRAME_BYTES)
             .ok_or_else(|| Status::invalid_argument("gRPC receive limit overflows"))?;
         owner.trace("grpc.client_stream.request_queued");
         Ok(Self {
@@ -204,7 +223,9 @@ where
             response: ResponseState::new(accepted),
             stream_id,
             owner,
-            cancelled: Box::pin(async move { let _ = cancel_owner.cancelled().await; }),
+            cancelled: Box::pin(async move {
+                let _ = cancel_owner.cancelled().await;
+            }),
             timer: deadline.map(|at| Sleep::with_timer_driver(at, clock.clone())),
             header_timer: Some(Sleep::with_timer_driver(header_deadline, clock.clone())),
             header_deadline,
@@ -222,19 +243,25 @@ where
 
     /// Initial response metadata, separate from the eventual trailers.
     #[must_use]
-    pub fn initial_metadata(&self) -> &Metadata { &self.response.initial }
+    pub fn initial_metadata(&self) -> &Metadata {
+        &self.response.initial
+    }
 
     /// Trailers after their HEADERS block was received. An error or early EOF
     /// can terminate without a trailer block; absence is not an OK status.
     #[must_use]
     pub fn trailing_metadata(&self) -> Option<&Metadata> {
-        self.response.trailers_received.then_some(&self.response.trailers)
+        self.response
+            .trailers_received
+            .then_some(&self.response.trailers)
     }
 
     /// Final observed status, including local cancellation or protocol failure.
     /// `None` means the caller has not yet collected a terminal observation.
     #[must_use]
-    pub fn terminal_status(&self) -> Option<&Status> { self.terminal.as_ref() }
+    pub fn terminal_status(&self) -> Option<&Status> {
+        self.terminal.as_ref()
+    }
 
     /// Receive one message. Dropping this borrowing wait preserves transport
     /// progress; the next call resumes instead of replaying request bytes.
@@ -254,9 +281,14 @@ where
     }
 
     fn retire(&mut self, status: Status) {
-        if self.ended { return; }
+        if self.ended {
+            return;
+        }
         self.ended = true;
-        self.owner.trace(&format!("grpc.client_stream.terminal code={:?}", status.code()));
+        self.owner.trace(&format!(
+            "grpc.client_stream.terminal code={:?}",
+            status.code()
+        ));
         self.terminal = Some(status);
         drop(self.io.take());
         self.inbound = BytesMut::new();
@@ -278,7 +310,10 @@ where
             return Err(cancel_status(&self.owner));
         }
         if self.deadline.is_some_and(|at| self.clock.now() >= at)
-            || self.timer.as_mut().is_some_and(|timer| Pin::new(timer).poll(task).is_ready())
+            || self
+                .timer
+                .as_mut()
+                .is_some_and(|timer| Pin::new(timer).poll(task).is_ready())
         {
             return Err(Status::deadline_exceeded("gRPC stream deadline exceeded"));
         }
@@ -295,7 +330,10 @@ where
         if !self.response.headers_received
             && self.header_timer.is_some()
             && (self.clock.now() >= self.header_deadline
-                || self.header_timer.as_mut().is_some_and(|timer| Pin::new(timer).poll(task).is_ready()))
+                || self
+                    .header_timer
+                    .as_mut()
+                    .is_some_and(|timer| Pin::new(timer).poll(task).is_ready()))
         {
             return Err(Status::deadline_exceeded("gRPC response headers timed out"));
         }
@@ -307,9 +345,17 @@ where
             self.keepalive = None;
             return Ok(());
         }
-        let expired = self.keepalive.as_mut().and_then(|probe| probe.poll(task).err());
-        let Some(error) = expired else { return Ok(()); };
-        let recover_ack = self.keepalive.as_ref().is_some_and(Keepalive::can_recover_ack);
+        let expired = self
+            .keepalive
+            .as_mut()
+            .and_then(|probe| probe.poll(task).err());
+        let Some(error) = expired else {
+            return Ok(());
+        };
+        let recover_ack = self
+            .keepalive
+            .as_ref()
+            .is_some_and(Keepalive::can_recover_ack);
         if !recover_ack {
             self.keepalive = None;
         }
@@ -320,8 +366,7 @@ where
         // nor a full response buffer extends the acknowledgement allowance.
         for _ in 0..BLOCKED_WRITE_EVENTS {
             self.check_stop(task)?;
-            if self.response.ended
-                || self.body.len().saturating_add(FRAME_BYTES) > self.max_buffer
+            if self.response.ended || self.body.len().saturating_add(FRAME_BYTES) > self.max_buffer
             {
                 break;
             }
@@ -363,7 +408,9 @@ where
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(io_status(error))),
                     Poll::Ready(Ok(n)) if n == 0 || n > remaining.len() => {
-                        return Poll::Ready(Err(Status::unavailable("invalid transport write progress")));
+                        return Poll::Ready(Err(Status::unavailable(
+                            "invalid transport write progress",
+                        )));
                     }
                     Poll::Ready(Ok(n)) => self.written += n,
                 }
@@ -374,7 +421,9 @@ where
             // A probe follows the initial SETTINGS and can only enter at a
             // complete frame boundary outside a HEADERS/CONTINUATION block.
             let probe = if self.outbound_allows_probe {
-                self.keepalive.as_mut().and_then(|probe| probe.take_probe(task))
+                self.keepalive
+                    .as_mut()
+                    .and_then(|probe| probe.take_probe(task))
             } else {
                 None
             };
@@ -382,20 +431,30 @@ where
                 match &frame {
                     Frame::Settings(settings) if !settings.ack => self.outbound_allows_probe = true,
                     Frame::Headers(headers) => self.outbound_allows_probe = headers.end_headers,
-                    Frame::Continuation(continuation) => self.outbound_allows_probe = continuation.end_headers,
+                    Frame::Continuation(continuation) => {
+                        self.outbound_allows_probe = continuation.end_headers
+                    }
                     _ => {}
                 }
-                frame.encode(&mut self.outbound)
+                frame
+                    .encode(&mut self.outbound)
                     .map_err(|_| Status::internal("cannot encode outbound HTTP/2 frame"))?;
             } else {
-                return io.as_mut().poll_flush(task).map(|result| result.map_err(io_status));
+                return io
+                    .as_mut()
+                    .poll_flush(task)
+                    .map(|result| result.map_err(io_status));
             }
         }
         task.waker().wake_by_ref();
         Poll::Pending
     }
 
-    fn poll_progress(&mut self, task: &mut Context<'_>, headers_only: bool) -> Poll<Result<(), Status>> {
+    fn poll_progress(
+        &mut self,
+        task: &mut Context<'_>,
+        headers_only: bool,
+    ) -> Poll<Result<(), Status>> {
         for _ in 0..POLL_STEPS {
             self.check_stop(task)?;
             let previous_body_bytes = self.body.len();
@@ -413,7 +472,10 @@ where
             // Let the caller decode before reading further frames. Incomplete
             // envelopes return here only after new DATA, avoiding a busy loop.
             let writes_pending = match self.poll_writes(task) {
-                Poll::Ready(Ok(())) => { self.unflushed_events = 0; false }
+                Poll::Ready(Ok(())) => {
+                    self.unflushed_events = 0;
+                    false
+                }
                 Poll::Ready(Err(status)) => return Poll::Ready(Err(status)),
                 Poll::Pending => true,
             };
@@ -426,7 +488,9 @@ where
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(status)) => return Poll::Ready(Err(status)),
                 Poll::Ready(Ok(())) => {
-                    if self.response.headers_received && (headers_only || !self.body.is_empty() || self.response.ended) {
+                    if self.response.headers_received
+                        && (headers_only || !self.body.is_empty() || self.response.ended)
+                    {
                         return Poll::Ready(Ok(()));
                     }
                 }
@@ -443,14 +507,18 @@ where
             return Poll::Pending;
         }
         for _ in 0..POLL_STEPS {
-            if let Some(frame) = self.frames.decode(&mut self.inbound)
+            if let Some(frame) = self
+                .frames
+                .decode(&mut self.inbound)
                 .map_err(|_| Status::internal("invalid HTTP/2 response frame"))?
             {
                 self.unflushed_events += 1;
                 if let Some(probe) = &mut self.keepalive {
                     probe.observe(&frame)?;
                 }
-                if let Some(event) = self.connection.process_frame(frame)
+                if let Some(event) = self
+                    .connection
+                    .process_frame(frame)
                     .map_err(|_| Status::internal("invalid HTTP/2 response state"))?
                 {
                     self.observe(event)?;
@@ -459,11 +527,19 @@ where
             }
             let mut chunk = [0_u8; 8192];
             let mut read = ReadBuf::new(&mut chunk);
-            match self.io.as_mut().expect("live transport").as_mut().poll_read(task, &mut read) {
+            match self
+                .io
+                .as_mut()
+                .expect("live transport")
+                .as_mut()
+                .poll_read(task, &mut read)
+            {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(io_status(error))),
                 Poll::Ready(Ok(())) if read.filled().is_empty() => {
-                    return Poll::Ready(Err(Status::unavailable("HTTP/2 EOF before gRPC terminal status")));
+                    return Poll::Ready(Err(Status::unavailable(
+                        "HTTP/2 EOF before gRPC terminal status",
+                    )));
                 }
                 Poll::Ready(Ok(())) => self.inbound.extend_from_slice(read.filled()),
             }
@@ -474,35 +550,55 @@ where
 
     fn observe(&mut self, event: ReceivedFrame) -> Result<(), Status> {
         match event {
-            ReceivedFrame::Headers { stream_id, headers, end_stream } if stream_id == self.stream_id => {
+            ReceivedFrame::Headers {
+                stream_id,
+                headers,
+                end_stream,
+            } if stream_id == self.stream_id => {
                 self.response.headers(headers, end_stream)?;
-                if self.response.headers_received { self.header_timer = None; }
+                if self.response.headers_received {
+                    self.header_timer = None;
+                }
                 Ok(())
             }
-            ReceivedFrame::Data { stream_id, data, end_stream } if stream_id == self.stream_id => {
+            ReceivedFrame::Data {
+                stream_id,
+                data,
+                end_stream,
+            } if stream_id == self.stream_id => {
                 if !self.response.headers_received || self.response.ended {
                     return Err(Status::internal("gRPC DATA outside response body"));
                 }
                 if self.body.len().saturating_add(data.len()) > self.max_buffer {
-                    return Err(Status::resource_exhausted("gRPC response buffer limit exceeded"));
+                    return Err(Status::resource_exhausted(
+                        "gRPC response buffer limit exceeded",
+                    ));
                 }
                 self.body.extend_from_slice(&data);
                 self.response.ended = end_stream;
                 Ok(())
             }
-            ReceivedFrame::Reset { stream_id, error_code } if stream_id == self.stream_id => {
-                Err(Status::from_h2_rst_stream_code(error_code))
-            }
-            ReceivedFrame::GoAway { last_stream_id, error_code, debug_data } => {
+            ReceivedFrame::Reset {
+                stream_id,
+                error_code,
+            } if stream_id == self.stream_id => Err(Status::from_h2_rst_stream_code(error_code)),
+            ReceivedFrame::GoAway {
+                last_stream_id,
+                error_code,
+                debug_data,
+            } => {
                 if error_code == ErrorCode::EnhanceYourCalm
                     && debug_data.as_ref() == b"too_many_pings"
                     && let Some(backoff) = self.keepalive_backoff.take()
                 {
                     let (previous, next) = backoff.back_off();
-                    self.owner.trace_with_fields("grpc.keepalive_backoff", &[
-                        ("previous_interval_ns", &previous.as_nanos().to_string()),
-                        ("next_interval_ns", &next.as_nanos().to_string()),
-                    ]);
+                    self.owner.trace_with_fields(
+                        "grpc.keepalive_backoff",
+                        &[
+                            ("previous_interval_ns", &previous.as_nanos().to_string()),
+                            ("next_interval_ns", &next.as_nanos().to_string()),
+                        ],
+                    );
                 }
                 if last_stream_id < self.stream_id || error_code != ErrorCode::NoError {
                     Err(Status::unavailable("HTTP/2 GOAWAY rejected this gRPC call"))
@@ -522,24 +618,39 @@ where
 {
     type Message = C::Decode;
 
-    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Result<C::Decode, Status>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<C::Decode, Status>>> {
         let this = self.get_mut();
-        if this.ended { return Poll::Ready(None); }
+        if this.ended {
+            return Poll::Ready(None);
+        }
         let _ambient = Cx::set_current(Some(this.owner.clone()));
         for _ in 0..POLL_STEPS {
             let result = (|| {
                 this.check_stop(task)?;
                 this.check_keepalive(task)?;
-                match this.codec.decode_message_with_negotiated_encoding(&mut this.body, this.response.encoding.as_deref())
+                match this
+                    .codec
+                    .decode_message_with_negotiated_encoding(
+                        &mut this.body,
+                        this.response.encoding.as_deref(),
+                    )
                     .map_err(GrpcError::into_status)?
                 {
                     Some(message) => return Ok(Some(message)),
                     None if this.response.ended => {
-                        if !this.body.is_empty() { return Err(Status::internal("truncated terminal gRPC message")); }
-                        let status = this.response.status.clone()
-                            .ok_or_else(|| Status::internal("gRPC response omitted terminal grpc-status"))?;
+                        if !this.body.is_empty() {
+                            return Err(Status::internal("truncated terminal gRPC message"));
+                        }
+                        let status = this.response.status.clone().ok_or_else(|| {
+                            Status::internal("gRPC response omitted terminal grpc-status")
+                        })?;
                         this.retire(status.clone());
-                        if status.code() != Code::Ok { return Err(status); }
+                        if status.code() != Code::Ok {
+                            return Err(status);
+                        }
                     }
                     None => {}
                 }
@@ -583,36 +694,65 @@ struct ResponseState {
 impl ResponseState {
     fn new(accepted: Vec<CompressionEncoding>) -> Self {
         Self {
-            headers_received: false, trailers_received: false,
-            initial: Metadata::new(), trailers: Metadata::new(), encoding: None,
-            accepted, status: None, ended: false, informational: 0,
+            headers_received: false,
+            trailers_received: false,
+            initial: Metadata::new(),
+            trailers: Metadata::new(),
+            encoding: None,
+            accepted,
+            status: None,
+            ended: false,
+            informational: 0,
         }
     }
 
     fn headers(&mut self, headers: Vec<Header>, end_stream: bool) -> Result<(), Status> {
-        if self.ended { return Err(Status::internal("headers after gRPC completion")); }
+        if self.ended {
+            return Err(Status::internal("headers after gRPC completion"));
+        }
         let mut size = 0usize;
         for header in &headers {
-            size = size.checked_add(header.name.len()).and_then(|n| n.checked_add(header.value.len()))
+            size = size
+                .checked_add(header.name.len())
+                .and_then(|n| n.checked_add(header.value.len()))
                 .and_then(|n| n.checked_add(32))
                 .ok_or_else(|| Status::resource_exhausted("gRPC metadata length overflow"))?;
         }
-        if size > METADATA_BYTES { return Err(Status::resource_exhausted("gRPC metadata limit exceeded")); }
+        if size > METADATA_BYTES {
+            return Err(Status::resource_exhausted("gRPC metadata limit exceeded"));
+        }
         let initial = !self.headers_received;
         if initial {
-            let status = unique(&headers, ":status")?.ok_or_else(|| Status::internal("missing HTTP status"))?;
-            let code = status.parse::<u16>().map_err(|_| Status::internal("malformed HTTP status"))?;
+            let status = unique(&headers, ":status")?
+                .ok_or_else(|| Status::internal("missing HTTP status"))?;
+            let code = status
+                .parse::<u16>()
+                .map_err(|_| Status::internal("malformed HTTP status"))?;
             if (100..200).contains(&code) && code != 101 {
                 self.informational += 1;
-                if end_stream || self.informational > 8 || headers.iter().any(|h| h.name.starts_with("grpc-")) {
+                if end_stream
+                    || self.informational > 8
+                    || headers.iter().any(|h| h.name.starts_with("grpc-"))
+                {
                     return Err(Status::internal("invalid informational gRPC response"));
                 }
                 return Ok(());
             }
-            if code != 200 { return Err(http_status(code)); }
+            if code != 200 {
+                return Err(http_status(code));
+            }
             let content = unique(&headers, "content-type")?.unwrap_or("");
-            let media = content.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            if media != "application/grpc" && media.strip_prefix("application/grpc+").is_none_or(|suffix| suffix.is_empty()) {
+            let media = content
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if media != "application/grpc"
+                && media
+                    .strip_prefix("application/grpc+")
+                    .is_none_or(|suffix| suffix.is_empty())
+            {
                 return Err(Status::internal("response is not native gRPC"));
             }
             // A trailers-only response carries no message, so an encoding this
@@ -626,7 +766,11 @@ impl ResponseState {
                 self.encoding = Some(encoding.to_owned());
             }
             self.headers_received = true;
-        } else if !end_stream || headers.iter().any(|h| h.name.starts_with(':') || h.name == "content-type" || h.name == "grpc-encoding") {
+        } else if !end_stream
+            || headers.iter().any(|h| {
+                h.name.starts_with(':') || h.name == "content-type" || h.name == "grpc-encoding"
+            })
+        {
             return Err(Status::internal("invalid gRPC trailing header block"));
         }
         let code = unique(&headers, "grpc-status")?;
@@ -640,9 +784,16 @@ impl ResponseState {
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(Status::internal("malformed grpc-status"));
             }
-            let code = raw.parse::<i32>().ok().map(Code::from_i32)
+            let code = raw
+                .parse::<i32>()
+                .ok()
+                .map(Code::from_i32)
                 .ok_or_else(|| Status::internal("unknown grpc-status"))?;
-            let message = message.map(super::status::percent_decode_grpc_message).transpose().map_err(GrpcError::into_status)?.unwrap_or_default();
+            let message = message
+                .map(super::status::percent_decode_grpc_message)
+                .transpose()
+                .map_err(GrpcError::into_status)?
+                .unwrap_or_default();
             self.status = Some(match details {
                 Some(details) => Status::with_details(code, message, decode_binary(details)?),
                 None => Status::new(code, message),
@@ -650,10 +801,23 @@ impl ResponseState {
             self.trailers_received = true;
             self.ended = true;
         }
-        let metadata = if end_stream { &mut self.trailers } else { &mut self.initial };
+        let metadata = if end_stream {
+            &mut self.trailers
+        } else {
+            &mut self.initial
+        };
         let mut retained = 0usize;
         for header in headers {
-            if header.name.starts_with(':') || matches!(header.name.as_str(), "content-type" | "grpc-encoding" | "grpc-status" | "grpc-message" | "grpc-status-details-bin") {
+            if header.name.starts_with(':')
+                || matches!(
+                    header.name.as_str(),
+                    "content-type"
+                        | "grpc-encoding"
+                        | "grpc-status"
+                        | "grpc-message"
+                        | "grpc-status-details-bin"
+                )
+            {
                 continue;
             }
             if header.name.ends_with("-bin") {
@@ -680,21 +844,28 @@ impl ResponseState {
 fn unique<'a>(headers: &'a [Header], name: &str) -> Result<Option<&'a str>, Status> {
     let mut values = headers.iter().filter(|h| h.name == name);
     let value = values.next().map(|h| h.value.as_str());
-    if values.next().is_some() { return Err(Status::internal("duplicate gRPC transport header")); }
+    if values.next().is_some() {
+        return Err(Status::internal("duplicate gRPC transport header"));
+    }
     Ok(value)
 }
 
 fn charge_metadata(total: &mut usize, name: &str, value: &str) -> Result<(), Status> {
-    *total = total.checked_add(name.len()).and_then(|n| n.checked_add(value.len()))
-        .and_then(|n| n.checked_add(32)).filter(|n| *n <= METADATA_BYTES)
+    *total = total
+        .checked_add(name.len())
+        .and_then(|n| n.checked_add(value.len()))
+        .and_then(|n| n.checked_add(32))
+        .filter(|n| *n <= METADATA_BYTES)
         .ok_or_else(|| Status::resource_exhausted("expanded gRPC metadata limit exceeded"))?;
     Ok(())
 }
 
 fn decode_binary(value: &str) -> Result<Bytes, Status> {
-    base64::engine::general_purpose::STANDARD.decode(value)
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
-        .map(Bytes::from).map_err(|_| Status::internal("malformed binary gRPC metadata"))
+        .map(Bytes::from)
+        .map_err(|_| Status::internal("malformed binary gRPC metadata"))
 }
 
 fn http_status(code: u16) -> Status {
@@ -715,23 +886,37 @@ fn caller_status(cx: &Cx) -> Result<(), Status> {
 
 fn cancel_status(cx: &Cx) -> Status {
     match cx.cancel_reason().map(|reason| reason.kind) {
-        Some(CancelKind::Timeout | CancelKind::Deadline) => Status::deadline_exceeded("gRPC caller deadline exceeded"),
-        Some(CancelKind::PollQuota | CancelKind::CostBudget) => Status::resource_exhausted("gRPC caller budget exhausted"),
+        Some(CancelKind::Timeout | CancelKind::Deadline) => {
+            Status::deadline_exceeded("gRPC caller deadline exceeded")
+        }
+        Some(CancelKind::PollQuota | CancelKind::CostBudget) => {
+            Status::resource_exhausted("gRPC caller budget exhausted")
+        }
         _ => Status::cancelled("gRPC caller cancelled"),
     }
 }
 
 fn io_status(error: std::io::Error) -> Status {
-    GrpcError::transport_kind(TransportErrorKind::from_io_error_kind(error.kind()), "gRPC stream transport failed").into_status()
+    GrpcError::transport_kind(
+        TransportErrorKind::from_io_error_kind(error.kind()),
+        "gRPC stream transport failed",
+    )
+    .into_status()
 }
 
 fn validate_config(config: &ChannelConfig) -> Result<(), Status> {
-    if config.connect_timeout.is_zero() || config.initial_stream_window_size == 0
+    if config.connect_timeout.is_zero()
+        || config.initial_stream_window_size == 0
         || config.initial_stream_window_size > 0x7fff_ffff
         || !(65_535..=0x7fff_ffff).contains(&config.initial_connection_window_size)
-        || config.max_recv_message_size.checked_add(5 + FRAME_BYTES).is_none()
+        || config
+            .max_recv_message_size
+            .checked_add(5 + FRAME_BYTES)
+            .is_none()
     {
-        return Err(Status::invalid_argument("invalid native gRPC streaming limits"));
+        return Err(Status::invalid_argument(
+            "invalid native gRPC streaming limits",
+        ));
     }
     Ok(())
 }
@@ -739,7 +924,12 @@ fn validate_config(config: &ChannelConfig) -> Result<(), Status> {
 fn validate_path(path: &str) -> Result<(), Status> {
     let mut parts = path.strip_prefix('/').unwrap_or("").split('/');
     let valid = matches!((parts.next(), parts.next(), parts.next()), (Some(s), Some(m), None) if !s.is_empty() && !m.is_empty());
-    if !valid || path.len() > 4096 || !path.bytes().all(|b| b.is_ascii_graphic() && !matches!(b, b'?' | b'#')) {
+    if !valid
+        || path.len() > 4096
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'?' | b'#'))
+    {
         return Err(Status::invalid_argument("invalid gRPC method path"));
     }
     Ok(())
@@ -756,23 +946,38 @@ fn authority(uri: &str) -> Result<(&str, &str), Status> {
     {
         return Ok(("http", "localhost"));
     }
-    let (scheme, rest) = uri.split_once("://").ok_or_else(|| Status::invalid_argument("invalid gRPC URI"))?;
+    let (scheme, rest) = uri
+        .split_once("://")
+        .ok_or_else(|| Status::invalid_argument("invalid gRPC URI"))?;
     let authority = rest.strip_suffix('/').unwrap_or(rest);
-    if !matches!(scheme, "http" | "https") || authority.is_empty() || authority.len() > 4096
-        || !authority.bytes().all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'?' | b'#' | b'@'))
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority.len() > 4096
+        || !authority
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'/' | b'?' | b'#' | b'@'))
     {
         return Err(Status::invalid_argument("invalid native gRPC authority"));
     }
     Ok((scheme, authority))
 }
 
-fn call_deadline(cx: &Cx, metadata: &Metadata, config: &ChannelConfig, now: Time) -> Result<Option<Time>, Status> {
+fn call_deadline(
+    cx: &Cx,
+    metadata: &Metadata,
+    config: &ChannelConfig,
+    now: Time,
+) -> Result<Option<Time>, Status> {
     let mut timeouts = metadata.iter().filter(|(key, _)| *key == "grpc-timeout");
     let timeout = timeouts.next();
-    if timeouts.next().is_some() { return Err(Status::invalid_argument("duplicate grpc-timeout")); }
+    if timeouts.next().is_some() {
+        return Err(Status::invalid_argument("duplicate grpc-timeout"));
+    }
     let requested = match timeout {
-        Some((_, MetadataValue::Ascii(value))) => Some(parse_grpc_timeout(value)
-            .ok_or_else(|| Status::invalid_argument("malformed grpc-timeout"))?),
+        Some((_, MetadataValue::Ascii(value))) => Some(
+            parse_grpc_timeout(value)
+                .ok_or_else(|| Status::invalid_argument("malformed grpc-timeout"))?,
+        ),
         Some(_) => return Err(Status::invalid_argument("binary grpc-timeout")),
         None => None,
     };
@@ -784,60 +989,131 @@ fn call_deadline(cx: &Cx, metadata: &Metadata, config: &ChannelConfig, now: Time
     Ok(deadline)
 }
 
-fn configured_codec<C: Codec>(codec: C, config: &ChannelConfig) -> Result<(FramedCodec<C>, Vec<CompressionEncoding>), Status> {
-    let compressor = match config.send_compression {
-        None | Some(CompressionEncoding::Identity) => None,
-        Some(encoding) => Some(encoding.frame_compressor()
-            .ok_or_else(|| Status::unimplemented("configured gRPC compression is unavailable"))?),
-    };
+fn configured_codec<C: Codec>(
+    codec: C,
+    config: &ChannelConfig,
+) -> Result<(FramedCodec<C>, Vec<CompressionEncoding>), Status> {
+    let compressor =
+        match config.send_compression {
+            None | Some(CompressionEncoding::Identity) => None,
+            Some(encoding) => Some(encoding.frame_compressor().ok_or_else(|| {
+                Status::unimplemented("configured gRPC compression is unavailable")
+            })?),
+        };
     let mut accepted = vec![CompressionEncoding::Identity];
     for encoding in &config.accept_compression {
         if *encoding != CompressionEncoding::Identity && encoding.frame_decompressor().is_none() {
-            return Err(Status::unimplemented("configured gRPC decompression is unavailable"));
+            return Err(Status::unimplemented(
+                "configured gRPC decompression is unavailable",
+            ));
         }
-        if !accepted.contains(encoding) { accepted.push(*encoding); }
+        if !accepted.contains(encoding) {
+            accepted.push(*encoding);
+        }
     }
-    let decompressor = accepted.iter().find_map(|encoding| encoding.frame_decompressor());
-    Ok((FramedCodec::with_message_size_limits(codec, config.max_send_message_size, config.max_recv_message_size)
-        .with_frame_hooks(compressor, decompressor), accepted))
+    let decompressor = accepted
+        .iter()
+        .find_map(|encoding| encoding.frame_decompressor());
+    Ok((
+        FramedCodec::with_message_size_limits(
+            codec,
+            config.max_send_message_size,
+            config.max_recv_message_size,
+        )
+        .with_frame_hooks(compressor, decompressor),
+        accepted,
+    ))
 }
 
 fn request_headers(
-    scheme: &str, authority: &str, path: &str, metadata: &Metadata,
-    config: &ChannelConfig, deadline: Option<Time>, now: Time,
+    scheme: &str,
+    authority: &str,
+    path: &str,
+    metadata: &Metadata,
+    config: &ChannelConfig,
+    deadline: Option<Time>,
+    now: Time,
 ) -> Result<Vec<Header>, Status> {
     let mut headers = vec![
-        Header::new(":method", "POST"), Header::new(":scheme", scheme),
-        Header::new(":authority", authority), Header::new(":path", path),
-        Header::new("content-type", "application/grpc"), Header::new("te", "trailers"),
+        Header::new(":method", "POST"),
+        Header::new(":scheme", scheme),
+        Header::new(":authority", authority),
+        Header::new(":path", path),
+        Header::new("content-type", "application/grpc"),
+        Header::new("te", "trailers"),
     ];
     if let Some(at) = deadline {
-        if now >= at { return Err(Status::deadline_exceeded("gRPC deadline expired before headers")); }
-        headers.push(Header::new("grpc-timeout", format_grpc_timeout(Duration::from_nanos(at.duration_since(now)))));
+        if now >= at {
+            return Err(Status::deadline_exceeded(
+                "gRPC deadline expired before headers",
+            ));
+        }
+        headers.push(Header::new(
+            "grpc-timeout",
+            format_grpc_timeout(Duration::from_nanos(at.duration_since(now))),
+        ));
     }
     if matches!(config.send_compression, Some(CompressionEncoding::Gzip)) {
         headers.push(Header::new("grpc-encoding", "gzip"));
     }
-    headers.push(Header::new("grpc-accept-encoding", if config.accept_compression.contains(&CompressionEncoding::Gzip) { "identity,gzip" } else { "identity" }));
-    let mut bytes = headers.iter().map(|h| h.name.len() + h.value.len()).sum::<usize>();
-    for (name, value) in metadata.iter() {
-        if name == "grpc-timeout" { continue; }
-        if name.starts_with(':') || name.starts_with("grpc-") || matches!(name,
-            "content-type" | "content-length" | "te" | "host" | "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade")
+    headers.push(Header::new(
+        "grpc-accept-encoding",
+        if config
+            .accept_compression
+            .contains(&CompressionEncoding::Gzip)
         {
-            return Err(Status::invalid_argument("transport-reserved gRPC request metadata"));
+            "identity,gzip"
+        } else {
+            "identity"
+        },
+    ));
+    let mut bytes = headers
+        .iter()
+        .map(|h| h.name.len() + h.value.len())
+        .sum::<usize>();
+    for (name, value) in metadata.iter() {
+        if name == "grpc-timeout" {
+            continue;
+        }
+        if name.starts_with(':')
+            || name.starts_with("grpc-")
+            || matches!(
+                name,
+                "content-type"
+                    | "content-length"
+                    | "te"
+                    | "host"
+                    | "connection"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "transfer-encoding"
+                    | "upgrade"
+            )
+        {
+            return Err(Status::invalid_argument(
+                "transport-reserved gRPC request metadata",
+            ));
         }
         // Charge conservative base64 expansion before allocating its String.
         let length = match value {
             MetadataValue::Ascii(value) => value.len(),
-            MetadataValue::Binary(value) => value.len().checked_add(2).and_then(|n| n.checked_div(3)).and_then(|n| n.checked_mul(4))
+            MetadataValue::Binary(value) => value
+                .len()
+                .checked_add(2)
+                .and_then(|n| n.checked_div(3))
+                .and_then(|n| n.checked_mul(4))
                 .ok_or_else(|| Status::resource_exhausted("request metadata length overflow"))?,
         };
-        bytes = bytes.checked_add(name.len()).and_then(|n| n.checked_add(length))
-            .filter(|n| *n <= METADATA_BYTES).ok_or_else(|| Status::resource_exhausted("request metadata limit exceeded"))?;
+        bytes = bytes
+            .checked_add(name.len())
+            .and_then(|n| n.checked_add(length))
+            .filter(|n| *n <= METADATA_BYTES)
+            .ok_or_else(|| Status::resource_exhausted("request metadata limit exceeded"))?;
         let value = match value {
             MetadataValue::Ascii(value) => value.clone(),
-            MetadataValue::Binary(value) => base64::engine::general_purpose::STANDARD_NO_PAD.encode(value),
+            MetadataValue::Binary(value) => {
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(value)
+            }
         };
         headers.push(Header::new(name, value));
     }

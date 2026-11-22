@@ -231,7 +231,8 @@ fn native_send_has_canonical_wire_bytes_and_close_preserves_a_receive_clone() {
         let limits = SymbolDatagramLimits::new(5).unwrap();
         let mut sink = UdpSymbolSink::new(socket, peer_address, limits).unwrap();
         let mut stream =
-            UdpSymbolStream::new(read_socket, peer_address, AuthKey::from_seed(42), limits).unwrap();
+            UdpSymbolStream::new(read_socket, peer_address, AuthKey::from_seed(42), limits)
+                .unwrap();
         assert_eq!(sink.peer_addr(), peer_address);
         assert_eq!(stream.peer_addr(), peer_address);
         assert_eq!(sink.local_addr().unwrap(), address);
@@ -385,7 +386,9 @@ fn invalid_datagram_flood_yields_after_thirty_two_packets() {
         );
         let received = match Pin::new(&mut stream).poll_next(&mut task) {
             Poll::Ready(Some(Ok(symbol))) => symbol,
-            other => panic!("queued valid packet was not reached on the next bounded poll: {other:?}"),
+            other => {
+                panic!("queued valid packet was not reached on the next bounded poll: {other:?}")
+            }
         };
         assert_eq!(received.symbol().data(), b"valid");
         assert_eq!(stream.stats().datagrams_received, 34);
@@ -554,9 +557,12 @@ fn real_udp_reconstructs_after_deterministic_source_loss_reordering_and_duplicat
         let receiver_address = receiving.local_addr().unwrap();
         let sender_address = sending.local_addr().unwrap();
         let limits = SymbolDatagramLimits::new(64).unwrap();
-        let sink =
-            UdpSymbolSink::new(UdpSocket::from_std(sending).unwrap(), receiver_address, limits)
-                .unwrap();
+        let sink = UdpSymbolSink::new(
+            UdpSocket::from_std(sending).unwrap(),
+            receiver_address,
+            limits,
+        )
+        .unwrap();
         let stream = UdpSymbolStream::new(
             UdpSocket::from_std(receiving).unwrap(),
             sender_address,

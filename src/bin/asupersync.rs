@@ -105,12 +105,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
-#[path = "asupersync/atp_local_sync.rs"]
-mod atp_local_sync;
 #[path = "asupersync/atp_local_mirror.rs"]
 mod atp_local_mirror;
 #[path = "asupersync/atp_local_recover.rs"]
 mod atp_local_recover;
+#[path = "asupersync/atp_local_sync.rs"]
+mod atp_local_sync;
 #[path = "asupersync/atp_local_watch.rs"]
 mod atp_local_watch;
 

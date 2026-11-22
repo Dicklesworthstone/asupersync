@@ -152,7 +152,10 @@ impl Fixture {
             }
             if Instant::now() >= deadline {
                 let _ = child.0.kill();
-                break (child.0.wait().expect("reap timed-out local-sync child"), true);
+                break (
+                    child.0.wait().expect("reap timed-out local-sync child"),
+                    true,
+                );
             }
             thread::sleep(Duration::from_millis(10));
         };
@@ -231,7 +234,10 @@ impl Invocation {
 
     fn json(&self) -> Value {
         serde_json::from_slice(&self.output.stdout).unwrap_or_else(|error| {
-            panic!("expected exactly one JSON receipt: {error}\n{}", self.describe())
+            panic!(
+                "expected exactly one JSON receipt: {error}\n{}",
+                self.describe()
+            )
         })
     }
 
@@ -296,7 +302,10 @@ fn assert_durable(report: &Value, fixture: &Fixture, generation: u64) {
     assert_eq!(result["dry_run"], false, "{report:#}");
     assert_eq!(result["baseline_generation"], generation, "{report:#}");
     assert_eq!(result["publication"]["state"], "durable", "{report:#}");
-    assert_eq!(result["publication"]["generation"], generation, "{report:#}");
+    assert_eq!(
+        result["publication"]["generation"], generation,
+        "{report:#}"
+    );
     assert!(result["failure"].is_null(), "{report:#}");
     assert!(result["persistence_failure"].is_null(), "{report:#}");
 }
@@ -309,13 +318,20 @@ fn assert_refused_before_effects(report: &Value, fixture: &Fixture, generation: 
     assert_eq!(result["baseline_generation"], generation, "{report:#}");
     assert_eq!(result["publication"]["state"], "unchanged", "{report:#}");
     assert!(
-        result["failure"].as_str().is_some_and(|error| !error.is_empty()),
+        result["failure"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
         "{report:#}"
     );
     assert!(result["persistence_failure"].is_null(), "{report:#}");
     assert!(result["staging_directory"].is_null(), "{report:#}");
-    let actions = result["actions"].as_array().expect("actual action receipts");
-    assert!(!actions.is_empty(), "the refused plan must contain an action");
+    let actions = result["actions"]
+        .as_array()
+        .expect("actual action receipts");
+    assert!(
+        !actions.is_empty(),
+        "the refused plan must contain an action"
+    );
     for action in actions {
         assert_eq!(action["state"], "not_started", "{report:#}");
         assert_eq!(action["bytes_written"], 0, "{report:#}");
@@ -397,7 +413,11 @@ fn local_sync_initialization_previews_both_directions_without_applying() {
 fn local_sync_apply_copies_both_directions_and_persists_convergence() {
     let fixture = Fixture::new("bidirectional-copy");
     private_directory(&fixture.local.join("nested"));
-    fs::write(fixture.local.join("nested/local.bin"), b"\0local\xffpayload\n").unwrap();
+    fs::write(
+        fixture.local.join("nested/local.bin"),
+        b"\0local\xffpayload\n",
+    )
+    .unwrap();
     fs::write(fixture.remote.join("remote.txt"), b"remote payload").unwrap();
 
     let report = fixture.apply(&["--initialize"]).success_json();
@@ -416,7 +436,10 @@ fn local_sync_apply_copies_both_directions_and_persists_convergence() {
             fs::read(root.join("nested/local.bin")).unwrap(),
             b"\0local\xffpayload\n"
         );
-        assert_eq!(fs::read(root.join("remote.txt")).unwrap(), b"remote payload");
+        assert_eq!(
+            fs::read(root.join("remote.txt")).unwrap(),
+            b"remote payload"
+        );
     }
     for (path, bytes) in [("nested/local.bin", 15), ("remote.txt", 14)] {
         let action = receipt(&report, path);
@@ -545,7 +568,10 @@ fn local_sync_overwrite_requires_each_explicit_grant_before_effects() {
         assert_refused_before_effects(&report, &fixture, 1);
         assert_eq!(report["has_conflicts"], false);
         assert_eq!(report["has_destructive_actions"], true);
-        assert_eq!(fs::read(fixture.local.join("shared.txt")).unwrap(), b"edited");
+        assert_eq!(
+            fs::read(fixture.local.join("shared.txt")).unwrap(),
+            b"edited"
+        );
         assert_eq!(
             fs::read(fixture.remote.join("shared.txt")).unwrap(),
             b"original"
@@ -558,7 +584,10 @@ fn local_sync_overwrite_requires_each_explicit_grant_before_effects() {
         .apply(&["--allow-overwrite", "--allow-permission-change"])
         .success_json();
     assert_durable(&report, &fixture, 2);
-    assert_eq!(fs::read(fixture.remote.join("shared.txt")).unwrap(), b"edited");
+    assert_eq!(
+        fs::read(fixture.remote.join("shared.txt")).unwrap(),
+        b"edited"
+    );
 }
 
 #[test]
@@ -673,7 +702,9 @@ fn local_sync_authorization_and_staging_flags_require_explicit_application() {
         fixture.plan(&[flag]).assert_failure();
     }
     let mut staging_without_apply = fixture.command();
-    staging_without_apply.arg("--staging-dir").arg(&fixture.staging);
+    staging_without_apply
+        .arg("--staging-dir")
+        .arg(&fixture.staging);
     fixture.run(staging_without_apply).assert_failure();
 
     assert_eq!(fixture.state_bytes(), state);
@@ -697,7 +728,10 @@ fn local_sync_stdout_failure_preserves_durable_receipt_and_reopenable_history() 
 
     let invocation = fixture.run_with_stdout(command, Some(Path::new("/dev/full")));
     invocation.assert_failure();
-    assert_eq!(invocation.output.status.code(), Some(ExitCode::RUNTIME_ERROR));
+    assert_eq!(
+        invocation.output.status.code(),
+        Some(ExitCode::RUNTIME_ERROR)
+    );
     let error: Value = serde_json::from_slice(&invocation.output.stderr).unwrap_or_else(|error| {
         panic!(
             "expected a structured stderr error with the observed receipt: {error}\n{}",

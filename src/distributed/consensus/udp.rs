@@ -102,11 +102,16 @@ impl UdpPbftTransport {
         {
             return Err(invalid("PBFT UDP roster or packet bound is incompatible"));
         }
-        let local = auth.local_replica().as_str().parse::<usize>()
+        let local = auth
+            .local_replica()
+            .as_str()
+            .parse::<usize>()
             .map_err(|_| invalid("PBFT UDP local replica is invalid"))?;
         let address = socket.local_addr().map_err(socket_error)?;
         if peers.get(local) != Some(&address) || socket.peer_addr().is_ok() {
-            return Err(invalid("PBFT UDP socket must be unconnected and bound to its local route"));
+            return Err(invalid(
+                "PBFT UDP socket must be unconnected and bound to its local route",
+            ));
         }
         let mut unique = HashSet::with_capacity(peers.len());
         for peer in &peers {
@@ -117,7 +122,9 @@ impl UdpPbftTransport {
                 || peer.is_ipv4() != address.is_ipv4()
                 || !unique.insert(*peer)
             {
-                return Err(invalid("PBFT UDP routes must be distinct resolved unicast endpoints"));
+                return Err(invalid(
+                    "PBFT UDP routes must be distinct resolved unicast endpoints",
+                ));
             }
         }
         Ok(Self {
@@ -138,12 +145,18 @@ impl UdpPbftTransport {
         if replica.as_str().len() > 4 {
             return Err(invalid("PBFT UDP recipient is invalid"));
         }
-        let index = replica.as_str().parse::<usize>()
+        let index = replica
+            .as_str()
+            .parse::<usize>()
             .map_err(|_| invalid("PBFT UDP recipient is invalid"))?;
         if index == self.local || index.to_string() != replica.as_str() {
-            return Err(invalid("PBFT UDP recipient must be another canonical replica"));
+            return Err(invalid(
+                "PBFT UDP recipient must be another canonical replica",
+            ));
         }
-        self.peers.get(index).copied()
+        self.peers
+            .get(index)
+            .copied()
             .ok_or_else(|| invalid("PBFT UDP recipient is outside the static roster"))
     }
 
@@ -159,7 +172,10 @@ impl UdpPbftTransport {
             Error::new(ErrorKind::InvalidStateTransition)
                 .with_message("PBFT UDP socket already has an operation owner")
         })?;
-        Ok(SocketLease { owner: &self.socket, socket: Some(socket) })
+        Ok(SocketLease {
+            owner: &self.socket,
+            socket: Some(socket),
+        })
     }
 }
 
@@ -170,7 +186,9 @@ struct SocketLease<'a> {
 
 impl SocketLease<'_> {
     fn socket(&mut self) -> &mut UdpSocket {
-        self.socket.as_mut().expect("leased socket is present until drop")
+        self.socket
+            .as_mut()
+            .expect("leased socket is present until drop")
     }
 }
 
@@ -189,7 +207,11 @@ impl PbftPacketTransport for UdpPbftTransport {
         let address = self.recipient(recipient)?;
         self.validate_size(packet.len())?;
         let mut socket = self.lease()?;
-        let written = socket.socket().send_to(&packet, address).await.map_err(socket_error)?;
+        let written = socket
+            .socket()
+            .send_to(&packet, address)
+            .await
+            .map_err(socket_error)?;
         if written != packet.len() {
             return Err(invalid("PBFT UDP did not send a complete datagram"));
         }
@@ -203,7 +225,11 @@ impl PbftPacketTransport for UdpPbftTransport {
             if index == self.local {
                 continue;
             }
-            let written = socket.socket().send_to(&packet, *address).await.map_err(socket_error)?;
+            let written = socket
+                .socket()
+                .send_to(&packet, *address)
+                .await
+                .map_err(socket_error)?;
             if written != packet.len() {
                 return Err(invalid("PBFT UDP did not send a complete datagram"));
             }
@@ -230,9 +256,7 @@ impl PbftPacketTransport for UdpPbftTransport {
                 }
                 Err(error) => return Err(socket_error(error)),
             };
-            if received < limit
-                && source != self.peers[self.local]
-                && self.peers.contains(&source)
+            if received < limit && source != self.peers[self.local] && self.peers.contains(&source)
             {
                 packet.truncate(received);
                 return Ok(packet);

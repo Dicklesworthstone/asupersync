@@ -305,8 +305,7 @@ where
             // and off the heap, including when a reader remains pending.
             let mut scratch = [0u8; 8192];
             let offered = remaining.min(scratch.len());
-            let (result, filled) =
-                poll_read_buf_slice(this.reader, cx, &mut scratch[..offered]);
+            let (result, filled) = poll_read_buf_slice(this.reader, cx, &mut scratch[..offered]);
             if filled != 0 {
                 this.buf.put_slice(&scratch[..filled]);
             }

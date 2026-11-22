@@ -28,6 +28,7 @@ use crate::observability::spectral_health::{
 use crate::runtime::rch_health::{RchAdmissionDecision, RchWorkerAdmissionReceipt};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
 use crate::sync::LockMetricsSnapshot;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::lock_ordering::{LockModule, LockOrderAtlasSnapshot, LockRank};
 use crate::types::pressure::SystemPressure;
 use crate::types::{CapabilityBudget, RegionId};
@@ -36,7 +37,6 @@ use crate::sync::pl::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Stable schema for operator-facing platform probe reports.
@@ -5596,7 +5596,8 @@ mod platform {
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         let pid = sysinfo::get_current_pid()
             .map_err(|err| std::io::Error::other(format!("current pid unavailable: {err}")))?;
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new()
+            .map_err(|err| std::io::Error::other(format!("sysinfo unavailable: {err}")))?;
         system.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::Some(&[pid]),
             true,
@@ -5623,7 +5624,8 @@ mod platform {
 
     #[cfg(all(windows, feature = "full-platform"))]
     pub fn memory_max_bytes() -> std::io::Result<u64> {
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new()
+            .map_err(|err| std::io::Error::other(format!("sysinfo unavailable: {err}")))?;
         system.refresh_memory();
         let total = system.total_memory();
         if total == 0 {

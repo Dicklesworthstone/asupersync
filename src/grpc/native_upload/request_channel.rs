@@ -35,9 +35,9 @@ impl RequestControl {
         match &self.0.lock().state {
             State::Open => None,
             State::Failed(status) => Some(status.clone()),
-            State::HalfClosed | State::Retired => {
-                Some(Status::failed_precondition("native request sender is closed"))
-            }
+            State::HalfClosed | State::Retired => Some(Status::failed_precondition(
+                "native request sender is closed",
+            )),
         }
     }
 
@@ -51,7 +51,9 @@ impl RequestControl {
                 State::Failed(status) => (Some(status.clone()), None),
                 State::Retired => (None, None),
                 State::Open | State::HalfClosed => {
-                    let previous = state.waiter.replace(incoming.take().expect("incoming waker"));
+                    let previous = state
+                        .waiter
+                        .replace(incoming.take().expect("incoming waker"));
                     (None, previous)
                 }
             }
@@ -215,7 +217,11 @@ impl<T> NativeRequestSender<T> {
         self.send_owned_context(caller.clone(), message)
     }
 
-    fn send_owned_context(&mut self, caller: Cx, message: T) -> impl Future<Output = Result<(), Status>> + '_ {
+    fn send_owned_context(
+        &mut self,
+        caller: Cx,
+        message: T,
+    ) -> impl Future<Output = Result<(), Status>> + '_ {
         let cx = self.cx.clone();
         let owner = cx.clone();
         let sender = self.sender.as_ref();
@@ -224,34 +230,48 @@ impl<T> NativeRequestSender<T> {
             if let Some(error) = control.send_error() {
                 return Err(error);
             }
-            let sender = sender.ok_or_else(|| Status::failed_precondition("native request sender is closed"))?;
+            let sender = sender
+                .ok_or_else(|| Status::failed_precondition("native request sender is closed"))?;
             let mut sending = pin!(sender.send(&caller, message));
             let mut cancelled = pin!(owner.cancelled());
             let mut caller_cancelled = pin!(caller.cancelled());
             poll_fn(|task| {
                 if cancelled.as_mut().poll(task).is_ready() {
                     let _ = owner.checkpoint();
-                    return Poll::Ready(Err(Status::cancelled("native request channel owner cancelled")));
+                    return Poll::Ready(Err(Status::cancelled(
+                        "native request channel owner cancelled",
+                    )));
                 }
                 if caller_cancelled.as_mut().poll(task).is_ready() {
                     let _ = caller.checkpoint();
-                    return Poll::Ready(Err(Status::cancelled("native request producer cancelled")));
+                    return Poll::Ready(Err(Status::cancelled(
+                        "native request producer cancelled",
+                    )));
                 }
                 match sending.as_mut().poll(task) {
                     Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                     Poll::Ready(Err(error)) => {
                         let status = match error {
-                            mpsc::SendError::Cancelled(_) => Status::cancelled("native request send cancelled"),
-                            mpsc::SendError::Full(_) => Status::resource_exhausted("native request buffer is full"),
-                            mpsc::SendError::Disconnected(_) => control.send_error().unwrap_or_else(|| {
-                                Status::failed_precondition("native request consumer has retired")
-                            }),
+                            mpsc::SendError::Cancelled(_) => {
+                                Status::cancelled("native request send cancelled")
+                            }
+                            mpsc::SendError::Full(_) => {
+                                Status::resource_exhausted("native request buffer is full")
+                            }
+                            mpsc::SendError::Disconnected(_) => {
+                                control.send_error().unwrap_or_else(|| {
+                                    Status::failed_precondition(
+                                        "native request consumer has retired",
+                                    )
+                                })
+                            }
                         };
                         Poll::Ready(Err(status))
                     }
                     Poll::Pending => Poll::Pending,
                 }
-            }).await
+            })
+            .await
         })
     }
 
@@ -275,11 +295,19 @@ impl<T> NativeRequestSender<T> {
         };
         sender.try_send(message).map_err(|error| {
             let (message, status) = match error {
-                mpsc::SendError::Full(message) => (message, Status::resource_exhausted("native request buffer is full")),
-                mpsc::SendError::Cancelled(message) => (message, Status::cancelled("native request send cancelled")),
-                mpsc::SendError::Disconnected(message) => (message, self.control.send_error().unwrap_or_else(|| {
-                    Status::failed_precondition("native request consumer has retired")
-                })),
+                mpsc::SendError::Full(message) => (
+                    message,
+                    Status::resource_exhausted("native request buffer is full"),
+                ),
+                mpsc::SendError::Cancelled(message) => {
+                    (message, Status::cancelled("native request send cancelled"))
+                }
+                mpsc::SendError::Disconnected(message) => (
+                    message,
+                    self.control.send_error().unwrap_or_else(|| {
+                        Status::failed_precondition("native request consumer has retired")
+                    }),
+                ),
             };
             NativeRequestSendError { message, status }
         })
@@ -293,7 +321,11 @@ impl<T> NativeRequestSender<T> {
             let mut state = self.control.0.lock();
             match &state.state {
                 State::Failed(status) => return Err(status.clone()),
-                State::Retired => return Err(Status::failed_precondition("native request consumer has retired")),
+                State::Retired => {
+                    return Err(Status::failed_precondition(
+                        "native request consumer has retired",
+                    ));
+                }
                 State::Open => state.state = State::HalfClosed,
                 State::HalfClosed => {}
             }
@@ -309,7 +341,9 @@ impl<T> NativeRequestSender<T> {
     /// longer be aborted and this returns `FailedPrecondition`.
     pub fn fail(&mut self, status: Status) -> Result<(), Status> {
         if status.code() == Code::Ok {
-            return Err(Status::invalid_argument("request failure status must not be OK"));
+            return Err(Status::invalid_argument(
+                "request failure status must not be OK",
+            ));
         }
         let _ambient = Cx::set_current(Some(self.cx.clone()));
         // Own the channel locally before invoking a possibly panicking waker.
@@ -382,22 +416,36 @@ impl<T: Send> Streaming for NativeRequestStream<T> {
             return Poll::Ready(None);
         }
         let failed = this.control.poll_failure(task);
-        let cancelled = this.cancelled.as_mut().expect("live cancellation observer")
-            .as_mut().poll(task).is_ready();
-        if let Some(status) = failed.or_else(|| cancelled.then(|| {
-            let _ = this.cx.checkpoint();
-            Status::cancelled("native request channel owner cancelled")
-        })) {
+        let cancelled = this
+            .cancelled
+            .as_mut()
+            .expect("live cancellation observer")
+            .as_mut()
+            .poll(task)
+            .is_ready();
+        if let Some(status) = failed.or_else(|| {
+            cancelled.then(|| {
+                let _ = this.cx.checkpoint();
+                Status::cancelled("native request channel owner cancelled")
+            })
+        }) {
             this.retire();
             return Poll::Ready(Some(Err(status)));
         }
-        match this.receiver.as_mut().expect("live request receiver").poll_recv(&this.cx, task) {
+        match this
+            .receiver
+            .as_mut()
+            .expect("live request receiver")
+            .poll_recv(&this.cx, task)
+        {
             Poll::Ready(Ok(message)) => Poll::Ready(Some(Ok(message))),
             // `Empty` is only produced by `try_recv`; it is unreachable from
             // `poll_recv` and is handled as cancellation for exhaustiveness.
             Poll::Ready(Err(mpsc::RecvError::Cancelled | mpsc::RecvError::Empty)) => {
                 this.retire();
-                Poll::Ready(Some(Err(Status::cancelled("native request receive cancelled"))))
+                Poll::Ready(Some(Err(Status::cancelled(
+                    "native request receive cancelled",
+                ))))
             }
             Poll::Ready(Err(mpsc::RecvError::Disconnected)) => {
                 // Sender drop publishes failure before disconnecting. Recheck
@@ -435,17 +483,24 @@ pub fn native_request_channel<T: Send>(
     capacity: usize,
 ) -> Result<(NativeRequestSender<T>, NativeRequestStream<T>), Status> {
     if capacity == 0 || capacity > MAX_STREAM_BUFFERED {
-        return Err(Status::invalid_argument("native request capacity is outside 1..=MAX_STREAM_BUFFERED"));
+        return Err(Status::invalid_argument(
+            "native request capacity is outside 1..=MAX_STREAM_BUFFERED",
+        ));
     }
     let (sender, receiver) = mpsc::channel(capacity);
     let control = Arc::new(RequestControl::default());
     let owner = cx.clone();
     Ok((
         NativeRequestSender {
-            cx: cx.clone(), sender: Some(sender), control: Arc::clone(&control), capacity,
+            cx: cx.clone(),
+            sender: Some(sender),
+            control: Arc::clone(&control),
+            capacity,
         },
         NativeRequestStream {
-            cx: cx.clone(), receiver: Some(receiver), control,
+            cx: cx.clone(),
+            receiver: Some(receiver),
+            control,
             cancelled: Some(Box::pin(async move { owner.cancelled().await })),
         },
     ))

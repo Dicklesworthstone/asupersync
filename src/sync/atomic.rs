@@ -40,7 +40,12 @@ mod tests {
         assert_eq!(counter.fetch_add(1, Ordering::SeqCst), u64::MAX);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-        let cas = counter.compare_exchange(0, 0x0102_0304_0506_0708, Ordering::AcqRel, Ordering::Acquire);
+        let cas = counter.compare_exchange(
+            0,
+            0x0102_0304_0506_0708,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         assert_eq!(cas, Ok(0));
         assert_eq!(counter.load(Ordering::Acquire), 0x0102_0304_0506_0708);
 

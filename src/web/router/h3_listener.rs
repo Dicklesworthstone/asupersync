@@ -1,8 +1,8 @@
 //! Owned, authenticated HTTP/3 service over the native managed UDP endpoint.
 
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 // This split implementation shares its parent router's private H3 dispatch
 // machinery as one cohesive unit (as remote/admission.rs does).
@@ -569,8 +569,10 @@ impl NativeH3Listener {
         std::future::poll_fn(|task_cx| state.poll_cleanup(cx, task_cx)).await;
         state.report.rejected_buffered_responses =
             state.response_budget.rejected.load(Ordering::Acquire);
-        state.report.rejected_connection_buffered_responses =
-            state.response_budget.connection_rejected.load(Ordering::Acquire);
+        state.report.rejected_connection_buffered_responses = state
+            .response_budget
+            .connection_rejected
+            .load(Ordering::Acquire);
         state.report.peak_buffered_response_bytes =
             state.response_budget.peak.load(Ordering::Acquire);
         if let Some(budget) = &state.request_body_budget {
@@ -648,7 +650,9 @@ impl ResponseBudget {
         let aggregate = self.parent.as_deref().unwrap_or(self);
         aggregate.rejected.fetch_add(1, Ordering::Relaxed);
         if connection_limited {
-            aggregate.connection_rejected.fetch_add(1, Ordering::Relaxed);
+            aggregate
+                .connection_rejected
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -732,9 +736,12 @@ impl RequestBodyBudget {
     }
 
     fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<RequestBodyReservation> {
-        let Ok(previous) = self.used.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            used.checked_add(bytes).filter(|next| *next <= self.limit)
-        }) else {
+        let Ok(previous) = self
+            .used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|next| *next <= self.limit)
+            })
+        else {
             self.rejected.fetch_add(1, Ordering::Relaxed);
             return None;
         };
@@ -1267,7 +1274,8 @@ impl RequestWork {
                                     request_cx.now(),
                                 );
                                 let work = async {
-                                    let (body, guard) = if let Some(body_publisher) = body_publisher {
+                                    let (body, guard) = if let Some(body_publisher) = body_publisher
+                                    {
                                         let queue_bytes = body_queue_bytes
                                             .expect("streaming request has a queue budget")
                                             .get();
@@ -1310,13 +1318,18 @@ impl RequestWork {
                                                 let Ok((_, head, body)) = prepared.response else {
                                                     return false;
                                                 };
-                                                let Some(body) = response_budget.try_retain(body, response_limit) else {
+                                                let Some(body) = response_budget
+                                                    .try_retain(body, response_limit)
+                                                else {
                                                     return false;
                                                 };
                                                 RequestReply::Buffered { head, body }
                                             }
                                             NativeH3RouterProducedDispatch::Produced(prepared) => {
-                                                RequestReply::Produced { cx: request_cx.clone(), prepared }
+                                                RequestReply::Produced {
+                                                    cx: request_cx.clone(),
+                                                    prepared,
+                                                }
                                             }
                                         };
                                         if reply_tx.send_blocking(reply).is_ok() {
@@ -1606,7 +1619,9 @@ impl ListenerState {
     fn new(router: Arc<Router>, config: NativeH3ListenerConfig, max_peer_uni_streams: u64) -> Self {
         Self {
             router,
-            response_budget: Arc::new(ResponseBudget::new(config.max_total_buffered_response_bytes)),
+            response_budget: Arc::new(ResponseBudget::new(
+                config.max_total_buffered_response_bytes,
+            )),
             request_body_budget: config
                 .max_total_request_body_reservation_bytes
                 .map(|limit| Arc::new(RequestBodyBudget::new(limit))),
@@ -1756,9 +1771,9 @@ impl ListenerState {
                             Arc::clone(&self.router),
                             self.config.router,
                         ),
-                        response_budget: self.response_budget.for_connection(
-                            self.config.max_buffered_response_bytes_per_connection,
-                        ),
+                        response_budget: self
+                            .response_budget
+                            .for_connection(self.config.max_buffered_response_bytes_per_connection),
                         control,
                         requests: BTreeMap::new(),
                         body_reservations: RequestBodyReservations::new(
@@ -1850,7 +1865,8 @@ impl ListenerState {
                             connection.id,
                             close_code.unwrap_or(0x100),
                             false,
-                        ) == Ok(true) {
+                        ) == Ok(true)
+                        {
                             retired_connection = true;
                         } else {
                             let _ = endpoint.remove_connection(cx, connection.id);
@@ -2100,9 +2116,12 @@ impl ListenerConnection {
     ) -> Result<bool, NativeH3SessionError> {
         let mut progress = false;
         let mut lifetime_exhausted = false;
-        let reservation_bytes = config.request_body_reservation_bytes().ok_or(
-            NativeH3SessionError::InvalidState("HTTP/3 request body reservation overflow"),
-        )?;
+        let reservation_bytes =
+            config
+                .request_body_reservation_bytes()
+                .ok_or(NativeH3SessionError::InvalidState(
+                    "HTTP/3 request body reservation overflow",
+                ))?;
         // Both loops are bounded by the authenticated local transport
         // parameters. Observe raw streams before decoding HEADERS, so a
         // partial frame cannot avoid the request assembly deadline.
@@ -2708,7 +2727,10 @@ impl ListenerConnection {
                                     Err(_) => request.cancel(cx, config.request_drain_timeout),
                                 }
                             }
-                            RequestReply::Produced { cx: request_cx, prepared } => {
+                            RequestReply::Produced {
+                                cx: request_cx,
+                                prepared,
+                            } => {
                                 match self.bridge.start_produced_dispatch_with_cx(
                                     cx,
                                     &mut self.session,

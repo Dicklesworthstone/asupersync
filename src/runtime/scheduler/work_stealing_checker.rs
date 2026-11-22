@@ -18,11 +18,11 @@
 #![allow(missing_docs)]
 
 use crate::runtime::scheduler::worker::WorkerId;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::TaskId;
 use crate::sync::pl::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;

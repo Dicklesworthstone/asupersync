@@ -180,7 +180,10 @@ impl WebSocketAcceptor {
 
         // Validate and generate accept response
         let mut accept_response = self.handshake.accept(&request)?;
-        accept_response.extensions = super::compression::negotiate_server(&accept_response.extensions, request.header("sec-websocket-extensions"))?;
+        accept_response.extensions = super::compression::negotiate_server(
+            &accept_response.extensions,
+            request.header("sec-websocket-extensions"),
+        )?;
 
         // Check cancellation before sending response
         if cx.checkpoint().is_err() {
@@ -217,7 +220,10 @@ impl WebSocketAcceptor {
 
         // Validate and generate accept response
         let mut accept_response = self.handshake.accept(request)?;
-        accept_response.extensions = super::compression::negotiate_server(&accept_response.extensions, request.header("sec-websocket-extensions"))?;
+        accept_response.extensions = super::compression::negotiate_server(
+            &accept_response.extensions,
+            request.header("sec-websocket-extensions"),
+        )?;
 
         // Check cancellation before sending response
         if cx.checkpoint().is_err() {
@@ -323,7 +329,9 @@ where
         let max_message_size = config.max_message_size;
         let mut codec = FrameCodec::server().max_payload_size(config.max_frame_size);
         let compression = super::compression::negotiated(&accept.extensions);
-        if matches!(compression, Ok(true)) { codec.enable_permessage_deflate(); }
+        if matches!(compression, Ok(true)) {
+            codec.enable_permessage_deflate();
+        }
         let mut close_handshake = CloseHandshake::with_config(config.close_config.clone());
         if compression.is_err() {
             // finish_upgrade's caller owns negotiation. A fabricated/unsupported
@@ -365,7 +373,9 @@ where
 
     /// Whether permessage-deflate is active for this connection.
     #[must_use]
-    pub fn compression_enabled(&self) -> bool { self.codec.permessage_deflate_enabled() }
+    pub fn compression_enabled(&self) -> bool {
+        self.codec.permessage_deflate_enabled()
+    }
 
     /// Check if the connection is open.
     #[must_use]
@@ -413,7 +423,8 @@ where
         }
 
         let frame = super::compression::outgoing(
-            Frame::from(msg), self.codec.permessage_deflate_enabled(),
+            Frame::from(msg),
+            self.codec.permessage_deflate_enabled(),
             self.config.max_message_size,
             self.config.max_frame_size,
         )?;
@@ -615,12 +626,9 @@ where
                 }
 
                 let deadline = self.heartbeat.deadline();
-                let read_result = super::heartbeat::wait_until(
-                    cx,
-                    deadline,
-                    std::pin::pin!(self.read_more(cx)),
-                )
-                .await;
+                let read_result =
+                    super::heartbeat::wait_until(cx, deadline, std::pin::pin!(self.read_more(cx)))
+                        .await;
                 let n = match read_result {
                     Ok(Some(n)) => n,
                     Ok(None) => continue,
@@ -681,10 +689,12 @@ where
             self.close_handshake.force_close(CloseReason::going_away());
             return Ok(None);
         }
-        cx.checkpoint().map_err(|_| {
-            WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-        })?;
-        Ok(self.close_handshake.take_peer_close().map(|reason| Message::Close(Some(reason))))
+        cx.checkpoint()
+            .map_err(|_| WsError::Io(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))?;
+        Ok(self
+            .close_handshake
+            .take_peer_close()
+            .map(|reason| Message::Close(Some(reason))))
     }
 
     /// Initiate a close handshake.
@@ -698,9 +708,17 @@ where
         // On expiry the connection is closed as when the peer does not
         // answer.
         self.close_handshake.start_deadline(CloseDeadline::new(
-            Some(cx), self.close_handshake.close_timeout()));
-        let deadline = self.close_handshake.deadline().expect("close deadline installed");
-        match deadline.wait(Some(cx), self.close_exchange(cx, reason, &deadline)).await? {
+            Some(cx),
+            self.close_handshake.close_timeout(),
+        ));
+        let deadline = self
+            .close_handshake
+            .deadline()
+            .expect("close deadline installed");
+        match deadline
+            .wait(Some(cx), self.close_exchange(cx, reason, &deadline))
+            .await?
+        {
             Some(()) => Ok(()),
             None => {
                 self.close_handshake.force_close(CloseReason::going_away());
@@ -873,10 +891,16 @@ where
             self.encode_frame(frame)?;
         }
         self.close_handshake.start_deadline(candidate);
-        let deadline = self.close_handshake.deadline().expect("close deadline installed");
+        let deadline = self
+            .close_handshake
+            .deadline()
+            .expect("close deadline installed");
         // CloseReceived already has its encoded echo. Closed may still have
         // a crossing Close's pending flush and peer notification.
-        match deadline.wait(op_cx, self.flush_write_buf_with_cx(op_cx)).await? {
+        match deadline
+            .wait(op_cx, self.flush_write_buf_with_cx(op_cx))
+            .await?
+        {
             Some(()) => self.close_handshake.mark_response_sent(),
             None => self.close_handshake.force_close(CloseReason::going_away()),
         }
@@ -1047,7 +1071,10 @@ where
         let Some(deadline) = self.active_close_deadline() else {
             return self.send_frame_inner(op_cx, frame).await;
         };
-        match deadline.wait(op_cx, self.send_frame_inner(op_cx, frame)).await? {
+        match deadline
+            .wait(op_cx, self.send_frame_inner(op_cx, frame))
+            .await?
+        {
             Some(()) => Ok(()),
             None => {
                 self.close_handshake.force_close(CloseReason::going_away());
@@ -1056,11 +1083,7 @@ where
         }
     }
 
-    async fn send_frame_inner(
-        &mut self,
-        op_cx: Option<&Cx>,
-        frame: Frame,
-    ) -> Result<(), WsError> {
+    async fn send_frame_inner(&mut self, op_cx: Option<&Cx>, frame: Frame) -> Result<(), WsError> {
         if !self.write_buf.is_empty() {
             self.flush_write_buf_with_cx(op_cx).await?;
         }

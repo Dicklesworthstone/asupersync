@@ -1,9 +1,9 @@
 //! Static capability-layer building blocks for FABRIC.
 
 use super::subject::{NamespaceKernel, SubjectPattern, SubjectToken};
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeMap;
 use std::fmt;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub mod routing;

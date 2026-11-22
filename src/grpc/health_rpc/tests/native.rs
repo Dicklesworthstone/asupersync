@@ -34,27 +34,43 @@ impl NamedService for WitnessService {
 }
 
 impl ServiceHandler for WitnessService {
-    fn descriptor(&self) -> &ServiceDescriptor { self.rpc.descriptor() }
-    fn method_names(&self) -> Vec<&str> { self.rpc.method_names() }
+    fn descriptor(&self) -> &ServiceDescriptor {
+        self.rpc.descriptor()
+    }
+    fn method_names(&self) -> Vec<&str> {
+        self.rpc.method_names()
+    }
 
     fn call_unary<'a>(
-        &'a self, cx: &'a Cx, path: &'a str, request: Request<Bytes>, trailers: Metadata,
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<Bytes>,
+        trailers: Metadata,
     ) -> ServiceHandlerFuture<'a> {
         self.rpc.call_unary(cx, path, request, trailers)
     }
 
     fn call_server_streaming<'a>(
-        &'a self, cx: &'a Cx, path: &'a str, request: Request<Bytes>, trailers: Metadata,
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<Bytes>,
+        trailers: Metadata,
     ) -> ServiceStreamingFuture<'a> {
         Box::pin(async move {
-            let (source, trailers) = self.rpc.call_server_streaming(cx, path, request, trailers)
-                .await?.into_parts();
+            let (source, trailers) = self
+                .rpc
+                .call_server_streaming(cx, path, request, trailers)
+                .await?
+                .into_parts();
             Ok(RegisteredServerStream::new(WitnessStream {
                 source: Some(source),
                 events: self.events.clone(),
                 id: self.next.fetch_add(1, Ordering::SeqCst),
                 parked: false,
-            }).with_trailers(trailers))
+            })
+            .with_trailers(trailers))
         })
     }
 }
@@ -68,11 +84,21 @@ struct WitnessStream {
 
 impl Streaming for WitnessStream {
     type Message = Bytes;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, Status>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         let this = self.get_mut();
-        let result = this.source.as_mut().expect("live health source").as_mut().poll_next(cx);
+        let result = this
+            .source
+            .as_mut()
+            .expect("live health source")
+            .as_mut()
+            .poll_next(cx);
         if result.is_pending() && !this.parked {
-            this.events.try_send(WatchEvent::Parked(this.id)).expect("bounded parked witness");
+            this.events
+                .try_send(WatchEvent::Parked(this.id))
+                .expect("bounded parked witness");
         }
         this.parked = result.is_pending();
         result
@@ -89,7 +115,9 @@ impl Drop for WitnessStream {
 
 struct StopOnDrop(ShutdownSignal);
 impl Drop for StopOnDrop {
-    fn drop(&mut self) { self.0.trigger_immediate(); }
+    fn drop(&mut self) {
+        self.0.trigger_immediate();
+    }
 }
 
 #[derive(Default)]
@@ -110,15 +138,21 @@ struct Peer {
 impl Peer {
     fn connect(address: SocketAddr, window: u32) -> Self {
         let socket = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut peer = Self {
             socket,
             decoder: HpackDecoder::new(),
             replies: BTreeMap::new(),
             latest_stream: 0,
         };
-        peer.socket.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
+        peer.socket
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .unwrap();
         let mut settings = vec![0, 4];
         settings.extend_from_slice(&window.to_be_bytes());
         peer.send(4, 0, 0, &settings);
@@ -143,15 +177,21 @@ impl Peer {
         self.replies.insert(id, Reply::default());
         let mut headers = Vec::new();
         for (name, value) in [
-            (":method", "POST"), (":scheme", "http"), (":authority", "localhost"),
-            (":path", path), ("content-type", "application/grpc"), ("te", "trailers"),
+            (":method", "POST"),
+            (":scheme", "http"),
+            (":authority", "localhost"),
+            (":path", path),
+            ("content-type", "application/grpc"),
+            ("te", "trailers"),
         ] {
             literal(&mut headers, name, value);
         }
         if let Some(token) = token {
             literal(&mut headers, "authorization", &format!("Bearer {token}"));
         }
-        if timeout { literal(&mut headers, "grpc-timeout", "500m"); }
+        if timeout {
+            literal(&mut headers, "grpc-timeout", "500m");
+        }
         // Independent golden request encoding: field 1, short UTF-8 service.
         assert!(service.len() < 128);
         let mut body = vec![0];
@@ -165,13 +205,20 @@ impl Peer {
 
     fn frame(&mut self) -> (u8, u8, u32, Vec<u8>) {
         let mut header = [0_u8; 9];
-        self.socket.read_exact(&mut header).expect("native health frame");
-        let length = (usize::from(header[0]) << 16)
-            | (usize::from(header[1]) << 8) | usize::from(header[2]);
+        self.socket
+            .read_exact(&mut header)
+            .expect("native health frame");
+        let length =
+            (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
         assert!(length <= 16 * 1024, "bounded native fixture frame");
         let mut payload = vec![0; length];
         self.socket.read_exact(&mut payload).unwrap();
-        (header[3], header[4], u32::from_be_bytes(header[5..].try_into().unwrap()) & 0x7fff_ffff, payload)
+        (
+            header[3],
+            header[4],
+            u32::from_be_bytes(header[5..].try_into().unwrap()) & 0x7fff_ffff,
+            payload,
+        )
     }
 
     fn step(&mut self) -> bool {
@@ -183,7 +230,10 @@ impl Peer {
             0 => {
                 assert_eq!(flags & 8, 0, "fixture emits unpadded DATA");
                 let reply = self.replies.get_mut(&id).expect("known health stream");
-                assert!(reply.data.len() + payload.len() <= 1024, "bounded unread fixture data");
+                assert!(
+                    reply.data.len() + payload.len() <= 1024,
+                    "bounded unread fixture data"
+                );
                 reply.data.extend_from_slice(&payload);
                 reply.ended |= flags & 1 != 0;
             }
@@ -200,9 +250,14 @@ impl Peer {
                 let headers = self.decoder.decode(&mut Bytes::from(payload)).unwrap();
                 let reply = self.replies.get_mut(&id).expect("known health headers");
                 for header in headers {
-                    if header.name == ":status" { assert_eq!(header.value, "200"); }
+                    if header.name == ":status" {
+                        assert_eq!(header.value, "200");
+                    }
                     if header.name == "grpc-status" {
-                        assert!(reply.status.replace(header.value).is_none(), "duplicate grpc-status");
+                        assert!(
+                            reply.status.replace(header.value).is_none(),
+                            "duplicate grpc-status"
+                        );
                     }
                 }
                 reply.ended |= flags & 1 != 0;
@@ -224,14 +279,20 @@ impl Peer {
             if reply.data.len() >= 5 {
                 assert_eq!(reply.data[0], 0, "identity health message");
                 let length = u32::from_be_bytes(reply.data[1..5].try_into().unwrap()) as usize;
-                assert!(length <= 2, "canonical status protobuf is at most two bytes");
+                assert!(
+                    length <= 2,
+                    "canonical status protobuf is at most two bytes"
+                );
                 if reply.data.len() >= length + 5 {
                     let bytes = reply.data[5..length + 5].to_vec();
                     drop(reply.data.drain(..length + 5));
                     return bytes;
                 }
             }
-            assert!(!reply.ended, "health stream ended before its expected message");
+            assert!(
+                !reply.ended,
+                "health stream ended before its expected message"
+            );
             self.step();
         }
         panic!("no health message within fixture frame budget");
@@ -242,7 +303,10 @@ impl Peer {
             if self.replies[&id].ended {
                 assert_eq!(self.replies[&id].reset, None);
                 assert_eq!(self.replies[&id].status.as_deref(), Some(status));
-                assert!(self.replies[&id].data.is_empty(), "unconsumed message bytes");
+                assert!(
+                    self.replies[&id].data.is_empty(),
+                    "unconsumed message bytes"
+                );
                 return;
             }
             self.step();
@@ -253,7 +317,9 @@ impl Peer {
     fn ping_barrier(&mut self) {
         self.send(6, 0, 0, b"health!!");
         for _ in 0..512 {
-            if self.step() { return; }
+            if self.step() {
+                return;
+            }
         }
         panic!("no health PING acknowledgement");
     }
@@ -272,9 +338,16 @@ fn event(events: &Receiver<WatchEvent>, expected: WatchEvent) {
     // Multiple updates can leave earlier Parked receipts; never infer a source
     // retirement from timing or from a different generation's receipt.
     for _ in 0..16 {
-        let observed = events.recv_timeout(Duration::from_secs(3)).expect("health source witness");
-        if observed == expected { return; }
-        assert!(matches!(observed, WatchEvent::Parked(_)), "unexpected retirement: {observed:?}");
+        let observed = events
+            .recv_timeout(Duration::from_secs(3))
+            .expect("health source witness");
+        if observed == expected {
+            return;
+        }
+        assert!(
+            matches!(observed, WatchEvent::Parked(_)),
+            "unexpected retirement: {observed:?}"
+        );
     }
     panic!("missing expected health source event: {expected:?}");
 }
@@ -286,11 +359,15 @@ where
     let rpc = health.rpc_service(1);
     let observed_rpc = rpc.clone();
     let (events, observed_events) = sync_channel(32);
-    let server = Arc::new(Server::builder().add_service(WitnessService {
-        rpc,
-        events,
-        next: AtomicUsize::new(1),
-    }).build());
+    let server = Arc::new(
+        Server::builder()
+            .add_service(WitnessService {
+                rpc,
+                events,
+                next: AtomicUsize::new(1),
+            })
+            .build(),
+    );
     let runtime = if multithread {
         RuntimeBuilder::new().worker_threads(2).build().unwrap()
     } else {
@@ -300,16 +377,19 @@ where
     let completed = Arc::new(AtomicBool::new(false));
     let observed_completion = Arc::clone(&completed);
     runtime.block_on(runtime.handle().spawn(async move {
-        let listener = server.bind_registered_streaming_http2(
-            "127.0.0.1:0",
-            HostPolicy::allow_all(),
-            ServerStreamingConfig {
-                frame_capacity: NonZeroUsize::MIN,
-                max_frame_bytes: NonZeroUsize::new(7).unwrap(),
-                max_trailer_bytes: 1024,
-                terminal_timeout: Duration::from_secs(1),
-            },
-        ).await.unwrap();
+        let listener = server
+            .bind_registered_streaming_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_all(),
+                ServerStreamingConfig {
+                    frame_capacity: NonZeroUsize::MIN,
+                    max_frame_bytes: NonZeroUsize::new(7).unwrap(),
+                    max_trailer_bytes: 1024,
+                    terminal_timeout: Duration::from_secs(1),
+                },
+            )
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let signal = listener.shutdown_signal();
         let in_flight = listener.in_flight_requests();
@@ -326,7 +406,10 @@ where
         assert_eq!(in_flight.load(Ordering::Acquire), 0);
         completed.store(true, Ordering::Release);
     }));
-    assert!(observed_completion.load(Ordering::Acquire), "native health task did not complete assertions");
+    assert!(
+        observed_completion.load(Ordering::Acquire),
+        "native health task did not complete assertions"
+    );
 }
 
 #[test]
@@ -387,7 +470,10 @@ fn native_zero_credit_watch_saturation_still_allows_check_and_cancel() {
         peer.request(1, WATCH_PATH, "svc", Some("secret"), false);
         event(events, WatchEvent::Parked(1));
         peer.ping_barrier();
-        assert!(peer.replies[&1].data.is_empty(), "no DATA without peer credit");
+        assert!(
+            peer.replies[&1].data.is_empty(),
+            "no DATA without peer credit"
+        );
         health.set_status("svc", ServingStatus::NotServing);
         peer.request(3, WATCH_PATH, "svc", Some("secret"), false);
         peer.finish(3, "8");

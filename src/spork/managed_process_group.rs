@@ -9,12 +9,14 @@
 //! its delivered prefix; no old incarnation is ever routed into a replacement.
 
 use super::process_group::{
-    BroadcastBackpressurePolicy, GroupEvent, GroupEventBatch, GroupEventCursor,
-    GroupMember, GroupMemberId, GroupName, GroupSnapshot, ProcessGroupError, ProcessGroupState,
+    BroadcastBackpressurePolicy, GroupEvent, GroupEventBatch, GroupEventCursor, GroupMember,
+    GroupMemberId, GroupName, GroupSnapshot, ProcessGroupError, ProcessGroupState,
 };
 use crate::channel::mpsc;
-use crate::cx::{CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx,
-    TrackedNameError, TrackedNameLease, TrackedNameRegistry};
+use crate::cx::{
+    CancelWakerToken, ChildRegion, ChildRegionError, ChildRegionSpec, Cx, TrackedNameError,
+    TrackedNameLease, TrackedNameRegistry,
+};
 use crate::monitor::{DownReason, Monitor, MonitorOpening, WatchError};
 use crate::record::task::TaskOutcome;
 use crate::remote::NodeId;
@@ -52,8 +54,19 @@ pub struct ManagedProcessGroupConfig {
 impl ManagedProcessGroupConfig {
     /// Construct explicit bounds and inherit the caller's region envelope.
     #[must_use]
-    pub const fn new(max_members: usize, mailbox_capacity: usize, max_requests: usize, event_capacity: usize) -> Self {
-        Self { max_members, mailbox_capacity, max_requests, event_capacity, region: ChildRegionSpec::inherit() }
+    pub const fn new(
+        max_members: usize,
+        mailbox_capacity: usize,
+        max_requests: usize,
+        event_capacity: usize,
+    ) -> Self {
+        Self {
+            max_members,
+            mailbox_capacity,
+            max_requests,
+            event_capacity,
+            region: ChildRegionSpec::inherit(),
+        }
     }
 }
 
@@ -166,7 +179,11 @@ impl ManagedGroupBroadcastReport {
     /// Whether every captured incarnation accepted a message.
     #[must_use]
     pub fn is_all_delivered(&self) -> bool {
-        self.cancellation.is_none() && self.recipients.iter().all(|r| r.status == ManagedGroupRecipientStatus::Delivered)
+        self.cancellation.is_none()
+            && self
+                .recipients
+                .iter()
+                .all(|r| r.status == ManagedGroupRecipientStatus::Delivered)
     }
 }
 
@@ -234,7 +251,11 @@ impl WakeSlot {
     }
     fn notify(&self) {
         let waker = self.0.lock().take();
-        callback(|| { if let Some(waker) = waker { waker.wake(); } });
+        callback(|| {
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        });
     }
 }
 impl Drop for WakeSlot {
@@ -255,25 +276,42 @@ impl WaitHub {
     }
     fn notify(&self) {
         let slots: Vec<_> = self.0.lock().iter().filter_map(Weak::upgrade).collect();
-        for slot in slots { slot.notify(); }
+        for slot in slots {
+            slot.notify();
+        }
     }
 }
 #[derive(Default)]
-struct Signal { wake: WakeSlot, stopping: AtomicBool, abort_leases: AtomicBool, abort_on_down: AtomicBool }
+struct Signal {
+    wake: WakeSlot,
+    stopping: AtomicBool,
+    abort_leases: AtomicBool,
+    abort_on_down: AtomicBool,
+}
 impl Signal {
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
         self.wake.notify();
     }
 }
-struct Credits { used: AtomicUsize, limit: usize }
+struct Credits {
+    used: AtomicUsize,
+    limit: usize,
+}
 struct Credit(Arc<Credits>);
 impl Credit {
     fn acquire(credits: &Arc<Credits>) -> Result<Self, ManagedGroupError> {
         let mut used = credits.used.load(Ordering::Relaxed);
         loop {
-            if used >= credits.limit { return Err(ManagedGroupError::Busy); }
-            match credits.used.compare_exchange_weak(used, used + 1, Ordering::AcqRel, Ordering::Relaxed) {
+            if used >= credits.limit {
+                return Err(ManagedGroupError::Busy);
+            }
+            match credits.used.compare_exchange_weak(
+                used,
+                used + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return Ok(Self(Arc::clone(credits))),
                 Err(actual) => used = actual,
             }
@@ -281,18 +319,27 @@ impl Credit {
     }
 }
 impl Drop for Credit {
-    fn drop(&mut self) { self.0.used.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
 }
-struct CancelRegistration<'a> { cx: &'a Cx, token: Option<CancelWakerToken> }
+struct CancelRegistration<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
 impl<'a> CancelRegistration<'a> {
-    fn new(cx: &'a Cx) -> Self { Self { cx, token: None } }
+    fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
     fn poll(&mut self, waker: &Waker) {
         self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
     }
 }
 impl Drop for CancelRegistration<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { callback(|| self.cx.clear_cancel_waker(token)); }
+        if let Some(token) = self.token.take() {
+            callback(|| self.cx.clear_cancel_waker(token));
+        }
     }
 }
 struct MemberTerminal {
@@ -311,20 +358,32 @@ impl MemberTerminal {
     fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire) && !self.leave.load(Ordering::Acquire)
     }
-    fn result(&self) -> Option<Result<GroupEvent, ManagedGroupError>> { self.outcome.lock().clone() }
+    fn result(&self) -> Option<Result<GroupEvent, ManagedGroupError>> {
+        self.outcome.lock().clone()
+    }
     fn finish(&self, result: Result<GroupEvent, ManagedGroupError>) {
         {
             let mut current = self.outcome.lock();
-            if current.is_none() { *current = Some(result); }
+            if current.is_none() {
+                *current = Some(result);
+            }
         }
         self.active.store(false, Ordering::Release);
         self.waiters.notify();
     }
 }
-struct Route<M> { member: GroupMember, sender: mpsc::Sender<M>, terminal: Arc<MemberTerminal> }
+struct Route<M> {
+    member: GroupMember,
+    sender: mpsc::Sender<M>,
+    terminal: Arc<MemberTerminal>,
+}
 impl<M> Clone for Route<M> {
     fn clone(&self) -> Self {
-        Self { member: self.member.clone(), sender: self.sender.clone(), terminal: Arc::clone(&self.terminal) }
+        Self {
+            member: self.member.clone(),
+            sender: self.sender.clone(),
+            terminal: Arc::clone(&self.terminal),
+        }
     }
 }
 struct Joined<M> {
@@ -380,8 +439,14 @@ impl<M> Future for JoinWait<'_, M> {
         let (value, credit) = {
             let mut reply = this.request.reply.lock();
             let value = reply.value.take();
-            if value.is_some() { reply.received = true; }
-            let credit = if value.is_some() { reply.credit.take() } else { None };
+            if value.is_some() {
+                reply.received = true;
+            }
+            let credit = if value.is_some() {
+                reply.credit.take()
+            } else {
+                None
+            };
             (value, credit)
         };
         drop(credit);
@@ -389,12 +454,16 @@ impl<M> Future for JoinWait<'_, M> {
             this.request.signal.wake.notify();
             this.finished = true;
             Poll::Ready(value)
-        } else { Poll::Pending }
+        } else {
+            Poll::Pending
+        }
     }
 }
 impl<M> Drop for JoinWait<'_, M> {
     fn drop(&mut self) {
-        if !self.finished { self.request.reply.lock().abandoned = true; }
+        if !self.finished {
+            self.request.reply.lock().abandoned = true;
+        }
         self.request.signal.wake.notify();
     }
 }
@@ -429,7 +498,11 @@ impl<M> Shared<M> {
         let retired = {
             let mut state = self.state.lock();
             state.next_event = event.sequence().saturating_add(1);
-            let retired = if state.events.len() == self.config.event_capacity { state.events.pop_front() } else { None };
+            let retired = if state.events.len() == self.config.event_capacity {
+                state.events.pop_front()
+            } else {
+                None
+            };
             state.events.push_back(event);
             retired
         };
@@ -438,10 +511,21 @@ impl<M> Shared<M> {
     }
     fn events(&self, cursor: GroupEventCursor) -> ManagedGroupEventBatch {
         let state = self.state.lock();
-        let first = state.events.front().map_or(state.next_event, GroupEvent::sequence);
-        let events = state.events.iter().filter(|event| event.sequence() >= cursor.next_sequence()).cloned().collect();
+        let first = state
+            .events
+            .front()
+            .map_or(state.next_event, GroupEvent::sequence);
+        let events = state
+            .events
+            .iter()
+            .filter(|event| event.sequence() >= cursor.next_sequence())
+            .cloned()
+            .collect();
         ManagedGroupEventBatch {
-            batch: GroupEventBatch::new(events, GroupEventCursor::from_next_sequence(state.next_event.max(cursor.next_sequence()))),
+            batch: GroupEventBatch::new(
+                events,
+                GroupEventCursor::from_next_sequence(state.next_event.max(cursor.next_sequence())),
+            ),
             skipped: first.saturating_sub(cursor.next_sequence()),
             first_retained: GroupEventCursor::from_next_sequence(first),
             closed: state.closed,
@@ -452,9 +536,15 @@ impl<M> Shared<M> {
         let (queued, requests, routes) = {
             let mut state = self.state.lock();
             state.closed = true;
-            if state.ready.is_none() { state.ready = Some(Err(ManagedGroupError::Closed)); }
+            if state.ready.is_none() {
+                state.ready = Some(Err(ManagedGroupError::Closed));
+            }
             let requests: Vec<_> = state.requests.iter().filter_map(Weak::upgrade).collect();
-            (std::mem::take(&mut state.queue), requests, std::mem::take(&mut state.routes))
+            (
+                std::mem::take(&mut state.queue),
+                requests,
+                std::mem::take(&mut state.routes),
+            )
         };
         for route in routes.into_values() {
             route.terminal.finish(Err(ManagedGroupError::Closed));
@@ -465,40 +555,67 @@ impl<M> Shared<M> {
             callback(|| request.finish(Err(ManagedGroupError::Closed)));
             callback(|| drop(request));
         }
-        for request in queued { callback(|| drop(request)); }
+        for request in queued {
+            callback(|| drop(request));
+        }
         self.waiters.notify();
         self.signal.wake.notify();
     }
 }
 
 /// Cloneable group capability; the owner handle controls its lifetime.
-pub struct ProcessGroupClient<M> { shared: Arc<Shared<M>> }
+pub struct ProcessGroupClient<M> {
+    shared: Arc<Shared<M>>,
+}
 impl<M> Clone for ProcessGroupClient<M> {
-    fn clone(&self) -> Self { Self { shared: Arc::clone(&self.shared) } }
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
 }
 impl<M> std::fmt::Debug for ProcessGroupClient<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProcessGroupClient").field("group", &self.shared.name)
-            .field("outstanding_requests", &self.outstanding_requests()).finish_non_exhaustive()
+        f.debug_struct("ProcessGroupClient")
+            .field("group", &self.shared.name)
+            .field("outstanding_requests", &self.outstanding_requests())
+            .finish_non_exhaustive()
     }
 }
 impl<M> ProcessGroupClient<M> {
     /// Queued/unclaimed joins plus admitted broadcasts and event waits.
     #[must_use]
-    pub fn outstanding_requests(&self) -> usize { self.shared.credits.used.load(Ordering::Acquire) }
+    pub fn outstanding_requests(&self) -> usize {
+        self.shared.credits.used.load(Ordering::Acquire)
+    }
     /// Snapshot of published members in canonical join order.
     pub fn members(&self, cx: &Cx) -> Result<GroupSnapshot, ManagedGroupError> {
         self.shared.validate(cx)?;
-        let members = self.shared.state.lock().routes.values().map(|route| route.member.clone()).collect();
+        let members = self
+            .shared
+            .state
+            .lock()
+            .routes
+            .values()
+            .map(|route| route.member.clone())
+            .collect();
         Ok(GroupSnapshot::new(self.shared.name.clone(), members))
     }
     /// Replay retained events without advancing the caller's cursor.
-    pub fn events(&self, cx: &Cx, cursor: GroupEventCursor) -> Result<ManagedGroupEventBatch, ManagedGroupError> {
+    pub fn events(
+        &self,
+        cx: &Cx,
+        cursor: GroupEventCursor,
+    ) -> Result<ManagedGroupEventBatch, ManagedGroupError> {
         self.shared.validate(cx)?;
         Ok(self.shared.events(cursor))
     }
     /// Wait for events, an explicit history gap, or controller closure.
-    pub async fn next_events(&self, cx: &Cx, cursor: GroupEventCursor) -> Result<ManagedGroupEventBatch, ManagedGroupError> {
+    pub async fn next_events(
+        &self,
+        cx: &Cx,
+        cursor: GroupEventCursor,
+    ) -> Result<ManagedGroupEventBatch, ManagedGroupError> {
         self.shared.validate(cx)?;
         let _credit = Credit::acquire(&self.shared.credits)?;
         let wake = self.shared.waiters.subscribe();
@@ -506,11 +623,17 @@ impl<M> ProcessGroupClient<M> {
         poll_fn(|task| {
             wake.register(task.waker());
             cancel.poll(task.waker());
-            if cx.checkpoint().is_err() { return Poll::Ready(Err(cancelled(cx))); }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled(cx)));
+            }
             let batch = self.shared.events(cursor);
-            if !batch.batch.is_empty() || batch.skipped != 0 || batch.closed { Poll::Ready(Ok(batch)) }
-            else { Poll::Pending }
-        }).await
+            if !batch.batch.is_empty() || batch.skipped != 0 || batch.closed {
+                Poll::Ready(Ok(batch))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
     /// Join as the actual calling task after its monitor and checked lease exist.
     /// Moving the guard never changes that identity. An abandoned join is removed
@@ -520,47 +643,78 @@ impl<M> ProcessGroupClient<M> {
         let credit = Credit::acquire(&self.shared.credits)?;
         let request = Arc::new(JoinRequest {
             member: GroupMemberId::new(self.shared.node.clone(), cx.task_id()),
-            reply: Mutex::new(Reply { value: None, abandoned: false, received: false, credit: Some(credit) }),
-            wake: WakeSlot::default(), signal: Arc::clone(&self.shared.signal),
+            reply: Mutex::new(Reply {
+                value: None,
+                abandoned: false,
+                received: false,
+                credit: Some(credit),
+            }),
+            wake: WakeSlot::default(),
+            signal: Arc::clone(&self.shared.signal),
         });
         {
             let mut state = self.shared.state.lock();
-            if state.closed || self.shared.signal.stopping.load(Ordering::Acquire) { return Err(ManagedGroupError::Closed); }
+            if state.closed || self.shared.signal.stopping.load(Ordering::Acquire) {
+                return Err(ManagedGroupError::Closed);
+            }
             state.requests.retain(|request| request.strong_count() != 0);
             state.requests.push(Arc::downgrade(&request));
             state.queue.push_back(Arc::clone(&request));
         }
-        let wait = JoinWait { request, cancel: CancelRegistration::new(cx), finished: false };
+        let wait = JoinWait {
+            request,
+            cancel: CancelRegistration::new(cx),
+            finished: false,
+        };
         self.shared.signal.wake.notify();
         let joined = wait.await?;
-        Ok(ManagedGroupMembership { shared: Arc::clone(&self.shared), joined })
+        Ok(ManagedGroupMembership {
+            shared: Arc::clone(&self.shared),
+            joined,
+        })
     }
 }
 
 /// One member's receive capability and generation-specific leave guard.
 /// A guard retained elsewhere is revoked when its original task retires.
-pub struct ManagedGroupMembership<M> { shared: Arc<Shared<M>>, joined: Joined<M> }
+pub struct ManagedGroupMembership<M> {
+    shared: Arc<Shared<M>>,
+    joined: Joined<M>,
+}
 impl<M> std::fmt::Debug for ManagedGroupMembership<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedGroupMembership").field("member", self.id())
-            .field("generation", &self.generation()).field("active", &self.is_active()).finish_non_exhaustive()
+        f.debug_struct("ManagedGroupMembership")
+            .field("member", self.id())
+            .field("generation", &self.generation())
+            .field("active", &self.is_active())
+            .finish_non_exhaustive()
     }
 }
 impl<M> ManagedGroupMembership<M> {
     /// Actual member identity.
     #[must_use]
-    pub fn id(&self) -> &GroupMemberId { self.joined.member.id() }
+    pub fn id(&self) -> &GroupMemberId {
+        self.joined.member.id()
+    }
     /// Monotone canonical join sequence.
     #[must_use]
-    pub fn generation(&self) -> u64 { self.joined.member.join_sequence() }
+    pub fn generation(&self) -> u64 {
+        self.joined.member.join_sequence()
+    }
     /// Canonical joined event.
     #[must_use]
-    pub fn joined_event(&self) -> &GroupEvent { &self.joined.event }
+    pub fn joined_event(&self) -> &GroupEvent {
+        &self.joined.event
+    }
     /// Whether leave/death has not yet been observed or requested.
     #[must_use]
-    pub fn is_active(&self) -> bool { self.joined.terminal.is_active() }
+    pub fn is_active(&self) -> bool {
+        self.joined.terminal.is_active()
+    }
     /// Out-of-band idempotent leave, independent of request credit.
-    pub fn request_leave(&self) { self.joined.terminal.request_leave(); }
+    pub fn request_leave(&self) {
+        self.joined.terminal.request_leave();
+    }
     /// Withdraw and await its terminal event and lease settlement. Abandoning
     /// this wait does not undo leave; repeated waits return the same result.
     pub async fn leave(&mut self, cx: &Cx) -> Result<GroupEvent, ManagedGroupError> {
@@ -580,9 +734,12 @@ impl<M> ManagedGroupMembership<M> {
             if self.shared.state.lock().closed {
                 return Poll::Ready(Err(ManagedGroupError::Closed));
             }
-            if cx.checkpoint().is_err() { return Poll::Ready(Err(cancelled(cx))); }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled(cx)));
+            }
             Poll::Pending
-        }).await
+        })
+        .await
     }
     /// Receive within this incarnation. Departure wakes a parked receive even
     /// when another task retains the guard. Queued values are never rerouted.
@@ -607,33 +764,51 @@ impl<M> ManagedGroupMembership<M> {
             if self.shared.state.lock().closed {
                 return Poll::Ready(Err(ManagedGroupRecvError::Closed));
             }
-            if cx.checkpoint().is_err() { return Poll::Ready(Err(ManagedGroupRecvError::Cancelled(cancel_reason(cx)))); }
-            if !terminal.is_active() { return Poll::Pending; }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(ManagedGroupRecvError::Cancelled(cancel_reason(cx))));
+            }
+            if !terminal.is_active() {
+                return Poll::Pending;
+            }
             match self.joined.receiver.poll_recv(cx, task) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-                Poll::Ready(Err(mpsc::RecvError::Cancelled)) => Poll::Ready(Err(ManagedGroupRecvError::Cancelled(cancel_reason(cx)))),
+                Poll::Ready(Err(mpsc::RecvError::Cancelled)) => {
+                    Poll::Ready(Err(ManagedGroupRecvError::Cancelled(cancel_reason(cx))))
+                }
                 Poll::Ready(Err(_)) => Poll::Ready(Err(ManagedGroupRecvError::Closed)),
             }
-        }).await
+        })
+        .await
     }
 }
 impl<M> Drop for ManagedGroupMembership<M> {
-    fn drop(&mut self) { self.request_leave(); }
+    fn drop(&mut self) {
+        self.request_leave();
+    }
 }
 
 fn runtime_identity(cx: &Cx) -> Result<Weak<ObligationMailbox>, ManagedGroupError> {
     cx.checkpoint().map_err(|_| cancelled(cx))?;
-    let (gateway, holder) = cx.obligation_transfer_destination().map_err(|_| ManagedGroupError::RuntimeRequired)?;
-    if !gateway.is_runtime_available() || !holder.is_live()
-        || holder.holder() != cx.task_id() || holder.region() != cx.region_id()
-    { return Err(ManagedGroupError::RuntimeRequired); }
+    let (gateway, holder) = cx
+        .obligation_transfer_destination()
+        .map_err(|_| ManagedGroupError::RuntimeRequired)?;
+    if !gateway.is_runtime_available()
+        || !holder.is_live()
+        || holder.holder() != cx.task_id()
+        || holder.region() != cx.region_id()
+    {
+        return Err(ManagedGroupError::RuntimeRequired);
+    }
     Ok(Arc::downgrade(gateway.mailbox()))
 }
 fn cancel_reason(cx: &Cx) -> CancelReason {
-    cx.cancel_reason().unwrap_or_else(|| CancelReason::user("process-group caller cancelled"))
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("process-group caller cancelled"))
 }
-fn cancelled(cx: &Cx) -> ManagedGroupError { ManagedGroupError::Cancelled(cancel_reason(cx)) }
+fn cancelled(cx: &Cx) -> ManagedGroupError {
+    ManagedGroupError::Cancelled(cancel_reason(cx))
+}
 fn callback(action: impl FnOnce()) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(action)) {
         // An adversarial panic payload can itself panic in Drop. Containment
@@ -656,7 +831,10 @@ impl<M: Clone + Send + Sync> ProcessGroupClient<M> {
     /// messages. Concurrent broadcasts may interleave; this is not multicast
     /// atomicity. A departed incarnation is never replaced within a snapshot.
     pub async fn broadcast(
-        &self, cx: &Cx, message: &M, policy: BroadcastBackpressurePolicy,
+        &self,
+        cx: &Cx,
+        message: &M,
+        policy: BroadcastBackpressurePolicy,
     ) -> Result<ManagedGroupBroadcastReport, ManagedGroupError> {
         self.shared.validate(cx)?;
         let _credit = Credit::acquire(&self.shared.credits)?;
@@ -669,20 +847,29 @@ impl<M: Clone + Send + Sync> ProcessGroupClient<M> {
         };
         routes.sort_by_key(|route| route.member.join_sequence());
         let mut report = ManagedGroupBroadcastReport {
-            group: self.shared.name.clone(), policy, cancellation: None,
-            recipients: routes.iter().map(|route| ManagedGroupRecipient {
-                member: route.member.id().clone(),
-                generation: route.member.join_sequence(),
-                status: ManagedGroupRecipientStatus::NotAttempted,
-            }).collect(),
+            group: self.shared.name.clone(),
+            policy,
+            cancellation: None,
+            recipients: routes
+                .iter()
+                .map(|route| ManagedGroupRecipient {
+                    member: route.member.id().clone(),
+                    generation: route.member.join_sequence(),
+                    status: ManagedGroupRecipientStatus::NotAttempted,
+                })
+                .collect(),
         };
         let wake = self.shared.waiters.subscribe();
         let mut cancel = CancelRegistration::new(cx);
         for (index, route) in routes.iter().enumerate() {
-            if index != 0 && index % SCAN_QUANTUM == 0 { yield_once().await; }
+            if index != 0 && index % SCAN_QUANTUM == 0 {
+                yield_once().await;
+            }
             let reserved = if cx.checkpoint().is_err() {
                 Err(ManagedGroupRecipientStatus::Cancelled)
-            } else if !route.terminal.is_active() || self.shared.signal.stopping.load(Ordering::Acquire) {
+            } else if !route.terminal.is_active()
+                || self.shared.signal.stopping.load(Ordering::Acquire)
+            {
                 Err(ManagedGroupRecipientStatus::Departed)
             } else if policy == BroadcastBackpressurePolicy::Wait {
                 let mut reserve = std::pin::pin!(route.sender.reserve_checked(cx));
@@ -692,17 +879,25 @@ impl<M: Clone + Send + Sync> ProcessGroupClient<M> {
                     if cx.checkpoint().is_err() {
                         return Poll::Ready(Err(ManagedGroupRecipientStatus::Cancelled));
                     }
-                    if !route.terminal.is_active() || self.shared.signal.stopping.load(Ordering::Acquire) {
+                    if !route.terminal.is_active()
+                        || self.shared.signal.stopping.load(Ordering::Acquire)
+                    {
                         return Poll::Ready(Err(ManagedGroupRecipientStatus::Departed));
                     }
                     match reserve.as_mut().poll(task) {
                         Poll::Pending => Poll::Pending,
                         Poll::Ready(Ok(permit)) => Poll::Ready(Ok(permit)),
-                        Poll::Ready(Err(error)) => Poll::Ready(Err(reservation_status(error, policy))),
+                        Poll::Ready(Err(error)) => {
+                            Poll::Ready(Err(reservation_status(error, policy)))
+                        }
                     }
-                }).await
+                })
+                .await
             } else {
-                route.sender.try_reserve_checked(cx).map_err(|error| reservation_status(error, policy))
+                route
+                    .sender
+                    .try_reserve_checked(cx)
+                    .map_err(|error| reservation_status(error, policy))
             };
             let status = match reserved {
                 Err(status) => status,
@@ -714,7 +909,9 @@ impl<M: Clone + Send + Sync> ProcessGroupClient<M> {
                         drop(permit);
                         drop(value);
                         ManagedGroupRecipientStatus::Cancelled
-                    } else if !route.terminal.is_active() || self.shared.signal.stopping.load(Ordering::Acquire) {
+                    } else if !route.terminal.is_active()
+                        || self.shared.signal.stopping.load(Ordering::Acquire)
+                    {
                         drop(permit);
                         drop(value);
                         ManagedGroupRecipientStatus::Departed
@@ -749,27 +946,40 @@ impl<M: Clone + Send + Sync> ProcessGroupClient<M> {
                     report.cancellation = Some(cancel_reason(cx));
                     break;
                 }
-                ManagedGroupRecipientStatus::Backpressured | ManagedGroupRecipientStatus::AdmissionRefused(_) => break,
+                ManagedGroupRecipientStatus::Backpressured
+                | ManagedGroupRecipientStatus::AdmissionRefused(_) => break,
                 _ => {}
             }
         }
         // Preserve typed prefix accounting even when the final commit's wake
         // requested cancellation; the normal task wrapper sees acknowledgement.
-        if cx.checkpoint().is_err() { report.cancellation = Some(cancel_reason(cx)); }
+        if cx.checkpoint().is_err() {
+            report.cancellation = Some(cancel_reason(cx));
+        }
         Ok(report)
     }
 }
 
 fn reservation_status(
-    error: mpsc::CheckedSendError<()>, policy: BroadcastBackpressurePolicy,
+    error: mpsc::CheckedSendError<()>,
+    policy: BroadcastBackpressurePolicy,
 ) -> ManagedGroupRecipientStatus {
     match error {
-        mpsc::CheckedSendError::Admission { error, .. } => ManagedGroupRecipientStatus::AdmissionRefused(error),
-        mpsc::CheckedSendError::Channel(mpsc::SendError::Disconnected(())) => ManagedGroupRecipientStatus::Departed,
-        mpsc::CheckedSendError::Channel(mpsc::SendError::Cancelled(())) => ManagedGroupRecipientStatus::Cancelled,
+        mpsc::CheckedSendError::Admission { error, .. } => {
+            ManagedGroupRecipientStatus::AdmissionRefused(error)
+        }
+        mpsc::CheckedSendError::Channel(mpsc::SendError::Disconnected(())) => {
+            ManagedGroupRecipientStatus::Departed
+        }
+        mpsc::CheckedSendError::Channel(mpsc::SendError::Cancelled(())) => {
+            ManagedGroupRecipientStatus::Cancelled
+        }
         mpsc::CheckedSendError::Channel(mpsc::SendError::Full(())) => {
-            if policy == BroadcastBackpressurePolicy::Skip { ManagedGroupRecipientStatus::Skipped }
-            else { ManagedGroupRecipientStatus::Backpressured }
+            if policy == BroadcastBackpressurePolicy::Skip {
+                ManagedGroupRecipientStatus::Skipped
+            } else {
+                ManagedGroupRecipientStatus::Backpressured
+            }
         }
     }
 }
@@ -777,13 +987,15 @@ fn reservation_status(
 async fn yield_once() {
     let mut yielded = false;
     poll_fn(|task| {
-        if yielded { Poll::Ready(()) }
-        else {
+        if yielded {
+            Poll::Ready(())
+        } else {
             yielded = true;
             task.waker().wake_by_ref();
             Poll::Pending
         }
-    }).await;
+    })
+    .await;
 }
 
 /// Sole owner of a region-owned process-group controller.
@@ -796,8 +1008,10 @@ pub struct ManagedProcessGroup<M> {
 }
 impl<M> std::fmt::Debug for ManagedProcessGroup<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ManagedProcessGroup").field("group", &self.shared.name)
-            .field("region", &self.region_id).finish_non_exhaustive()
+        f.debug_struct("ManagedProcessGroup")
+            .field("group", &self.shared.name)
+            .field("region", &self.region_id)
+            .finish_non_exhaustive()
     }
 }
 impl<M: Send + 'static> ManagedProcessGroup<M> {
@@ -806,54 +1020,96 @@ impl<M: Send + 'static> ManagedProcessGroup<M> {
     /// The node identifies this local owner; no remote discovery or transport
     /// is implied. All clients remain permanently bound to this runtime.
     pub async fn open(
-        cx: &Cx, name: GroupName, node: NodeId, config: ManagedProcessGroupConfig,
+        cx: &Cx,
+        name: GroupName,
+        node: NodeId,
+        config: ManagedProcessGroupConfig,
     ) -> Result<Self, ManagedGroupError> {
-        if config.mailbox_capacity == 0 || config.max_requests == 0 || config.event_capacity == 0
-            || name.as_str().len() > 255 || node.as_str().is_empty() || node.as_str().len() > 255
-        { return Err(ManagedGroupError::InvalidConfig); }
+        if config.mailbox_capacity == 0
+            || config.max_requests == 0
+            || config.event_capacity == 0
+            || name.as_str().len() > 255
+            || node.as_str().is_empty()
+            || node.as_str().len() > 255
+        {
+            return Err(ManagedGroupError::InvalidConfig);
+        }
         let runtime = runtime_identity(cx)?;
-        let region = cx.open_child_region(config.region.clone()).await
+        let region = cx
+            .open_child_region(config.region.clone())
+            .await
             .map_err(|error| ManagedGroupError::Region(Arc::new(error)))?;
         let region_id = region.region_id();
         let shared = Arc::new(Shared {
-            name, node,
-            credits: Arc::new(Credits { used: AtomicUsize::new(0), limit: config.max_requests }),
-            config, runtime,
-            state: Mutex::new(SharedState {
-                queue: VecDeque::new(), requests: Vec::new(), routes: BTreeMap::new(),
-                events: VecDeque::new(), next_event: 0, closed: false, ready: None,
+            name,
+            node,
+            credits: Arc::new(Credits {
+                used: AtomicUsize::new(0),
+                limit: config.max_requests,
             }),
-            signal: Arc::new(Signal::default()), waiters: Arc::new(WaitHub::default()),
+            config,
+            runtime,
+            state: Mutex::new(SharedState {
+                queue: VecDeque::new(),
+                requests: Vec::new(),
+                routes: BTreeMap::new(),
+                events: VecDeque::new(),
+                next_event: 0,
+                closed: false,
+                ready: None,
+            }),
+            signal: Arc::new(Signal::default()),
+            waiters: Arc::new(WaitHub::default()),
         });
         // Construct before submission: denial or cancellation before the first
         // controller poll must also close every queued join/ready waiter.
         let lifetime = Lifetime(Arc::clone(&shared));
-        let task = region.cx().spawn(move |controller_cx| async move {
-            let lifetime = lifetime;
-            let report = run_controller(&controller_cx, &lifetime.0).await;
-            drop(lifetime);
-            report
-        }).map_err(|error| ManagedGroupError::Spawn(Arc::new(error)))?;
-        let owner = Self { shared, region: Some(region), task: Some(task), region_id };
+        let task = region
+            .cx()
+            .spawn(move |controller_cx| async move {
+                let lifetime = lifetime;
+                let report = run_controller(&controller_cx, &lifetime.0).await;
+                drop(lifetime);
+                report
+            })
+            .map_err(|error| ManagedGroupError::Spawn(Arc::new(error)))?;
+        let owner = Self {
+            shared,
+            region: Some(region),
+            task: Some(task),
+            region_id,
+        };
         let wake = owner.shared.waiters.subscribe();
         let mut cancel = CancelRegistration::new(cx);
         poll_fn(|task| {
             wake.register(task.waker());
             cancel.poll(task.waker());
-            if cx.checkpoint().is_err() { return Poll::Ready(Err(cancelled(cx))); }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled(cx)));
+            }
             let ready = owner.shared.state.lock().ready.clone();
-            match ready { Some(result) => Poll::Ready(result), None => Poll::Pending }
-        }).await?;
+            match ready {
+                Some(result) => Poll::Ready(result),
+                None => Poll::Pending,
+            }
+        })
+        .await?;
         Ok(owner)
     }
 }
 impl<M> ManagedProcessGroup<M> {
     /// Clone a group capability without transferring lifetime ownership.
     #[must_use]
-    pub fn client(&self) -> ProcessGroupClient<M> { ProcessGroupClient { shared: Arc::clone(&self.shared) } }
+    pub fn client(&self) -> ProcessGroupClient<M> {
+        ProcessGroupClient {
+            shared: Arc::clone(&self.shared),
+        }
+    }
     /// The actual region containing the sole controller.
     #[must_use]
-    pub const fn region_id(&self) -> RegionId { self.region_id }
+    pub const fn region_id(&self) -> RegionId {
+        self.region_id
+    }
     /// Out-of-band graceful stop, independent of outstanding request credit.
     pub fn request_shutdown(&self) {
         self.shared.signal.stop();
@@ -862,13 +1118,28 @@ impl<M> ManagedProcessGroup<M> {
     /// Await controller retirement and the actual region finalizer barrier.
     /// Dropping this future leaves its child region owned by the close protocol.
     pub async fn join(mut self) -> ManagedProcessGroupExit {
-        let task_outcome = poll_fn(|task| self.task.as_mut().expect("owned group controller").poll_join(task)).await;
-        let close = self.region.take().expect("owned group region").close_with_outcome().await
+        let task_outcome = poll_fn(|task| {
+            self.task
+                .as_mut()
+                .expect("owned group controller")
+                .poll_join(task)
+        })
+        .await;
+        let close = self
+            .region
+            .take()
+            .expect("owned group region")
+            .close_with_outcome()
+            .await
             .map(|close| ManagedGroupClose {
-                outcome: close.outcome, cleanup_outcome: close.cleanup_outcome,
+                outcome: close.outcome,
+                cleanup_outcome: close.cleanup_outcome,
                 descendant_panic: close.descendant_panic,
             });
-        ManagedProcessGroupExit { task_outcome, close }
+        ManagedProcessGroupExit {
+            task_outcome,
+            close,
+        }
     }
     /// Seal admission, revoke all memberships, settle leases, and await close.
     pub async fn shutdown(self) -> ManagedProcessGroupExit {
@@ -879,13 +1150,19 @@ impl<M> ManagedProcessGroup<M> {
     // Configure before publishing clients: actual member DOWN then aborts the
     // tracked name obligation at the controller's original retirement boundary.
     pub(crate) fn abort_on_member_down(&self) {
-        self.shared.signal.abort_on_down.store(true, Ordering::Release);
+        self.shared
+            .signal
+            .abort_on_down
+            .store(true, Ordering::Release);
     }
 
     // Opt-in revocation for global-name ownership. Ordinary process-group
     // shutdown retains its existing successful-release settlement semantics.
     pub(crate) fn request_abort(&self) {
-        self.shared.signal.abort_leases.store(true, Ordering::Release);
+        self.shared
+            .signal
+            .abort_leases
+            .store(true, Ordering::Release);
         self.request_shutdown();
     }
 
@@ -899,14 +1176,18 @@ impl<M> ManagedProcessGroup<M> {
 impl<M> Drop for ManagedProcessGroup<M> {
     fn drop(&mut self) {
         self.request_shutdown();
-        if let Some(task) = &self.task { callback(|| task.abort()); }
+        if let Some(task) = &self.task {
+            callback(|| task.abort());
+        }
         // ChildRegion's Drop arms the real close barrier. No synchronous drop
         // path claims that controller retirement or finalization has completed.
     }
 }
 struct Lifetime<M>(Arc<Shared<M>>);
 impl<M> Drop for Lifetime<M> {
-    fn drop(&mut self) { self.0.close(); }
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 struct LiveRecord<M> {
@@ -916,7 +1197,10 @@ struct LiveRecord<M> {
     terminal: Arc<MemberTerminal>,
     publication: Option<Arc<JoinRequest<M>>>,
 }
-struct Admission<M> { request: Arc<JoinRequest<M>>, opening: MonitorOpening }
+struct Admission<M> {
+    request: Arc<JoinRequest<M>>,
+    opening: MonitorOpening,
+}
 enum Work<M> {
     Start(Arc<JoinRequest<M>>),
     Admit(Arc<JoinRequest<M>>, Result<Monitor, WatchError>),
@@ -938,10 +1222,14 @@ impl<M> Drop for Controller<M> {
         // messages after publication, and one destructor must not prevent other
         // memberships' obligations from settling before this task retires.
         for record in self.records.values_mut() {
-            if let Some(lease) = record.lease.take() { callback(|| drop(lease)); }
+            if let Some(lease) = record.lease.take() {
+                callback(|| drop(lease));
+            }
         }
         self.shared.close();
-        if let Some(pending) = self.pending.take() { callback(|| drop(pending)); }
+        if let Some(pending) = self.pending.take() {
+            callback(|| drop(pending));
+        }
         for (_, record) in std::mem::take(&mut self.records) {
             callback(|| drop(record));
         }
@@ -950,7 +1238,10 @@ impl<M> Drop for Controller<M> {
 
 impl<M> Controller<M> {
     fn poll(
-        &mut self, cx: &Cx, cancel: &mut CancelRegistration<'_>, task: &mut Context<'_>,
+        &mut self,
+        cx: &Cx,
+        cancel: &mut CancelRegistration<'_>,
+        task: &mut Context<'_>,
     ) -> Poll<Work<M>> {
         self.shared.signal.wake.register(task.waker());
         cancel.poll(task.waker());
@@ -965,7 +1256,9 @@ impl<M> Controller<M> {
             let record = self.records.get_mut(id).expect("retained scan member");
             if let Some(request) = &record.publication {
                 let (abandoned, received) = request.disposition();
-                if abandoned { return Poll::Ready(Work::Remove(id.clone(), None)); }
+                if abandoned {
+                    return Poll::Ready(Work::Remove(id.clone(), None));
+                }
                 if received {
                     let request = record.publication.take();
                     callback(|| drop(request));
@@ -995,7 +1288,9 @@ impl<M> Controller<M> {
         }
         if let Some(admission) = self.pending.as_mut() {
             if admission.request.disposition().0 {
-                return Poll::Ready(Work::Discard(self.pending.take().expect("pending admission")));
+                return Poll::Ready(Work::Discard(
+                    self.pending.take().expect("pending admission"),
+                ));
             }
             if let Poll::Ready(result) = Pin::new(&mut admission.opening).poll(task) {
                 let admission = self.pending.take().expect("completed admission");
@@ -1004,18 +1299,24 @@ impl<M> Controller<M> {
         }
         if self.pending.is_none() {
             let request = self.shared.state.lock().queue.pop_front();
-            if let Some(request) = request { return Poll::Ready(Work::Start(request)); }
+            if let Some(request) = request {
+                return Poll::Ready(Work::Start(request));
+            }
         }
         Poll::Pending
     }
 
     fn start(&mut self, cx: &Cx, request: Arc<JoinRequest<M>>) {
-        if request.disposition().0 { return; }
+        if request.disposition().0 {
+            return;
+        }
         let refusal = if self.records.contains_key(&request.member) {
             Some(ManagedGroupError::DuplicateMember(request.member.clone()))
         } else if self.records.len() >= self.shared.config.max_members {
             Some(ManagedGroupError::Capacity)
-        } else { None };
+        } else {
+            None
+        };
         if let Some(error) = refusal {
             callback(|| request.finish(Err(error)));
             return;
@@ -1024,12 +1325,23 @@ impl<M> Controller<M> {
         self.pending = Some(Admission { request, opening });
     }
 
-    fn admit(&mut self, cx: &Cx, request: Arc<JoinRequest<M>>, monitor: Result<Monitor, WatchError>) {
+    fn admit(
+        &mut self,
+        cx: &Cx,
+        request: Arc<JoinRequest<M>>,
+        monitor: Result<Monitor, WatchError>,
+    ) {
         let monitor = match monitor {
             Ok(monitor) => monitor,
-            Err(error) => { callback(|| request.finish(Err(ManagedGroupError::Watch(error)))); return; }
+            Err(error) => {
+                callback(|| request.finish(Err(ManagedGroupError::Watch(error))));
+                return;
+            }
         };
-        if request.disposition().0 { callback(|| drop(monitor)); return; }
+        if request.disposition().0 {
+            callback(|| drop(monitor));
+            return;
+        }
         if cx.checkpoint().is_err() || self.shared.signal.stopping.load(Ordering::Acquire) {
             callback(|| drop(monitor));
             callback(|| request.finish(Err(ManagedGroupError::Closed)));
@@ -1042,7 +1354,10 @@ impl<M> Controller<M> {
         }
         // This private registry has one lease per retained incarnation. The
         // holder is the controller, while the watch retains the actual member.
-        let lease = match self.registry.register(cx, format!("member/{}", self.state.next_join_sequence())) {
+        let lease = match self
+            .registry
+            .register(cx, format!("member/{}", self.state.next_join_sequence()))
+        {
             Ok(lease) => lease,
             Err(error) => {
                 callback(|| drop(monitor));
@@ -1052,8 +1367,10 @@ impl<M> Controller<M> {
         };
         // Checked admission can notify the runtime. Recheck abandonment, death
         // and cancellation before exposing a mailbox after that boundary.
-        if request.disposition().0 || monitor.try_down().is_some()
-            || cx.checkpoint().is_err() || self.shared.signal.stopping.load(Ordering::Acquire)
+        if request.disposition().0
+            || monitor.try_down().is_some()
+            || cx.checkpoint().is_err()
+            || self.shared.signal.stopping.load(Ordering::Acquire)
         {
             let _ = self.settle(lease, false);
             callback(|| drop(monitor));
@@ -1072,35 +1389,71 @@ impl<M> Controller<M> {
             }
         };
         self.state.discard_managed_events();
-        let member = self.state.member(&request.member).expect("joined canonical member").clone();
+        let member = self
+            .state
+            .member(&request.member)
+            .expect("joined canonical member")
+            .clone();
         let terminal = Arc::new(MemberTerminal {
-            leave: AtomicBool::new(false), active: AtomicBool::new(true), outcome: Mutex::new(None),
-            signal: Arc::clone(&self.shared.signal), waiters: Arc::clone(&self.shared.waiters),
+            leave: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            outcome: Mutex::new(None),
+            signal: Arc::clone(&self.shared.signal),
+            waiters: Arc::clone(&self.shared.waiters),
         });
         let (sender, receiver) = mpsc::channel(self.shared.config.mailbox_capacity);
         let record = LiveRecord {
-            member: member.clone(), monitor, lease: Some(lease),
-            terminal: Arc::clone(&terminal), publication: Some(Arc::clone(&request)),
+            member: member.clone(),
+            monitor,
+            lease: Some(lease),
+            terminal: Arc::clone(&terminal),
+            publication: Some(Arc::clone(&request)),
         };
         let replaced = self.records.insert(request.member.clone(), record);
-        debug_assert!(replaced.is_none(), "canonical join excludes duplicate records");
+        debug_assert!(
+            replaced.is_none(),
+            "canonical join excludes duplicate records"
+        );
         callback(|| drop(replaced));
-        let route = Route { member: member.clone(), sender, terminal: Arc::clone(&terminal) };
-        let retired = self.shared.state.lock().routes.insert(request.member.clone(), route);
-        debug_assert!(retired.is_none(), "canonical join excludes duplicate routes");
+        let route = Route {
+            member: member.clone(),
+            sender,
+            terminal: Arc::clone(&terminal),
+        };
+        let retired = self
+            .shared
+            .state
+            .lock()
+            .routes
+            .insert(request.member.clone(), route);
+        debug_assert!(
+            retired.is_none(),
+            "canonical join excludes duplicate routes"
+        );
         callback(|| drop(retired));
         self.report.joined = self.report.joined.saturating_add(1);
         self.shared.publish(event.clone());
         // The record owns both the lease and the unclaimed request before any
         // caller can receive or abandon the guard, including through a wake.
-        callback(|| request.finish(Ok(Joined { member, event, receiver, terminal })));
+        callback(|| {
+            request.finish(Ok(Joined {
+                member,
+                event,
+                receiver,
+                terminal,
+            }))
+        });
     }
 
     fn settle(&mut self, lease: TrackedNameLease, down: bool) -> Result<(), TrackedNameError> {
         let abort = self.shared.signal.abort_leases.load(Ordering::Acquire)
             || (down && self.shared.signal.abort_on_down.load(Ordering::Acquire));
         let result = match catch_unwind(AssertUnwindSafe(|| {
-            if abort { lease.abort() } else { lease.release() }
+            if abort {
+                lease.abort()
+            } else {
+                lease.release()
+            }
         })) {
             Ok(result) => result,
             Err(payload) => {
@@ -1116,20 +1469,32 @@ impl<M> Controller<M> {
     }
 
     fn remove(&mut self, cx: &Cx, id: &GroupMemberId, reason: Option<DownReason>) {
-        let Some(mut record) = self.records.remove(id) else { return; };
+        let Some(mut record) = self.records.remove(id) else {
+            return;
+        };
         // Departure must be visible before channel closure or event publication
         // can wake a broadcaster or observer on another worker.
         record.terminal.active.store(false, Ordering::Release);
-        let route = {
-            let mut state = self.shared.state.lock();
-            if state.routes.get(id).is_some_and(|route| route.member.join_sequence() == record.member.join_sequence()) {
-                state.routes.remove(id)
-            } else { None }
-        };
+        let route =
+            {
+                let mut state = self.shared.state.lock();
+                if state.routes.get(id).is_some_and(|route| {
+                    route.member.join_sequence() == record.member.join_sequence()
+                }) {
+                    state.routes.remove(id)
+                } else {
+                    None
+                }
+            };
         // Snapshot senders may outlive this record and a forgotten receiver.
         // Seal the channel itself, waking all pending checked reservations.
-        if let Some(route) = &route { callback(|| route.sender.close_receiver()); }
-        let settlement = record.lease.take().map_or(Ok(()), |lease| self.settle(lease, reason.is_some()));
+        if let Some(route) = &route {
+            callback(|| route.sender.close_receiver());
+        }
+        let settlement = record
+            .lease
+            .take()
+            .map_or(Ok(()), |lease| self.settle(lease, reason.is_some()));
         let result = if let Err(error) = settlement {
             Err(ManagedGroupError::Lease(error))
         } else {
@@ -1141,8 +1506,11 @@ impl<M> Controller<M> {
             match transition {
                 Ok(event) => {
                     self.state.discard_managed_events();
-                    if down { self.report.down = self.report.down.saturating_add(1); }
-                    else { self.report.left = self.report.left.saturating_add(1); }
+                    if down {
+                        self.report.down = self.report.down.saturating_add(1);
+                    } else {
+                        self.report.left = self.report.left.saturating_add(1);
+                    }
                     self.shared.publish(event.clone());
                     Ok(event)
                 }
@@ -1164,7 +1532,9 @@ impl<M> Controller<M> {
             callback(|| admission.request.finish(Err(ManagedGroupError::Closed)));
             callback(|| drop(admission));
         }
-        let reason = cx.cancel_reason().unwrap_or_else(|| CancelReason::user("process-group owner shutdown"));
+        let reason = cx
+            .cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("process-group owner shutdown"));
         while let Some(id) = self.records.keys().next().cloned() {
             self.remove(cx, &id, Some(DownReason::Cancelled(reason.clone())));
         }
@@ -1174,9 +1544,12 @@ impl<M> Controller<M> {
 
 async fn run_controller<M: Send + 'static>(cx: &Cx, shared: &Arc<Shared<M>>) -> ManagedGroupReport {
     let mut controller = Controller {
-        shared: Arc::clone(shared), records: BTreeMap::new(),
-        state: ProcessGroupState::new(shared.name.clone()), registry: TrackedNameRegistry::new(),
-        pending: None, report: ManagedGroupReport::default(),
+        shared: Arc::clone(shared),
+        records: BTreeMap::new(),
+        state: ProcessGroupState::new(shared.name.clone()),
+        registry: TrackedNameRegistry::new(),
+        pending: None,
+        report: ManagedGroupReport::default(),
     };
     let ready = shared.validate(cx);
     let refused = ready.is_err();
@@ -1194,7 +1567,10 @@ async fn run_controller<M: Send + 'static>(cx: &Cx, shared: &Arc<Shared<M>>) -> 
                 Work::Stop => break,
             }
             work += 1;
-            if work == SCAN_QUANTUM { work = 0; yield_once().await; }
+            if work == SCAN_QUANTUM {
+                work = 0;
+                yield_once().await;
+            }
         }
     }
     // No await or task-result publication after taking leases out of ownership.

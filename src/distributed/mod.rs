@@ -71,18 +71,17 @@ pub use membership::{
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use node::{
+    NativeDistributedClient, NativeDistributedComponent, NativeDistributedComponentResult,
     NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
-    NativeDistributedDiscoveryStartError,
-    NativeDistributedClient, NativeDistributedComponent, NativeDistributedComponentResult, NativeDistributedNode,
-    NativeDistributedNodeReport,
+    NativeDistributedDiscoveryStartError, NativeDistributedNode, NativeDistributedNodeReport,
     NativeDistributedNodeStartError, NativeDistributedNodeStartFailure,
-    NativeDistributedNodeStopCause, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
-    NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
-    NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
+    NativeDistributedNodeStopCause, NativeDistributedOutboundConfig,
+    NativeDistributedOutboundError, NativeDistributedOutboundReport, NativeDistributedRemoteError,
+    NativeDistributedRemoteHandle, NativeDistributedRemoteResult, NativeDistributedSymbolConfig,
+    NativeDistributedSymbolError, NativeDistributedSymbolReport, NativeDistributedSymbolRoute,
+    NativeDistributedSymbolTransport, NativeDistributedTypedRemoteError,
     NativeDistributedTypedRemoteHandle, NativeDistributedTypedRemoteReport,
     NativeDistributedTypedRemoteResult, NativeListenerResult, NativeMembershipResult,
-    NativeDistributedSymbolConfig, NativeDistributedSymbolError, NativeDistributedSymbolReport,
-    NativeDistributedSymbolRoute, NativeDistributedSymbolTransport,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

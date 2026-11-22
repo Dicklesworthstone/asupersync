@@ -71,43 +71,89 @@ pub enum IoGroupTapeError {
 pub struct IoGroupBytes(Zeroizing<Vec<u8>>);
 impl fmt::Debug for IoGroupBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IoGroupBytes").field("encoded_bytes", &self.0.len()).finish_non_exhaustive()
+        f.debug_struct("IoGroupBytes")
+            .field("encoded_bytes", &self.0.len())
+            .finish_non_exhaustive()
     }
 }
 impl AsRef<[u8]> for IoGroupBytes {
-    fn as_ref(&self) -> &[u8] { &self.0 }
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
-fn add(a: usize, b: usize) -> Result<usize, IoGroupTapeError> { a.checked_add(b).ok_or(IoGroupTapeError::Overflow) }
-fn mul(a: usize, b: usize) -> Result<usize, IoGroupTapeError> { a.checked_mul(b).ok_or(IoGroupTapeError::Overflow) }
+fn add(a: usize, b: usize) -> Result<usize, IoGroupTapeError> {
+    a.checked_add(b).ok_or(IoGroupTapeError::Overflow)
+}
+fn mul(a: usize, b: usize) -> Result<usize, IoGroupTapeError> {
+    a.checked_mul(b).ok_or(IoGroupTapeError::Overflow)
+}
 fn number(bytes: &[u8], at: usize) -> Result<u64, IoGroupTapeError> {
-    let value = bytes.get(at..add(at, 8)?).ok_or(IoGroupTapeError::Truncated)?;
-    Ok(u64::from_le_bytes(value.try_into().expect("eight-byte field")))
+    let value = bytes
+        .get(at..add(at, 8)?)
+        .ok_or(IoGroupTapeError::Truncated)?;
+    Ok(u64::from_le_bytes(
+        value.try_into().expect("eight-byte field"),
+    ))
 }
 fn count(bytes: &[u8], at: usize) -> Result<usize, IoGroupTapeError> {
     usize::try_from(number(bytes, at)?).map_err(|_| IoGroupTapeError::Overflow)
 }
 fn put(out: &mut Vec<u8>, value: usize) -> Result<(), IoGroupTapeError> {
-    out.extend_from_slice(&u64::try_from(value).map_err(|_| IoGroupTapeError::Overflow)?.to_le_bytes()); Ok(())
+    out.extend_from_slice(
+        &u64::try_from(value)
+            .map_err(|_| IoGroupTapeError::Overflow)?
+            .to_le_bytes(),
+    );
+    Ok(())
 }
 fn checksum(bytes: &[u8]) -> [u8; 32] {
-    let mut hash = Sha256::new(); hash.update(DOMAIN); hash.update(bytes); hash.finalize().into()
+    let mut hash = Sha256::new();
+    hash.update(DOMAIN);
+    hash.update(bytes);
+    hash.finalize().into()
 }
 fn tag(operation: IoOperation) -> u8 {
-    match operation { IoOperation::Read => 0, IoOperation::Write => 1, IoOperation::WriteVectored => 2, IoOperation::Flush => 3, IoOperation::Shutdown => 4 }
+    match operation {
+        IoOperation::Read => 0,
+        IoOperation::Write => 1,
+        IoOperation::WriteVectored => 2,
+        IoOperation::Flush => 3,
+        IoOperation::Shutdown => 4,
+    }
 }
 fn operation(tag: u8) -> Result<IoOperation, IoGroupTapeError> {
-    match tag { 0 => Ok(IoOperation::Read), 1 => Ok(IoOperation::Write), 2 => Ok(IoOperation::WriteVectored), 3 => Ok(IoOperation::Flush), 4 => Ok(IoOperation::Shutdown), _ => Err(IoGroupTapeError::Format) }
+    match tag {
+        0 => Ok(IoOperation::Read),
+        1 => Ok(IoOperation::Write),
+        2 => Ok(IoOperation::WriteVectored),
+        3 => Ok(IoOperation::Flush),
+        4 => Ok(IoOperation::Shutdown),
+        _ => Err(IoGroupTapeError::Format),
+    }
 }
 
 #[derive(Clone, Copy)]
-struct Descriptor { id: u64, start: usize, end: usize }
+struct Descriptor {
+    id: u64,
+    start: usize,
+    end: usize,
+}
 fn metadata_bytes(streams: usize, events: usize) -> Result<usize, IoGroupTapeError> {
-    let per_stream = add(size_of::<RecordedStream>(), add(size_of::<Descriptor>(), add(size_of::<u64>(), size_of::<usize>())?)?)?;
+    let per_stream = add(
+        size_of::<RecordedStream>(),
+        add(
+            size_of::<Descriptor>(),
+            add(size_of::<u64>(), size_of::<usize>())?,
+        )?,
+    )?;
     add(mul(streams, per_stream)?, mul(events, size_of::<Entry>())?)
 }
 fn vector<T>(capacity: usize) -> Result<Vec<T>, IoGroupTapeError> {
-    let mut out = Vec::new(); out.try_reserve_exact(capacity).map_err(|_| IoGroupTapeError::Allocation)?; Ok(out)
+    let mut out = Vec::new();
+    out.try_reserve_exact(capacity)
+        .map_err(|_| IoGroupTapeError::Allocation)?;
+    Ok(out)
 }
 
 impl RecordedIoGroup {
@@ -124,27 +170,46 @@ impl RecordedIoGroup {
     /// Encoded component temporaries and final output each fit the chosen
     /// bound; live tapes, small metadata vectors and allocator overhead are
     /// separate. Temporary plaintext owners zeroize on success and refusal.
-    pub fn to_canonical_bytes(&self, max_encoded_bytes: usize) -> Result<IoGroupBytes, IoGroupTapeError> {
-        let overhead = add(HEADER + CHECKSUM, add(mul(self.streams.len(), 16)?, mul(self.order.len(), ENTRY_BYTES)?)?)?;
-        let mut remaining = max_encoded_bytes.checked_sub(overhead).ok_or(IoGroupTapeError::Limit("encoded bytes"))?;
+    pub fn to_canonical_bytes(
+        &self,
+        max_encoded_bytes: usize,
+    ) -> Result<IoGroupBytes, IoGroupTapeError> {
+        let overhead = add(
+            HEADER + CHECKSUM,
+            add(
+                mul(self.streams.len(), 16)?,
+                mul(self.order.len(), ENTRY_BYTES)?,
+            )?,
+        )?;
+        let mut remaining = max_encoded_bytes
+            .checked_sub(overhead)
+            .ok_or(IoGroupTapeError::Limit("encoded bytes"))?;
         let mut components = vector(self.streams.len())?;
         for stream in &self.streams {
             let encoded = stream.tape.to_canonical_bytes(remaining)?;
-            remaining = remaining.checked_sub(encoded.as_ref().len()).ok_or(IoGroupTapeError::Limit("encoded bytes"))?;
+            remaining = remaining
+                .checked_sub(encoded.as_ref().len())
+                .ok_or(IoGroupTapeError::Limit("encoded bytes"))?;
             components.push(encoded);
         }
         let length = max_encoded_bytes - remaining;
         let mut out = IoGroupBytes(Zeroizing::new(vector(length)?));
         out.0.extend_from_slice(MAGIC);
         out.0.extend_from_slice(&VERSION.to_le_bytes());
-        put(&mut out.0, self.streams.len())?; put(&mut out.0, self.order.len())?;
+        put(&mut out.0, self.streams.len())?;
+        put(&mut out.0, self.order.len())?;
         for (stream, encoded) in self.streams.iter().zip(&components) {
             out.0.extend_from_slice(&stream.id.to_le_bytes());
             put(&mut out.0, encoded.as_ref().len())?;
             out.0.extend_from_slice(encoded.as_ref());
         }
-        for entry in &self.order { put(&mut out.0, entry.stream)?; out.0.push(tag(entry.operation)); }
-        let mut digest = checksum(&out.0); out.0.extend_from_slice(&digest); digest.zeroize();
+        for entry in &self.order {
+            put(&mut out.0, entry.stream)?;
+            out.0.push(tag(entry.operation));
+        }
+        let mut digest = checksum(&out.0);
+        out.0.extend_from_slice(&digest);
+        digest.zeroize();
         debug_assert_eq!(out.0.len(), length);
         Ok(out)
     }
@@ -157,55 +222,106 @@ impl RecordedIoGroup {
     /// tapes during replay, not asserted by an unkeyed checksum. Incorrect kinds
     /// fail closed in the replay driver rather than fabricating readiness. Always
     /// require `IoReplayGroup::verify_complete` after the consumer drains.
-    pub fn from_canonical_bytes(bytes: &[u8], limits: IoGroupDecodeLimits) -> Result<Self, IoGroupTapeError> {
-        if bytes.len() > limits.max_encoded_bytes { return Err(IoGroupTapeError::Limit("encoded bytes")); }
-        if bytes.len() < HEADER + CHECKSUM { return Err(IoGroupTapeError::Truncated); }
-        if &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() { return Err(IoGroupTapeError::Format); }
-        let streams = count(bytes, 12)?; let events = count(bytes, 20)?;
-        if streams > limits.max_streams { return Err(IoGroupTapeError::Limit("streams")); }
-        if events > limits.max_events { return Err(IoGroupTapeError::Limit("events")); }
-        if metadata_bytes(streams, events)? > limits.max_group_bytes { return Err(IoGroupTapeError::Limit("group storage")); }
+    pub fn from_canonical_bytes(
+        bytes: &[u8],
+        limits: IoGroupDecodeLimits,
+    ) -> Result<Self, IoGroupTapeError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(IoGroupTapeError::Limit("encoded bytes"));
+        }
+        if bytes.len() < HEADER + CHECKSUM {
+            return Err(IoGroupTapeError::Truncated);
+        }
+        if &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() {
+            return Err(IoGroupTapeError::Format);
+        }
+        let streams = count(bytes, 12)?;
+        let events = count(bytes, 20)?;
+        if streams > limits.max_streams {
+            return Err(IoGroupTapeError::Limit("streams"));
+        }
+        if events > limits.max_events {
+            return Err(IoGroupTapeError::Limit("events"));
+        }
+        if metadata_bytes(streams, events)? > limits.max_group_bytes {
+            return Err(IoGroupTapeError::Limit("group storage"));
+        }
         // Framing and every component encoded bound precede any tape decoding.
         // This pass allocates nothing, including for forged large stream counts.
         let mut position = HEADER;
         for _ in 0..streams {
             let length = count(bytes, add(position, 8)?)?;
-            if length > limits.per_stream.max_encoded_bytes { return Err(IoGroupTapeError::Stream(IoTapeError::Limit("encoded bytes"))); }
+            if length > limits.per_stream.max_encoded_bytes {
+                return Err(IoGroupTapeError::Stream(IoTapeError::Limit(
+                    "encoded bytes",
+                )));
+            }
             position = add(add(position, 16)?, length)?;
-            if position > bytes.len() { return Err(IoGroupTapeError::Truncated); }
+            if position > bytes.len() {
+                return Err(IoGroupTapeError::Truncated);
+            }
         }
         let order_start = position;
         let body_end = add(order_start, mul(events, ENTRY_BYTES)?)?;
         let expected_length = add(body_end, CHECKSUM)?;
-        if bytes.len() < expected_length { return Err(IoGroupTapeError::Truncated); }
-        if bytes.len() > expected_length { return Err(IoGroupTapeError::TrailingData); }
-        let mut expected = checksum(&bytes[..body_end]); let matches = expected.as_slice() == &bytes[body_end..]; expected.zeroize();
-        if !matches { return Err(IoGroupTapeError::Checksum); }
-        let mut descriptors = vector(streams)?; let mut ids = vector(streams)?;
+        if bytes.len() < expected_length {
+            return Err(IoGroupTapeError::Truncated);
+        }
+        if bytes.len() > expected_length {
+            return Err(IoGroupTapeError::TrailingData);
+        }
+        let mut expected = checksum(&bytes[..body_end]);
+        let matches = expected.as_slice() == &bytes[body_end..];
+        expected.zeroize();
+        if !matches {
+            return Err(IoGroupTapeError::Checksum);
+        }
+        let mut descriptors = vector(streams)?;
+        let mut ids = vector(streams)?;
         position = HEADER;
         for _ in 0..streams {
             let id = number(bytes, position)?;
             let length = count(bytes, position + 8)?;
-            let start = position + 16; let end = start + length; // preflight checked
-            descriptors.push(Descriptor { id, start, end }); ids.push(id); position = end;
+            let start = position + 16;
+            let end = start + length; // preflight checked
+            descriptors.push(Descriptor { id, start, end });
+            ids.push(id);
+            position = end;
         }
         ids.sort_unstable();
-        if ids.windows(2).any(|pair| pair[0] == pair[1]) { return Err(IoGroupTapeError::Coverage); }
-        let mut counts = vector(streams)?; counts.resize(streams, 0usize);
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(IoGroupTapeError::Coverage);
+        }
+        let mut counts = vector(streams)?;
+        counts.resize(streams, 0usize);
         let mut order = vector(events)?;
         for entry in bytes[order_start..body_end].chunks_exact(ENTRY_BYTES) {
             let stream = count(entry, 0)?;
             let count = counts.get_mut(stream).ok_or(IoGroupTapeError::Coverage)?;
             *count = count.checked_add(1).ok_or(IoGroupTapeError::Overflow)?;
-            order.push(Entry { stream, operation: operation(entry[8])? });
+            order.push(Entry {
+                stream,
+                operation: operation(entry[8])?,
+            });
         }
         let mut decoded = vector(streams)?;
         for (descriptor, count) in descriptors.iter().zip(counts) {
-            let tape = IoTape::from_canonical_bytes(&bytes[descriptor.start..descriptor.end], limits.per_stream)?;
-            if tape.operations() != count { return Err(IoGroupTapeError::Coverage); }
-            decoded.push(RecordedStream { id: descriptor.id, tape });
+            let tape = IoTape::from_canonical_bytes(
+                &bytes[descriptor.start..descriptor.end],
+                limits.per_stream,
+            )?;
+            if tape.operations() != count {
+                return Err(IoGroupTapeError::Coverage);
+            }
+            decoded.push(RecordedStream {
+                id: descriptor.id,
+                tape,
+            });
         }
-        Ok(Self { streams: decoded, order })
+        Ok(Self {
+            streams: decoded,
+            order,
+        })
     }
 }
 

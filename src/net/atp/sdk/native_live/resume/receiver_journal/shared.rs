@@ -102,7 +102,9 @@ impl<W> JournaledSession<W> {
             budget: Budget {
                 used: 0,
                 maximum,
-                _credit: Credit::Shared { _capacity: capacity },
+                _credit: Credit::Shared {
+                    _capacity: capacity,
+                },
             },
         };
         if let Some((mut retained, saved)) = restore {
@@ -124,7 +126,10 @@ impl<W> JournaledSession<W> {
             receiver.budget.used = saved.used;
             receiver.budget.maximum = saved.maximum;
         }
-        Ok(JournaledReceiver { receiver, store: Mutex::new(store) })
+        Ok(JournaledReceiver {
+            receiver,
+            store: Mutex::new(store),
+        })
     }
 }
 
@@ -196,7 +201,9 @@ impl<W: LiveStreamCommitSink + Unpin> JournaledReceiver<W> {
                     };
                     match checkpoint {
                         Ok(()) => {
-                            receiver.receive_wire_checkpointed(cx, wire, offered, store).await
+                            receiver
+                                .receive_wire_checkpointed(cx, wire, offered, store)
+                                .await
                         }
                         Err(error) => Err(error),
                     }

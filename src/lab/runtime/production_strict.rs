@@ -614,7 +614,11 @@ pub(super) fn prepare_source(
     let spawns = schedule.spawn_order();
     let event_count = events
         .len()
-        .checked_add(schedule.cancellation_events().map_or(0, <[ProductionCancellationEvent]>::len))
+        .checked_add(
+            schedule
+                .cancellation_events()
+                .map_or(0, <[ProductionCancellationEvent]>::len),
+        )
         .ok_or(StrictProductionReplayError::InvalidProjection {
             reason: "combined source event count overflow",
         })?;

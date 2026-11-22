@@ -2097,13 +2097,8 @@ impl Resolver {
                 let query_id = dns_query_id(context.entropy);
                 let query = build_dns_query(name, query_type, query_id)?;
 
-                let response = query_nameserver(
-                    nameserver,
-                    &query,
-                    query_id,
-                    query_timeout,
-                    context.stop,
-                );
+                let response =
+                    query_nameserver(nameserver, &query, query_id, query_timeout, context.stop);
                 // A blocked syscall can finish after its caller is gone. Do
                 // not consume its answer or start another resolver operation.
                 check_dns_abandoned(context.stop)?;

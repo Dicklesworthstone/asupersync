@@ -371,10 +371,7 @@ mod tests {
         assert!(bridge.as_mut().poll(&mut task).is_pending());
         cx.cancel_fast(CancelKind::User);
         assert!(count.0.load(Ordering::SeqCst) > 0);
-        assert!(matches!(
-            bridge.as_mut().poll(&mut task),
-            Poll::Ready(None)
-        ));
+        assert!(matches!(bridge.as_mut().poll(&mut task), Poll::Ready(None)));
         // The wrapper is still alive. Receiver ownership must already have
         // been released, rather than waiting for drop(bridge).
         assert!(sender.send(42).is_err());
@@ -409,10 +406,7 @@ mod tests {
         let mut task = Context::from_waker(&waker);
         assert!(bridge.as_mut().poll(&mut task).is_pending());
         assert!(count.0.load(Ordering::SeqCst) > 0);
-        assert!(matches!(
-            bridge.as_mut().poll(&mut task),
-            Poll::Ready(None)
-        ));
+        assert!(matches!(bridge.as_mut().poll(&mut task), Poll::Ready(None)));
     }
 
     #[test]
@@ -474,10 +468,7 @@ mod tests {
         let mut task = Context::from_waker(Waker::noop());
         assert!(bridge.as_mut().poll(&mut task).is_pending());
         cx.cancel_fast(CancelKind::User);
-        assert!(matches!(
-            bridge.as_mut().poll(&mut task),
-            Poll::Ready(None)
-        ));
+        assert!(matches!(bridge.as_mut().poll(&mut task), Poll::Ready(None)));
         assert!(dropped.load(Ordering::SeqCst));
         assert!(correct_context.load(Ordering::SeqCst));
     }
@@ -503,9 +494,7 @@ mod tests {
                 .poll(&mut Context::from_waker(Waker::noop()))
                 .is_pending()
         );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(bridge))).is_err()
-        );
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(bridge))).is_err());
         assert!(dropped.load(Ordering::SeqCst));
         assert!(correct_context.load(Ordering::SeqCst));
         assert_eq!(current_request_id().as_deref(), Some("outer"));
@@ -519,10 +508,7 @@ mod tests {
         let mut bridge = Box::pin(with_tokio_context(&cx, std::future::pending::<()>));
         assert!(bridge.as_mut().poll(&mut task).is_pending());
         cx.cancel_fast(CancelKind::User);
-        assert!(matches!(
-            bridge.as_mut().poll(&mut task),
-            Poll::Ready(None)
-        ));
+        assert!(matches!(bridge.as_mut().poll(&mut task), Poll::Ready(None)));
         assert_eq!(Arc::strong_count(&count), 2);
         let wakes = count.0.load(Ordering::SeqCst);
         cx.cancel_fast(CancelKind::User);

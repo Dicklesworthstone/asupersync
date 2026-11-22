@@ -7,13 +7,13 @@
 
 use super::sparse_writer::SparseWriterError;
 use crate::fs::scoped::ScopedFsError;
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::types::Outcome;
 use std::future::{Future, poll_fn};
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 /// Explicit bounds for one receive operation, checked before source polling.
@@ -122,7 +122,10 @@ impl<R> ScopedReceive<R> {
         poll_fn(|task| self.poll_wait(task)).await
     }
 
-    pub(super) fn poll_wait(&mut self, task: &mut Context<'_>) -> Poll<ScopedReceiveResult<PathBuf>> {
+    pub(super) fn poll_wait(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<ScopedReceiveResult<PathBuf>> {
         if self.poisoned {
             return Poll::Ready(Err(ScopedReceiveError::Poisoned));
         }
@@ -223,9 +226,10 @@ impl ReceiveStartGate {
     const PREPARED: u8 = 3;
 
     fn hold(&self) -> bool {
-        match self.0.compare_exchange(
-            Self::OPEN, Self::HELD, Ordering::AcqRel, Ordering::Acquire,
-        ) {
+        match self
+            .0
+            .compare_exchange(Self::OPEN, Self::HELD, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) | Err(Self::HELD | Self::PREPARED) => true,
             Err(_) => false,
         }
@@ -233,9 +237,11 @@ impl ReceiveStartGate {
 
     fn release(&self) {
         // Never undo body admission after an earlier wait has started it.
-        let _ = self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-            matches!(state, Self::HELD | Self::PREPARED).then_some(Self::OPEN)
-        });
+        let _ = self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                matches!(state, Self::HELD | Self::PREPARED).then_some(Self::OPEN)
+            });
     }
 
     fn is_prepared(&self) -> bool {
@@ -243,13 +249,13 @@ impl ReceiveStartGate {
     }
 
     pub(super) fn poll_admit(&self) -> Poll<()> {
-        let previous = self.0.try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-            match state {
-                Self::OPEN => Some(Self::ADMITTED),
-                Self::HELD => Some(Self::PREPARED),
-                _ => None,
-            }
-        });
+        let previous =
+            self.0
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
+                    Self::OPEN => Some(Self::ADMITTED),
+                    Self::HELD => Some(Self::PREPARED),
+                    _ => None,
+                });
         match previous {
             Ok(Self::OPEN) | Err(Self::ADMITTED) => Poll::Ready(()),
             _ => Poll::Pending,
@@ -259,9 +265,8 @@ impl ReceiveStartGate {
 
 pub(super) type JournalCheckpointSlot =
     Arc<parking_lot::Mutex<Option<Arc<super::JournalCheckpoint>>>>;
-pub(super) type JournalReceiveWork<R> = Pin<
-    Box<dyn Future<Output = (Option<R>, JournalReceiveReport)> + Send>,
->;
+pub(super) type JournalReceiveWork<R> =
+    Pin<Box<dyn Future<Output = (Option<R>, JournalReceiveReport)> + Send>>;
 
 /// Receive owner that retains journal work across dropped borrowing waits.
 ///
@@ -356,9 +361,7 @@ impl<R> ScopedJournalReceive<R> {
             return Err(ScopedReceiveError::PreparationTooLate);
         }
         poll_fn(|task| match self.poll_report(task) {
-            Poll::Ready(Ok(report)) => {
-                Poll::Ready(Ok(JournalReceivePreparation::Stopped(report)))
-            }
+            Poll::Ready(Ok(report)) => Poll::Ready(Ok(JournalReceivePreparation::Stopped(report))),
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Pending if self.start.is_prepared() => match self.last_checkpoint() {
                 Some(checkpoint) => {
@@ -367,7 +370,8 @@ impl<R> ScopedJournalReceive<R> {
                 None => Poll::Pending,
             },
             Poll::Pending => Poll::Pending,
-        }).await
+        })
+        .await
     }
 
     /// Drive the same operation and consume its report once.
@@ -416,8 +420,14 @@ mod preparation_gate_tests {
         let gate = ReceiveStartGate::default();
         assert!(gate.hold());
         assert!(!gate.is_prepared());
-        assert!(gate.hold(), "a dropped borrowing preparation can be resumed");
-        assert!(!gate.is_prepared(), "holding alone is not preflight retirement");
+        assert!(
+            gate.hold(),
+            "a dropped borrowing preparation can be resumed"
+        );
+        assert!(
+            !gate.is_prepared(),
+            "holding alone is not preflight retirement"
+        );
         assert!(gate.poll_admit().is_pending());
         assert!(gate.is_prepared());
         assert!(gate.hold());
@@ -425,7 +435,10 @@ mod preparation_gate_tests {
         gate.release();
         assert!(!gate.is_prepared());
         assert!(gate.poll_admit().is_ready());
-        assert!(!gate.hold(), "late preparation cannot close an admitted body");
+        assert!(
+            !gate.hold(),
+            "late preparation cannot close an admitted body"
+        );
         gate.release();
         assert!(gate.poll_admit().is_ready());
     }

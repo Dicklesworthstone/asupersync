@@ -33,16 +33,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 mod outbound;
-pub use outbound::{
-    NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
-    NativeDistributedDiscoveryStartError,
-    NativeDistributedClient, NativeDistributedOutboundConfig, NativeDistributedOutboundError,
-    NativeDistributedOutboundReport, NativeDistributedRemoteError, NativeDistributedRemoteHandle,
-    NativeDistributedRemoteResult, NativeDistributedTypedRemoteError,
-    NativeDistributedTypedRemoteHandle, NativeDistributedTypedRemoteReport,
-    NativeDistributedTypedRemoteResult,
-};
 use outbound::Outbound;
+pub use outbound::{
+    NativeDistributedClient, NativeDistributedDiscoveryHandle, NativeDistributedDiscoveryResult,
+    NativeDistributedDiscoveryStartError, NativeDistributedOutboundConfig,
+    NativeDistributedOutboundError, NativeDistributedOutboundReport, NativeDistributedRemoteError,
+    NativeDistributedRemoteHandle, NativeDistributedRemoteResult,
+    NativeDistributedTypedRemoteError, NativeDistributedTypedRemoteHandle,
+    NativeDistributedTypedRemoteReport, NativeDistributedTypedRemoteResult,
+};
 
 mod symbols;
 pub use symbols::{
@@ -179,7 +178,10 @@ struct StopPanics {
 
 impl StopPanics {
     fn new() -> Self {
-        Self { unwinding: std::thread::panicking(), first: None }
+        Self {
+            unwinding: std::thread::panicking(),
+            first: None,
+        }
     }
 
     fn run(&mut self, action: impl FnOnce()) {
@@ -240,13 +242,21 @@ impl Controls {
             Component(Membership) => 5,
             Component(Swim) => 6,
         };
-        if self.stopped.compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        if self
+            .stopped
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return;
         }
         // Publish the seal before any callback; independent stop actions must
         // all run even if a membership lease waiter panics while being woken.
-        if let Some(outbound) = &self.outbound { outbound.begin_close(panics); }
-        panics.run(|| { let _ = self.listener.begin_drain(); });
+        if let Some(outbound) = &self.outbound {
+            outbound.begin_close(panics);
+        }
+        panics.run(|| {
+            let _ = self.listener.begin_drain();
+        });
         panics.run(|| self.membership.close());
         panics.run(|| self.changed.notify_waiters());
     }
@@ -267,7 +277,10 @@ struct Component<T> {
 
 impl<T> Component<T> {
     fn new() -> Self {
-        Self { task: None, outcome: Arc::new(Mutex::new(None)) }
+        Self {
+            task: None,
+            outcome: Arc::new(Mutex::new(None)),
+        }
     }
 
     async fn join(&mut self, cx: &Cx) -> Option<Result<(), JoinError>> {
@@ -286,7 +299,10 @@ impl<T> Component<T> {
 impl Drop for ComponentStop {
     fn drop(&mut self) {
         let mut panics = StopPanics::new();
-        self.controls.stop(NativeDistributedNodeStopCause::Component(self.component), &mut panics);
+        self.controls.stop(
+            NativeDistributedNodeStopCause::Component(self.component),
+            &mut panics,
+        );
     }
 }
 
@@ -308,7 +324,9 @@ impl Drop for Unstarted {
             panics.run(move || drop(membership));
         }
         if let Some(listener) = self.listener.take() {
-            panics.run(|| { let _ = listener.handle().begin_drain(); });
+            panics.run(|| {
+                let _ = listener.handle().begin_drain();
+            });
             panics.run(move || drop(listener));
         }
         if let Some(swim) = self.swim.take() {
@@ -401,7 +419,9 @@ impl NativeDistributedNode {
         child: ChildRegionSpec,
     ) -> impl Future<Output = Result<Self, NativeDistributedNodeStartError>> {
         let unstarted = Unstarted {
-            listener: Some(listener), membership: Some(membership), swim,
+            listener: Some(listener),
+            membership: Some(membership),
+            swim,
             outbound: Some(outbound),
         };
         Self::start_inner(cx, unstarted, child)
@@ -413,12 +433,26 @@ impl NativeDistributedNode {
         child: ChildRegionSpec,
     ) -> Result<Self, NativeDistributedNodeStartError> {
         let outbound = unstarted.outbound.take().map(|outbound| {
-            outbound.bind(unstarted.membership.as_ref().expect("owned membership").clone())
+            outbound.bind(
+                unstarted
+                    .membership
+                    .as_ref()
+                    .expect("owned membership")
+                    .clone(),
+            )
         });
         let controls = Arc::new(Controls {
             stopped: AtomicU8::new(0),
-            listener: unstarted.listener.as_ref().expect("owned listener").handle(),
-            membership: unstarted.membership.as_ref().expect("owned membership").clone(),
+            listener: unstarted
+                .listener
+                .as_ref()
+                .expect("owned listener")
+                .handle(),
+            membership: unstarted
+                .membership
+                .as_ref()
+                .expect("owned membership")
+                .clone(),
             outbound,
             changed: Notify::new(),
         });
@@ -443,25 +477,41 @@ impl NativeDistributedNode {
         // Arc, without running Unstarted's membership-close backstop.
         drop(unstarted.membership.take());
         if let Err(cause) = node.admit(cx, child).await {
-            let rollback = node.finish(NativeDistributedNodeStopCause::StartupFailure).await;
-            return Err(NativeDistributedNodeStartError { cause, rollback: Box::new(rollback) });
+            let rollback = node
+                .finish(NativeDistributedNodeStopCause::StartupFailure)
+                .await;
+            return Err(NativeDistributedNodeStartError {
+                cause,
+                rollback: Box::new(rollback),
+            });
         }
         Ok(node)
     }
 
-    async fn admit(&mut self, cx: &Cx, child: ChildRegionSpec) -> Result<(), NativeDistributedNodeStartFailure> {
+    async fn admit(
+        &mut self,
+        cx: &Cx,
+        child: ChildRegionSpec,
+    ) -> Result<(), NativeDistributedNodeStartFailure> {
         use NativeDistributedComponent::{Listener, Membership, Swim};
         use NativeDistributedNodeStartFailure as Failure;
         cx.checkpoint().map_err(|_| Failure::Cancelled)?;
-        if cx.timer_driver().is_none() { return Err(Failure::MissingTimer); }
+        if cx.timer_driver().is_none() {
+            return Err(Failure::MissingTimer);
+        }
         if !cx.capabilities().io || cx.io_driver_handle().is_none() {
             return Err(Failure::MissingIoDriver);
         }
         if self.controls.outbound.is_some() && !cx.capabilities().remote {
             return Err(Failure::MissingRemote);
         }
-        self.address = Some(self.unstarted_listener.as_ref().expect("unstarted listener")
-            .local_addr().map_err(Failure::Address)?);
+        self.address = Some(
+            self.unstarted_listener
+                .as_ref()
+                .expect("unstarted listener")
+                .local_addr()
+                .map_err(Failure::Address)?,
+        );
         let region = cx.open_child_region(child).await.map_err(Failure::Region)?;
         let principal = region.cx().clone();
         self.region_id = Some(region.region_id());
@@ -472,28 +522,42 @@ impl NativeDistributedNode {
         let stop = self.component_stop(Listener);
         let outcome = Arc::clone(&self.listener.outcome);
         let listener = self.unstarted_listener.take().expect("unstarted listener");
-        self.listener.task = Some(principal.spawn(move |body| async move {
-            let _stop = stop;
-            let _ = entered.send_blocking(());
-            let result = listener.run(&body).await;
-            *outcome.lock() = Some(result);
-            // Acknowledge observed cancellation, but preserve the component
-            // outcome independently of the runtime's final classification.
-            let _ = body.checkpoint();
-        }).map_err(|source| Failure::Spawn { component: Listener, source })?);
+        self.listener.task = Some(
+            principal
+                .spawn(move |body| async move {
+                    let _stop = stop;
+                    let _ = entered.send_blocking(());
+                    let result = listener.run(&body).await;
+                    *outcome.lock() = Some(result);
+                    // Acknowledge observed cancellation, but preserve the component
+                    // outcome independently of the runtime's final classification.
+                    let _ = body.checkpoint();
+                })
+                .map_err(|source| Failure::Spawn {
+                    component: Listener,
+                    source,
+                })?,
+        );
         Self::entered(&self.controls, cx, Listener, receiver).await?;
 
         let (entered, receiver) = oneshot::channel();
         let stop = self.component_stop(Membership);
         let outcome = Arc::clone(&self.membership.outcome);
         let membership = self.controls.membership.clone();
-        self.membership.task = Some(principal.spawn(move |body| async move {
-            let _stop = stop;
-            let _ = entered.send_blocking(());
-            let result = membership.run(&body).await;
-            *outcome.lock() = Some(result);
-            let _ = body.checkpoint();
-        }).map_err(|source| Failure::Spawn { component: Membership, source })?);
+        self.membership.task = Some(
+            principal
+                .spawn(move |body| async move {
+                    let _stop = stop;
+                    let _ = entered.send_blocking(());
+                    let result = membership.run(&body).await;
+                    *outcome.lock() = Some(result);
+                    let _ = body.checkpoint();
+                })
+                .map_err(|source| Failure::Spawn {
+                    component: Membership,
+                    source,
+                })?,
+        );
         Self::entered(&self.controls, cx, Membership, receiver).await?;
 
         if self.unstarted_swim.is_some() {
@@ -502,22 +566,35 @@ impl NativeDistributedNode {
             let controls = Arc::clone(&self.controls);
             let outcome = Arc::clone(&self.swim.outcome);
             let swim = self.unstarted_swim.take().expect("configured swim");
-            self.swim.task = Some(principal.spawn(move |body| async move {
-                let _stop = stop;
-                let _ = entered.send_blocking(());
-                let result = swim.run_until(&body, controls.changed.wait_until(|| {
-                    controls.cause().is_some()
-                })).await;
-                *outcome.lock() = Some(result);
-                let _ = body.checkpoint();
-            }).map_err(|source| Failure::Spawn { component: Swim, source })?);
+            self.swim.task = Some(
+                principal
+                    .spawn(move |body| async move {
+                        let _stop = stop;
+                        let _ = entered.send_blocking(());
+                        let result = swim
+                            .run_until(
+                                &body,
+                                controls.changed.wait_until(|| controls.cause().is_some()),
+                            )
+                            .await;
+                        *outcome.lock() = Some(result);
+                        let _ = body.checkpoint();
+                    })
+                    .map_err(|source| Failure::Spawn {
+                        component: Swim,
+                        source,
+                    })?,
+            );
             Self::entered(&self.controls, cx, Swim, receiver).await?;
         }
         Ok(())
     }
 
     fn component_stop(&self, component: NativeDistributedComponent) -> ComponentStop {
-        ComponentStop { controls: Arc::clone(&self.controls), component }
+        ComponentStop {
+            controls: Arc::clone(&self.controls),
+            component,
+        }
     }
 
     async fn entered(
@@ -527,7 +604,8 @@ impl NativeDistributedNode {
         mut receiver: oneshot::Receiver<()>,
     ) -> Result<(), NativeDistributedNodeStartFailure> {
         let entered = receiver.recv(cx).await;
-        cx.checkpoint().map_err(|_| NativeDistributedNodeStartFailure::Cancelled)?;
+        cx.checkpoint()
+            .map_err(|_| NativeDistributedNodeStartFailure::Cancelled)?;
         entered.map_err(|_| NativeDistributedNodeStartFailure::Entry(component))?;
         if let Some(cause) = controls.cause() {
             return Err(NativeDistributedNodeStartFailure::Stopped(cause));
@@ -549,7 +627,9 @@ impl NativeDistributedNode {
 
     /// Whether admission has been sealed; does not imply drain has completed.
     #[must_use]
-    pub fn is_closed(&self) -> bool { self.controls.cause().is_some() }
+    pub fn is_closed(&self) -> bool {
+        self.controls.cause().is_some()
+    }
 
     /// Current authenticated membership stamp, without delegating update authority.
     #[must_use]
@@ -559,11 +639,15 @@ impl NativeDistributedNode {
 
     /// Checked membership leases currently retained by this controller.
     #[must_use]
-    pub fn live_leases(&self) -> usize { self.controls.membership.live_leases() }
+    pub fn live_leases(&self) -> usize {
+        self.controls.membership.live_leases()
+    }
 
     /// Bounded, non-authoritative observation of the optional SWIM driver.
     #[must_use]
-    pub fn swim_observer(&self) -> Option<SwimObserver> { self.observer.clone() }
+    pub fn swim_observer(&self) -> Option<SwimObserver> {
+        self.observer.clone()
+    }
 
     /// Bounded node-owned outbound work, when configured at startup.
     ///
@@ -572,15 +656,22 @@ impl NativeDistributedNode {
     /// membership controller, transport policy or capability after admission.
     #[must_use]
     pub fn client(&self) -> Option<NativeDistributedClient> {
-        self.controls.outbound.as_ref().map(|_| NativeDistributedClient::new(
-            Arc::clone(&self.controls), self.principal.as_ref().expect("admitted node principal").clone(),
-        ))
+        self.controls.outbound.as_ref().map(|_| {
+            NativeDistributedClient::new(
+                Arc::clone(&self.controls),
+                self.principal
+                    .as_ref()
+                    .expect("admitted node principal")
+                    .clone(),
+            )
+        })
     }
 
     /// Seal admission and ask every component to stop. Await `close` for drain.
     pub fn begin_close(&self) {
         let mut panics = StopPanics::new();
-        self.controls.stop(NativeDistributedNodeStopCause::Close, &mut panics);
+        self.controls
+            .stop(NativeDistributedNodeStopCause::Close, &mut panics);
     }
 
     /// Seal admission, drain the whole child region, and collect every task.
@@ -593,20 +684,27 @@ impl NativeDistributedNode {
         self.finish(NativeDistributedNodeStopCause::Close).await
     }
 
-    async fn finish(&mut self, cause: NativeDistributedNodeStopCause) -> NativeDistributedNodeReport {
+    async fn finish(
+        &mut self,
+        cause: NativeDistributedNodeStopCause,
+    ) -> NativeDistributedNodeReport {
         let mut panics = StopPanics::new();
         self.controls.stop(cause, &mut panics);
         self.retire_unstarted(&mut panics);
         let outbound_graceful = if let Some(outbound) = &self.controls.outbound {
             Some(outbound.close(self.principal.as_ref()).await)
-        } else { None };
+        } else {
+            None
+        };
         let region_close = if let Some(region) = self.region.take() {
             Some(region.close().await)
         } else {
             None
         };
         if matches!(&region_close, Some(Ok(()))) {
-            if let Some(outbound) = &self.controls.outbound { outbound.region_retired(); }
+            if let Some(outbound) = &self.controls.outbound {
+                outbound.region_retired();
+            }
         }
         let (mut listener, mut membership, mut swim) = (None, None, None);
         if let Some(principal) = self.principal.as_ref() {
@@ -623,25 +721,42 @@ impl NativeDistributedNode {
             listener: listener.map(|retirement| self.listener.collect(retirement)),
             membership: membership.map(|retirement| self.membership.collect(retirement)),
             swim: swim.map(|retirement| self.swim.collect(retirement)),
-            outbound: self.controls.outbound.as_ref().zip(outbound_graceful)
+            outbound: self
+                .controls
+                .outbound
+                .as_ref()
+                .zip(outbound_graceful)
                 .map(|(outbound, graceful)| outbound.report(graceful)),
         }
     }
 
     fn retire_unstarted(&mut self, panics: &mut StopPanics) {
-        if let Some(listener) = self.unstarted_listener.take() { panics.run(move || drop(listener)); }
-        if let Some(swim) = self.unstarted_swim.take() { panics.run(move || drop(swim)); }
+        if let Some(listener) = self.unstarted_listener.take() {
+            panics.run(move || drop(listener));
+        }
+        if let Some(swim) = self.unstarted_swim.take() {
+            panics.run(move || drop(swim));
+        }
     }
 }
 
 impl Drop for NativeDistributedNode {
     fn drop(&mut self) {
         let mut panics = StopPanics::new();
-        self.controls.stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
+        self.controls
+            .stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
         self.retire_unstarted(&mut panics);
-        if let Some(region) = self.region.take() { panics.run(move || drop(region)); }
-        if let Some(task) = self.listener.task.take() { panics.run(move || drop(task)); }
-        if let Some(task) = self.membership.task.take() { panics.run(move || drop(task)); }
-        if let Some(task) = self.swim.task.take() { panics.run(move || drop(task)); }
+        if let Some(region) = self.region.take() {
+            panics.run(move || drop(region));
+        }
+        if let Some(task) = self.listener.task.take() {
+            panics.run(move || drop(task));
+        }
+        if let Some(task) = self.membership.task.take() {
+            panics.run(move || drop(task));
+        }
+        if let Some(task) = self.swim.task.take() {
+            panics.run(move || drop(task));
+        }
     }
 }

@@ -748,9 +748,7 @@ impl IoDriverHandle {
         let Some(service) = &self.service else {
             return;
         };
-        if service.available.load(Ordering::Acquire)
-            || service.notified.load(Ordering::Acquire)
-        {
+        if service.available.load(Ordering::Acquire) || service.notified.load(Ordering::Acquire) {
             return;
         }
         let wakers = {
@@ -4067,7 +4065,9 @@ mod tests {
         let shared = IoDriverHandle::new(reactor.clone());
         let other = IoDriverHandle::new(Arc::new(LabReactor::new()));
         let (waker, wakes) = create_test_waker();
-        let registration = first.register(&TestFdSource, Interest::READABLE, waker).unwrap();
+        let registration = first
+            .register(&TestFdSource, Interest::READABLE, waker)
+            .unwrap();
         assert!(registration.belongs_to(&first));
         assert!(registration.belongs_to(&shared));
         assert!(!registration.belongs_to(&other));
@@ -4086,7 +4086,11 @@ mod tests {
             .unwrap();
         assert_ne!(live.token(), registration.token());
         drop(registration);
-        assert_eq!(successor.waker_count(), 1, "old cleanup must preserve the successor");
+        assert_eq!(
+            successor.waker_count(),
+            1,
+            "old cleanup must preserve the successor"
+        );
         assert_eq!(reactor.registration_count(), 1);
         drop(live);
         assert_eq!(successor.waker_count(), 0);
@@ -4145,7 +4149,9 @@ mod tests {
         // Replacing peer slots with no-op wakers during revocation would
         // silently break this public manual-driver usage.
         peer_registration.set_interest(Interest::READABLE).unwrap();
-        manual_registration.set_interest(Interest::READABLE).unwrap();
+        manual_registration
+            .set_interest(Interest::READABLE)
+            .unwrap();
         assert_eq!(peer_registration.token(), peer_token);
         assert_eq!(manual_registration.token(), manual_token);
         reactor.set_ready(peer_token, Event::readable(peer_token));
@@ -4538,7 +4544,10 @@ mod tests {
             retire_each([first, second, last]);
         }));
         let panic = result.expect_err("the first retirement failure must remain observable");
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"first retirement failure"));
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"first retirement failure")
+        );
         for wakes in [first_wakes, second_wakes, last_wakes] {
             assert_eq!(wakes.load(Ordering::SeqCst), 0);
         }
@@ -4594,7 +4603,10 @@ mod tests {
             panic!("original operation failed");
         }));
         let panic = result.expect_err("the original operation failure must remain observable");
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"original operation failed"));
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"original operation failed")
+        );
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(last_state.count.load(Ordering::SeqCst), 1);

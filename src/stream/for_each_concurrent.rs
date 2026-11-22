@@ -372,8 +372,7 @@ where
             let mut cancel_wake = CancelWake { cx, token: None };
             let mut completion = pin!(set.join_next(cx));
             poll_fn(|task| {
-                cancel_wake.token =
-                    Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
+                cancel_wake.token = Some(cx.refresh_cancel_waker(cancel_wake.token, task.waker()));
                 if let Poll::Ready(outcome) = completion.as_mut().poll(task) {
                     return Poll::Ready(outcome);
                 }
@@ -409,9 +408,9 @@ where
     // descendant may never receive cancellation and the direct join can hang.
     // Legacy callers share a region and deliberately do not take this path.
     if let Some(boundary) = boundary.filter(|_| terminal.is_some()) {
-        let reason = cx.cancel_reason().unwrap_or_else(|| {
-            CancelReason::user("scoped stream: draining work subtree")
-        });
+        let reason = cx
+            .cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("scoped stream: draining work subtree"));
         // Runtime loss is reported by the owner's subsequent close. Never
         // bypass direct handle retirement because cancellation enqueue failed.
         let _ = boundary.cancel(reason);

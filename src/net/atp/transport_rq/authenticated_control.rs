@@ -132,7 +132,10 @@ impl AuthenticatedControl {
         extension.extend_from_slice(&self.send_sequence.to_be_bytes());
         extension.extend_from_slice(tag.as_bytes());
         let mut authenticated = frame.clone();
-        authenticated.header.extensions.insert(AUTH_EXTENSION, extension);
+        authenticated
+            .header
+            .extensions
+            .insert(AUTH_EXTENSION, extension);
         let bytes = authenticated
             .to_wire_bytes()
             .map_err(|error| RqError::Frame(error.to_string()))?;
@@ -154,11 +157,15 @@ impl AuthenticatedControl {
     }
 
     fn verify_received_inner(&mut self, frame: &Frame) -> Result<(), RqError> {
-        let extension = frame.header.extensions.get(&AUTH_EXTENSION).ok_or_else(|| {
-            RqError::Authentication(
-                "authenticated full-object control frame is missing its tag".to_string(),
-            )
-        })?;
+        let extension = frame
+            .header
+            .extensions
+            .get(&AUTH_EXTENSION)
+            .ok_or_else(|| {
+                RqError::Authentication(
+                    "authenticated full-object control frame is missing its tag".to_string(),
+                )
+            })?;
         if extension.len() != AUTH_EXTENSION_BYTES {
             return Err(RqError::Authentication(
                 "authenticated control extension has an invalid length".to_string(),
@@ -197,8 +204,7 @@ impl AuthenticatedControl {
 }
 
 fn frame_auth_symbol(frame: &Frame, sequence: u64) -> Result<Symbol, RqError> {
-    if frame.header.payload_length.value()
-        != u64::try_from(frame.payload.len()).unwrap_or(u64::MAX)
+    if frame.header.payload_length.value() != u64::try_from(frame.payload.len()).unwrap_or(u64::MAX)
     {
         return Err(RqError::Authentication(
             "authenticated control payload length mismatch".to_string(),
@@ -218,7 +224,11 @@ fn frame_auth_symbol(frame: &Frame, sequence: u64) -> Result<Symbol, RqError> {
         .iter()
         .filter(|(id, _)| **id != AUTH_EXTENSION)
         .collect();
-    hasher.update(u64::try_from(extensions.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(
+        u64::try_from(extensions.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     for (id, value) in extensions {
         hasher.update(id.to_be_bytes());
         super::rq_delta_hash_len_prefixed(&mut hasher, value);

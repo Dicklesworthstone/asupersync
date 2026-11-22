@@ -149,21 +149,18 @@ impl fmt::Debug for ManagedAppResources {
 
 impl ManagedAppResources {
     /// Get the handle only if this work unit declared its name and Rust type.
-    pub fn get<T: Any + Send + Sync>(
-        &self,
-        name: &str,
-    ) -> Result<Arc<T>, ManagedAppResourceError> {
+    pub fn get<T: Any + Send + Sync>(&self, name: &str) -> Result<Arc<T>, ManagedAppResourceError> {
         let value = self
             .values
             .get(name)
             .ok_or_else(|| ManagedAppResourceError::Undeclared(name.to_string()))?;
-        Arc::clone(&value.value)
-            .downcast::<T>()
-            .map_err(|_| ManagedAppResourceError::TypeMismatch {
+        Arc::clone(&value.value).downcast::<T>().map_err(|_| {
+            ManagedAppResourceError::TypeMismatch {
                 resource: name.to_string(),
                 expected: type_name::<T>(),
                 supplied: value.value_type,
-            })
+            }
+        })
     }
 
     /// Names actually held by this view, in deterministic order.
@@ -199,9 +196,9 @@ impl ResourceCatalog {
             }
         }
         for declaration in declarations {
-            let binding = supplied.get(&declaration.name).ok_or_else(|| {
-                ManagedAppResourceError::MissingBinding(declaration.name.clone())
-            })?;
+            let binding = supplied
+                .get(&declaration.name)
+                .ok_or_else(|| ManagedAppResourceError::MissingBinding(declaration.name.clone()))?;
             if binding.declaration != *declaration {
                 return Err(ManagedAppResourceError::DeclarationMismatch(
                     declaration.name.clone(),
@@ -225,7 +222,10 @@ impl ResourceCatalog {
             }
         }
         let declared: BTreeSet<_> = declarations.iter().map(|d| d.name.as_str()).collect();
-        if let Some(name) = supplied.keys().find(|name| !declared.contains(name.as_str())) {
+        if let Some(name) = supplied
+            .keys()
+            .find(|name| !declared.contains(name.as_str()))
+        {
             return Err(ManagedAppResourceError::UnexpectedBinding(name.clone()));
         }
         Ok(Self { bindings: supplied })
@@ -243,7 +243,9 @@ impl ResourceCatalog {
         // the effective view, even if a supplied declaration labels a handle
         // itself as Pure.
         if !names.is_empty() && capabilities.contains(&AppCxCapabilityV1::Pure) {
-            return Err(ManagedAppResourceError::PureWorkHasResources(unit.to_string()));
+            return Err(ManagedAppResourceError::PureWorkHasResources(
+                unit.to_string(),
+            ));
         }
         let mut requested = BTreeMap::new();
         for requirement in requirements {
@@ -253,7 +255,10 @@ impl ResourceCatalog {
                     resource: requirement.name.clone(),
                 });
             }
-            if requested.insert(requirement.name.clone(), requirement).is_some() {
+            if requested
+                .insert(requirement.name.clone(), requirement)
+                .is_some()
+            {
                 return Err(ManagedAppResourceError::DuplicateRequirement {
                     unit: unit.to_string(),
                     resource: requirement.name.clone(),
@@ -262,15 +267,17 @@ impl ResourceCatalog {
         }
         let mut values = BTreeMap::new();
         for name in names {
-            let requirement = requested.get(name).ok_or_else(|| {
-                ManagedAppResourceError::MissingRequirement {
-                    unit: unit.to_string(),
-                    resource: name.clone(),
-                }
-            })?;
-            let binding = self.bindings.get(name).ok_or_else(|| {
-                ManagedAppResourceError::MissingBinding(name.clone())
-            })?;
+            let requirement =
+                requested
+                    .get(name)
+                    .ok_or_else(|| ManagedAppResourceError::MissingRequirement {
+                        unit: unit.to_string(),
+                        resource: name.clone(),
+                    })?;
+            let binding = self
+                .bindings
+                .get(name)
+                .ok_or_else(|| ManagedAppResourceError::MissingBinding(name.clone()))?;
             if !capabilities.contains(&binding.declaration.capability) {
                 return Err(ManagedAppResourceError::MissingCapability {
                     unit: unit.to_string(),
@@ -284,12 +291,17 @@ impl ResourceCatalog {
                     supplied: binding.value_type,
                 });
             }
-            values.insert(name.clone(), ResourceValue {
-                capability: binding.declaration.capability.clone(),
-                value: Arc::clone(&binding.value),
-                value_type: binding.value_type,
-            });
+            values.insert(
+                name.clone(),
+                ResourceValue {
+                    capability: binding.declaration.capability.clone(),
+                    value: Arc::clone(&binding.value),
+                    value_type: binding.value_type,
+                },
+            );
         }
-        Ok(ManagedAppResources { values: Arc::new(values) })
+        Ok(ManagedAppResources {
+            values: Arc::new(values),
+        })
     }
 }

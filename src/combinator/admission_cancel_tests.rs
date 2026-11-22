@@ -1,7 +1,9 @@
 //! Public admission paths must remain subscribed until masked cancellation
 //! becomes observable, even when capacity and the owner clock never change.
 
-use super::bulkhead::{Bulkhead, BulkheadAcquireError, BulkheadError, BulkheadPermit, BulkheadPolicy};
+use super::bulkhead::{
+    Bulkhead, BulkheadAcquireError, BulkheadError, BulkheadPermit, BulkheadPolicy,
+};
 use super::rate_limit::{
     FixedWindowRateLimitPermit, FixedWindowRateLimiter, RateLimitAcquireError, RateLimitError,
     RateLimitPermit, RateLimitPolicy, RateLimiter, WaitStrategy,
@@ -80,9 +82,11 @@ impl Admission {
 
     fn hold(&self) -> Held<'_> {
         match self {
-            Self::Bulkhead(limiter) => {
-                Held::Bulkhead(limiter.try_acquire(1, Time::ZERO).expect("initial capacity"))
-            }
+            Self::Bulkhead(limiter) => Held::Bulkhead(
+                limiter
+                    .try_acquire(1, Time::ZERO)
+                    .expect("initial capacity"),
+            ),
             Self::TokenBucket(limiter) => {
                 Held::TokenBucket(limiter.acquire_permit(1, Time::ZERO).unwrap())
             }
@@ -144,7 +148,10 @@ impl Admission {
     fn assert_available(&self, cx: &Cx) {
         let mut future = Box::pin(self.acquire(cx, 1));
         let mut task = Context::from_waker(Waker::noop());
-        assert!(matches!(future.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            future.as_mut().poll(&mut task),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(self.available(), 1, "successful probe refunds its permit");
         assert_eq!(registrations(cx), 0);
     }
@@ -231,7 +238,10 @@ fn masked_admission_refreshes_wakers_and_retires_only_its_own_wait() {
             new.0.store(0, Ordering::Release);
         });
 
-        assert!(old.0.load(Ordering::Acquire) > 0, "{kind:?} must wake on unmask");
+        assert!(
+            old.0.load(Ordering::Acquire) > 0,
+            "{kind:?} must wake on unmask"
+        );
         assert_eq!(new.0.load(Ordering::Acquire), 0);
         let Poll::Ready(result) = second.as_mut().poll(&mut old_task) else {
             panic!("{kind:?} did not observe unmasked cancellation");
@@ -262,7 +272,10 @@ fn admission_can_complete_while_masked_and_retires_its_subscription() {
             assert!(future.as_mut().poll(&mut task).is_pending());
             assert_eq!(registrations(&cx), 1);
             held.release();
-            assert!(matches!(future.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+            assert!(matches!(
+                future.as_mut().poll(&mut task),
+                Poll::Ready(Ok(()))
+            ));
             assert_eq!(registrations(&cx), 0);
             assert_eq!(admission.available(), 1);
             assert!(driver.is_empty());
@@ -306,7 +319,8 @@ fn native_unmask_wakes_saturated_admission_without_capacity_or_clock_progress() 
                                     .worker_threads(2)
                                     .with_sharded_state(true)
                             };
-                            let runtime = builder.with_timer_driver(driver.clone()).build().unwrap();
+                            let runtime =
+                                builder.with_timer_driver(driver.clone()).build().unwrap();
                             let joined = runtime.block_on(runtime.handle().spawn(async move {
                                 let root = Cx::current().expect("native admission root");
                                 let mut child = root
@@ -319,18 +333,23 @@ fn native_unmask_wakes_saturated_admission_without_capacity_or_clock_progress() 
                                             if result.is_pending() {
                                                 *saved_waker.lock() = Some(task.waker().clone());
                                                 let requested = cx.is_cancel_requested();
-                                                if !reported_initial || (requested && !reported_requested) {
+                                                if !reported_initial
+                                                    || (requested && !reported_requested)
+                                                {
                                                     reported_initial = true;
                                                     reported_requested |= requested;
-                                                    parked_tx.send((
-                                                        requested,
-                                                        registrations(&cx),
-                                                        driver.pending_count(),
-                                                    )).unwrap();
+                                                    parked_tx
+                                                        .send((
+                                                            requested,
+                                                            registrations(&cx),
+                                                            driver.pending_count(),
+                                                        ))
+                                                        .unwrap();
                                                 }
                                             }
                                             result
-                                        }).await;
+                                        })
+                                        .await;
                                         assert_eq!(registrations(&cx), 0);
                                         assert!(driver.is_empty());
                                         Outcome::<_, ()>::Ok(result)
@@ -339,7 +358,9 @@ fn native_unmask_wakes_saturated_admission_without_capacity_or_clock_progress() 
                                 child.join(&root).await
                             }));
                             let drain = runtime.shutdown_drained(Duration::from_secs(3));
-                            done_tx.send((joined, drain, runtime.is_quiescent())).unwrap();
+                            done_tx
+                                .send((joined, drain, runtime.is_quiescent()))
+                                .unwrap();
                         }
                     });
                     let first_park = parked_rx.recv_timeout(Duration::from_secs(3));
@@ -373,7 +394,9 @@ fn native_unmask_wakes_saturated_admission_without_capacity_or_clock_progress() 
                 assert!(woke_without_rescue, "{kind:?} missed its mask-exit wake");
                 match &joined {
                     Ok(Outcome::Ok(result)) => assert_cancelled(result, &reason),
-                    other => panic!("native task must publish the exact admission result: {other:?}"),
+                    other => {
+                        panic!("native task must publish the exact admission result: {other:?}")
+                    }
                 }
                 assert_eq!(driver.now(), Time::ZERO);
                 assert!(driver.is_empty());

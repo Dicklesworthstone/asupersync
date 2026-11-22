@@ -4,8 +4,8 @@ use super::{DynamicChildId, DynamicSupervisor, DynamicSupervisorError};
 use crate::cx::{Cx, Scope};
 use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{
-    ChildName, ChildSpec, ChildStart, ManagedChildBinding, ManagedChildFactory,
-    ManagedRestartMode, ManagedSupervisorBindError, SupervisionConfig, SupervisorBuilder,
+    ChildName, ChildSpec, ChildStart, ManagedChildBinding, ManagedChildFactory, ManagedRestartMode,
+    ManagedSupervisorBindError, SupervisionConfig, SupervisorBuilder,
 };
 use crate::types::{Budget, TaskId, policy::FailFast};
 
@@ -101,18 +101,26 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         self.check_admission(&name)?;
         let mut builder = SupervisorBuilder::new(name.clone())
             .with_restart_policy(config.supervision.restart_policy)
-            .child(ChildSpec::new(name.clone(), ManagedOnly)
-                .with_shutdown_budget(config.shutdown_budget));
+            .child(
+                ChildSpec::new(name.clone(), ManagedOnly)
+                    .with_shutdown_budget(config.shutdown_budget),
+            );
         if let Some(budget) = config.budget {
             builder = builder.with_budget(budget);
         }
         let compiled = builder.compile().map_err(|error| {
             DynamicSupervisorError::WorkerConfiguration(ManagedSupervisorBindError::Topology(error))
         })?;
-        let managed = compiled.bind_managed(
-            vec![ManagedChildBinding::new(name.clone(), config.restart_mode, factory)],
-            config.supervision,
-        ).map_err(DynamicSupervisorError::WorkerConfiguration)?;
+        let managed = compiled
+            .bind_managed(
+                vec![ManagedChildBinding::new(
+                    name.clone(),
+                    config.restart_mode,
+                    factory,
+                )],
+                config.supervision,
+            )
+            .map_err(DynamicSupervisorError::WorkerConfiguration)?;
         self.start_child(name, managed).await
     }
 }

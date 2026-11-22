@@ -419,7 +419,13 @@ impl VerifiedTraceReader {
         let mut hasher = initial.clone();
         let mut used = 0;
         while let Some(event) = reader.read_event()? {
-            admit_event(&event, reader.events_read() - 1, &mut used, &mut hasher, limits)?;
+            admit_event(
+                &event,
+                reader.events_read() - 1,
+                &mut used,
+                &mut hasher,
+                limits,
+            )?;
         }
         let content_digest = hasher.finalize().into();
         reader.rewind()?;

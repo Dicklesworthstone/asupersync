@@ -3,12 +3,12 @@
 //! Provides a thread-safe injection point for tasks from outside the worker threads.
 //! Tasks are routed to the appropriate priority lane: cancel > timed > ready.
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::types::{TaskId, Time};
 use crate::util::CachePadded;
 use crate::sync::pl::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::global_queue::{CountReservation, GlobalFifoQueue};
 

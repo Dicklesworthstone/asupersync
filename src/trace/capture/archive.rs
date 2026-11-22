@@ -258,24 +258,35 @@ impl Header {
         }
     }
 
-    fn admit(self, limits: ScheduleCaptureArchiveLimits) -> Result<(), ScheduleCaptureArchiveError> {
+    fn admit(
+        self,
+        limits: ScheduleCaptureArchiveLimits,
+    ) -> Result<(), ScheduleCaptureArchiveError> {
         for (count, maximum, resource) in [
             (self.counts[0], limits.max_events, "events"),
             (self.counts[1], limits.max_contexts, "contexts"),
             (self.counts[2], limits.max_caller_tasks, "caller tasks"),
             (self.counts[3], limits.max_events, "outcomes"),
-            (self.counts[4], limits.max_cancellation_spans, "cancellation spans"),
+            (
+                self.counts[4],
+                limits.max_cancellation_spans,
+                "cancellation spans",
+            ),
             (self.counts[5], limits.max_events, "terminal witnesses"),
         ] {
             if count > maximum {
                 return Err(ScheduleCaptureArchiveError::Limit(resource));
             }
             if count > self.capacity {
-                return Err(ScheduleCaptureArchiveError::Invalid("count exceeds capture capacity"));
+                return Err(ScheduleCaptureArchiveError::Invalid(
+                    "count exceeds capture capacity",
+                ));
             }
         }
         if self.total_events < to_u64(self.counts[0])? {
-            return Err(ScheduleCaptureArchiveError::Invalid("retention count exceeds insertion count"));
+            return Err(ScheduleCaptureArchiveError::Invalid(
+                "retention count exceeds insertion count",
+            ));
         }
         Ok(())
     }
@@ -292,19 +303,30 @@ struct LimitedBytes {
 
 impl LimitedBytes {
     fn new(limit: usize, resource: &'static str) -> Self {
-        Self { bytes: Vec::new(), limit, resource, failure: None }
+        Self {
+            bytes: Vec::new(),
+            limit,
+            resource,
+            failure: None,
+        }
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), ScheduleCaptureArchiveError> {
-        let needed = self.bytes.len().checked_add(bytes.len())
+        let needed = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
             .ok_or(ScheduleCaptureArchiveError::Limit(self.resource))?;
         if needed > self.limit {
             return Err(ScheduleCaptureArchiveError::Limit(self.resource));
         }
         if needed > self.bytes.capacity() {
-            let capacity = needed.max(self.bytes.capacity().saturating_mul(2)).min(self.limit);
+            let capacity = needed
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(self.limit);
             let mut grown = Vec::new();
-            grown.try_reserve_exact(capacity)
+            grown
+                .try_reserve_exact(capacity)
                 .map_err(|_| ScheduleCaptureArchiveError::Allocation)?;
             grown.extend_from_slice(&self.bytes);
             self.bytes.zeroize();
@@ -355,7 +377,9 @@ fn to_usize(value: u64) -> Result<usize, ScheduleCaptureArchiveError> {
 
 fn reserve<T>(count: usize) -> Result<Vec<T>, ScheduleCaptureArchiveError> {
     let mut result = Vec::new();
-    result.try_reserve_exact(count).map_err(|_| ScheduleCaptureArchiveError::Allocation)?;
+    result
+        .try_reserve_exact(count)
+        .map_err(|_| ScheduleCaptureArchiveError::Allocation)?;
     Ok(result)
 }
 
@@ -366,9 +390,12 @@ fn json<T: Serialize>(
 ) -> Result<LimitedBytes, ScheduleCaptureArchiveError> {
     let mut encoded = LimitedBytes::new(limit, resource);
     if serde_json::to_writer(&mut encoded, record).is_err() {
-        return Err(encoded.failure.take().unwrap_or(
-            ScheduleCaptureArchiveError::Invalid("record serialization failed"),
-        ));
+        return Err(encoded
+            .failure
+            .take()
+            .unwrap_or(ScheduleCaptureArchiveError::Invalid(
+                "record serialization failed",
+            )));
     }
     Ok(encoded)
 }
@@ -391,14 +418,22 @@ struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], ScheduleCaptureArchiveError> {
-        let end = self.position.checked_add(count).ok_or(ScheduleCaptureArchiveError::Truncated)?;
-        let bytes = self.bytes.get(self.position..end).ok_or(ScheduleCaptureArchiveError::Truncated)?;
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or(ScheduleCaptureArchiveError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(ScheduleCaptureArchiveError::Truncated)?;
         self.position = end;
         Ok(bytes)
     }
 
     fn integer(&mut self) -> Result<u64, ScheduleCaptureArchiveError> {
-        let bytes: [u8; 8] = self.take(8)?.try_into()
+        let bytes: [u8; 8] = self
+            .take(8)?
+            .try_into()
             .map_err(|_| ScheduleCaptureArchiveError::Truncated)?;
         Ok(u64::from_le_bytes(bytes))
     }
@@ -487,7 +522,12 @@ impl ScheduleCaptureSnapshot {
         }
         let reason_limit = limits.max_record_bytes.min(limits.max_reason_bytes);
         for event in &self.events {
-            write_record(&mut output, event, reason_limit, "reason-bearing record bytes")?;
+            write_record(
+                &mut output,
+                event,
+                reason_limit,
+                "reason-bearing record bytes",
+            )?;
         }
         for context in &self.contexts {
             let wire = WireContext {
@@ -501,21 +541,38 @@ impl ScheduleCaptureSnapshot {
             write_record(&mut output, task, limits.max_record_bytes, "record bytes")?;
         }
         for (&sequence, &severity) in &self.completion_outcomes {
-            write_record(&mut output, &(sequence, severity.as_u8()), limits.max_record_bytes, "record bytes")?;
+            write_record(
+                &mut output,
+                &(sequence, severity.as_u8()),
+                limits.max_record_bytes,
+                "record bytes",
+            )?;
         }
         for span in &self.cancellation_publications.spans {
-            write_record(&mut output, &WireSpan::from(span), limits.max_record_bytes, "record bytes")?;
+            write_record(
+                &mut output,
+                &WireSpan::from(span),
+                limits.max_record_bytes,
+                "record bytes",
+            )?;
         }
         for (sequence, terminal) in &self.cancellation_publications.terminals {
             let terminal = terminal.as_ref().map(|state| WireTerminal {
                 requested: state.requested,
                 reason: state.reason.as_ref(),
             });
-            write_record(&mut output, &(sequence, terminal), reason_limit, "reason-bearing record bytes")?;
+            write_record(
+                &mut output,
+                &(sequence, terminal),
+                reason_limit,
+                "reason-bearing record bytes",
+            )?;
         }
         let checksum = Sha256::digest(&output.bytes);
         output.append(checksum.as_ref())?;
-        Ok(ScheduleCaptureArchive { bytes: output.take() })
+        Ok(ScheduleCaptureArchive {
+            bytes: output.take(),
+        })
     }
 
     /// Open a complete archive after checking byte/count bounds and checksum.
@@ -543,8 +600,11 @@ impl ScheduleCaptureSnapshot {
         if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
             return Err(ScheduleCaptureArchiveError::Invalid("magic"));
         }
-        let version = u32::from_le_bytes(bytes[8..12].try_into()
-            .map_err(|_| ScheduleCaptureArchiveError::Truncated)?);
+        let version = u32::from_le_bytes(
+            bytes[8..12]
+                .try_into()
+                .map_err(|_| ScheduleCaptureArchiveError::Truncated)?,
+        );
         if version != VERSION {
             return Err(ScheduleCaptureArchiveError::Version(version));
         }
@@ -553,25 +613,41 @@ impl ScheduleCaptureSnapshot {
         if checksum.as_slice() != &bytes[payload_len..] {
             return Err(ScheduleCaptureArchiveError::Integrity);
         }
-        let mut decoder = Decoder { bytes: &bytes[..payload_len], position: 12 };
+        let mut decoder = Decoder {
+            bytes: &bytes[..payload_len],
+            position: 12,
+        };
         let header = Header {
             total_events: decoder.integer()?,
             capacity: decoder.count()?,
             worker_count: decoder.count()?,
             dropped_spans: decoder.integer()?,
             counts: [
-                decoder.count()?, decoder.count()?, decoder.count()?,
-                decoder.count()?, decoder.count()?, decoder.count()?,
+                decoder.count()?,
+                decoder.count()?,
+                decoder.count()?,
+                decoder.count()?,
+                decoder.count()?,
+                decoder.count()?,
             ],
         };
         header.admit(limits)?;
-        let records = header.counts.into_iter().try_fold(0_usize, |sum, count| sum.checked_add(count))
+        let records = header
+            .counts
+            .into_iter()
+            .try_fold(0_usize, |sum, count| sum.checked_add(count))
             .ok_or(ScheduleCaptureArchiveError::Limit("record count"))?;
         if records > (payload_len - HEADER_LEN) / 8 {
             return Err(ScheduleCaptureArchiveError::Truncated);
         }
-        let [event_count, context_count, caller_count, outcome_count, span_count, terminal_count] =
-            header.counts;
+        let [
+            event_count,
+            context_count,
+            caller_count,
+            outcome_count,
+            span_count,
+            terminal_count,
+        ] = header.counts;
         let reason_limit = limits.max_record_bytes.min(limits.max_reason_bytes);
         let mut events = reserve(event_count)?;
         for _ in 0..event_count {
@@ -593,7 +669,8 @@ impl ScheduleCaptureSnapshot {
         let mut completion_outcomes = BTreeMap::new();
         let mut last_outcome = None;
         for _ in 0..outcome_count {
-            let (sequence, severity): (u64, u8) = decoder.record(limits.max_record_bytes, "record bytes")?;
+            let (sequence, severity): (u64, u8) =
+                decoder.record(limits.max_record_bytes, "record bytes")?;
             if last_outcome.is_some_and(|previous| sequence <= previous) {
                 return Err(ScheduleCaptureArchiveError::Invalid("outcome order"));
             }
@@ -611,10 +688,13 @@ impl ScheduleCaptureSnapshot {
         for _ in 0..terminal_count {
             let (sequence, terminal): (u64, Option<WireTerminal<CancelReason>>) =
                 decoder.record(reason_limit, "reason-bearing record bytes")?;
-            terminals.push((sequence, terminal.map(|state| TerminalCancellationState {
-                requested: state.requested,
-                reason: state.reason,
-            })));
+            terminals.push((
+                sequence,
+                terminal.map(|state| TerminalCancellationState {
+                    requested: state.requested,
+                    reason: state.reason,
+                }),
+            ));
         }
         if decoder.position != payload_len {
             return Err(ScheduleCaptureArchiveError::Invalid("trailing bytes"));
@@ -627,7 +707,9 @@ impl ScheduleCaptureSnapshot {
             completion_outcomes,
             terminal_outcomes,
             cancellation_publications: CancellationPublicationSnapshot {
-                spans, dropped_spans: header.dropped_spans, terminals,
+                spans,
+                dropped_spans: header.dropped_spans,
+                terminals,
             },
             total_events: header.total_events,
             capacity: header.capacity,
@@ -649,7 +731,9 @@ impl ScheduleCaptureSnapshot {
         limits: ScheduleCaptureArchiveLimits,
     ) -> Result<(), ScheduleCaptureArchiveError> {
         let archive = self.to_bytes(limits)?;
-        writer.write_all(archive.as_bytes()).map_err(|error| ScheduleCaptureArchiveError::Io(error.kind()))
+        writer
+            .write_all(archive.as_bytes())
+            .map_err(|error| ScheduleCaptureArchiveError::Io(error.kind()))
     }
 
     /// Read one archive through EOF with a strict byte ceiling, then decode it.
@@ -711,17 +795,20 @@ fn terminal_outcomes(
     caller_tasks: &[TaskId],
     outcomes: &BTreeMap<u64, Severity>,
 ) -> Vec<(TaskId, Severity)> {
-    let mut terminal = events.iter().filter_map(|event| {
-        if event.kind == TraceEventKind::Complete
-            && let TraceData::Task { task, .. } = &event.data
-            && caller_tasks.binary_search(task).is_err()
-            && let Some(&outcome) = outcomes.get(&event.seq)
-        {
-            Some((*task, outcome))
-        } else {
-            None
-        }
-    }).collect::<Vec<_>>();
+    let mut terminal = events
+        .iter()
+        .filter_map(|event| {
+            if event.kind == TraceEventKind::Complete
+                && let TraceData::Task { task, .. } = &event.data
+                && caller_tasks.binary_search(task).is_err()
+                && let Some(&outcome) = outcomes.get(&event.seq)
+            {
+                Some((*task, outcome))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     // This field is derived, as in the recorder. Canonical source observations
     // and their witness sections are never sorted or deduplicated on import.
     terminal.sort_by_key(|(task, _)| *task);
@@ -729,37 +816,67 @@ fn terminal_outcomes(
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_structure(snapshot: &ScheduleCaptureSnapshot) -> Result<(), ScheduleCaptureArchiveError> {
+fn validate_structure(
+    snapshot: &ScheduleCaptureSnapshot,
+) -> Result<(), ScheduleCaptureArchiveError> {
     let invalid = ScheduleCaptureArchiveError::Invalid;
-    if snapshot.events.windows(2).any(|pair| pair[0].seq >= pair[1].seq) {
+    if snapshot
+        .events
+        .windows(2)
+        .any(|pair| pair[0].seq >= pair[1].seq)
+    {
         return Err(invalid("event order"));
     }
-    if snapshot.events.iter().any(|event| event.version != TRACE_EVENT_SCHEMA_VERSION) {
+    if snapshot
+        .events
+        .iter()
+        .any(|event| event.version != TRACE_EVENT_SCHEMA_VERSION)
+    {
         return Err(invalid("event schema version"));
     }
-    if snapshot.contexts.windows(2).any(|pair| pair[0].event_sequence >= pair[1].event_sequence) {
+    if snapshot
+        .contexts
+        .windows(2)
+        .any(|pair| pair[0].event_sequence >= pair[1].event_sequence)
+    {
         return Err(invalid("context order"));
     }
-    if snapshot.caller_tasks.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if snapshot
+        .caller_tasks
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
         return Err(invalid("caller identity order"));
     }
     let mut task_ids = BTreeSet::new();
     for event in &snapshot.events {
         let reason = match &event.data {
-            TraceData::Cancel { reason, .. } | TraceData::RegionCancel { reason, .. } => Some(reason),
-            TraceData::Down { reason: crate::monitor::DownReason::Cancelled(reason), .. }
-            | TraceData::Exit { reason: crate::monitor::DownReason::Cancelled(reason), .. } => Some(reason),
+            TraceData::Cancel { reason, .. } | TraceData::RegionCancel { reason, .. } => {
+                Some(reason)
+            }
+            TraceData::Down {
+                reason: crate::monitor::DownReason::Cancelled(reason),
+                ..
+            }
+            | TraceData::Exit {
+                reason: crate::monitor::DownReason::Cancelled(reason),
+                ..
+            } => Some(reason),
             _ => None,
         };
         if let Some(reason) = reason {
             check_reason_depth(reason)?;
         }
         let payload_matches = match event.kind {
-            TraceEventKind::Spawn | TraceEventKind::Complete | TraceEventKind::Poll
-            | TraceEventKind::Schedule | TraceEventKind::Yield | TraceEventKind::Wake =>
-                matches!(&event.data, TraceData::Task { .. }),
-            TraceEventKind::CancelRequest | TraceEventKind::CancelAck =>
-                matches!(&event.data, TraceData::Cancel { .. }),
+            TraceEventKind::Spawn
+            | TraceEventKind::Complete
+            | TraceEventKind::Poll
+            | TraceEventKind::Schedule
+            | TraceEventKind::Yield
+            | TraceEventKind::Wake => matches!(&event.data, TraceData::Task { .. }),
+            TraceEventKind::CancelRequest | TraceEventKind::CancelAck => {
+                matches!(&event.data, TraceData::Cancel { .. })
+            }
             _ => true,
         };
         if !payload_matches {
@@ -767,27 +884,41 @@ fn validate_structure(snapshot: &ScheduleCaptureSnapshot) -> Result<(), Schedule
         }
         if let TraceData::Task { task, .. } = &event.data {
             task_ids.insert(*task);
-            if event.kind == TraceEventKind::Poll && snapshot.caller_tasks.binary_search(task).is_ok() {
+            if event.kind == TraceEventKind::Poll
+                && snapshot.caller_tasks.binary_search(task).is_ok()
+            {
                 return Err(invalid("caller identity has a worker poll"));
             }
         }
     }
-    if snapshot.caller_tasks.iter().any(|task| !task_ids.contains(task)) {
+    if snapshot
+        .caller_tasks
+        .iter()
+        .any(|task| !task_ids.contains(task))
+    {
         return Err(invalid("caller identity has no event"));
     }
-    let event_at = |sequence| snapshot.events.binary_search_by_key(&sequence, |event| event.seq)
-        .ok().map(|index| &snapshot.events[index]);
+    let event_at = |sequence| {
+        snapshot
+            .events
+            .binary_search_by_key(&sequence, |event| event.seq)
+            .ok()
+            .map(|index| &snapshot.events[index])
+    };
     let mut worker_sequences = BTreeMap::new();
     for context in &snapshot.contexts {
         let Some(event) = event_at(context.event_sequence) else {
             return Err(invalid("context has no canonical event"));
         };
         if !is_scheduler_observation(event.kind)
-            || context.worker_id.is_some_and(|worker| worker >= snapshot.worker_count)
+            || context
+                .worker_id
+                .is_some_and(|worker| worker >= snapshot.worker_count)
         {
             return Err(invalid("context worker or event category"));
         }
-        if worker_sequences.insert(context.worker_id, context.worker_sequence)
+        if worker_sequences
+            .insert(context.worker_id, context.worker_sequence)
             .is_some_and(|previous| previous >= context.worker_sequence)
         {
             return Err(invalid("worker sequence order"));
@@ -800,19 +931,28 @@ fn validate_structure(snapshot: &ScheduleCaptureSnapshot) -> Result<(), Schedule
             return Err(invalid("outcome has no completion"));
         }
     }
-    if terminal_outcomes(&snapshot.events, &snapshot.caller_tasks, &snapshot.completion_outcomes)
-        != snapshot.terminal_outcomes
+    if terminal_outcomes(
+        &snapshot.events,
+        &snapshot.caller_tasks,
+        &snapshot.completion_outcomes,
+    ) != snapshot.terminal_outcomes
     {
         return Err(invalid("derived terminal outcomes"));
     }
     let spans = &snapshot.cancellation_publications.spans;
-    if spans.windows(2).any(|pair| pair[0].start_sequence >= pair[1].start_sequence) {
+    if spans
+        .windows(2)
+        .any(|pair| pair[0].start_sequence >= pair[1].start_sequence)
+    {
         return Err(invalid("publication order"));
     }
     for span in spans {
-        if span.end_sequence.is_some_and(|end| end <= span.start_sequence)
+        if span
+            .end_sequence
+            .is_some_and(|end| end <= span.start_sequence)
             || span.request_sequence.is_some_and(|request| {
-                request <= span.start_sequence || span.end_sequence.is_some_and(|end| request >= end)
+                request <= span.start_sequence
+                    || span.end_sequence.is_some_and(|end| request >= end)
             })
         {
             return Err(invalid("publication sequence bounds"));
@@ -837,8 +977,9 @@ fn validate_structure(snapshot: &ScheduleCaptureSnapshot) -> Result<(), Schedule
         // Preserve any absent witness when eviction is reported, even inside
         // the retained sequence range. A retained match must still be Complete.
         match event_at(*sequence) {
-            Some(event) if event.kind == TraceEventKind::Complete
-                && matches!(&event.data, TraceData::Task { .. }) => {}
+            Some(event)
+                if event.kind == TraceEventKind::Complete
+                    && matches!(&event.data, TraceData::Task { .. }) => {}
             None if snapshot.dropped_events() != 0 => {}
             _ => return Err(invalid("terminal witness has no completion")),
         }

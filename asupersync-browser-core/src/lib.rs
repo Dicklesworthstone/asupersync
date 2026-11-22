@@ -177,9 +177,14 @@ fn dispatcher_handle_is_live(handle: &WasmHandleRef) -> bool {
 fn cleanup_released_fetches() {
     let retired = INFLIGHT_FETCHES.with(|inflight| {
         let mut inflight = inflight.borrow_mut();
-        let handles: Vec<_> = inflight.keys().copied()
-            .filter(|handle| !dispatcher_handle_is_live(handle)).collect();
-        handles.into_iter().filter_map(|handle| inflight.remove(&handle))
+        let handles: Vec<_> = inflight
+            .keys()
+            .copied()
+            .filter(|handle| !dispatcher_handle_is_live(handle))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| inflight.remove(&handle))
             .collect::<Vec<_>>()
     });
     // Abort dispatches synchronous host listeners. A listener can reenter this
@@ -195,9 +200,15 @@ const fn cleanup_released_fetches() {}
 fn cleanup_released_websockets() {
     let retired = INFLIGHT_WEBSOCKETS.with(|sockets| {
         let mut sockets = sockets.borrow_mut();
-        let handles: Vec<_> = sockets.keys().copied()
-            .filter(|handle| !dispatcher_handle_is_live(handle)).collect();
-        handles.into_iter().filter_map(|handle| sockets.remove(&handle))
+        #[allow(clippy::needless_collect)]
+        let handles: Vec<_> = sockets
+            .keys()
+            .copied()
+            .filter(|handle| !dispatcher_handle_is_live(handle))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| sockets.remove(&handle))
             .collect::<Vec<_>>()
     });
     // Socket destruction calls the host too; detach before invoking it.

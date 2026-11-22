@@ -1883,7 +1883,10 @@ impl fmt::Display for AttenuationError {
         match self {
             Self::AlreadyBound => f.write_str("cannot attenuate a bound macaroon discharge"),
             Self::TooManyCaveats { actual, max } => {
-                write!(f, "attenuated macaroon has {actual} caveats; maximum is {max}")
+                write!(
+                    f,
+                    "attenuated macaroon has {actual} caveats; maximum is {max}"
+                )
             }
             Self::FieldTooLarge {
                 field,

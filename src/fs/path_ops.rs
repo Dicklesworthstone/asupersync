@@ -6,10 +6,10 @@
 
 use super::metadata::{Metadata, Permissions};
 use crate::cx::io_gate::spawn_blocking_io;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-internals")]
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 #[cfg(feature = "test-internals")]
@@ -551,7 +551,8 @@ impl StagedAtomicWrite {
     /// the temporary file is cleaned up when the queued job is subsequently dequeued
     /// and discarded.
     pub async fn commit_async(self) -> io::Result<()> {
-        self.commit_async_with_hook(OperationProbeHook::default()).await
+        self.commit_async_with_hook(OperationProbeHook::default())
+            .await
     }
 
     fn commit_with_hook(mut self, hook: OperationProbeHook) -> io::Result<()> {
@@ -580,7 +581,8 @@ impl StagedAtomicWrite {
         self,
         probe: Arc<FilesystemOperationProbe>,
     ) -> io::Result<()> {
-        self.commit_async_with_hook(OperationProbeHook::with_probe(probe)).await
+        self.commit_async_with_hook(OperationProbeHook::with_probe(probe))
+            .await
     }
 }
 
@@ -708,7 +710,13 @@ fn stage_write_atomic_blocking(
     contents: &[u8],
     hook: OperationProbeHook,
 ) -> io::Result<StagedAtomicWrite> {
-    scoped_atomic::stage_with(path, false, || Ok(()), |file| file.write_all(contents), hook)
+    scoped_atomic::stage_with(
+        path,
+        false,
+        || Ok(()),
+        |file| file.write_all(contents),
+        hook,
+    )
 }
 
 fn normalized_parent(path: &Path) -> &Path {

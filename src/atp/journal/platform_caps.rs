@@ -6,13 +6,13 @@ use std::ffi::CString;
 use std::mem::MaybeUninit;
 
 use crate::cx::Cx;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 /// Static operation costs to avoid repeated HashMap allocation
@@ -200,7 +200,6 @@ impl PlatformCapabilities {
     // can run directly in an owned blocking job, without polling futures or
     // starting a nested executor on that worker.
     pub(crate) fn detect_for_path_blocking(path: &Path) -> Outcome<Self, CapabilityError> {
-
         // Detect OS type
         let os_type = Self::detect_os_type();
 
@@ -265,9 +264,7 @@ impl PlatformCapabilities {
     }
 
     /// Detect filesystem-specific features
-    fn detect_filesystem_features(
-        path: &Path,
-    ) -> Outcome<FilesystemFeatures, CapabilityError> {
+    fn detect_filesystem_features(path: &Path) -> Outcome<FilesystemFeatures, CapabilityError> {
         // Get filesystem statistics
         let fs_type = match Self::detect_filesystem_type(path) {
             Outcome::Ok(fs_type) => fs_type,

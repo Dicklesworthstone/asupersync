@@ -214,12 +214,15 @@ fn encoder_yields_with_one_byte_ready_writes_without_losing_progress() {
     assert_eq!(accepted, second.len());
     assert!(pending > 0, "draining the earlier frame must yield");
 
-    let ((), pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
-        enc.poll_flush(cx)
-    });
+    let ((), pending) =
+        finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| enc.poll_flush(cx));
     assert!(pending > 0, "flushing through partial writes must yield");
     expected.extend_from_slice(&asupersync_zstd::encode_all(&second, &params));
-    assert_eq!(encoder.get_ref().bytes, expected, "flush preserves the wire");
+    assert_eq!(
+        encoder.get_ref().bytes,
+        expected,
+        "flush preserves the wire"
+    );
 
     let (accepted, pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
         enc.poll_write(cx, &third)
@@ -247,9 +250,8 @@ fn encoder_yields_with_one_byte_ready_writes_without_losing_progress() {
 
     // Retrying flush during a suspended shutdown drains staged bytes without
     // invoking the codec's now-forbidden flush operation.
-    let ((), pending) = finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
-        enc.poll_flush(cx)
-    });
+    let ((), pending) =
+        finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| enc.poll_flush(cx));
     assert!(pending > 0);
     finish_encoder_operation(&mut encoder, &wakes, &mut cx, |enc, cx| {
         enc.poll_shutdown(cx)
@@ -293,14 +295,13 @@ fn encoder_yields_while_emitting_large_frames_to_a_ready_writer() {
         assert_eq!(pending, 0);
         assert_eq!(encoder.get_ref().writes, 0);
 
-        let mut poll = |enc: Pin<&mut ZstdEncoder<ReadyWriter>>, cx: &mut Context<'_>| {
-            match operation {
+        let mut poll =
+            |enc: Pin<&mut ZstdEncoder<ReadyWriter>>, cx: &mut Context<'_>| match operation {
                 "write" => enc.poll_write(cx, b"+"),
                 "flush" => enc.poll_flush(cx).map_ok(|()| 0),
                 "shutdown" => enc.poll_shutdown(cx).map_ok(|()| 0),
                 _ => unreachable!(),
-            }
-        };
+            };
         let first = checked_encoder_poll(&mut encoder, &wakes, &mut cx, &mut poll);
         assert!(
             first.is_pending(),

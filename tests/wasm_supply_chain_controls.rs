@@ -607,10 +607,17 @@ fn glue_wasm_references(glue: &str) -> BTreeSet<String> {
     let mut refs = BTreeSet::new();
     for (offset, _) in glue.match_indices("wasm.") {
         // Only the glue's own module binding counts, not `x.wasm.<member>`.
-        if glue[..offset].chars().next_back().is_some_and(|c| is_ident(c) || c == '.') {
+        if glue[..offset]
+            .chars()
+            .next_back()
+            .is_some_and(|c| is_ident(c) || c == '.')
+        {
             continue;
         }
-        let name: String = glue[offset + "wasm.".len()..].chars().take_while(|&c| is_ident(c)).collect();
+        let name: String = glue[offset + "wasm.".len()..]
+            .chars()
+            .take_while(|&c| is_ident(c))
+            .collect();
         if !name.is_empty() {
             refs.insert(name);
         }
@@ -626,17 +633,24 @@ fn glue_wasm_references(glue: &str) -> BTreeSet<String> {
 #[test]
 fn browser_core_glue_calls_only_exports_present_in_the_committed_wasm() {
     // Negative control: the checker must be able to fail.
-    let control = glue_wasm_references("const a = wasm.present(1); const b = wasm.absent_export(2); x.wasm.ignored;");
+    let control = glue_wasm_references(
+        "const a = wasm.present(1); const b = wasm.absent_export(2); x.wasm.ignored;",
+    );
     assert_eq!(
         control,
         BTreeSet::from([String::from("absent_export"), String::from("present")]),
         "reference scanner must see exactly the two wasm.<export> calls"
     );
 
-    let wasm = fs::read("packages/browser-core/asupersync_bg.wasm").expect("read committed wasm binary");
+    let wasm =
+        fs::read("packages/browser-core/asupersync_bg.wasm").expect("read committed wasm binary");
     let exports = wasm_export_names(&wasm);
-    assert!(exports.contains("memory"), "export section parse found no memory export");
-    let glue = fs::read_to_string("packages/browser-core/asupersync.js").expect("read committed glue");
+    assert!(
+        exports.contains("memory"),
+        "export section parse found no memory export"
+    );
+    let glue =
+        fs::read_to_string("packages/browser-core/asupersync.js").expect("read committed glue");
     let references = glue_wasm_references(&glue);
     assert!(!references.is_empty(), "glue must reference wasm exports");
     let missing: Vec<_> = references.difference(&exports).cloned().collect();

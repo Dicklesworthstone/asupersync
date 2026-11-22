@@ -95,7 +95,10 @@ fn masked_cancellation_does_not_abort_or_self_wake_parked_storage() {
     let count = Arc::new(WakeCount(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&count));
     let mut task = Context::from_waker(&waker);
-    let mut wait = Box::pin(run_io(&cx, std::future::pending::<Result<(), TransportError>>()));
+    let mut wait = Box::pin(run_io(
+        &cx,
+        std::future::pending::<Result<(), TransportError>>(),
+    ));
     cx.masked(|| {
         for _ in 0..4 {
             assert!(wait.as_mut().poll(&mut task).is_pending());
@@ -114,8 +117,15 @@ fn abandoning_a_storage_wait_unregisters_its_cancellation_observer() {
     let count = Arc::new(WakeCount(AtomicUsize::new(0)));
     let weak = Arc::downgrade(&count);
     let waker = Waker::from(count);
-    let mut wait = Box::pin(run_io(&cx, std::future::pending::<Result<(), TransportError>>()));
-    assert!(wait.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    let mut wait = Box::pin(run_io(
+        &cx,
+        std::future::pending::<Result<(), TransportError>>(),
+    ));
+    assert!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     drop(waker);
     assert!(weak.upgrade().is_some());
     drop(wait);
@@ -143,7 +153,10 @@ fn native_spool_roundtrip_deduplicates_and_supports_reordered_reads() {
         ));
         spool.seal(&cx).await.unwrap();
         spool.seal(&cx).await.unwrap();
-        for (chunk, expected) in [(&second, b"second".as_slice()), (&first, b"first".as_slice())] {
+        for (chunk, expected) in [
+            (&second, b"second".as_slice()),
+            (&first, b"first".as_slice()),
+        ] {
             spool.read_verified(&cx, chunk, &mut scratch).await.unwrap();
             assert_eq!(scratch, expected);
         }
@@ -216,7 +229,10 @@ fn native_baseline_ranges_are_revalidated_after_source_changes() {
         let source = BaselineChunk::new(Arc::new(path.clone()), 6);
         let mut scratch = Vec::new();
         let chunk = key(b"payload");
-        source.read_verified(&cx, &chunk, &mut scratch).await.unwrap();
+        source
+            .read_verified(&cx, &chunk, &mut scratch)
+            .await
+            .unwrap();
         assert_eq!(scratch, b"payload");
         std::fs::write(&path, b"beforePAYLOADafter").unwrap();
         assert!(matches!(
@@ -279,17 +295,21 @@ fn native_pending_spool_io_cancels_before_the_started_syscall_is_released() {
                     spool.insert(&cx, chunk.clone(), b"first").await.unwrap();
                     spool.seal(&cx).await.unwrap();
                 }
-                spool.file.install_cursor_operation_probe_for_test(worker_probe);
+                spool
+                    .file
+                    .install_cursor_operation_probe_for_test(worker_probe);
                 context_tx.send(cx.clone()).unwrap();
                 let outcome = if reading {
                     spool.read_verified(&cx, &chunk, &mut Vec::new()).await
                 } else {
                     spool.insert(&cx, chunk, b"first").await
                 };
-                finished_tx.send((
-                    matches!(outcome, Err(TransportError::Cancelled)),
-                    spool.phase == SpoolPhase::Failed,
-                )).unwrap();
+                finished_tx
+                    .send((
+                        matches!(outcome, Err(TransportError::Cancelled)),
+                        spool.phase == SpoolPhase::Failed,
+                    ))
+                    .unwrap();
             });
         });
         let cx = context_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -435,7 +455,10 @@ fn native_baseline_worker_reads_reuse_scratch_through_maximum_chunk_size() {
         let allocation = scratch.as_ptr() as usize;
         for length in [1, 63, 64, 65, 128 * 1024, 256 * 1024, maximum] {
             let expected = &bytes[17..17 + length];
-            source.read_verified(&cx, &key(expected), &mut scratch).await.unwrap();
+            source
+                .read_verified(&cx, &key(expected), &mut scratch)
+                .await
+                .unwrap();
             assert_eq!(scratch, expected);
             assert_eq!(scratch.as_ptr() as usize, allocation);
         }
@@ -461,7 +484,9 @@ fn native_baseline_preflight_refuses_before_taking_scratch_or_opening() {
         }
         let overflow = BaselineChunk::new(Arc::clone(&missing), u64::MAX);
         assert!(matches!(
-            overflow.read_verified(&cx, &key(b"payload"), &mut scratch).await,
+            overflow
+                .read_verified(&cx, &key(b"payload"), &mut scratch)
+                .await,
             Err(TransportError::Frame(_))
         ));
         let denied = cx.restrict::<crate::cx::cap::None>();
@@ -472,7 +497,9 @@ fn native_baseline_preflight_refuses_before_taking_scratch_or_opening() {
         let stopped = Cx::for_testing();
         stopped.cancel_fast(CancelKind::User);
         assert!(matches!(
-            source.read_verified(&stopped, &key(b"payload"), &mut scratch).await,
+            source
+                .read_verified(&stopped, &key(b"payload"), &mut scratch)
+                .await,
             Err(TransportError::Cancelled)
         ));
         assert_eq!(scratch, b"keep-scratch");
@@ -530,7 +557,10 @@ fn native_tcp_delta_reconstructs_baseline_ranges_and_spooled_changes() {
     let received = receiver.join().unwrap();
     let sent = sent.expect("delta sender");
     let received = received.expect("delta receiver");
-    assert_eq!(sent.bytes_sent, 4096, "only the changed middle chunk crosses TCP");
+    assert_eq!(
+        sent.bytes_sent, 4096,
+        "only the changed middle chunk crosses TCP"
+    );
     assert_eq!(received.bytes_received, 4096);
     assert!(sent.receipt.committed && sent.receipt.sha_ok && sent.receipt.merkle_ok);
     assert!(received.committed);
@@ -546,13 +576,18 @@ fn native_spool_reads_full_chunks_across_filesystem_poll_boundaries() {
         let size = usize::try_from(MAX_COMPRESSED_CHUNK_RAW).unwrap();
         let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let chunk = key(&payload);
-        let mut spool = DeltaChunkSpool::create(&cx, &path, size as u64).await.unwrap();
+        let mut spool = DeltaChunkSpool::create(&cx, &path, size as u64)
+            .await
+            .unwrap();
         spool.insert(&cx, chunk.clone(), &payload).await.unwrap();
         spool.seal(&cx).await.unwrap();
         let mut scratch = vec![0xa5; size];
         let allocation = scratch.as_ptr() as usize;
         for _ in 0..2 {
-            spool.read_verified(&cx, &chunk, &mut scratch).await.unwrap();
+            spool
+                .read_verified(&cx, &chunk, &mut scratch)
+                .await
+                .unwrap();
             assert_eq!(scratch, payload);
             assert_eq!(scratch.as_ptr() as usize, allocation);
             assert_eq!(spool.phase, SpoolPhase::Reading);
@@ -568,13 +603,22 @@ fn native_short_spool_read_fails_without_authorizing_a_prefix() {
         let path = root.path().join("spool");
         let payload = vec![0x37; 256 * 1024 + 1];
         let chunk = key(&payload);
-        let mut spool = DeltaChunkSpool::create(&cx, &path, chunk.size_bytes).await.unwrap();
+        let mut spool = DeltaChunkSpool::create(&cx, &path, chunk.size_bytes)
+            .await
+            .unwrap();
         spool.insert(&cx, chunk.clone(), &payload).await.unwrap();
         spool.seal(&cx).await.unwrap();
-        std::fs::OpenOptions::new().write(true).open(&path).unwrap()
-            .set_len(128 * 1024 + 1).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(128 * 1024 + 1)
+            .unwrap();
         let mut scratch = Vec::new();
-        let error = spool.read_verified(&cx, &chunk, &mut scratch).await.unwrap_err();
+        let error = spool
+            .read_verified(&cx, &chunk, &mut scratch)
+            .await
+            .unwrap_err();
         assert!(matches!(error,
             TransportError::Io(error) if error.kind() == std::io::ErrorKind::UnexpectedEof));
         assert_eq!(spool.phase, SpoolPhase::Failed);
@@ -598,7 +642,10 @@ fn native_baseline_type_admission_preserves_regular_hardlink_reuse() {
         let allocation = scratch.as_ptr() as usize;
         for path in [path, alias] {
             let source = BaselineChunk::new(Arc::new(path), 6);
-            source.read_verified(&cx, &key(b"payload"), &mut scratch).await.unwrap();
+            source
+                .read_verified(&cx, &key(b"payload"), &mut scratch)
+                .await
+                .unwrap();
             assert_eq!(scratch, b"payload");
             assert_eq!(scratch.as_ptr() as usize, allocation);
         }
@@ -614,10 +661,16 @@ fn native_baseline_refuses_a_directory_replacing_an_indexed_file() {
         let held = root.path().join("held");
         std::fs::write(&path, b"payload").unwrap();
         let source = BaselineChunk::new(Arc::new(path.clone()), 0);
-        source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap();
+        source
+            .read_verified(&cx, &key(b"payload"), &mut Vec::new())
+            .await
+            .unwrap();
         std::fs::rename(&path, &held).unwrap();
         std::fs::create_dir(&path).unwrap();
-        let error = source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap_err();
+        let error = source
+            .read_verified(&cx, &key(b"payload"), &mut Vec::new())
+            .await
+            .unwrap_err();
         assert!(matches!(error, TransportError::Source(message)
             if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
         assert_eq!(std::fs::read(&held).unwrap(), b"payload");
@@ -635,14 +688,23 @@ fn native_baseline_refuses_a_same_content_symlink_replacement() {
         let held = root.path().join("held");
         std::fs::write(&path, b"beforepayloadafter").unwrap();
         let source = BaselineChunk::new(Arc::new(path.clone()), 6);
-        source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await.unwrap();
+        source
+            .read_verified(&cx, &key(b"payload"), &mut Vec::new())
+            .await
+            .unwrap();
         std::fs::rename(&path, &held).unwrap();
         std::os::unix::fs::symlink(&held, &path).unwrap();
         let mut scratch = Vec::new();
-        let error = source.read_verified(&cx, &key(b"payload"), &mut scratch).await.unwrap_err();
+        let error = source
+            .read_verified(&cx, &key(b"payload"), &mut scratch)
+            .await
+            .unwrap_err();
         assert!(matches!(error, TransportError::Source(message)
             if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
-        assert!(scratch.is_empty(), "matching bytes behind a link must not be published");
+        assert!(
+            scratch.is_empty(),
+            "matching bytes behind a link must not be published"
+        );
         assert_eq!(std::fs::read_link(&path).unwrap(), held);
         assert_eq!(std::fs::read(&held).unwrap(), b"beforepayloadafter");
     });
@@ -683,7 +745,12 @@ fn native_baseline_fifo_refusal_finishes_before_any_writer_is_opened() {
         let source = BaselineChunk::new(Arc::new(path.clone()), 0);
         std::fs::rename(&path, &held).unwrap();
         nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
         let worker_path = path.clone();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -694,13 +761,21 @@ fn native_baseline_fifo_refusal_finishes_before_any_writer_is_opened() {
             let outcome = runtime.block_on(runtime.handle().spawn(async move {
                 if after_path_check {
                     crate::runtime::spawn_blocking(move || {
-                        open_baseline_handle(&worker_path).map(drop).map_err(|error| {
-                            TransportError::Source(format!("{}: {error}", worker_path.display()))
-                        })
-                    }).await
+                        open_baseline_handle(&worker_path)
+                            .map(drop)
+                            .map_err(|error| {
+                                TransportError::Source(format!(
+                                    "{}: {error}",
+                                    worker_path.display()
+                                ))
+                            })
+                    })
+                    .await
                 } else {
                     let cx = Cx::current().unwrap();
-                    source.read_verified(&cx, &key(b"payload"), &mut Vec::new()).await
+                    source
+                        .read_verified(&cx, &key(b"payload"), &mut Vec::new())
+                        .await
                 }
             }));
             done_tx.send(outcome).unwrap();
@@ -713,20 +788,36 @@ fn native_baseline_fifo_refusal_finishes_before_any_writer_is_opened() {
         let rescue = if finished_without_writer {
             None
         } else {
-            let reader = std::fs::OpenOptions::new().read(true)
-                .custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
-            let writer = std::fs::OpenOptions::new().write(true)
-                .custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+            let reader = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap();
+            let writer = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap();
             Some((reader, writer))
         };
         let outcome = first.or_else(|_| done_rx.recv_timeout(Duration::from_secs(5)));
         let joined = worker.join();
         drop(rescue);
         assert!(joined.is_ok(), "native runtime worker must retire");
-        assert!(finished_without_writer, "FIFO refusal required a peer writer");
-        assert!(matches!(outcome.unwrap(), Err(TransportError::Source(message))
-            if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        assert!(
+            finished_without_writer,
+            "FIFO refusal required a peer writer"
+        );
+        assert!(
+            matches!(outcome.unwrap(), Err(TransportError::Source(message))
+            if message == format!("{}: delta baseline source must be a plain regular file", path.display()))
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
         assert_eq!(std::fs::read(&held).unwrap(), b"payload");
     }
 }
@@ -739,10 +830,18 @@ fn native_baseline_refuses_a_device_even_when_its_bytes_would_match() {
     run(async {
         let cx = Cx::current().unwrap();
         let path = PathBuf::from("/dev/zero");
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_char_device());
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_char_device()
+        );
         let source = BaselineChunk::new(Arc::new(path.clone()), 0);
         let mut scratch = Vec::new();
-        let error = source.read_verified(&cx, &key(&[0; 32]), &mut scratch).await.unwrap_err();
+        let error = source
+            .read_verified(&cx, &key(&[0; 32]), &mut scratch)
+            .await
+            .unwrap_err();
         assert!(matches!(error, TransportError::Source(message)
             if message == format!("{}: delta baseline source must be a plain regular file", path.display())));
         assert!(scratch.is_empty());
@@ -786,7 +885,14 @@ fn native_tcp_delta_rejects_baseline_substitution_after_request_without_publicat
             let cx = Cx::current().unwrap();
             let listener = crate::net::TcpListener::bind("127.0.0.1:0").await?;
             address_tx.send(listener.local_addr()?).unwrap();
-            tcp::receive_once(&cx, &listener, &receiver_destination, receive_config, "receiver").await
+            tcp::receive_once(
+                &cx,
+                &listener,
+                &receiver_destination,
+                receive_config,
+                "receiver",
+            )
+            .await
         }))
     });
     let address = match address_rx.recv_timeout(Duration::from_secs(10)) {
@@ -806,50 +912,83 @@ fn native_tcp_delta_rejects_baseline_substitution_after_request_without_publicat
         let (size, content_id, content_sha256) =
             tcp::hash_file_streaming(&source_path, &mut vec![0; 4096]).await?;
         let digest = tcp::EntryDigest {
-            rel_path: "payload".into(), size, content_id, content_sha256,
+            rel_path: "payload".into(),
+            size,
+            content_id,
+            content_sha256,
         };
         let content_root = tcp::flat_merkle_root_from_digests(&[digest]);
         let entries = [tcp::SourceEntry {
-            rel_path: "payload".into(), abs_path: source_path,
+            rel_path: "payload".into(),
+            abs_path: source_path,
         }];
         let delta = tcp::build_delta_manifest_from_entries(
-            content_root.clone(), &entries, &[tcp::EntryMetadata::default()], 4096,
-        ).await?;
+            content_root.clone(),
+            &entries,
+            &[tcp::EntryMetadata::default()],
+            4096,
+        )
+        .await?;
         let manifest = tcp::TransferManifest {
             transfer_id: tcp::transfer_id_hex(&content_root, size, 1),
-            root_name: "payload".into(), is_directory: false, total_bytes: size,
-            merkle_root_hex: content_root, metadata_root_hex: None, directory_metadata: None,
+            root_name: "payload".into(),
+            is_directory: false,
+            total_bytes: size,
+            merkle_root_hex: content_root,
+            metadata_root_hex: None,
+            directory_metadata: None,
             entries: vec![tcp::ManifestEntry {
-                index: 0, rel_path: "payload".into(), size,
-                sha256_hex: tcp::hex_encode(&content_sha256), metadata: None, members: Vec::new(),
+                index: 0,
+                rel_path: "payload".into(),
+                size,
+                sha256_hex: tcp::hex_encode(&content_sha256),
+                metadata: None,
+                members: Vec::new(),
             }],
             delta_manifest: Some(delta),
         };
         let stream = crate::net::TcpStream::connect(address).await?;
         let mut wire = tcp::FrameTransport::new(stream);
-        let hello = tcp::json_frame(tcp::FrameType::Handshake, &tcp::Hello {
-            protocol: tcp::ATP_TCP_PROTOCOL, role: "sender".into(), peer_id: "baseline-guard-test".into(),
-        })?;
-        tcp::with_transport_timeout(&cx, config.idle_timeout, "test hello", wire.send(&hello)).await?;
-        let ack = tcp::with_transport_timeout(&cx, config.idle_timeout, "test ack", wire.recv()).await?;
+        let hello = tcp::json_frame(
+            tcp::FrameType::Handshake,
+            &tcp::Hello {
+                protocol: tcp::ATP_TCP_PROTOCOL,
+                role: "sender".into(),
+                peer_id: "baseline-guard-test".into(),
+            },
+        )?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test hello", wire.send(&hello))
+            .await?;
+        let ack =
+            tcp::with_transport_timeout(&cx, config.idle_timeout, "test ack", wire.recv()).await?;
         if ack.frame_type() != tcp::FrameType::HandshakeAck
             || !tcp::parse_json::<tcp::HelloAck>(&ack)?.accepted
         {
-            return Err(TransportError::Frame("test peer handshake was not accepted".into()));
+            return Err(TransportError::Frame(
+                "test peer handshake was not accepted".into(),
+            ));
         }
         let frame = tcp::json_frame(tcp::FrameType::ObjectManifest, &manifest)?;
-        tcp::with_transport_timeout(&cx, config.idle_timeout, "test manifest", wire.send(&frame)).await?;
-        let frame = tcp::with_transport_timeout(&cx, config.idle_timeout, "test request", wire.recv()).await?;
+        tcp::with_transport_timeout(&cx, config.idle_timeout, "test manifest", wire.send(&frame))
+            .await?;
+        let frame =
+            tcp::with_transport_timeout(&cx, config.idle_timeout, "test request", wire.recv())
+                .await?;
         if frame.frame_type() != tcp::FrameType::ObjectRequest {
-            return Err(TransportError::Frame("receiver did not emit ObjectRequest".into()));
+            return Err(TransportError::Frame(
+                "receiver did not emit ObjectRequest".into(),
+            ));
         }
         let request: tcp::DeltaObjectRequest = tcp::parse_json(&frame)?;
         tcp::sender_validation::validate_request(&manifest, &request)?;
         if request.mode != tcp::DeltaWireMode::DeltaChunks
-            || request.missing_bytes != 4096 || request.missing_chunks.len() != 1
+            || request.missing_bytes != 4096
+            || request.missing_chunks.len() != 1
             || request.missing_chunks[0].entry_offset != 4096
         {
-            return Err(TransportError::Frame("fixture did not witness the indexed delta baseline".into()));
+            return Err(TransportError::Frame(
+                "fixture did not witness the indexed delta baseline".into(),
+            ));
         }
         // Receiving this request proves the receiver finished indexing the
         // original regular file. Its unchanged ranges are now replaced by a
@@ -857,14 +996,32 @@ fn native_tcp_delta_rejects_baseline_substitution_after_request_without_publicat
         std::fs::rename(&switched_path, &saved_path)?;
         std::os::unix::fs::symlink(&saved_path, &switched_path)?;
         let frame = tcp::data_frame(0, 4096, &target[4096..8192])?;
-        tcp::with_transport_timeout(&cx, config.idle_timeout, "test changed chunk", wire.send(&frame)).await?;
+        tcp::with_transport_timeout(
+            &cx,
+            config.idle_timeout,
+            "test changed chunk",
+            wire.send(&frame),
+        )
+        .await?;
         let complete = tcp::Frame::empty(tcp::FrameType::ObjectComplete)
             .map_err(|error| TransportError::Frame(error.to_string()))?;
-        tcp::with_transport_timeout(&cx, config.idle_timeout, "test complete", wire.send(&complete)).await?;
-        match tcp::with_transport_timeout(&cx, config.idle_timeout, "test rejection", wire.recv()).await {
-            Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+        tcp::with_transport_timeout(
+            &cx,
+            config.idle_timeout,
+            "test complete",
+            wire.send(&complete),
+        )
+        .await?;
+        match tcp::with_transport_timeout(&cx, config.idle_timeout, "test rejection", wire.recv())
+            .await
+        {
+            Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Ok(())
+            }
             Err(error) => Err(error),
-            Ok(_) => Err(TransportError::Frame("rejected baseline produced a protocol success frame".into())),
+            Ok(_) => Err(TransportError::Frame(
+                "rejected baseline produced a protocol success frame".into(),
+            )),
         }
     }));
     let received = receiver.join().expect("receiver thread must retire");
@@ -873,7 +1030,13 @@ fn native_tcp_delta_rejects_baseline_substitution_after_request_without_publicat
         if message == format!("{}: delta baseline source must be a plain regular file", received_path.display())));
     assert_eq!(std::fs::read_link(&received_path).unwrap(), held_path);
     assert_eq!(std::fs::read(&held_path).unwrap(), baseline);
-    let entries: Vec<_> = std::fs::read_dir(&destination).unwrap()
-        .map(|entry| entry.unwrap().file_name()).collect();
-    assert_eq!(entries, vec![std::ffi::OsString::from("payload")], "failed receive must reclaim its spool and staging");
+    let entries: Vec<_> = std::fs::read_dir(&destination)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![std::ffi::OsString::from("payload")],
+        "failed receive must reclaim its spool and staging"
+    );
 }

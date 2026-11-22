@@ -143,9 +143,7 @@ where
                                     // error. Cancellation now stops admission;
                                     // it must not invoke a retry callback or
                                     // consume a shared dependency's token.
-                                    if let Some(reason) =
-                                        retry_cancel_reason().or(cancel_reason)
-                                    {
+                                    if let Some(reason) = retry_cancel_reason().or(cancel_reason) {
                                         this.inner.set(RetryInner::Completed);
                                         return Poll::Ready(RetryResult::Cancelled(reason));
                                     }

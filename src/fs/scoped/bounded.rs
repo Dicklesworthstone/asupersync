@@ -45,9 +45,9 @@ where
         self.run_io(move |child| {
             let mut file = std::fs::File::open(path)?;
             read_bounded_reader(&mut file, max_bytes, || {
-                child.checkpoint().map_err(|error| {
-                    io::Error::new(io::ErrorKind::Interrupted, error)
-                })
+                child
+                    .checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))
             })
         })
         .await
@@ -90,9 +90,9 @@ where
                 ));
             }
             read_bounded_reader(&mut file, max_bytes, || {
-                child.checkpoint().map_err(|error| {
-                    io::Error::new(io::ErrorKind::Interrupted, error)
-                })
+                child
+                    .checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))
             })
         })
         .await
@@ -113,9 +113,9 @@ where
         self.run_io(move |child| {
             let mut file = std::fs::File::open(path)?;
             let bytes = read_bounded_reader(&mut file, max_bytes, || {
-                child.checkpoint().map_err(|error| {
-                    io::Error::new(io::ErrorKind::Interrupted, error)
-                })
+                child
+                    .checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))
             })?;
             String::from_utf8(bytes)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.utf8_error()))
@@ -160,8 +160,13 @@ fn read_bounded_reader(
         // below cannot overflow, even when the caller supplies usize::MAX.
         let needed = bytes.len() + count;
         if needed > bytes.capacity() {
-            let target = bytes.capacity().saturating_mul(2).max(needed).min(max_bytes);
-            bytes.try_reserve_exact(target - bytes.len())
+            let target = bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(needed)
+                .min(max_bytes);
+            bytes
+                .try_reserve_exact(target - bytes.len())
                 .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
         }
         bytes.extend_from_slice(&scratch[..count]);

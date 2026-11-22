@@ -19,10 +19,15 @@ fn snapshot_preserves_counter_gauge_histogram_resource_and_time_semantics() {
     snapshot.add_gauge("active", Vec::new(), -7);
     snapshot.add_histogram("duration", Vec::new(), 3, 1.25);
     let resource = vec![("service.name".into(), "test-service".into())];
-    let bytes = encode_snapshot(batch(&snapshot), &resource).unwrap().unwrap();
+    let bytes = encode_snapshot(batch(&snapshot), &resource)
+        .unwrap()
+        .unwrap();
     let decoded = decode(&bytes);
     let resource = &decoded.resource_metrics[0];
-    assert_eq!(resource.resource.as_ref().unwrap().attributes[0].key, "service.name");
+    assert_eq!(
+        resource.resource.as_ref().unwrap().attributes[0].key,
+        "service.name"
+    );
     let metrics = &resource.scope_metrics[0].metrics;
     assert_eq!(metrics.len(), 3);
     assert_eq!(metrics[0].name, "active");
@@ -32,14 +37,20 @@ fn snapshot_preserves_counter_gauge_histogram_resource_and_time_semantics() {
     let Some(MetricData::Gauge(gauge)) = &metrics[0].data else {
         panic!("gauge wire type");
     };
-    assert_eq!(gauge.data_points[0].value, Some(NumberDataPointValue::Int(-7)));
+    assert_eq!(
+        gauge.data_points[0].value,
+        Some(NumberDataPointValue::Int(-7))
+    );
     assert_eq!(gauge.data_points[0].start_time_unix_nano, 0);
     assert_eq!(gauge.data_points[0].time_unix_nano, 2000);
 
     let Some(MetricData::Histogram(histogram)) = &metrics[1].data else {
         panic!("histogram wire type");
     };
-    assert_eq!(histogram.aggregation_temporality, AggregationTemporality::Cumulative.as_raw());
+    assert_eq!(
+        histogram.aggregation_temporality,
+        AggregationTemporality::Cumulative.as_raw()
+    );
     let point = &histogram.data_points[0];
     assert_eq!(point.count, 3);
     assert_eq!(point.sum, Some(1.25));
@@ -52,8 +63,14 @@ fn snapshot_preserves_counter_gauge_histogram_resource_and_time_semantics() {
         panic!("counter wire type");
     };
     assert!(sum.is_monotonic);
-    assert_eq!(sum.aggregation_temporality, AggregationTemporality::Cumulative.as_raw());
-    assert_eq!(sum.data_points[0].value, Some(NumberDataPointValue::Int(42)));
+    assert_eq!(
+        sum.aggregation_temporality,
+        AggregationTemporality::Cumulative.as_raw()
+    );
+    assert_eq!(
+        sum.data_points[0].value,
+        Some(NumberDataPointValue::Int(42))
+    );
     assert_eq!(sum.data_points[0].start_time_unix_nano, 1000);
     assert_eq!(sum.data_points[0].time_unix_nano, 2000);
     assert_eq!(sum.data_points[0].attributes[0].key, "route");
@@ -62,7 +79,11 @@ fn snapshot_preserves_counter_gauge_histogram_resource_and_time_semantics() {
 #[test]
 fn encoding_is_independent_of_series_label_and_resource_insertion_order() {
     let mut first = MetricsSnapshot::new();
-    first.add_counter("requests", vec![("z".into(), "2".into()), ("a".into(), "1".into())], 5);
+    first.add_counter(
+        "requests",
+        vec![("z".into(), "2".into()), ("a".into(), "1".into())],
+        5,
+    );
     first.add_counter("requests", vec![("route".into(), "/other".into())], 9);
     first.add_gauge("active", Vec::new(), 2);
     let mut second = first.clone();
@@ -81,7 +102,11 @@ fn encoding_is_independent_of_series_label_and_resource_insertion_order() {
 
 #[test]
 fn empty_snapshot_produces_no_request() {
-    assert!(encode_snapshot(batch(&MetricsSnapshot::new()), &[]).unwrap().is_none());
+    assert!(
+        encode_snapshot(batch(&MetricsSnapshot::new()), &[])
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -101,10 +126,14 @@ fn counter_integer_boundary_is_exact_and_overflow_is_rejected() {
     let mut snapshot = MetricsSnapshot::new();
     snapshot.add_counter("counter", Vec::new(), i64::MAX as u64);
     let decoded = decode(&encode_snapshot(batch(&snapshot), &[]).unwrap().unwrap());
-    let Some(MetricData::Sum(sum)) = &decoded.resource_metrics[0].scope_metrics[0].metrics[0].data else {
+    let Some(MetricData::Sum(sum)) = &decoded.resource_metrics[0].scope_metrics[0].metrics[0].data
+    else {
         panic!("counter wire type");
     };
-    assert_eq!(sum.data_points[0].value, Some(NumberDataPointValue::Int(i64::MAX)));
+    assert_eq!(
+        sum.data_points[0].value,
+        Some(NumberDataPointValue::Int(i64::MAX))
+    );
     for invalid in [i64::MAX as u64 + 1, u64::MAX] {
         snapshot.counters[0].2 = invalid;
         assert!(encode_snapshot(batch(&snapshot), &[]).is_err());
@@ -113,7 +142,12 @@ fn counter_integer_boundary_is_exact_and_overflow_is_rejected() {
 
 #[test]
 fn invalid_histograms_never_produce_a_request() {
-    for (count, sum) in [(1, f64::NAN), (1, f64::INFINITY), (1, f64::NEG_INFINITY), (0, 1.0)] {
+    for (count, sum) in [
+        (1, f64::NAN),
+        (1, f64::INFINITY),
+        (1, f64::NEG_INFINITY),
+        (0, 1.0),
+    ] {
         let mut snapshot = MetricsSnapshot::new();
         snapshot.add_histogram("histogram", Vec::new(), count, sum);
         assert!(encode_snapshot(batch(&snapshot), &[]).is_err());
@@ -141,13 +175,18 @@ fn duplicate_series_and_mixed_metric_kinds_are_rejected() {
 fn malformed_names_and_labels_are_rejected_with_value_redacted_errors() {
     for labels in [
         vec![(String::new(), "private-value".into())],
-        vec![("key".into(), "private-value".into()), ("key".into(), "other".into())],
+        vec![
+            ("key".into(), "private-value".into()),
+            ("key".into(), "other".into()),
+        ],
         vec![("k".repeat(1025), "private-value".into())],
         vec![("key".into(), "v".repeat(4097))],
     ] {
         let mut snapshot = MetricsSnapshot::new();
         snapshot.add_counter("private-name", labels, 1);
-        let error = encode_snapshot(batch(&snapshot), &[]).unwrap_err().to_string();
+        let error = encode_snapshot(batch(&snapshot), &[])
+            .unwrap_err()
+            .to_string();
         assert!(!error.contains("private-value"));
         assert!(!error.contains("private-name"));
     }
@@ -162,7 +201,10 @@ fn malformed_names_and_labels_are_rejected_with_value_redacted_errors() {
 fn resource_attributes_obey_the_same_duplicate_and_size_rules() {
     let mut snapshot = MetricsSnapshot::new();
     snapshot.add_gauge("active", Vec::new(), 1);
-    let duplicate = vec![("service.name".into(), "one".into()), ("service.name".into(), "two".into())];
+    let duplicate = vec![
+        ("service.name".into(), "one".into()),
+        ("service.name".into(), "two".into()),
+    ];
     assert!(encode_snapshot(batch(&snapshot), &duplicate).is_err());
     let oversized = vec![("resource".into(), "x".repeat(4097))];
     assert!(encode_snapshot(batch(&snapshot), &oversized).is_err());
@@ -195,7 +237,11 @@ fn aggregate_attribute_and_string_limits_are_enforced_before_owned_encoding() {
     assert!(encode_snapshot(batch(&snapshot), &[]).is_err());
     let mut snapshot = MetricsSnapshot::new();
     for index in 0..800 {
-        snapshot.add_gauge(format!("metric-{index}"), vec![("key".into(), "v".repeat(4096))], 1);
+        snapshot.add_gauge(
+            format!("metric-{index}"),
+            vec![("key".into(), "v".repeat(4096))],
+            1,
+        );
     }
     assert!(encode_snapshot(batch(&snapshot), &[]).is_err());
 }

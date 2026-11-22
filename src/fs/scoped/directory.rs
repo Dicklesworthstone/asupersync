@@ -159,7 +159,10 @@ impl DirectoryBudget {
 pub(super) fn reserve_entry<T>(entries: &mut Vec<T>, max_entries: usize) -> io::Result<()> {
     if entries.len() == entries.capacity() {
         let needed = entries.len().checked_add(1).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::OutOfMemory, "directory result length overflow")
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "directory result length overflow",
+            )
         })?;
         let target = entries
             .capacity()

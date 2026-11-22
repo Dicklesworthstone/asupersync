@@ -33,13 +33,21 @@ impl RequestContentCodings {
 /// Resolve the public header projection and any still-authoritative repeated
 /// wire fields once, for buffered middleware and explicit streaming extraction.
 pub fn request_content_decoder(request: &Request) -> io::Result<ContentDecoder> {
-    let mut fields = request.headers.iter()
+    let mut fields = request
+        .headers
+        .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"));
     let current = fields.next().map(|(_, value)| value.as_str());
     if fields.next().is_some() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "ambiguous request content encoding order"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ambiguous request content encoding order",
+        ));
     }
-    match (current, request.extensions.get_typed::<RequestContentCodings>()) {
+    match (
+        current,
+        request.extensions.get_typed::<RequestContentCodings>(),
+    ) {
         (Some(current), Some(original)) if original.unchanged(request, current) => {
             ContentDecoder::from_request_fields(original.fields.iter().map(String::as_str))
         }
@@ -112,7 +120,10 @@ impl<H: Handler> Layer<H> for StreamingRequestDecompressionLayer {
     type Service = StreamingRequestDecompressionMiddleware<H>;
 
     fn layer(&self, inner: H) -> Self::Service {
-        StreamingRequestDecompressionMiddleware { inner, limits: self.limits }
+        StreamingRequestDecompressionMiddleware {
+            inner,
+            limits: self.limits,
+        }
     }
 }
 
@@ -125,7 +136,11 @@ pub struct StreamingRequestDecompressionMiddleware<H> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl<H: Handler> Handler for StreamingRequestDecompressionMiddleware<H> {
-    fn call(&self, cx: &Cx, mut request: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        mut request: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         request.extensions.insert_typed(self.limits);
         self.inner.call(cx, request)
     }
@@ -177,7 +192,10 @@ impl RequestDecompressionLayer {
     /// A zero-byte limit is valid; neither bound can be disabled.
     #[must_use]
     pub const fn new(max_encoded_bytes: usize, max_decoded_bytes: usize) -> Self {
-        Self { max_encoded_bytes, max_decoded_bytes }
+        Self {
+            max_encoded_bytes,
+            max_decoded_bytes,
+        }
     }
 }
 
@@ -185,7 +203,10 @@ impl<H: Handler> Layer<H> for RequestDecompressionLayer {
     type Service = RequestDecompressionMiddleware<H>;
 
     fn layer(&self, inner: H) -> Self::Service {
-        RequestDecompressionMiddleware { inner, limits: *self }
+        RequestDecompressionMiddleware {
+            inner,
+            limits: *self,
+        }
     }
 }
 
@@ -199,12 +220,19 @@ impl<H: Handler> RequestDecompressionMiddleware<H> {
     /// Wrap a handler with explicit encoded and decoded request-body limits.
     #[must_use]
     pub const fn new(inner: H, max_encoded_bytes: usize, max_decoded_bytes: usize) -> Self {
-        Self { inner, limits: RequestDecompressionLayer::new(max_encoded_bytes, max_decoded_bytes) }
+        Self {
+            inner,
+            limits: RequestDecompressionLayer::new(max_encoded_bytes, max_decoded_bytes),
+        }
     }
 }
 
 impl<H: Handler> Handler for RequestDecompressionMiddleware<H> {
-    fn call(&self, cx: &Cx, mut request: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        mut request: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             if cx.checkpoint().is_err() {
@@ -221,23 +249,44 @@ impl<H: Handler> Handler for RequestDecompressionMiddleware<H> {
     }
 }
 
-fn decode_request(request: &mut Request, limits: RequestDecompressionLayer) -> Result<(), Response> {
-    let policy_limit = request.body_policy().map_or(usize::MAX, |policy| policy.max_total_body_size);
+fn decode_request(
+    request: &mut Request,
+    limits: RequestDecompressionLayer,
+) -> Result<(), Response> {
+    let policy_limit = request
+        .body_policy()
+        .map_or(usize::MAX, |policy| policy.max_total_body_size);
     let encoded_limit = limits.max_encoded_bytes.min(policy_limit);
     let decoded_limit = limits.max_decoded_bytes.min(policy_limit);
     if request.body.len() > encoded_limit {
-        return Err(refused(StatusCode::PAYLOAD_TOO_LARGE, "encoded request body exceeds limit"));
+        return Err(refused(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "encoded request body exceeds limit",
+        ));
     }
     // Apply the wire bound to every spelling, not only a HashMap's first hit.
     let mut content_length = None;
-    for (_, value) in request.headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+    for (_, value) in request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
         let declared = crate::web::extract::parse_content_length(value)
             .map_err(|_| refused(StatusCode::BAD_REQUEST, "invalid request content length"))?;
-        if content_length.replace(declared).is_some_and(|previous| previous != declared) {
-            return Err(refused(StatusCode::BAD_REQUEST, "conflicting request content length"));
+        if content_length
+            .replace(declared)
+            .is_some_and(|previous| previous != declared)
+        {
+            return Err(refused(
+                StatusCode::BAD_REQUEST,
+                "conflicting request content length",
+            ));
         }
         if declared > encoded_limit {
-            return Err(refused(StatusCode::PAYLOAD_TOO_LARGE, "encoded request body exceeds limit"));
+            return Err(refused(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "encoded request body exceeds limit",
+            ));
         }
     }
     let decoder = request_content_decoder(request).map_err(decode_refusal)?;
@@ -246,23 +295,37 @@ fn decode_request(request: &mut Request, limits: RequestDecompressionLayer) -> R
     request.extensions.remove_typed::<RequestContentCodings>();
 
     if decoder.is_identity() && content_length.is_some_and(|length| length > decoded_limit) {
-        return Err(refused(StatusCode::PAYLOAD_TOO_LARGE, "decoded request body exceeds resource limit"));
+        return Err(refused(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "decoded request body exceeds resource limit",
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    if request.extensions.get_typed::<crate::web::extract::StreamingRawBodySlot>().is_some() {
+    if request
+        .extensions
+        .get_typed::<crate::web::extract::StreamingRawBodySlot>()
+        .is_some()
+    {
         if !decoder.is_identity() {
-            return Err(refused(StatusCode::UNSUPPORTED_MEDIA_TYPE, "encoded streaming request bodies are unsupported")
-                .header("accept-encoding", "identity"));
+            return Err(refused(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "encoded streaming request bodies are unsupported",
+            )
+            .header("accept-encoding", "identity"));
         }
         crate::web::extract::tighten_streaming_raw_body(request, encoded_limit.min(decoded_limit));
         return Ok(());
     }
 
     if !decoder.is_identity() && request.header("content-range").is_some() {
-        return Err(refused(StatusCode::UNSUPPORTED_MEDIA_TYPE, "encoded partial request bodies are unsupported"));
+        return Err(refused(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "encoded partial request bodies are unsupported",
+        ));
     }
-    let decoded = decoder.decode(&request.body, DecompressionLimit::new(decoded_limit))
+    let decoded = decoder
+        .decode(&request.body, DecompressionLimit::new(decoded_limit))
         .map_err(decode_refusal)?;
     if decoder.is_identity() {
         return Ok(());
@@ -273,14 +336,19 @@ fn decode_request(request: &mut Request, limits: RequestDecompressionLayer) -> R
             && !name.eq_ignore_ascii_case("transfer-encoding")
             && !name.eq_ignore_ascii_case("trailer")
     });
-    request.headers.insert("content-length".to_owned(), body.len().to_string());
+    request
+        .headers
+        .insert("content-length".to_owned(), body.len().to_string());
     request.body = body.into();
     Ok(())
 }
 
 fn decode_refusal(error: io::Error) -> Response {
     if is_limit_error(&error) {
-        refused(StatusCode::PAYLOAD_TOO_LARGE, "decoded request body exceeds resource limit")
+        refused(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "decoded request body exceeds resource limit",
+        )
     } else if error.kind() == io::ErrorKind::Unsupported {
         let mut supported = Vec::new();
         if cfg!(feature = "compression") {
@@ -290,8 +358,11 @@ fn decode_refusal(error: io::Error) -> Response {
             supported.push("zstd");
         }
         supported.push("identity");
-        refused(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported request content encoding")
-            .header("accept-encoding", supported.join(", "))
+        refused(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported request content encoding",
+        )
+        .header("accept-encoding", supported.join(", "))
     } else {
         refused(StatusCode::BAD_REQUEST, "malformed encoded request body")
     }

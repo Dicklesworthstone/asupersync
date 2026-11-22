@@ -2,11 +2,10 @@
 
 use super::{
     DirectoryEntryKind, DirectoryManifest, DirectoryManifestEntry, DirectoryPath,
-    NativeDirectoryError, NativeDirectoryLimits, NativeDirectorySnapshot,
-    NativeRoot, PreparedNativeDirectorySync, Stamp, changed, checkpoint,
-    directory_flags, disjoint_roots, file_flags, io_error, metadata_stamp,
-    open_parent, os_error, refused, revalidate_stamps, scan_root, stat_at,
-    validate_profile,
+    NativeDirectoryError, NativeDirectoryLimits, NativeDirectorySnapshot, NativeRoot,
+    PreparedNativeDirectorySync, Stamp, changed, checkpoint, directory_flags, disjoint_roots,
+    file_flags, io_error, metadata_stamp, open_parent, os_error, refused, revalidate_stamps,
+    scan_root, stat_at, validate_profile,
 };
 use crate::atp::sync::{
     BidirectionalSyncAction, BidirectionalSyncDecision, DestructiveAuthorization,
@@ -27,8 +26,8 @@ mod recovery;
 pub use recovery::{
     NativeDirectoryRecoveryEntry, NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
     NativeDirectoryRecoverySource, NativeDirectoryRecoverySourceAction,
-    NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery, prepare_native_directory_recovery,
-    prepare_native_directory_recovery_from_source,
+    NativeDirectoryRecoveryState, PreparedNativeDirectoryRecovery,
+    prepare_native_directory_recovery, prepare_native_directory_recovery_from_source,
 };
 
 /// Last actual filesystem boundary reached by an action.
@@ -131,7 +130,8 @@ impl PreparedNativeDirectorySync {
         authorization: DestructiveAuthorization,
         staging_root: impl Into<PathBuf>,
     ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
-        self.apply_profile(cx, authorization, staging_root.into(), false).await
+        self.apply_profile(cx, authorization, staging_root.into(), false)
+            .await
     }
 
     /// Apply a reviewed reconciliation, retaining deleted entries in quarantine.
@@ -171,7 +171,8 @@ impl PreparedNativeDirectorySync {
         authorization: DestructiveAuthorization,
         staging_root: impl Into<PathBuf>,
     ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
-        self.apply_profile(cx, authorization, staging_root.into(), true).await
+        self.apply_profile(cx, authorization, staging_root.into(), true)
+            .await
     }
 
     async fn apply_profile(
@@ -183,7 +184,13 @@ impl PreparedNativeDirectorySync {
     ) -> Result<NativeDirectorySyncReport, NativeDirectoryError> {
         cx.scoped_fs()
             .run_io(move |worker| {
-                Ok(apply_owned(&worker, self, authorization, &staging_root, quarantine_deletions))
+                Ok(apply_owned(
+                    &worker,
+                    self,
+                    authorization,
+                    &staging_root,
+                    quarantine_deletions,
+                ))
             })
             .await
             .map_err(NativeDirectoryError::Runtime)
@@ -201,8 +208,11 @@ pub(super) fn apply_owned(
         plan_id: prepared.plan_id.clone(),
         dry_run: authorization.dry_run,
         complete: false,
-        actions: prepared.preview.decisions.iter().map(|decision| {
-            NativeDirectoryActionReceipt {
+        actions: prepared
+            .preview
+            .decisions
+            .iter()
+            .map(|decision| NativeDirectoryActionReceipt {
                 path: decision.path.clone(),
                 action: decision.action,
                 state: NativeDirectoryActionState::NotStarted,
@@ -210,8 +220,8 @@ pub(super) fn apply_owned(
                 staged_path: None,
                 quarantine_path: None,
                 durable: false,
-            }
-        }).collect(),
+            })
+            .collect(),
         staging_directory: None,
         verified_baseline: None,
         failure: None,
@@ -249,17 +259,27 @@ pub(super) fn apply_owned(
         report.staging_directory = Some(job_path.clone());
         let staging = File::from(
             openat(
-                &staging_root.file, directory_name.as_str(), directory_flags(), Mode::empty(),
-            ).map_err(|error| os_error(&job_path, error))?,
+                &staging_root.file,
+                directory_name.as_str(),
+                directory_flags(),
+                Mode::empty(),
+            )
+            .map_err(|error| os_error(&job_path, error))?,
         );
         let job_stamp = metadata_stamp(&staging, &job_path)?;
         if job_stamp.uid != geteuid().as_raw()
             || job_stamp.gid != getegid().as_raw()
             || job_stamp.mode & 0o7777 != 0o700
         {
-            return Err(refused(&job_path, "staging directory ownership or permissions differ"));
+            return Err(refused(
+                &job_path,
+                "staging directory ownership or permissions differ",
+            ));
         }
-        staging_root.file.sync_all().map_err(|source| io_error(&staging_root.path, source))?;
+        staging_root
+            .file
+            .sync_all()
+            .map_err(|source| io_error(&staging_root.path, source))?;
 
         for (index, decision) in prepared.preview.decisions.iter().enumerate() {
             checkpoint(cx)?;
@@ -276,17 +296,34 @@ pub(super) fn apply_owned(
                     receipt.durable = true;
                 }
                 BidirectionalSyncAction::CopyLocalToRemote => apply_copy(
-                    cx, &prepared.local, &mut prepared.remote, decision,
-                    &staging, &job_path, index, prepared.limits, receipt,
+                    cx,
+                    &prepared.local,
+                    &mut prepared.remote,
+                    decision,
+                    &staging,
+                    &job_path,
+                    index,
+                    prepared.limits,
+                    receipt,
                 )?,
                 BidirectionalSyncAction::CopyRemoteToLocal => apply_copy(
-                    cx, &prepared.remote, &mut prepared.local, decision,
-                    &staging, &job_path, index, prepared.limits, receipt,
+                    cx,
+                    &prepared.remote,
+                    &mut prepared.local,
+                    decision,
+                    &staging,
+                    &job_path,
+                    index,
+                    prepared.limits,
+                    receipt,
                 )?,
                 BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote => {}
-                _ => return Err(refused(
-                    Path::new(decision.path.as_str()), "unsupported action escaped preflight",
-                )),
+                _ => {
+                    return Err(refused(
+                        Path::new(decision.path.as_str()),
+                        "unsupported action escaped preflight",
+                    ));
+                }
             }
         }
 
@@ -306,8 +343,15 @@ pub(super) fn apply_owned(
                 return Err(changed(&job_path));
             }
             apply_delete(
-                cx, absent, destination, decision, &staging, &job_path,
-                index, prepared.limits, &mut report.actions[index],
+                cx,
+                absent,
+                destination,
+                decision,
+                &staging,
+                &job_path,
+                index,
+                prepared.limits,
+                &mut report.actions[index],
             )?;
         }
 
@@ -316,7 +360,8 @@ pub(super) fn apply_owned(
         let remote = scan_again(cx, &prepared.remote.root, prepared.limits)?;
         if local.manifest != expected || remote.manifest != expected {
             return Err(refused(
-                &prepared.local.root.path, "final inventories do not match the reviewed projection",
+                &prepared.local.root.path,
+                "final inventories do not match the reviewed projection",
             ));
         }
         revalidate_stamps(cx, &local)?;
@@ -345,28 +390,44 @@ fn preflight_actions(
             BidirectionalSyncAction::CopyLocalToRemote => (&decision.local, &decision.remote),
             BidirectionalSyncAction::CopyRemoteToLocal => (&decision.remote, &decision.local),
             BidirectionalSyncAction::Conflict { .. } => {
-                return Err(refused(path, "unresolved conflict blocks the entire native plan"));
+                return Err(refused(
+                    path,
+                    "unresolved conflict blocks the entire native plan",
+                ));
             }
             BidirectionalSyncAction::DeleteLocal | BidirectionalSyncAction::DeleteRemote => {
                 if !quarantine_deletions {
                     return Err(refused(path, "native directory deletion is not supported"));
                 }
                 if !authorization.dry_run && !authorization.allow_delete {
-                    return Err(refused(path, "deletion requires explicit delete authorization"));
+                    return Err(refused(
+                        path,
+                        "deletion requires explicit delete authorization",
+                    ));
                 }
                 let (destination, absent) = match decision.action {
                     BidirectionalSyncAction::DeleteLocal => (&decision.local, &decision.remote),
                     _ => (&decision.remote, &decision.local),
                 };
-                if absent.is_some() || !destination.as_ref().is_some_and(|entry| {
-                    matches!(entry.kind, DirectoryEntryKind::File | DirectoryEntryKind::Directory)
-                }) {
-                    return Err(refused(path, "deletion requires an ordinary entry and opposite-side absence"));
+                if absent.is_some()
+                    || !destination.as_ref().is_some_and(|entry| {
+                        matches!(
+                            entry.kind,
+                            DirectoryEntryKind::File | DirectoryEntryKind::Directory
+                        )
+                    })
+                {
+                    return Err(refused(
+                        path,
+                        "deletion requires an ordinary entry and opposite-side absence",
+                    ));
                 }
                 continue;
             }
         };
-        let source = source.as_ref().ok_or_else(|| refused(path, "copy source is absent"))?;
+        let source = source
+            .as_ref()
+            .ok_or_else(|| refused(path, "copy source is absent"))?;
         match (source.kind, destination.as_ref().map(|entry| entry.kind)) {
             (DirectoryEntryKind::File | DirectoryEntryKind::Directory, None) => {}
             (DirectoryEntryKind::File, Some(DirectoryEntryKind::File)) => {
@@ -374,14 +435,17 @@ fn preflight_actions(
                     && (!authorization.allow_overwrite || !authorization.allow_permission_change)
                 {
                     return Err(refused(
-                        path, "overwrite requires explicit overwrite and permission-change authorization",
+                        path,
+                        "overwrite requires explicit overwrite and permission-change authorization",
                     ));
                 }
             }
             _ => return Err(refused(path, "entry kind replacement is not supported")),
         }
     }
-    let expected = prepared.preview.merged_manifest()
+    let expected = prepared
+        .preview
+        .merged_manifest()
         .ok_or_else(|| refused(Path::new(""), "plan has no complete merged projection"))?;
     // The union can exceed a bound even when each input root fits individually.
     validate_profile(&expected, prepared.limits)?;
@@ -394,15 +458,22 @@ fn preflight_overwrites(
 ) -> Result<(), NativeDirectoryError> {
     for decision in &prepared.preview.decisions {
         let destination = match decision.action {
-            BidirectionalSyncAction::CopyLocalToRemote if decision.remote.is_some() => &prepared.remote,
-            BidirectionalSyncAction::CopyRemoteToLocal if decision.local.is_some() => &prepared.local,
+            BidirectionalSyncAction::CopyLocalToRemote if decision.remote.is_some() => {
+                &prepared.remote
+            }
+            BidirectionalSyncAction::CopyRemoteToLocal if decision.local.is_some() => {
+                &prepared.local
+            }
             _ => continue,
         };
         checkpoint(cx)?;
         let (parent, name) = guarded_parent(destination, &decision.path)?;
         let display = destination.root.path.join(decision.path.as_str());
-        let expected = destination.guards.get(&decision.path)
-            .copied().ok_or_else(|| changed(&display))?;
+        let expected = destination
+            .guards
+            .get(&decision.path)
+            .copied()
+            .ok_or_else(|| changed(&display))?;
         let file = open_guarded_file(&parent, name, &display, expected)?;
         validate_overwrite_metadata(&file, expected, &display)?;
     }
@@ -418,10 +489,21 @@ fn validate_overwrite_metadata(
         || expected.uid != geteuid().as_raw()
         || expected.gid != getegid().as_raw()
     {
-        return Err(refused(path, "overwrite cannot preserve special modes or different ownership"));
+        return Err(refused(
+            path,
+            "overwrite cannot preserve special modes or different ownership",
+        ));
     }
-    if file.list_xattr().map_err(|source| io_error(path, source))?.next().is_some() {
-        return Err(refused(path, "overwrite cannot preserve visible extended metadata"));
+    if file
+        .list_xattr()
+        .map_err(|source| io_error(path, source))?
+        .next()
+        .is_some()
+    {
+        return Err(refused(
+            path,
+            "overwrite cannot preserve visible extended metadata",
+        ));
     }
     if metadata_stamp(file, path)? != expected {
         return Err(changed(path));
@@ -438,17 +520,36 @@ fn preflight_staging(
     disjoint_roots(&staging, &prepared.remote.root)?;
     if staging.identity.device != prepared.local.root.identity.device
         || staging.identity.device != prepared.remote.root.identity.device
-        || prepared.local.guards.values().chain(prepared.remote.guards.values())
+        || prepared
+            .local
+            .guards
+            .values()
+            .chain(prepared.remote.guards.values())
             .any(|stamp| stamp.identity == staging.identity)
     {
-        return Err(refused(path, "staging must be external on the same filesystem as both roots"));
+        return Err(refused(
+            path,
+            "staging must be external on the same filesystem as both roots",
+        ));
     }
     let stamp = metadata_stamp(&staging.file, path)?;
     if stamp.uid != geteuid().as_raw() || stamp.mode & 0o7022 != 0 {
-        return Err(refused(path, "staging root requires user ownership and private write access"));
+        return Err(refused(
+            path,
+            "staging root requires user ownership and private write access",
+        ));
     }
-    if staging.file.list_xattr().map_err(|source| io_error(path, source))?.next().is_some() {
-        return Err(refused(path, "staging root has unsupported extended metadata"));
+    if staging
+        .file
+        .list_xattr()
+        .map_err(|source| io_error(path, source))?
+        .next()
+        .is_some()
+    {
+        return Err(refused(
+            path,
+            "staging root has unsupported extended metadata",
+        ));
     }
     Ok(staging)
 }
@@ -459,11 +560,18 @@ fn scan_again(
     limits: NativeDirectoryLimits,
 ) -> Result<NativeDirectorySnapshot, NativeDirectoryError> {
     root.revalidate()?;
-    scan_root(cx, NativeRoot {
-        path: root.path.clone(),
-        file: root.file.try_clone().map_err(|source| io_error(&root.path, source))?,
-        identity: root.identity,
-    }, limits)
+    scan_root(
+        cx,
+        NativeRoot {
+            path: root.path.clone(),
+            file: root
+                .file
+                .try_clone()
+                .map_err(|source| io_error(&root.path, source))?,
+            identity: root.identity,
+        },
+        limits,
+    )
 }
 
 fn revalidate_complete(
@@ -491,9 +599,9 @@ fn guarded_parent<'a>(
     }
     let (parent, name) = open_parent(&snapshot.root, path)?;
     for (index, _) in path.as_str().match_indices('/') {
-        let ancestor = DirectoryPath::normalize(
-            &path.as_str()[..index], snapshot.manifest.path_rules,
-        ).map_err(NativeDirectoryError::Manifest)?;
+        let ancestor =
+            DirectoryPath::normalize(&path.as_str()[..index], snapshot.manifest.path_rules)
+                .map_err(NativeDirectoryError::Manifest)?;
         let (above, name) = open_parent(&snapshot.root, &ancestor)?;
         let display = snapshot.root.path.join(ancestor.as_str());
         if stat_at(&above, name, &display)? != snapshot.guards.get(&ancestor).copied() {
@@ -505,7 +613,10 @@ fn guarded_parent<'a>(
         Some((prefix, _)) => {
             let prefix = DirectoryPath::normalize(prefix, snapshot.manifest.path_rules)
                 .map_err(NativeDirectoryError::Manifest)?;
-            snapshot.guards.get(&prefix).copied()
+            snapshot
+                .guards
+                .get(&prefix)
+                .copied()
                 .ok_or_else(|| changed(&snapshot.root.path.join(prefix.as_str())))?
         }
         None => snapshot.root_stamp,
@@ -550,13 +661,18 @@ fn verify_absent(
     {
         return Err(changed(&snapshot.root.path.join(path.as_str())));
     }
-    let mut directory = snapshot.root.file.try_clone()
+    let mut directory = snapshot
+        .root
+        .file
+        .try_clone()
         .map_err(|source| io_error(&snapshot.root.path, source))?;
     let mut relative = String::new();
     let mut display = snapshot.root.path.clone();
     for name in path.as_str().split('/') {
         checkpoint(cx)?;
-        if !relative.is_empty() { relative.push('/'); }
+        if !relative.is_empty() {
+            relative.push('/');
+        }
         relative.push_str(name);
         display.push(name);
         let prefix = DirectoryPath::normalize(&relative, snapshot.manifest.path_rules)
@@ -565,7 +681,9 @@ fn verify_absent(
         if stat_at(&directory, name, &display)? != expected {
             return Err(changed(&display));
         }
-        let Some(expected) = expected else { return Ok(()); };
+        let Some(expected) = expected else {
+            return Ok(());
+        };
         if expected.kind(&display)? != DirectoryEntryKind::Directory {
             return Err(changed(&display));
         }
@@ -580,7 +698,11 @@ fn verify_absent(
     Err(changed(&display))
 }
 
-fn verify_empty_directory(cx: &Cx, directory: &File, path: &Path) -> Result<(), NativeDirectoryError> {
+fn verify_empty_directory(
+    cx: &Cx,
+    directory: &File,
+    path: &Path,
+) -> Result<(), NativeDirectoryError> {
     let mut entries = Dir::openat(directory, ".", directory_flags(), Mode::empty())
         .map_err(|error| os_error(path, error))?;
     for entry in entries.iter() {
@@ -609,8 +731,16 @@ fn apply_delete(
     let path = &decision.path;
     let display = destination.root.path.join(path.as_str());
     verify_absent(cx, absent, path)?;
-    let entry = destination.manifest.entries.get(path).ok_or_else(|| changed(&display))?;
-    let expected = destination.guards.get(path).copied().ok_or_else(|| changed(&display))?;
+    let entry = destination
+        .manifest
+        .entries
+        .get(path)
+        .ok_or_else(|| changed(&display))?;
+    let expected = destination
+        .guards
+        .get(path)
+        .copied()
+        .ok_or_else(|| changed(&display))?;
     let (parent, name) = guarded_parent(destination, path)?;
     if stat_at(&parent, name, &display)? != Some(expected) {
         return Err(changed(&display));
@@ -634,7 +764,9 @@ fn apply_delete(
         original
     };
     // Preserve the original inode's data/metadata before moving its only name.
-    original.sync_all().map_err(|source| io_error(&display, source))?;
+    original
+        .sync_all()
+        .map_err(|source| io_error(&display, source))?;
 
     // Hashing and syncing may be long: recheck both sides and staging at the
     // actual effect boundary, including the absence that justified deletion.
@@ -651,7 +783,16 @@ fn apply_delete(
     verify_staging_directory(staging, staging_path)?;
     checkpoint(cx)?;
     // No cancellation boundary inside the move, recovery-name sync and receipt.
-    quarantine_previous(&parent, name, &display, expected, staging, staging_path, index, receipt)?;
+    quarantine_previous(
+        &parent,
+        name,
+        &display,
+        expected,
+        staging,
+        staging_path,
+        index,
+        receipt,
+    )?;
     receipt.durable = true;
     if stat_at(&parent, name, &display)?.is_some() {
         return Err(changed(&display));
@@ -674,8 +815,16 @@ fn apply_copy(
     let path = &decision.path;
     let source_path = source.root.path.join(path.as_str());
     let destination_path = destination.root.path.join(path.as_str());
-    let entry = source.manifest.entries.get(path).ok_or_else(|| changed(&source_path))?;
-    let source_stamp = source.guards.get(path).copied().ok_or_else(|| changed(&source_path))?;
+    let entry = source
+        .manifest
+        .entries
+        .get(path)
+        .ok_or_else(|| changed(&source_path))?;
+    let source_stamp = source
+        .guards
+        .get(path)
+        .copied()
+        .ok_or_else(|| changed(&source_path))?;
     let (source_parent, source_name) = guarded_parent(source, path)?;
     if stat_at(&source_parent, source_name, &source_path)? != Some(source_stamp) {
         return Err(changed(&source_path));
@@ -692,47 +841,69 @@ fn apply_copy(
             .map_err(|error| os_error(&destination_path, error))?;
         receipt.state = NativeDirectoryActionState::Published;
         let created = File::from(
-            openat(&destination_parent, destination_name, directory_flags(), Mode::empty())
-                .map_err(|error| os_error(&destination_path, error))?,
+            openat(
+                &destination_parent,
+                destination_name,
+                directory_flags(),
+                Mode::empty(),
+            )
+            .map_err(|error| os_error(&destination_path, error))?,
         );
-        created.sync_all().map_err(|source| io_error(&destination_path, source))?;
-        destination_parent.sync_all().map_err(|source| io_error(&destination_path, source))?;
+        created
+            .sync_all()
+            .map_err(|source| io_error(&destination_path, source))?;
+        destination_parent
+            .sync_all()
+            .map_err(|source| io_error(&destination_path, source))?;
         receipt.durable = true;
         return record_destination(destination, entry, &destination_parent, &created);
     }
 
-    let mut source_file = open_guarded_file(
-        &source_parent, source_name, &source_path, source_stamp,
-    )?;
+    let mut source_file =
+        open_guarded_file(&source_parent, source_name, &source_path, source_stamp)?;
     let staging_name = format!("new-{index:08x}");
     let staged_path = staging_path.join(&staging_name);
     let mut staged = File::from(
         openat(
-            staging, staging_name.as_str(),
+            staging,
+            staging_name.as_str(),
             OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
             Mode::S_IRUSR | Mode::S_IWUSR,
-        ).map_err(|error| os_error(&staged_path, error))?,
+        )
+        .map_err(|error| os_error(&staged_path, error))?,
     );
     receipt.state = NativeDirectoryActionState::Staged;
     receipt.staged_path = Some(staged_path.clone());
     let digest = copy_bytes(
-        cx, &mut source_file, &mut staged, source_stamp, &source_path, &staged_path,
-        limits, &mut receipt.bytes_written,
+        cx,
+        &mut source_file,
+        &mut staged,
+        source_stamp,
+        &source_path,
+        &staged_path,
+        limits,
+        &mut receipt.bytes_written,
     )?;
     if Some(digest.as_str()) != entry.content_id.as_deref() {
         return Err(changed(&source_path));
     }
     let mode = previous.map_or(0o600, |stamp| stamp.mode & 0o777);
-    staged.set_permissions(Permissions::from_mode(mode))
+    staged
+        .set_permissions(Permissions::from_mode(mode))
         .map_err(|source| io_error(&staged_path, source))?;
     let mut staged_stamp = metadata_stamp(&staged, &staged_path)?;
     if staged_stamp.uid != geteuid().as_raw()
         || staged_stamp.gid != getegid().as_raw()
         || staged_stamp.mode & 0o7777 != mode
     {
-        return Err(refused(&staged_path, "staged file ownership or permissions differ"));
+        return Err(refused(
+            &staged_path,
+            "staged file ownership or permissions differ",
+        ));
     }
-    staged.sync_all().map_err(|source| io_error(&staged_path, source))?;
+    staged
+        .sync_all()
+        .map_err(|source| io_error(&staged_path, source))?;
     staged_stamp = metadata_stamp(&staged, &staged_path)?;
 
     // Revalidate after potentially long copying and immediately before effects.
@@ -748,17 +919,25 @@ fn apply_copy(
     }
     if let Some(previous) = previous {
         let previous_file = open_guarded_file(
-            &destination_parent, destination_name, &destination_path, previous,
+            &destination_parent,
+            destination_name,
+            &destination_path,
+            previous,
         )?;
         validate_overwrite_metadata(&previous_file, previous, &destination_path)?;
-        let previous_entry = destination.manifest.entries.get(path)
+        let previous_entry = destination
+            .manifest
+            .entries
+            .get(path)
             .ok_or_else(|| changed(&destination_path))?;
         let digest = super::hash_file(cx, &previous_file, previous, &destination_path, limits)?;
         if Some(digest.as_str()) != previous_entry.content_id.as_deref() {
             return Err(changed(&destination_path));
         }
         // The original bytes must be recoverable before its name is moved.
-        previous_file.sync_all().map_err(|source| io_error(&destination_path, source))?;
+        previous_file
+            .sync_all()
+            .map_err(|source| io_error(&destination_path, source))?;
     }
 
     // Hashing the old destination can itself be long. Bind both paths again.
@@ -777,13 +956,26 @@ fn apply_copy(
     // No cancellation boundary inside quarantine + publish + directory sync.
     if let Some(previous) = previous {
         quarantine_previous(
-            &destination_parent, destination_name, &destination_path, previous,
-            staging, staging_path, index, receipt,
+            &destination_parent,
+            destination_name,
+            &destination_path,
+            previous,
+            staging,
+            staging_path,
+            index,
+            receipt,
         )?;
     }
     publish_staged(
-        staging, staging_path, &staged, &staging_name, staged_stamp,
-        &destination_parent, destination_name, &destination_path, receipt,
+        staging,
+        staging_path,
+        &staged,
+        &staging_name,
+        staged_stamp,
+        &destination_parent,
+        destination_name,
+        &destination_path,
+        receipt,
     )?;
     record_destination(destination, entry, &destination_parent, &staged)
 }
@@ -805,7 +997,10 @@ fn verify_staged(
     Ok(())
 }
 
-fn verify_staging_directory(staging: &File, staging_path: &Path) -> Result<(), NativeDirectoryError> {
+fn verify_staging_directory(
+    staging: &File,
+    staging_path: &Path,
+) -> Result<(), NativeDirectoryError> {
     let named_directory = NativeRoot::open(staging_path)?;
     if named_directory.identity != metadata_stamp(staging, staging_path)?.identity {
         return Err(changed(staging_path));
@@ -827,9 +1022,13 @@ fn quarantine_previous(
     let name = format!("previous-{index:08x}");
     let path = staging_path.join(&name);
     renameat2(
-        destination_parent, destination_name, staging, name.as_str(),
+        destination_parent,
+        destination_name,
+        staging,
+        name.as_str(),
         RenameFlags::RENAME_NOREPLACE,
-    ).map_err(|error| os_error(destination_path, error))?;
+    )
+    .map_err(|error| os_error(destination_path, error))?;
     receipt.state = NativeDirectoryActionState::Quarantined;
     receipt.quarantine_path = Some(path.clone());
     if stat_at(staging, name.as_str(), &path)?
@@ -838,8 +1037,12 @@ fn quarantine_previous(
         return Err(changed(&path));
     }
     // Keep a durable recovery name even when later publication is refused.
-    staging.sync_all().map_err(|source| io_error(staging_path, source))?;
-    destination_parent.sync_all().map_err(|source| io_error(destination_path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| io_error(staging_path, source))?;
+    destination_parent
+        .sync_all()
+        .map_err(|source| io_error(destination_path, source))?;
     Ok(())
 }
 
@@ -857,13 +1060,21 @@ fn publish_staged(
 ) -> Result<(), NativeDirectoryError> {
     verify_staged(staging, staging_path, staged, staging_name, staged_stamp)?;
     renameat2(
-        staging, staging_name, destination_parent, destination_name,
+        staging,
+        staging_name,
+        destination_parent,
+        destination_name,
         RenameFlags::RENAME_NOREPLACE,
-    ).map_err(|error| os_error(destination_path, error))?;
+    )
+    .map_err(|error| os_error(destination_path, error))?;
     receipt.state = NativeDirectoryActionState::Published;
     receipt.staged_path = None;
-    destination_parent.sync_all().map_err(|source| io_error(destination_path, source))?;
-    staging.sync_all().map_err(|source| io_error(staging_path, source))?;
+    destination_parent
+        .sync_all()
+        .map_err(|source| io_error(destination_path, source))?;
+    staging
+        .sync_all()
+        .map_err(|source| io_error(staging_path, source))?;
     receipt.durable = true;
     Ok(())
 }
@@ -884,22 +1095,30 @@ fn copy_bytes(
     let mut read_total = 0_u64;
     loop {
         checkpoint(cx)?;
-        let count = source.read(&mut buffer).map_err(|source| io_error(source_path, source))?;
+        let count = source
+            .read(&mut buffer)
+            .map_err(|source| io_error(source_path, source))?;
         if count == 0 {
             break;
         }
-        read_total = read_total.checked_add(count as u64)
+        read_total = read_total
+            .checked_add(count as u64)
             .filter(|total| *total <= expected.size && *total <= limits.max_file_bytes)
             .ok_or_else(|| changed(source_path))?;
         let mut offset = 0;
         while offset < count {
             checkpoint(cx)?;
-            let count_written = destination.write(&buffer[offset..count])
+            let count_written = destination
+                .write(&buffer[offset..count])
                 .map_err(|source| io_error(destination_path, source))?;
             if count_written == 0 {
-                return Err(io_error(destination_path, std::io::Error::new(
-                    std::io::ErrorKind::WriteZero, "staging write made no progress",
-                )));
+                return Err(io_error(
+                    destination_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "staging write made no progress",
+                    ),
+                ));
             }
             offset += count_written;
             *written += count_written as u64;
@@ -922,11 +1141,16 @@ fn record_destination(
     let display = destination.root.path.join(path.as_str());
     let published_stamp = metadata_stamp(published, &display)?;
     destination.guards.insert(path.clone(), published_stamp);
-    destination.manifest.entries.insert(path.clone(), entry.clone());
+    destination
+        .manifest
+        .entries
+        .insert(path.clone(), entry.clone());
     if let Some((prefix, _)) = path.as_str().rsplit_once('/') {
         let prefix = DirectoryPath::normalize(prefix, destination.manifest.path_rules)
             .map_err(NativeDirectoryError::Manifest)?;
-        destination.guards.insert(prefix, metadata_stamp(parent, &display)?);
+        destination
+            .guards
+            .insert(prefix, metadata_stamp(parent, &display)?);
     } else {
         destination.root_stamp = metadata_stamp(parent, &destination.root.path)?;
     }
@@ -939,15 +1163,22 @@ fn record_deletion(
     parent: &File,
 ) -> Result<(), NativeDirectoryError> {
     let display = destination.root.path.join(path.as_str());
-    let removed = destination.manifest.entries.remove(path).ok_or_else(|| changed(&display))?;
+    let removed = destination
+        .manifest
+        .entries
+        .remove(path)
+        .ok_or_else(|| changed(&display))?;
     destination.guards.remove(path);
-    destination.total_bytes = destination.total_bytes
+    destination.total_bytes = destination
+        .total_bytes
         .checked_sub(removed.metadata.size_bytes.unwrap_or(0))
         .ok_or_else(|| changed(&display))?;
     if let Some((prefix, _)) = path.as_str().rsplit_once('/') {
         let prefix = DirectoryPath::normalize(prefix, destination.manifest.path_rules)
             .map_err(NativeDirectoryError::Manifest)?;
-        destination.guards.insert(prefix, metadata_stamp(parent, &display)?);
+        destination
+            .guards
+            .insert(prefix, metadata_stamp(parent, &display)?);
     } else {
         destination.root_stamp = metadata_stamp(parent, &destination.root.path)?;
     }

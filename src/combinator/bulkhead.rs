@@ -30,14 +30,14 @@
 //! }
 //! ```
 
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::pl::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
 use std::task::Poll;
+use std::time::Duration;
 
 use crate::cx::Cx;
 use crate::sync::Notify;
@@ -978,8 +978,10 @@ impl Bulkhead {
                 // permanently-ready timer loop. Cancellation stays deferred.
                 .filter(|deadline| *deadline > now)
                 .map_or(queue_deadline, |deadline| queue_deadline.min(deadline));
-            let mut timer =
-                std::pin::pin!(crate::time::Sleep::with_timer_driver(wake_at, driver.clone()));
+            let mut timer = std::pin::pin!(crate::time::Sleep::with_timer_driver(
+                wake_at,
+                driver.clone()
+            ));
             poll_fn(|task| {
                 cancellation.register(task.waker());
                 if cx.checkpoint().is_err() {

@@ -144,11 +144,17 @@ pub struct MembershipLeaseId {
 }
 impl MembershipLeaseId {
     /// Logical member, not a transport destination.
-    pub fn node(&self) -> &NodeId { &self.node }
+    pub fn node(&self) -> &NodeId {
+        &self.node
+    }
     /// Incarnation under which the obligation was admitted.
-    pub const fn incarnation(&self) -> u64 { self.incarnation }
+    pub const fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
     /// Runtime obligation the owner must eventually resolve.
-    pub const fn obligation_id(&self) -> ObligationId { self.obligation_id }
+    pub const fn obligation_id(&self) -> ObligationId {
+        self.obligation_id
+    }
 }
 
 /// Why an admitted lease must be aborted by its runtime owner.
@@ -207,23 +213,35 @@ impl fmt::Debug for MembershipLeaseController {
     }
 }
 
-fn valid_label(label: &str) -> bool { !label.is_empty() && label.len() <= 255 }
-fn terminal(kind: MembershipKind) -> bool { matches!(kind, MembershipKind::Dead | MembershipKind::Left) }
+fn valid_label(label: &str) -> bool {
+    !label.is_empty() && label.len() <= 255
+}
+fn terminal(kind: MembershipKind) -> bool {
+    matches!(kind, MembershipKind::Dead | MembershipKind::Left)
+}
 fn kind_byte(kind: MembershipKind) -> u8 {
-    match kind { MembershipKind::Alive => 0, MembershipKind::Suspect => 1,
-        MembershipKind::Dead => 2, MembershipKind::Left => 3 }
+    match kind {
+        MembershipKind::Alive => 0,
+        MembershipKind::Suspect => 1,
+        MembershipKind::Dead => 2,
+        MembershipKind::Left => 3,
+    }
 }
 
 impl MembershipUpdate {
     /// Encode and authenticate one explicitly authorized decision using existing
     /// domain-framed HMAC. No detection, key generation, transport, or I/O occurs.
     pub fn authenticated_bytes(
-        &self, authority: &NodeId, epoch: u64, key: &AuthKey,
+        &self,
+        authority: &NodeId,
+        epoch: u64,
+        key: &AuthKey,
     ) -> Result<Vec<u8>, MembershipControlError> {
         if !valid_label(authority.as_str()) || !valid_label(self.event.node.as_str()) {
             return Err(MembershipControlError::Format);
         }
-        let mut bytes = Vec::with_capacity(71 + authority.as_str().len() + self.event.node.as_str().len());
+        let mut bytes =
+            Vec::with_capacity(71 + authority.as_str().len() + self.event.node.as_str().len());
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&1_u32.to_le_bytes());
         bytes.push(authority.as_str().len() as u8);
@@ -240,20 +258,33 @@ impl MembershipUpdate {
     }
 }
 
-struct Cursor<'a> { bytes: &'a [u8], at: usize }
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
 impl<'a> Cursor<'a> {
     fn take(&mut self, count: usize) -> Result<&'a [u8], MembershipControlError> {
-        let end = self.at.checked_add(count).ok_or(MembershipControlError::Format)?;
-        let bytes = self.bytes.get(self.at..end).ok_or(MembershipControlError::Format)?;
+        let end = self
+            .at
+            .checked_add(count)
+            .ok_or(MembershipControlError::Format)?;
+        let bytes = self
+            .bytes
+            .get(self.at..end)
+            .ok_or(MembershipControlError::Format)?;
         self.at = end;
         Ok(bytes)
     }
     fn u64(&mut self) -> Result<u64, MembershipControlError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("eight bytes"),
+        ))
     }
     fn label(&mut self) -> Result<&'a str, MembershipControlError> {
         let count = usize::from(self.take(1)?[0]);
-        if count == 0 { return Err(MembershipControlError::Format); }
+        if count == 0 {
+            return Err(MembershipControlError::Format);
+        }
         std::str::from_utf8(self.take(count)?).map_err(|_| MembershipControlError::Format)
     }
 }
@@ -262,52 +293,92 @@ impl MembershipLeaseController {
     /// Provision an authority epoch and fixed member set; no grants are permitted
     /// until a fresh authenticated Alive statement has advanced the supplied floor.
     pub fn new(
-        authority: NodeId, epoch: u64, key: AuthKey, floors: Vec<MembershipFloor>,
+        authority: NodeId,
+        epoch: u64,
+        key: AuthKey,
+        floors: Vec<MembershipFloor>,
         limits: MembershipControllerLimits,
     ) -> Result<Self, MembershipControlError> {
-        if !valid_label(authority.as_str()) { return Err(MembershipControlError::Format); }
-        if floors.len() > limits.max_members { return Err(MembershipControlError::Capacity); }
+        if !valid_label(authority.as_str()) {
+            return Err(MembershipControlError::Format);
+        }
+        if floors.len() > limits.max_members {
+            return Err(MembershipControlError::Capacity);
+        }
         let mut members = BTreeMap::new();
         for floor in floors {
             if !valid_label(floor.node.as_str()) || members.contains_key(&floor.node) {
                 return Err(MembershipControlError::Format);
             }
-            members.insert(floor.node.clone(), Member {
-                floor, stamp: None, last_alive_transition: None, leases: BTreeMap::new(),
-            });
+            members.insert(
+                floor.node.clone(),
+                Member {
+                    floor,
+                    stamp: None,
+                    last_alive_transition: None,
+                    leases: BTreeMap::new(),
+                },
+            );
         }
-        Ok(Self { authority, epoch, key, members, seen_leases: BTreeSet::new(),
-            revocations: Vec::new(), limits, now: Time::ZERO })
+        Ok(Self {
+            authority,
+            epoch,
+            key,
+            members,
+            seen_leases: BTreeSet::new(),
+            revocations: Vec::new(),
+            limits,
+            now: Time::ZERO,
+        })
     }
 
     /// Configured authority identity; never taken from an incoming statement.
-    pub fn authority(&self) -> &NodeId { &self.authority }
+    pub fn authority(&self) -> &NodeId {
+        &self.authority
+    }
     /// Last accepted state (None also covers provisioned but uninitialized members).
     pub fn stamp(&self, node: &NodeId) -> Option<MembershipStamp> {
         self.members.get(node).and_then(|member| member.stamp)
     }
     // The provisioned set is immutable. None distinguishes an unknown subject
     // from a known member which has not received its first authenticated update.
-    pub(super) fn observation(&self, node: &NodeId)
-        -> Option<(Option<MembershipStamp>, Option<MembershipStamp>)>
-    {
-        self.members.get(node).map(|member| (member.stamp, member.last_alive_transition))
+    pub(super) fn observation(
+        &self,
+        node: &NodeId,
+    ) -> Option<(Option<MembershipStamp>, Option<MembershipStamp>)> {
+        self.members
+            .get(node)
+            .map(|member| (member.stamp, member.last_alive_transition))
     }
 
     /// Number of retained active lease objects for a member; call expire for due ones.
     pub fn active_leases(&self, node: &NodeId) -> usize {
-        self.members.get(node).map_or(0, |member| member.leases.len())
+        self.members
+            .get(node)
+            .map_or(0, |member| member.leases.len())
     }
     /// Earliest retained lease deadline for the owner's timer driver.
     pub fn next_expiry(&self) -> Option<Time> {
-        self.members.values().flat_map(|member| member.leases.values()).map(Lease::expires_at).min()
+        self.members
+            .values()
+            .flat_map(|member| member.leases.values())
+            .map(Lease::expires_at)
+            .min()
     }
     /// Pending cleanup instructions, retained across repeated reads and rejoin.
-    pub fn revocations(&self) -> &[MembershipRevocation] { &self.revocations }
+    pub fn revocations(&self) -> &[MembershipRevocation] {
+        &self.revocations
+    }
     /// Acknowledge AFTER the owning runtime has aborted this exact obligation.
     /// This does not itself touch RuntimeState or establish remote quiescence.
     pub fn acknowledge_revocation(&mut self, lease: &MembershipLeaseId) -> bool {
-        let Some(index) = self.revocations.iter().position(|entry| &entry.lease == lease) else { return false; };
+        let Some(index) = self
+            .revocations
+            .iter()
+            .position(|entry| &entry.lease == lease)
+        else {
+            return false;
+        };
         self.revocations.remove(index);
         true
     }
@@ -316,57 +387,109 @@ impl MembershipLeaseController {
     /// Exact latest duplicates are idempotent; stale or conflicting statements
     /// never change grant policy. A higher incarnation retires old leases even
     /// when its first reported state is Suspect/Dead/Left rather than Alive.
-    pub fn apply_authenticated(&mut self, bytes: &[u8]) -> Result<MembershipApplied, MembershipControlError> {
-        if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) { return Err(MembershipControlError::Format); }
+    pub fn apply_authenticated(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<MembershipApplied, MembershipControlError> {
+        if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) {
+            return Err(MembershipControlError::Format);
+        }
         let end = bytes.len() - 32;
         let tag = AuthenticationTag::from_bytes(bytes[end..].try_into().expect("tag bytes"));
-        if !tag.verify_domain_payload(&self.key, DOMAIN, &bytes[..end]) { return Err(MembershipControlError::Authentication); }
-        let mut cursor = Cursor { bytes: &bytes[..end], at: 0 };
-        if cursor.take(8)? != MAGIC || cursor.take(4)? != 1_u32.to_le_bytes() { return Err(MembershipControlError::Format); }
-        if cursor.label()? != self.authority.as_str() || cursor.u64()? != self.epoch { return Err(MembershipControlError::Authority); }
+        if !tag.verify_domain_payload(&self.key, DOMAIN, &bytes[..end]) {
+            return Err(MembershipControlError::Authentication);
+        }
+        let mut cursor = Cursor {
+            bytes: &bytes[..end],
+            at: 0,
+        };
+        if cursor.take(8)? != MAGIC || cursor.take(4)? != 1_u32.to_le_bytes() {
+            return Err(MembershipControlError::Format);
+        }
+        if cursor.label()? != self.authority.as_str() || cursor.u64()? != self.epoch {
+            return Err(MembershipControlError::Authority);
+        }
         let subject = cursor.label()?;
         let incarnation = cursor.u64()?;
         let sequence = cursor.u64()?;
         let kind = match cursor.take(1)?[0] {
-            0 => MembershipKind::Alive, 1 => MembershipKind::Suspect,
-            2 => MembershipKind::Dead, 3 => MembershipKind::Left,
+            0 => MembershipKind::Alive,
+            1 => MembershipKind::Suspect,
+            2 => MembershipKind::Dead,
+            3 => MembershipKind::Left,
             _ => return Err(MembershipControlError::Format),
         };
-        if cursor.at != end { return Err(MembershipControlError::Format); }
+        if cursor.at != end {
+            return Err(MembershipControlError::Format);
+        }
         // Only one bounded label is allocated, after authenticating the full input.
         let node = NodeId::new(subject);
-        let member = self.members.get_mut(&node).ok_or(MembershipControlError::UnknownMember)?;
+        let member = self
+            .members
+            .get_mut(&node)
+            .ok_or(MembershipControlError::UnknownMember)?;
         let previous = member.stamp;
         let old_incarnation = previous.map_or(member.floor.incarnation, |stamp| stamp.incarnation);
         let old_sequence = previous.map_or(member.floor.sequence, |stamp| stamp.sequence);
-        let stamp = MembershipStamp { incarnation, sequence, kind };
+        let stamp = MembershipStamp {
+            incarnation,
+            sequence,
+            kind,
+        };
         if sequence == old_sequence {
-            return if previous == Some(stamp) { Ok(MembershipApplied::Duplicate) }
-                else if previous.is_some() { Err(MembershipControlError::Conflict) }
-                else { Err(MembershipControlError::Stale) };
+            return if previous == Some(stamp) {
+                Ok(MembershipApplied::Duplicate)
+            } else if previous.is_some() {
+                Err(MembershipControlError::Conflict)
+            } else {
+                Err(MembershipControlError::Stale)
+            };
         }
-        if sequence < old_sequence || incarnation < old_incarnation { return Err(MembershipControlError::Stale); }
-        if incarnation == old_incarnation && previous.is_some_and(|old| terminal(old.kind)) && !terminal(kind) {
+        if sequence < old_sequence || incarnation < old_incarnation {
+            return Err(MembershipControlError::Stale);
+        }
+        if incarnation == old_incarnation
+            && previous.is_some_and(|old| terminal(old.kind))
+            && !terminal(kind)
+        {
             return Err(MembershipControlError::Terminal);
         }
-        let reason = if incarnation > old_incarnation { Some(MembershipRevocationReason::Superseded) }
-            else if terminal(kind) { Some(MembershipRevocationReason::Terminal) } else { None };
-        let revoked = if reason.is_some() { member.leases.len() } else { 0 };
-        self.revocations.try_reserve(revoked).map_err(|_| MembershipControlError::Allocation)?;
+        let reason = if incarnation > old_incarnation {
+            Some(MembershipRevocationReason::Superseded)
+        } else if terminal(kind) {
+            Some(MembershipRevocationReason::Terminal)
+        } else {
+            None
+        };
+        let revoked = if reason.is_some() {
+            member.leases.len()
+        } else {
+            0
+        };
+        self.revocations
+            .try_reserve(revoked)
+            .map_err(|_| MembershipControlError::Allocation)?;
         if let Some(reason) = reason {
             for (obligation_id, mut lease) in std::mem::take(&mut member.leases) {
                 let _ = lease.mark_expired();
-                self.revocations.push(MembershipRevocation { lease: MembershipLeaseId {
-                    node: node.clone(), incarnation: old_incarnation, obligation_id,
-                }, reason });
+                self.revocations.push(MembershipRevocation {
+                    lease: MembershipLeaseId {
+                        node: node.clone(),
+                        incarnation: old_incarnation,
+                        obligation_id,
+                    },
+                    reason,
+                });
             }
         }
         // Publish only after every authentication, sequence, incarnation and
         // allocation check has succeeded. Heartbeats and duplicates do not
         // manufacture recovery transitions; a newer Alive incarnation does.
-        if kind == MembershipKind::Alive && previous.is_none_or(|old| {
-            old.kind != MembershipKind::Alive || old.incarnation != incarnation
-        }) {
+        if kind == MembershipKind::Alive
+            && previous.is_none_or(|old| {
+                old.kind != MembershipKind::Alive || old.incarnation != incarnation
+            })
+        {
             member.last_alive_transition = Some(stamp);
         }
         member.stamp = Some(stamp);
@@ -376,19 +499,41 @@ impl MembershipLeaseController {
     /// Admit an existing runtime-owned lease only for an accepted Alive incarnation.
     /// A denied grant always returns the unconsumed lease for caller cleanup.
     pub fn try_grant(
-        &mut self, node: &NodeId, incarnation: u64, lease: Lease, now: Time,
+        &mut self,
+        node: &NodeId,
+        incarnation: u64,
+        lease: Lease,
+        now: Time,
     ) -> Result<MembershipLeaseId, RejectedMembershipLease> {
-        let error = if now < self.now { Some(MembershipControlError::Clock) }
-            else if !lease.is_active(now)
-                || self.stamp(node).is_none_or(|stamp| stamp.incarnation != incarnation || stamp.kind != MembershipKind::Alive) {
-                Some(MembershipControlError::GrantDenied)
-            } else if self.seen_leases.contains(&lease.obligation_id()) { Some(MembershipControlError::ReusedLease) }
-            else if self.seen_leases.len() >= self.limits.max_lease_ids { Some(MembershipControlError::Capacity) }
-            else { None };
-        if let Some(error) = error { return Err(RejectedMembershipLease { error, lease }); }
-        let token = MembershipLeaseId { node: node.clone(), incarnation, obligation_id: lease.obligation_id() };
+        let error = if now < self.now {
+            Some(MembershipControlError::Clock)
+        } else if !lease.is_active(now)
+            || self.stamp(node).is_none_or(|stamp| {
+                stamp.incarnation != incarnation || stamp.kind != MembershipKind::Alive
+            })
+        {
+            Some(MembershipControlError::GrantDenied)
+        } else if self.seen_leases.contains(&lease.obligation_id()) {
+            Some(MembershipControlError::ReusedLease)
+        } else if self.seen_leases.len() >= self.limits.max_lease_ids {
+            Some(MembershipControlError::Capacity)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(RejectedMembershipLease { error, lease });
+        }
+        let token = MembershipLeaseId {
+            node: node.clone(),
+            incarnation,
+            obligation_id: lease.obligation_id(),
+        };
         self.seen_leases.insert(token.obligation_id);
-        self.members.get_mut(node).expect("admitted member").leases.insert(token.obligation_id, lease);
+        self.members
+            .get_mut(node)
+            .expect("admitted member")
+            .leases
+            .insert(token.obligation_id, lease);
         self.now = now;
         Ok(token)
     }
@@ -396,19 +541,36 @@ impl MembershipLeaseController {
     /// Expire due leases into the retained cleanup outbox. No runtime obligations
     /// are discharged here, and a backward clock is refused without mutation.
     pub fn expire(&mut self, now: Time) -> Result<usize, MembershipControlError> {
-        if now < self.now { return Err(MembershipControlError::Clock); }
-        let count = self.members.values().flat_map(|member| member.leases.values())
-            .filter(|lease| lease.is_expired(now)).count();
-        self.revocations.try_reserve(count).map_err(|_| MembershipControlError::Allocation)?;
+        if now < self.now {
+            return Err(MembershipControlError::Clock);
+        }
+        let count = self
+            .members
+            .values()
+            .flat_map(|member| member.leases.values())
+            .filter(|lease| lease.is_expired(now))
+            .count();
+        self.revocations
+            .try_reserve(count)
+            .map_err(|_| MembershipControlError::Allocation)?;
         let outbox = &mut self.revocations;
         for (node, member) in &mut self.members {
-            let incarnation = member.stamp.map_or(member.floor.incarnation, |stamp| stamp.incarnation);
+            let incarnation = member
+                .stamp
+                .map_or(member.floor.incarnation, |stamp| stamp.incarnation);
             member.leases.retain(|&obligation_id, lease| {
-                if !lease.is_expired(now) { return true; }
+                if !lease.is_expired(now) {
+                    return true;
+                }
                 let _ = lease.mark_expired();
-                outbox.push(MembershipRevocation { lease: MembershipLeaseId {
-                    node: node.clone(), incarnation, obligation_id,
-                }, reason: MembershipRevocationReason::Expired });
+                outbox.push(MembershipRevocation {
+                    lease: MembershipLeaseId {
+                        node: node.clone(),
+                        incarnation,
+                        obligation_id,
+                    },
+                    reason: MembershipRevocationReason::Expired,
+                });
                 false
             });
         }
@@ -419,26 +581,64 @@ impl MembershipLeaseController {
     /// Renew an existing exact-incarnation lease. Suspicion pauses new grants but
     /// does not revoke/forbid renewal of unexpired existing leases. Due leases are
     /// retired first; an old-incarnation token cannot address a new incarnation.
-    pub fn renew(&mut self, token: &MembershipLeaseId, duration: Duration, now: Time) -> Result<(), MembershipControlError> {
+    pub fn renew(
+        &mut self,
+        token: &MembershipLeaseId,
+        duration: Duration,
+        now: Time,
+    ) -> Result<(), MembershipControlError> {
         self.expire(now)?;
-        if duration.is_zero() || now + duration <= now { return Err(MembershipControlError::GrantDenied); }
-        let member = self.members.get_mut(&token.node).ok_or(MembershipControlError::UnknownLease)?;
-        if member.stamp.is_none_or(|stamp| stamp.incarnation != token.incarnation) { return Err(MembershipControlError::UnknownLease); }
-        let lease = member.leases.get_mut(&token.obligation_id).ok_or(MembershipControlError::UnknownLease)?;
-        if lease.renewal_count() == u32::MAX { return Err(MembershipControlError::Capacity); }
+        if duration.is_zero() || now + duration <= now {
+            return Err(MembershipControlError::GrantDenied);
+        }
+        let member = self
+            .members
+            .get_mut(&token.node)
+            .ok_or(MembershipControlError::UnknownLease)?;
+        if member
+            .stamp
+            .is_none_or(|stamp| stamp.incarnation != token.incarnation)
+        {
+            return Err(MembershipControlError::UnknownLease);
+        }
+        let lease = member
+            .leases
+            .get_mut(&token.obligation_id)
+            .ok_or(MembershipControlError::UnknownLease)?;
+        if lease.renewal_count() == u32::MAX {
+            return Err(MembershipControlError::Capacity);
+        }
         lease.renew(duration, now)?;
         Ok(())
     }
 
     /// Release and return the terminal lease so its owner can commit the actual
     /// runtime obligation. Its ID remains unavailable for all future grants.
-    pub fn release(&mut self, token: &MembershipLeaseId, now: Time) -> Result<Lease, MembershipControlError> {
+    pub fn release(
+        &mut self,
+        token: &MembershipLeaseId,
+        now: Time,
+    ) -> Result<Lease, MembershipControlError> {
         self.expire(now)?;
-        let member = self.members.get_mut(&token.node).ok_or(MembershipControlError::UnknownLease)?;
-        if member.stamp.is_none_or(|stamp| stamp.incarnation != token.incarnation) { return Err(MembershipControlError::UnknownLease); }
-        let lease = member.leases.get_mut(&token.obligation_id).ok_or(MembershipControlError::UnknownLease)?;
+        let member = self
+            .members
+            .get_mut(&token.node)
+            .ok_or(MembershipControlError::UnknownLease)?;
+        if member
+            .stamp
+            .is_none_or(|stamp| stamp.incarnation != token.incarnation)
+        {
+            return Err(MembershipControlError::UnknownLease);
+        }
+        let lease = member
+            .leases
+            .get_mut(&token.obligation_id)
+            .ok_or(MembershipControlError::UnknownLease)?;
         lease.release(now)?;
-        Ok(member.leases.remove(&token.obligation_id).expect("released lease"))
+        Ok(member
+            .leases
+            .remove(&token.obligation_id)
+            .expect("released lease"))
     }
 }
 

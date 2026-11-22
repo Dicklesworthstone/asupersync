@@ -861,7 +861,9 @@ impl<B: Body> MultipartBody<B> {
         if !is_valid_streaming_multipart_boundary(&boundary) {
             return Err(MultipartBodyError::InvalidBoundary);
         }
-        let mut remaining = u64::try_from(boundary.len()).ok().and_then(|n| n.checked_add(6));
+        let mut remaining = u64::try_from(boundary.len())
+            .ok()
+            .and_then(|n| n.checked_add(6));
         let mut queued = VecDeque::new();
         for mut part in parts {
             part.header_length = part.checked_header_length(&boundary)?;
@@ -949,9 +951,9 @@ where
                     };
                     let head = part.encode_head(&this.boundary);
                     this.phase = MultipartBodyPhase::Data;
-                    return Poll::Ready(Some(this.emit(MultipartChunk::Framing(
-                        BytesCursor::new(head),
-                    ))));
+                    return Poll::Ready(Some(
+                        this.emit(MultipartChunk::Framing(BytesCursor::new(head))),
+                    ));
                 }
                 MultipartBodyPhase::Data => {
                     let part = this.parts.front_mut().expect("multipart DATA owns a part");
@@ -966,23 +968,22 @@ where
                             }
                         }
                         MultipartPartSource::Stream(body) => {
-                            std::task::ready!(body.as_mut().poll_frame(cx))
-                                .map(|frame| {
-                                    frame.map(|frame| frame.map_data(MultipartChunk::Payload))
-                                })
+                            std::task::ready!(body.as_mut().poll_frame(cx)).map(|frame| {
+                                frame.map(|frame| frame.map_data(MultipartChunk::Payload))
+                            })
                         }
                     };
                     match frame {
                         Some(Ok(Frame::Data(data))) => {
                             let Ok(length) = u64::try_from(data.remaining()) else {
                                 return Poll::Ready(Some(Err(
-                                    this.fail(MultipartBodyError::LengthOverflow),
+                                    this.fail(MultipartBodyError::LengthOverflow)
                                 )));
                             };
                             if let Some(remaining) = part.remaining {
                                 let Some(remaining) = remaining.checked_sub(length) else {
                                     return Poll::Ready(Some(Err(
-                                        this.fail(MultipartBodyError::LengthMismatch),
+                                        this.fail(MultipartBodyError::LengthMismatch)
                                     )));
                                 };
                                 part.remaining = Some(remaining);
@@ -993,18 +994,18 @@ where
                         }
                         Some(Ok(Frame::Trailers(_))) => {
                             return Poll::Ready(Some(Err(
-                                this.fail(MultipartBodyError::TrailersNotAllowed),
+                                this.fail(MultipartBodyError::TrailersNotAllowed)
                             )));
                         }
                         Some(Err(error)) => {
                             return Poll::Ready(Some(Err(
-                                this.fail(MultipartBodyError::Producer(error.to_string())),
+                                this.fail(MultipartBodyError::Producer(error.to_string()))
                             )));
                         }
                         None => {
                             if part.remaining.is_some_and(|remaining| remaining != 0) {
                                 return Poll::Ready(Some(Err(
-                                    this.fail(MultipartBodyError::LengthMismatch),
+                                    this.fail(MultipartBodyError::LengthMismatch)
                                 )));
                             }
                             this.phase = MultipartBodyPhase::Separator;
@@ -1028,9 +1029,9 @@ where
                 MultipartBodyPhase::Closing => {
                     let closing = Bytes::from(format!("--{}--\r\n", this.boundary));
                     this.phase = MultipartBodyPhase::Done;
-                    return Poll::Ready(Some(this.emit(MultipartChunk::Framing(
-                        BytesCursor::new(closing),
-                    ))));
+                    return Poll::Ready(Some(
+                        this.emit(MultipartChunk::Framing(BytesCursor::new(closing))),
+                    ));
                 }
                 MultipartBodyPhase::Done => return Poll::Ready(None),
             }
@@ -1047,7 +1048,8 @@ where
         if self.is_end_stream() {
             SizeHint::with_exact(0)
         } else {
-            self.remaining.map_or_else(SizeHint::default, SizeHint::with_exact)
+            self.remaining
+                .map_or_else(SizeHint::default, SizeHint::with_exact)
         }
     }
 }

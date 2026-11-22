@@ -49,7 +49,9 @@ fn certificate(name: &str) -> CertificateDer<'static> {
     let pem = if name == "ca" {
         fixtures["ca"].as_str().unwrap()
     } else {
-        fixtures["identities"][name]["certificate"].as_str().unwrap()
+        fixtures["identities"][name]["certificate"]
+            .as_str()
+            .unwrap()
     };
     CertificateDer::pem_reader_iter(&mut BufReader::new(pem.as_bytes()))
         .next()
@@ -318,7 +320,6 @@ mod native_h3_listener_live {
         }
     }
 
-
     mod streaming_request {
         use super::*;
         use std::pin::Pin;
@@ -348,8 +349,7 @@ mod native_h3_listener_live {
             let builder = if workers == 1 {
                 asupersync::runtime::RuntimeBuilder::current_thread()
             } else {
-                asupersync::runtime::RuntimeBuilder::multi_thread()
-                    .worker_threads(workers)
+                asupersync::runtime::RuntimeBuilder::multi_thread().worker_threads(workers)
             };
             let runtime = builder
                 .with_sharded_state(sharded)
@@ -421,7 +421,11 @@ mod native_h3_listener_live {
             aborted: Option<ObligationAbortReason>,
         ) -> usize {
             let events = body_events(trace, request);
-            assert_eq!(events.len(), 2, "one body reserve and one terminal settlement");
+            assert_eq!(
+                events.len(),
+                2,
+                "one body reserve and one terminal settlement"
+            );
             assert_eq!(body_credit_id(&events), credit);
             assert_eq!(
                 events[1].1.kind,
@@ -478,7 +482,10 @@ mod native_h3_listener_live {
                             if task == request.task_id())
                 })
                 .expect("the actual request holder retired");
-            assert!(settled < retired, "body credit must settle before holder retirement");
+            assert!(
+                settled < retired,
+                "body credit must settle before holder retirement"
+            );
         }
 
         fn request_ownership_counts(runtime: &RuntimeHandle) -> (usize, usize) {
@@ -491,8 +498,13 @@ mod native_h3_listener_live {
                 .iter()
                 .filter(|event| {
                     event.kind == TraceEventKind::ObligationReserve
-                        && matches!(event.data,
-                            TraceData::Obligation { kind: ObligationKind::IoOp, .. })
+                        && matches!(
+                            event.data,
+                            TraceData::Obligation {
+                                kind: ObligationKind::IoOp,
+                                ..
+                            }
+                        )
                 })
                 .count();
             (regions, credits)
@@ -702,7 +714,10 @@ mod native_h3_listener_live {
                     Poll::Ready(Ok(Some(event))) => return (event, pending),
                     Poll::Pending => {
                         pending += 1;
-                        owner.drive_io_once(cx, Duration::from_millis(20)).await.unwrap();
+                        owner
+                            .drive_io_once(cx, Duration::from_millis(20))
+                            .await
+                            .unwrap();
                         received.extend(drain_h3_events(cx, session, owner.connection_mut()));
                     }
                     other @ Poll::Ready(_) => {
@@ -773,7 +788,9 @@ mod native_h3_listener_live {
                                         let mut trailers_seen = false;
                                         while let Some(frame) = std::future::poll_fn(|task_cx| {
                                             Pin::new(&mut body).poll_frame(task_cx)
-                                        }).await {
+                                        })
+                                        .await
+                                        {
                                             match frame.unwrap() {
                                                 Frame::Data(bytes) => {
                                                     assert!(!trailers_seen);
@@ -781,9 +798,13 @@ mod native_h3_listener_live {
                                                 }
                                                 Frame::Trailers(fields) => {
                                                     assert!(trailers && !trailers_seen);
-                                                    assert_trailer_fields(&fields, &[
-                                                        ("x-upload-complete".to_owned(), "yes".to_owned()),
-                                                    ]);
+                                                    assert_trailer_fields(
+                                                        &fields,
+                                                        &[(
+                                                            "x-upload-complete".to_owned(),
+                                                            "yes".to_owned(),
+                                                        )],
+                                                    );
                                                     trailers_seen = true;
                                                 }
                                             }
@@ -798,55 +819,129 @@ mod native_h3_listener_live {
                         );
                         let mut listener_config = config(QUEUE_BYTES);
                         listener_config.endpoint.connection_config.recv_window = WINDOW;
-                        listener_config.endpoint.connection_config.connection_recv_limit = 512;
+                        listener_config
+                            .endpoint
+                            .connection_config
+                            .connection_recv_limit = 512;
                         listener_config.receive_window_bytes = WINDOW;
                         let listener = bind(&cx, router, listener_config).await;
                         let address = listener.local_addr();
-                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let (shutdown_tx, mut shutdown_rx) =
+                            asupersync::channel::oneshot::channel();
                         let serving = listener.serve_with_shutdown(&cx, async {
                             shutdown_rx.recv(&cx).await.unwrap();
                         });
                         let client = async {
                             let (mut owner, mut session) = connect(&cx, address, 102).await;
-                            assert_eq!(owner.connection().inner().streams().initial_send_windows().local_bidi, WINDOW);
-                            assert!(owner.connection().inner().streams().connection_send_remaining() <= 512);
-                            let mut writer = session.start_request_writer(
-                                &cx,
-                                owner.connection_mut(),
-                                &incremental_head("/incremental", Some(expected.len()), true),
-                                false,
-                            ).unwrap();
+                            assert_eq!(
+                                owner
+                                    .connection()
+                                    .inner()
+                                    .streams()
+                                    .initial_send_windows()
+                                    .local_bidi,
+                                WINDOW
+                            );
+                            assert!(
+                                owner
+                                    .connection()
+                                    .inner()
+                                    .streams()
+                                    .connection_send_remaining()
+                                    <= 512
+                            );
+                            let mut writer = session
+                                .start_request_writer(
+                                    &cx,
+                                    owner.connection_mut(),
+                                    &incremental_head("/incremental", Some(expected.len()), true),
+                                    false,
+                                )
+                                .unwrap();
                             let stream = writer.stream_id();
                             let mut events = Vec::new();
                             let (event, header_pending) = flush_incremental_request(
-                                &cx, &mut owner, &mut session, &mut writer, &mut events,
-                            ).await;
-                            assert_eq!(event, NativeH3RequestWriteEvent::Headers { end_stream: false });
-                            assert!(header_pending > 0, "HEADERS exceed the negotiated stream window");
-                            writer.queue_data(Bytes::copy_from_slice(&expected)).unwrap();
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                &mut writer,
+                                &mut events,
+                            )
+                            .await;
+                            assert_eq!(
+                                event,
+                                NativeH3RequestWriteEvent::Headers { end_stream: false }
+                            );
+                            assert!(
+                                header_pending > 0,
+                                "HEADERS exceed the negotiated stream window"
+                            );
+                            writer
+                                .queue_data(Bytes::copy_from_slice(&expected))
+                                .unwrap();
                             let (event, body_pending) = flush_incremental_request(
-                                &cx, &mut owner, &mut session, &mut writer, &mut events,
-                            ).await;
-                            assert_eq!(event, NativeH3RequestWriteEvent::Data { payload_bytes: expected.len() });
-                            assert!(body_pending > 1, "one DATA frame exceeds both negotiated windows");
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                &mut writer,
+                                &mut events,
+                            )
+                            .await;
+                            assert_eq!(
+                                event,
+                                NativeH3RequestWriteEvent::Data {
+                                    payload_bytes: expected.len()
+                                }
+                            );
+                            assert!(
+                                body_pending > 1,
+                                "one DATA frame exceeds both negotiated windows"
+                            );
                             assert!(!writer.is_finished());
                             let terminal = if trailers {
-                                writer.queue_trailers(&[("x-upload-complete".to_owned(), "yes".to_owned())]).unwrap();
+                                writer
+                                    .queue_trailers(&[(
+                                        "x-upload-complete".to_owned(),
+                                        "yes".to_owned(),
+                                    )])
+                                    .unwrap();
                                 NativeH3RequestWriteEvent::Trailers
                             } else {
                                 writer.finish().unwrap();
                                 NativeH3RequestWriteEvent::Finished
                             };
-                            assert_eq!(flush_incremental_request(
-                                &cx, &mut owner, &mut session, &mut writer, &mut events,
-                            ).await.0, terminal);
+                            assert_eq!(
+                                flush_incremental_request(
+                                    &cx,
+                                    &mut owner,
+                                    &mut session,
+                                    &mut writer,
+                                    &mut events,
+                                )
+                                .await
+                                .0,
+                                terminal
+                            );
                             assert!(writer.is_finished());
                             drop(writer);
                             finish_incremental_response(
-                                &cx, &mut owner, &mut session, stream, events, b"upload complete",
-                            ).await;
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                stream,
+                                events,
+                                b"upload complete",
+                            )
+                            .await;
                             shutdown_tx.send(&cx, ()).unwrap();
-                            acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None).await;
+                            acknowledge_shutdown_goaway(
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                stream.0 + 4,
+                                None,
+                            )
+                            .await;
                         };
                         let (report, ()) = zip(serving, client).await;
                         let report = report.unwrap();
@@ -869,31 +964,44 @@ mod native_h3_listener_live {
                     let parked = Arc::new(Mutex::new(Some(parked_tx)));
                     let retired = Arc::new(AtomicUsize::new(0));
                     let handler_retired = Arc::clone(&retired);
-                    let router = Router::new().route(
-                        "/abandon-incremental",
-                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
-                            move |request_cx: Cx, body: StreamingRawBody| {
-                                let mut parked = parked.lock().unwrap().take();
-                                let retired = Arc::clone(&handler_retired);
-                                async move {
-                                    let mut cancelled = std::pin::pin!(request_cx.cancelled());
-                                    std::future::poll_fn(|task_cx| {
-                                        let poll = cancelled.as_mut().poll(task_cx);
-                                        if poll.is_pending() && let Some(signal) = parked.take() {
-                                            signal.send(&request_cx, request_cx.clone()).unwrap();
-                                        }
-                                        poll
-                                    }).await;
-                                    assert!(request_cx.checkpoint().is_err());
-                                    drop(body);
-                                    retired.fetch_add(1, Ordering::SeqCst);
-                                    Response::new(StatusCode::OK, "cancelled upload cannot succeed")
-                                }
-                            },
-                        )),
-                    ).route("/healthy-incremental", post(FnHandler::new(|| {
-                        Response::new(StatusCode::OK, "connection survived")
-                    })));
+                    let router = Router::new()
+                        .route(
+                            "/abandon-incremental",
+                            post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                                move |request_cx: Cx, body: StreamingRawBody| {
+                                    let mut parked = parked.lock().unwrap().take();
+                                    let retired = Arc::clone(&handler_retired);
+                                    async move {
+                                        let mut cancelled = std::pin::pin!(request_cx.cancelled());
+                                        std::future::poll_fn(|task_cx| {
+                                            let poll = cancelled.as_mut().poll(task_cx);
+                                            if poll.is_pending()
+                                                && let Some(signal) = parked.take()
+                                            {
+                                                signal
+                                                    .send(&request_cx, request_cx.clone())
+                                                    .unwrap();
+                                            }
+                                            poll
+                                        })
+                                        .await;
+                                        assert!(request_cx.checkpoint().is_err());
+                                        drop(body);
+                                        retired.fetch_add(1, Ordering::SeqCst);
+                                        Response::new(
+                                            StatusCode::OK,
+                                            "cancelled upload cannot succeed",
+                                        )
+                                    }
+                                },
+                            )),
+                        )
+                        .route(
+                            "/healthy-incremental",
+                            post(FnHandler::new(|| {
+                                Response::new(StatusCode::OK, "connection survived")
+                            })),
+                        );
                     let mut listener_config = config(32);
                     listener_config.endpoint.connection_config.recv_window = 256;
                     listener_config.receive_window_bytes = 256;
@@ -905,62 +1013,129 @@ mod native_h3_listener_live {
                     });
                     let client = async {
                         let (mut owner, mut session) = connect(&cx, address, 103).await;
-                        let mut writer = session.start_request_writer(
-                            &cx, owner.connection_mut(),
-                            &incremental_head("/abandon-incremental", None, false), false,
-                        ).unwrap();
+                        let mut writer = session
+                            .start_request_writer(
+                                &cx,
+                                owner.connection_mut(),
+                                &incremental_head("/abandon-incremental", None, false),
+                                false,
+                            )
+                            .unwrap();
                         let stream = writer.stream_id();
                         let mut events = Vec::new();
-                        flush_incremental_request(&cx, &mut owner, &mut session, &mut writer, &mut events).await;
+                        flush_incremental_request(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            &mut writer,
+                            &mut events,
+                        )
+                        .await;
                         assert!(events.is_empty());
                         let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
                         writer.queue_data(Bytes::from(vec![0x5a; 8192])).unwrap();
                         let mut polls = 0;
                         loop {
-                            assert!(writer.poll_flush(
-                                &cx, owner.connection_mut(), &mut Context::from_waker(Waker::noop()),
-                            ).is_pending());
+                            assert!(
+                                writer
+                                    .poll_flush(
+                                        &cx,
+                                        owner.connection_mut(),
+                                        &mut Context::from_waker(Waker::noop()),
+                                    )
+                                    .is_pending()
+                            );
                             owner.flush(&cx).await.unwrap();
-                            owner.drive_io_once(&cx, Duration::from_millis(20)).await.unwrap();
-                            assert!(drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty());
+                            owner
+                                .drive_io_once(&cx, Duration::from_millis(20))
+                                .await
+                                .unwrap();
+                            assert!(
+                                drain_h3_events(&cx, &mut session, owner.connection_mut())
+                                    .is_empty()
+                            );
                             polls += 1;
-                            assert!(polls < 64, "the unread bounded body must apply backpressure");
+                            assert!(
+                                polls < 64,
+                                "the unread bounded body must apply backpressure"
+                            );
                             if !owner.connection().has_pending_stream_frames(stream)
-                                && owner.connection().inner().stream_send_credit_remaining(stream) == 0
+                                && owner
+                                    .connection()
+                                    .inner()
+                                    .stream_send_credit_remaining(stream)
+                                    == 0
                             {
                                 break;
                             }
                         }
                         assert!(writer.has_pending_write() && !writer.is_finished());
-                        assert!(writer.poll_flush(
-                            &cx,
-                            owner.connection_mut(),
-                            &mut Context::from_waker(Waker::noop()),
-                        ).is_pending(), "the empty packet queue must still wait for peer credit");
+                        assert!(
+                            writer
+                                .poll_flush(
+                                    &cx,
+                                    owner.connection_mut(),
+                                    &mut Context::from_waker(Waker::noop()),
+                                )
+                                .is_pending(),
+                            "the empty packet queue must still wait for peer credit"
+                        );
                         assert_eq!(retired.load(Ordering::SeqCst), 0);
                         drop(writer);
-                        assert!(drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty());
+                        assert!(
+                            drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty()
+                        );
                         owner.flush(&cx).await.unwrap();
                         // Continue the authenticated driver until the peer's
                         // cancellation edge is observed, then prove its owner drained.
-                        receive_cancelled(&cx, &mut owner, &mut session, stream,
-                            asupersync::http::h3::H3_REQUEST_CANCELLED).await;
+                        receive_cancelled(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            stream,
+                            asupersync::http::h3::H3_REQUEST_CANCELLED,
+                        )
+                        .await;
                         wait_region_closed(&request_cx).await;
                         assert_eq!(retired.load(Ordering::SeqCst), 1);
-                        let mut healthy = session.start_request_writer(
-                            &cx, owner.connection_mut(),
-                            &incremental_head("/healthy-incremental", Some(0), false), true,
-                        ).unwrap();
+                        let mut healthy = session
+                            .start_request_writer(
+                                &cx,
+                                owner.connection_mut(),
+                                &incremental_head("/healthy-incremental", Some(0), false),
+                                true,
+                            )
+                            .unwrap();
                         let healthy_stream = healthy.stream_id();
                         assert_eq!(healthy_stream.0, stream.0 + 4);
-                        flush_incremental_request(&cx, &mut owner, &mut session, &mut healthy, &mut events).await;
+                        flush_incremental_request(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            &mut healthy,
+                            &mut events,
+                        )
+                        .await;
                         assert!(healthy.is_finished());
                         drop(healthy);
-                        finish_incremental_response(&cx, &mut owner, &mut session,
-                            healthy_stream, events, b"connection survived").await;
+                        finish_incremental_response(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            healthy_stream,
+                            events,
+                            b"connection survived",
+                        )
+                        .await;
                         shutdown_tx.send(&cx, ()).unwrap();
-                        acknowledge_shutdown_goaway(&cx, &mut owner, &mut session,
-                            healthy_stream.0 + 4, None).await;
+                        acknowledge_shutdown_goaway(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            healthy_stream.0 + 4,
+                            None,
+                        )
+                        .await;
                     };
                     let (report, ()) = zip(serving, client).await;
                     let report = report.unwrap();
@@ -1027,7 +1202,10 @@ mod native_h3_listener_live {
                     .await
                     .unwrap();
                 if owner.connection().close_was_peer_initiated() {
-                    assert!(goaway, "cooperative idle retirement must deliver GOAWAY first");
+                    assert!(
+                        goaway,
+                        "cooperative idle retirement must deliver GOAWAY first"
+                    );
                     assert_eq!(
                         owner.connection().inner().transport().close_code(),
                         Some(0x100),
@@ -1064,7 +1242,8 @@ mod native_h3_listener_live {
                         listener_config.request_drain_timeout = Duration::from_secs(1);
                         let listener = bind(&cx, Router::new(), listener_config).await;
                         let address = listener.local_addr();
-                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let (shutdown_tx, mut shutdown_rx) =
+                            asupersync::channel::oneshot::channel();
                         let serving = listener.serve_with_shutdown(&cx, async {
                             shutdown_rx.recv(&cx).await.unwrap();
                         });
@@ -1091,14 +1270,8 @@ mod native_h3_listener_live {
                                 )
                                 .await;
                                 shutdown_tx.send(&cx, ()).unwrap();
-                                acknowledge_shutdown_goaway(
-                                    &cx,
-                                    &mut owner,
-                                    &mut session,
-                                    0,
-                                    None,
-                                )
-                                .await;
+                                acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, 0, None)
+                                    .await;
                             }
                         };
                         let (report, ()) = zip(serving, client).await;
@@ -1169,7 +1342,8 @@ mod native_h3_listener_live {
                                         .spawn(move |child_cx| async move {
                                             let _retired = ProducerRetired(retired);
                                             let mut started = Some(started_tx);
-                                            let mut cancelled = std::pin::pin!(child_cx.cancelled());
+                                            let mut cancelled =
+                                                std::pin::pin!(child_cx.cancelled());
                                             std::future::poll_fn(|task_cx| {
                                                 let poll = cancelled.as_mut().poll(task_cx);
                                                 if poll.is_pending()
@@ -1215,13 +1389,8 @@ mod native_h3_listener_live {
                         let stream = open_upload(&cx, &mut owner, "/owned", Some(12)).await;
                         let request_cx: Cx = body_parked_rx.recv(&cx).await.unwrap();
                         assert!(!request_cx.is_cancel_requested());
-                        keep_control_only_connection_open(
-                            &cx,
-                            &mut owner,
-                            &mut session,
-                            IDLE * 2,
-                        )
-                        .await;
+                        keep_control_only_connection_open(&cx, &mut owner, &mut session, IDLE * 2)
+                            .await;
                         assert!(!request_cx.is_cancel_requested());
                         write_data(&cx, &mut owner, stream, b"owned upload", true).await;
                         receive_response(
@@ -1237,24 +1406,14 @@ mod native_h3_listener_live {
                         assert_eq!(child_cx.region_id(), request_cx.region_id());
                         assert!(child_cx.is_cancel_requested());
                         assert_eq!(retired.load(Ordering::SeqCst), 0);
-                        keep_control_only_connection_open(
-                            &cx,
-                            &mut owner,
-                            &mut session,
-                            IDLE * 2,
-                        )
-                        .await;
+                        keep_control_only_connection_open(&cx, &mut owner, &mut session, IDLE * 2)
+                            .await;
                         assert_eq!(retired.load(Ordering::SeqCst), 0);
                         cleanup_release_tx.send(&cx, ()).unwrap();
                         wait_region_closed(&request_cx).await;
                         assert_eq!(retired.load(Ordering::SeqCst), 1);
-                        receive_application_idle_close(
-                            &cx,
-                            &mut owner,
-                            &mut session,
-                            stream.0 + 4,
-                        )
-                        .await;
+                        receive_application_idle_close(&cx, &mut owner, &mut session, stream.0 + 4)
+                            .await;
                         shutdown_tx.send(&cx, ()).unwrap();
                     };
                     let (report, ()) = zip(serving, client).await;
@@ -1443,20 +1602,30 @@ mod native_h3_listener_live {
                 loop {
                     let encoder = StreamId(7);
                     if owner.connection().inner().streams().stream(encoder).is_ok() {
-                        let bytes = owner.connection_mut().read_stream(cx, encoder, 1024).unwrap();
+                        let bytes = owner
+                            .connection_mut()
+                            .read_stream(cx, encoder, 1024)
+                            .unwrap();
                         if !bytes.is_empty() {
                             let instructions = if *encoder_type_seen {
                                 bytes.as_ref()
                             } else {
-                                assert_eq!(bytes[0], 2, "server's second uni stream is its encoder");
+                                assert_eq!(
+                                    bytes[0], 2,
+                                    "server's second uni stream is its encoder"
+                                );
                                 *encoder_type_seen = true;
                                 &bytes[1..]
                             };
-                            peer.feed_encoder_stream_bytes(encoder.0, instructions).unwrap();
+                            peer.feed_encoder_stream_bytes(encoder.0, instructions)
+                                .unwrap();
                         }
                     }
                     response_wire.extend_from_slice(
-                        &owner.connection_mut().read_stream(cx, stream, 1024).unwrap(),
+                        &owner
+                            .connection_mut()
+                            .read_stream(cx, stream, 1024)
+                            .unwrap(),
                     );
                     assert!(response_wire.len() <= 4096);
                     if owner.connection().is_stream_eof(stream).unwrap()
@@ -1470,7 +1639,8 @@ mod native_h3_listener_live {
                 let mut section = None;
                 let mut body = Vec::new();
                 while !rest.is_empty() {
-                    let (frame, consumed) = H3Frame::decode(rest, &H3ConnectionConfig::default()).unwrap();
+                    let (frame, consumed) =
+                        H3Frame::decode(rest, &H3ConnectionConfig::default()).unwrap();
                     rest = &rest[consumed..];
                     match frame {
                         H3Frame::Headers(bytes) => assert!(section.replace(bytes).is_none()),
@@ -1490,12 +1660,15 @@ mod native_h3_listener_live {
                 let cx = Cx::current().unwrap();
                 let calls = Arc::new(AtomicUsize::new(0));
                 let handler_calls = Arc::clone(&calls);
-                let router = Router::new().route("/compressed", post(FnHandler::new(move || {
-                    handler_calls.fetch_add(1, Ordering::SeqCst);
-                    Response::new(StatusCode::OK, BODY.to_vec())
-                        .header("content-type", CONTENT_TYPE)
-                        .header("set-cookie", "private=not-indexed")
-                })));
+                let router = Router::new().route(
+                    "/compressed",
+                    post(FnHandler::new(move || {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        Response::new(StatusCode::OK, BODY.to_vec())
+                            .header("content-type", CONTENT_TYPE)
+                            .header("set-cookie", "private=not-indexed")
+                    })),
+                );
                 let mut listener_config = config(8);
                 listener_config.qpack_encoder_table_capacity = NonZeroUsize::new(256);
                 let listener = bind(&cx, router, listener_config).await;
@@ -1511,33 +1684,73 @@ mod native_h3_listener_live {
                         ..H3Settings::default()
                     };
                     let (mut owner, _session) = connect_with_h3_profile(
-                        &cx, address, 110, connection_config(), H3Settings::default(),
-                        H3ConnectionConfig::default().with_dynamic_qpack(), settings.clone(),
-                    ).await;
+                        &cx,
+                        address,
+                        110,
+                        connection_config(),
+                        H3Settings::default(),
+                        H3ConnectionConfig::default().with_dynamic_qpack(),
+                        settings.clone(),
+                    )
+                    .await;
                     // Observe real encoded response sections before resolving
                     // them. This peer owns its decoder/feedback after SETTINGS.
                     let mut peer = QpackInstructionStreamState::from_local_and_peer_settings(
-                        H3QpackMode::DynamicTableAllowed, &settings, &H3Settings::default(),
-                    ).unwrap();
-                    peer.register_stream(7, H3UniStreamType::QpackEncoder).unwrap();
+                        H3QpackMode::DynamicTableAllowed,
+                        &settings,
+                        &H3Settings::default(),
+                    )
+                    .unwrap();
+                    peer.register_stream(7, H3UniStreamType::QpackEncoder)
+                        .unwrap();
                     let first = open_upload(&cx, &mut owner, "/compressed", Some(0)).await;
                     write_data(&cx, &mut owner, first, b"", true).await;
                     let mut encoder_type_seen = false;
                     let (first_section, first_body) = raw_compressed_response(
-                        &cx, &mut owner, &mut peer, &mut encoder_type_seen, first,
-                    ).await;
+                        &cx,
+                        &mut owner,
+                        &mut peer,
+                        &mut encoder_type_seen,
+                        first,
+                    )
+                    .await;
                     assert_eq!(first_body, BODY);
-                    assert_eq!(qpack_field_section_metadata(
-                        &first_section, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
-                    ).unwrap().required_insert_count(), 0);
+                    assert_eq!(
+                        qpack_field_section_metadata(
+                            &first_section,
+                            H3QpackMode::DynamicTableAllowed,
+                            Some(peer.received_context()),
+                        )
+                        .unwrap()
+                        .required_insert_count(),
+                        0
+                    );
                     let first_head = qpack_decode_response_field_section(
-                        &first_section, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
-                    ).unwrap();
+                        &first_section,
+                        H3QpackMode::DynamicTableAllowed,
+                        Some(peer.received_context()),
+                    )
+                    .unwrap();
                     assert_eq!(first_head.status, 200);
-                    assert!(first_head.headers.contains(&("content-type".to_owned(), CONTENT_TYPE.to_owned())));
-                    assert!(first_head.headers.contains(&("set-cookie".to_owned(), "private=not-indexed".to_owned())));
+                    assert!(
+                        first_head
+                            .headers
+                            .contains(&("content-type".to_owned(), CONTENT_TYPE.to_owned()))
+                    );
+                    assert!(
+                        first_head
+                            .headers
+                            .contains(&("set-cookie".to_owned(), "private=not-indexed".to_owned()))
+                    );
                     assert_eq!(peer.received_context().dynamic_table().len(), 1);
-                    assert_eq!(peer.received_context().dynamic_table().get_by_insertion_id(0).unwrap().name(), "content-type");
+                    assert_eq!(
+                        peer.received_context()
+                            .dynamic_table()
+                            .get_by_insertion_id(0)
+                            .unwrap()
+                            .name(),
+                        "content-type"
+                    );
                     assert_eq!(peer.received_context().dynamic_table().capacity(), 256);
 
                     let increment = QpackDecoderInstruction::InsertCountIncrement { increment: 1 };
@@ -1545,7 +1758,10 @@ mod native_h3_listener_live {
                     let decoder = owner.connection_mut().open_uni_stream(&cx).unwrap();
                     let mut feedback = vec![3];
                     qpack_encode_decoder_instruction(&mut feedback, &increment).unwrap();
-                    owner.connection_mut().write_stream(&cx, decoder, Bytes::from(feedback), false).unwrap();
+                    owner
+                        .connection_mut()
+                        .write_stream(&cx, decoder, Bytes::from(feedback), false)
+                        .unwrap();
                     owner.flush(&cx).await.unwrap();
                     while owner.connection().inner().transport().bytes_in_flight() != 0 {
                         owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
@@ -1554,37 +1770,75 @@ mod native_h3_listener_live {
                     let second = open_upload(&cx, &mut owner, "/compressed", Some(0)).await;
                     write_data(&cx, &mut owner, second, b"", true).await;
                     let (compressed, second_body) = raw_compressed_response(
-                        &cx, &mut owner, &mut peer, &mut encoder_type_seen, second,
-                    ).await;
+                        &cx,
+                        &mut owner,
+                        &mut peer,
+                        &mut encoder_type_seen,
+                        second,
+                    )
+                    .await;
                     assert_eq!(second_body, BODY);
-                    assert_eq!(qpack_field_section_metadata(
-                        &compressed, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
-                    ).unwrap().required_insert_count(), 1);
+                    assert_eq!(
+                        qpack_field_section_metadata(
+                            &compressed,
+                            H3QpackMode::DynamicTableAllowed,
+                            Some(peer.received_context()),
+                        )
+                        .unwrap()
+                        .required_insert_count(),
+                        1
+                    );
                     assert!(compressed.len() < first_section.len());
-                    assert_eq!(qpack_decode_response_field_section(
-                        &compressed, H3QpackMode::DynamicTableAllowed, Some(peer.received_context()),
-                    ).unwrap(), first_head);
-                    peer.submit_received_field_section(second.0, &compressed).unwrap();
-                    let ack = QpackDecoderInstruction::HeaderAcknowledgement { stream_id: second.0 };
+                    assert_eq!(
+                        qpack_decode_response_field_section(
+                            &compressed,
+                            H3QpackMode::DynamicTableAllowed,
+                            Some(peer.received_context()),
+                        )
+                        .unwrap(),
+                        first_head
+                    );
+                    peer.submit_received_field_section(second.0, &compressed)
+                        .unwrap();
+                    let ack = QpackDecoderInstruction::HeaderAcknowledgement {
+                        stream_id: second.0,
+                    };
                     peer.apply_local_decoder_instruction(&ack).unwrap();
                     let mut feedback = Vec::new();
                     qpack_encode_decoder_instruction(&mut feedback, &ack).unwrap();
-                    owner.connection_mut().write_stream(&cx, decoder, Bytes::from(feedback), false).unwrap();
+                    owner
+                        .connection_mut()
+                        .write_stream(&cx, decoder, Bytes::from(feedback), false)
+                        .unwrap();
                     owner.flush(&cx).await.unwrap();
-                    assert_eq!(peer.received_decoder_feedback().outstanding_reference_count(), 0);
+                    assert_eq!(
+                        peer.received_decoder_feedback()
+                            .outstanding_reference_count(),
+                        0
+                    );
                     assert_eq!(calls.load(Ordering::SeqCst), 2);
                     shutdown_tx.send(&cx, ()).unwrap();
                     let mut expected_goaway = Vec::new();
-                    H3Frame::Goaway(second.0 + 4).encode(&mut expected_goaway).unwrap();
+                    H3Frame::Goaway(second.0 + 4)
+                        .encode(&mut expected_goaway)
+                        .unwrap();
                     let mut goaway = Vec::new();
                     loop {
                         owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
                         if owner.connection().close_was_peer_initiated() {
                             assert_eq!(goaway, expected_goaway);
-                            assert_eq!(owner.connection().inner().transport().close_code(), Some(0));
+                            assert_eq!(
+                                owner.connection().inner().transport().close_code(),
+                                Some(0)
+                            );
                             break;
                         }
-                        goaway.extend_from_slice(&owner.connection_mut().read_stream(&cx, StreamId(3), 64).unwrap());
+                        goaway.extend_from_slice(
+                            &owner
+                                .connection_mut()
+                                .read_stream(&cx, StreamId(3), 64)
+                                .unwrap(),
+                        );
                         assert!(expected_goaway.starts_with(&goaway));
                         owner.flush(&cx).await.unwrap();
                     }
@@ -1622,7 +1876,10 @@ mod native_h3_listener_live {
                 let mut wire = Vec::new();
                 loop {
                     wire.extend_from_slice(
-                        &owner.connection_mut().read_stream(cx, stream, 1024).unwrap(),
+                        &owner
+                            .connection_mut()
+                            .read_stream(cx, stream, 1024)
+                            .unwrap(),
                     );
                     assert!(wire.len() <= expected_body.len() + 256);
                     if owner.connection().is_stream_eof(stream).unwrap() {
@@ -1757,11 +2014,14 @@ mod native_h3_listener_live {
                         .unwrap();
                     *path = QpackFieldPlan::DynamicIndex(0);
                     let section =
-                        qpack_encode_field_section_with_context(&plan, Some(peer.context())).unwrap();
+                        qpack_encode_field_section_with_context(&plan, Some(peer.context()))
+                            .unwrap();
                     peer.submit_field_section(blocked.0, &section).unwrap();
                     let mut blocked_wire = Vec::new();
                     H3Frame::Headers(section).encode(&mut blocked_wire).unwrap();
-                    H3Frame::Data(BODY.to_vec()).encode(&mut blocked_wire).unwrap();
+                    H3Frame::Data(BODY.to_vec())
+                        .encode(&mut blocked_wire)
+                        .unwrap();
                     owner
                         .connection_mut()
                         .write_stream(&cx, blocked, Bytes::from(blocked_wire), true)
@@ -2163,7 +2423,10 @@ mod native_h3_listener_live {
                         ),
                         "only the drain deadline's cancellation may end the parked handler",
                     );
-                    assert!(waited >= DRAIN, "drain returned before its deadline: {waited:?}");
+                    assert!(
+                        waited >= DRAIN,
+                        "drain returned before its deadline: {waited:?}"
+                    );
                     assert_eq!(report.accepted_connections, 1);
                     assert_eq!(report.completed_requests, 0);
                     assert_eq!(report.cancelled_requests, 1);
@@ -2820,11 +3083,14 @@ mod native_h3_listener_live {
                                         let retired = Arc::clone(&handler_retired);
                                         async move {
                                             let _retired = ProducerRetired(retired);
-                                            let mut panic_wait = std::pin::pin!(panic.recv(&request_cx));
+                                            let mut panic_wait =
+                                                std::pin::pin!(panic.recv(&request_cx));
                                             std::future::poll_fn(|task_cx| {
-                                                assert!(Pin::new(&mut body)
-                                                    .poll_frame(task_cx)
-                                                    .is_pending());
+                                                assert!(
+                                                    Pin::new(&mut body)
+                                                        .poll_frame(task_cx)
+                                                        .is_pending()
+                                                );
                                                 if let Some(parked) = parked.take() {
                                                     parked
                                                         .send(&request_cx, request_cx.clone())
@@ -2852,13 +3118,15 @@ mod native_h3_listener_live {
                             );
                         let listener = bind(&cx, router, config(8)).await;
                         let address = listener.local_addr();
-                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let (shutdown_tx, mut shutdown_rx) =
+                            asupersync::channel::oneshot::channel();
                         let pump_paused = AtomicBool::new(false);
                         let pump_waker = Mutex::new(None::<Waker>);
                         let serving = async {
-                            let mut serving = std::pin::pin!(listener.serve_with_shutdown(&cx, async {
-                                shutdown_rx.recv(&cx).await.unwrap();
-                            }));
+                            let mut serving =
+                                std::pin::pin!(listener.serve_with_shutdown(&cx, async {
+                                    shutdown_rx.recv(&cx).await.unwrap();
+                                }));
                             std::future::poll_fn(|task_cx| {
                                 if pump_paused.load(Ordering::Acquire) {
                                     *pump_waker.lock().unwrap() = Some(task_cx.waker().clone());
@@ -2902,12 +3170,14 @@ mod native_h3_listener_live {
                                 credit,
                                 Some(ObligationAbortReason::Error),
                             );
-                            assert!(runtime
-                                .diagnostics()
-                                .unwrap()
-                                .explain_region_open(request_cx.region_id())
-                                .region_state
-                                .is_some());
+                            assert!(
+                                runtime
+                                    .diagnostics()
+                                    .unwrap()
+                                    .explain_region_open(request_cx.region_id())
+                                    .region_state
+                                    .is_some()
+                            );
                             pump_paused.store(false, Ordering::Release);
                             let wake = pump_waker.lock().unwrap().take();
                             if let Some(wake) = wake {
@@ -3017,12 +3287,7 @@ mod native_h3_listener_live {
                             drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty()
                         );
                     }
-                    let state = owner
-                        .connection()
-                        .inner()
-                        .streams()
-                        .stream(stream)
-                        .unwrap();
+                    let state = owner.connection().inner().streams().stream(stream).unwrap();
                     assert_eq!(state.send_reset, Some((0x100, state.send_offset)));
                     assert!(
                         owner.connection().path_stats().bytes_in_flight > 0,
@@ -3953,7 +4218,9 @@ mod native_h3_listener_live {
                                         if poll.is_pending() && trailers_seen {
                                             assert!(!body.is_end_stream());
                                             if let Some(signal) = parked.take() {
-                                                signal.send(&request_cx, request_cx.clone()).unwrap();
+                                                signal
+                                                    .send(&request_cx, request_cx.clone())
+                                                    .unwrap();
                                             }
                                         }
                                         poll
@@ -3970,7 +4237,9 @@ mod native_h3_listener_live {
                                             assert_trailer_fields(&trailers, &fields);
                                             trailers_seen = true;
                                         }
-                                        Some(Err(error)) => panic!("valid request trailers: {error}"),
+                                        Some(Err(error)) => {
+                                            panic!("valid request trailers: {error}")
+                                        }
                                         None => break,
                                     }
                                 }
@@ -4080,7 +4349,9 @@ mod native_h3_listener_live {
                                             assert_trailer_fields(&trailers, &fields);
                                             trailers_seen = true;
                                         }
-                                        Some(Err(error)) => panic!("queued trailer failed: {error}"),
+                                        Some(Err(error)) => {
+                                            panic!("queued trailer failed: {error}")
+                                        }
                                         None => break,
                                     }
                                 }
@@ -4103,13 +4374,8 @@ mod native_h3_listener_live {
                 });
                 let client = async {
                     let (mut owner, mut session) = connect(&cx, address, 72).await;
-                    let stream = open_upload(
-                        &cx,
-                        &mut owner,
-                        "/queued-trailers",
-                        Some(PAYLOAD.len()),
-                    )
-                    .await;
+                    let stream =
+                        open_upload(&cx, &mut owner, "/queued-trailers", Some(PAYLOAD.len())).await;
                     admitted_rx.recv(&cx).await.unwrap();
                     write_data(&cx, &mut owner, stream, PAYLOAD, false).await;
                     write_trailers(&cx, &mut owner, stream, &fields, false).await;
@@ -4223,7 +4489,9 @@ mod native_h3_listener_live {
                                         let poll = Pin::new(&mut body).poll_frame(task_cx);
                                         if poll.is_pending() {
                                             if let Some(signal) = parked.take() {
-                                                signal.send(&request_cx, request_cx.clone()).unwrap();
+                                                signal
+                                                    .send(&request_cx, request_cx.clone())
+                                                    .unwrap();
                                             }
                                         }
                                         poll
@@ -4231,7 +4499,9 @@ mod native_h3_listener_live {
                                     .await;
                                     match frame {
                                         Some(Err(error)) => *terminal.lock().unwrap() = Some(error),
-                                        other => panic!("invalid trailer must fail the body: {other:?}"),
+                                        other => {
+                                            panic!("invalid trailer must fail the body: {other:?}")
+                                        }
                                     }
                                     Response::new(StatusCode::OK, "must not be emitted")
                                 }
@@ -4252,24 +4522,12 @@ mod native_h3_listener_live {
                 });
                 let client = async {
                     let (mut owner, mut session) = connect(&cx, address, 73).await;
-                    let stream = open_upload(
-                        &cx,
-                        &mut owner,
-                        "/invalid-trailers",
-                        None,
-                    )
-                    .await;
+                    let stream = open_upload(&cx, &mut owner, "/invalid-trailers", None).await;
                     let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
                     assert!(!request_cx.is_cancel_requested());
                     write_trailers(&cx, &mut owner, stream, &fields, false).await;
-                    receive_cancelled(
-                        &cx,
-                        &mut owner,
-                        &mut session,
-                        stream,
-                        expected_reset_code,
-                    )
-                    .await;
+                    receive_cancelled(&cx, &mut owner, &mut session, stream, expected_reset_code)
+                        .await;
                     wait_region_closed(&request_cx).await;
                     assert_eq!(*terminal.lock().unwrap(), Some(expected_error));
                     assert_eq!(retired.load(Ordering::SeqCst), 1);

@@ -49,8 +49,13 @@ pub(super) fn advertise(
         ));
     }
     let symbol = super::quic_delta_manifest_auth_symbol(session, manifest)?;
-    let tag = context.derive_context(OFFER_DOMAIN).sign_symbol_tag(&symbol);
-    frame.header.extensions.insert(OFFER_EXTENSION, tag.as_bytes().to_vec());
+    let tag = context
+        .derive_context(OFFER_DOMAIN)
+        .sign_symbol_tag(&symbol);
+    frame
+        .header
+        .extensions
+        .insert(OFFER_EXTENSION, tag.as_bytes().to_vec());
     Ok(())
 }
 
@@ -67,10 +72,14 @@ pub(super) fn offered(
         QuicTransportError::HandshakeRejected("malformed QUIC resume capability".to_string())
     })?;
     let symbol = super::quic_delta_manifest_auth_symbol(session, manifest)?;
-    let mut authenticated = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::from_bytes(tag));
+    let mut authenticated =
+        AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::from_bytes(tag));
     if !supported(manifest)
         || context.mode() != AuthMode::Strict
-        || context.derive_context(OFFER_DOMAIN).verify_authenticated_symbol(&mut authenticated).is_err()
+        || context
+            .derive_context(OFFER_DOMAIN)
+            .verify_authenticated_symbol(&mut authenticated)
+            .is_err()
         || !authenticated.is_verified()
     {
         return Err(QuicTransportError::HandshakeRejected(
@@ -82,12 +91,12 @@ pub(super) fn offered(
 
 #[cfg(feature = "tls")]
 mod storage {
-    use super::{MAX_BYTES, MAX_CHUNKS, SELECTOR, supported};
     use super::super::{
         BTreeMap, CasChunkRef, ContentId, Cx, DeltaChunkWire, DeltaObjectRequest, DeltaWireMode,
-        Digest, Path, PathBuf, PersistentChunkManifest, QuicConfig, QuicTransportError,
-        Sha256, TransferManifest, delta_chunks, hex_encode, quic_decode_delta_root,
+        Digest, Path, PathBuf, PersistentChunkManifest, QuicConfig, QuicTransportError, Sha256,
+        TransferManifest, delta_chunks, hex_encode, quic_decode_delta_root,
     };
+    use super::{MAX_BYTES, MAX_CHUNKS, SELECTOR, supported};
     use crate::atp::journal::{AppendJournal, JournalConfig, JournalRecord, TransferResumeStatus};
     use crate::atp::manifest::MerkleRoot;
     use crate::atp::object::ObjectId;
@@ -132,17 +141,23 @@ mod storage {
         io::Error::new(io::ErrorKind::InvalidData, message)
     }
 
-    fn journal_result<T>(outcome: Outcome<T, crate::atp::journal::append_journal::JournalError>) -> io::Result<T> {
+    fn journal_result<T>(
+        outcome: Outcome<T, crate::atp::journal::append_journal::JournalError>,
+    ) -> io::Result<T> {
         match outcome {
             Outcome::Ok(value) => Ok(value),
             Outcome::Err(error) => Err(invalid(&format!("QUIC resume journal: {error}"))),
-            Outcome::Cancelled(_) => Err(io::Error::new(io::ErrorKind::Interrupted, "QUIC resume journal cancelled")),
+            Outcome::Cancelled(_) => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "QUIC resume journal cancelled",
+            )),
             Outcome::Panicked(_) => Err(io::Error::other("QUIC resume journal panicked")),
         }
     }
 
     fn checkpoint(cx: &Cx) -> io::Result<()> {
-        cx.checkpoint().map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "QUIC resume cancelled"))
+        cx.checkpoint()
+            .map_err(|_| io::Error::new(io::ErrorKind::Interrupted, "QUIC resume cancelled"))
     }
 
     async fn blocking<T, F>(cx: &Cx, work: F) -> Result<T, QuicTransportError>
@@ -151,22 +166,34 @@ mod storage {
         F: FnOnce(Cx) -> io::Result<T> + Send + 'static,
     {
         if !cx.capabilities().io {
-            return Err(QuicTransportError::Config("QUIC resume requires the caller's IO capability".to_string()));
+            return Err(QuicTransportError::Config(
+                "QUIC resume requires the caller's IO capability".to_string(),
+            ));
         }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let mut task = cx.spawn_blocking_drained(move |child| {
-            if !child.capabilities().io {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-                    "QUIC resume storage owner lacks IO capability"));
-            }
-            work(child)
-        }).map_err(|error| {
-            QuicTransportError::Source(format!("admit owned QUIC resume storage: {error}"))
-        })?;
-        task.join().await.map_err(|error| {
-            if cx.checkpoint().is_err() { QuicTransportError::Cancelled }
-            else { QuicTransportError::Source(format!("retire QUIC resume storage: {error}")) }
-        })?.map_err(|error| delta_chunks::io_error(cx, error))
+        let mut task = cx
+            .spawn_blocking_drained(move |child| {
+                if !child.capabilities().io {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "QUIC resume storage owner lacks IO capability",
+                    ));
+                }
+                work(child)
+            })
+            .map_err(|error| {
+                QuicTransportError::Source(format!("admit owned QUIC resume storage: {error}"))
+            })?;
+        task.join()
+            .await
+            .map_err(|error| {
+                if cx.checkpoint().is_err() {
+                    QuicTransportError::Cancelled
+                } else {
+                    QuicTransportError::Source(format!("retire QUIC resume storage: {error}"))
+                }
+            })?
+            .map_err(|error| delta_chunks::io_error(cx, error))
     }
 
     fn regular(path: &Path) -> io::Result<std::fs::Metadata> {
@@ -216,10 +243,13 @@ mod storage {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if named.dev() != held.dev() || named.ino() != held.ino()
+            if named.dev() != held.dev()
+                || named.ino() != held.ino()
                 || (!is_directory && (named.nlink() != 1 || held.nlink() != 1))
             {
-                return Err(invalid("QUIC resume storage path no longer names its owned inode"));
+                return Err(invalid(
+                    "QUIC resume storage path no longer names its owned inode",
+                ));
             }
         }
         Ok(())
@@ -231,7 +261,9 @@ mod storage {
         #[cfg(unix)]
         if is_directory {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_DIRECTORY);
+            options.custom_flags(
+                libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_DIRECTORY,
+            );
         }
         let file = options.open(path)?;
         same_handle(path, &file, is_directory)?;
@@ -264,7 +296,9 @@ mod storage {
                 return Err(invalid("QUIC resume journal file budget exceeded"));
             }
             let metadata = regular(&entry.path())?;
-            bytes = bytes.checked_add(metadata.len()).ok_or_else(|| invalid("QUIC resume history overflow"))?;
+            bytes = bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| invalid("QUIC resume history overflow"))?;
             if bytes > MAX_HISTORY_BYTES {
                 return Err(invalid("QUIC resume journal byte budget exceeded"));
             }
@@ -276,8 +310,10 @@ mod storage {
         let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
             QuicTransportError::Control("QUIC resume lacks a fixed manifest".to_string())
         })?;
-        let encoded = serde_json::to_vec(&(manifest.root_name.as_str(), delta))
-            .map_err(|error| QuicTransportError::Control(format!("encode QUIC resume identity: {error}")))?;
+        let encoded =
+            serde_json::to_vec(&(manifest.root_name.as_str(), delta)).map_err(|error| {
+                QuicTransportError::Control(format!("encode QUIC resume identity: {error}"))
+            })?;
         let mut hash = Sha256::new();
         hash.update(b"ATP-QUIC-DURABLE-FIXED-CACHE-V1\0");
         hash.update(encoded);
@@ -297,7 +333,9 @@ mod storage {
             left -= len as u64;
         }
         if hash.finalize().to_hex() != chunk.content_id_hex {
-            return Err(invalid("QUIC resume payload differs from its authenticated chunk"));
+            return Err(invalid(
+                "QUIC resume payload differs from its authenticated chunk",
+            ));
         }
         Ok(())
     }
@@ -312,7 +350,9 @@ mod storage {
         timestamp: u64,
     ) -> io::Result<Store> {
         checkpoint(cx)?;
-        let parent = root.parent().ok_or_else(|| invalid("QUIC resume root has no parent"))?;
+        let parent = root
+            .parent()
+            .ok_or_else(|| invalid("QUIC resume root has no parent"))?;
         directory(parent)?;
         make_directory(&root)?;
         let directory = open_read(&root, true)?;
@@ -328,14 +368,18 @@ mod storage {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 regular(&payload_path)?;
-                safe_open_options().read(true).write(true).open(&payload_path)?
+                safe_open_options()
+                    .read(true)
+                    .write(true)
+                    .open(&payload_path)?
             }
             Err(error) => return Err(error),
         };
         payload.try_lock().map_err(io::Error::from)?;
         same_handle(&root, &directory, true)?;
         same_handle(&payload_path, &payload, false)?;
-        if regular(&payload_path)?.len() > manifest.total_bytes || manifest.total_bytes > MAX_BYTES {
+        if regular(&payload_path)?.len() > manifest.total_bytes || manifest.total_bytes > MAX_BYTES
+        {
             return Err(invalid("QUIC resume payload exceeds its object budget"));
         }
         let journal_path = root.join("journal");
@@ -360,7 +404,10 @@ mod storage {
         // A torn latest generation makes AppendJournal choose a fresh file.
         // Reserve that file before its first append, rather than admitting four
         // files and discovering a fifth only on the next reopen.
-        let next_file = journal_path.join(format!("journal_gen_{:06}.dat", journal.get_stats().generation));
+        let next_file = journal_path.join(format!(
+            "journal_gen_{:06}.dat",
+            journal.get_stats().generation
+        ));
         match std::fs::symlink_metadata(&next_file) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -374,48 +421,81 @@ mod storage {
             return Err(invalid("QUIC resume journal record budget exceeded"));
         }
         let mut summary = journal_result(journal.get_resume_summary_with_limits(
-            &transfer, MAX_RECORDS, MAX_CHUNKS, MAX_HISTORY_BYTES,
+            &transfer,
+            MAX_RECORDS,
+            MAX_CHUNKS,
+            MAX_HISTORY_BYTES,
         ))?;
         if summary.status == TransferResumeStatus::Unknown {
             if journal.get_stats().total_entries != 0 {
-                return Err(invalid("QUIC resume journal contains another object's history"));
+                return Err(invalid(
+                    "QUIC resume journal contains another object's history",
+                ));
             }
             if journal_budget(&journal_path)?.1 > MAX_HISTORY_BYTES - 4096 {
                 return Err(invalid("QUIC resume journal has no room for an offer"));
             }
-            journal_result(journal.append(JournalRecord::Offer {
-                transfer_id: transfer.clone(), object_id: ObjectId::content(ContentId::new(identity)),
-                manifest_root: MerkleRoot::new(identity), total_size: manifest.total_bytes,
-                timestamp, auth_tag: AuthenticationTag::from_bytes([0; 32]),
-            }.with_signature(&key)))?;
+            journal_result(
+                journal.append(
+                    JournalRecord::Offer {
+                        transfer_id: transfer.clone(),
+                        object_id: ObjectId::content(ContentId::new(identity)),
+                        manifest_root: MerkleRoot::new(identity),
+                        total_size: manifest.total_bytes,
+                        timestamp,
+                        auth_tag: AuthenticationTag::from_bytes([0; 32]),
+                    }
+                    .with_signature(&key),
+                ),
+            )?;
             summary = journal_result(journal.get_resume_summary_with_limits(
-                &transfer, MAX_RECORDS, MAX_CHUNKS, MAX_HISTORY_BYTES,
+                &transfer,
+                MAX_RECORDS,
+                MAX_CHUNKS,
+                MAX_HISTORY_BYTES,
             ))?;
         }
         if !summary.is_resumable() || summary.total_size != Some(manifest.total_bytes) {
-            return Err(invalid("QUIC resume journal has no matching resumable offer"));
+            return Err(invalid(
+                "QUIC resume journal has no matching resumable offer",
+            ));
         }
         let entries = journal_result(journal.get_transfer_entries(&transfer))?;
         if entries.len() as u64 != journal.get_stats().total_entries {
-            return Err(invalid("QUIC resume journal has foreign or missing history"));
+            return Err(invalid(
+                "QUIC resume journal has foreign or missing history",
+            ));
         }
         if !matches!(entries.first().map(|entry| &entry.record), Some(JournalRecord::Offer {
             object_id, manifest_root, total_size, ..
         }) if *object_id == ObjectId::content(ContentId::new(identity))
             && *manifest_root == MerkleRoot::new(identity) && *total_size == manifest.total_bytes)
         {
-            return Err(invalid("QUIC resume journal identity differs from the challenged manifest"));
+            return Err(invalid(
+                "QUIC resume journal identity differs from the challenged manifest",
+            ));
         }
-        let layout = manifest.delta_manifest.as_ref().ok_or_else(|| invalid("QUIC resume manifest disappeared"))?;
-        let by_offset: BTreeMap<_, _> = layout.chunks.iter().map(|chunk| (chunk.stream_offset, chunk)).collect();
+        let layout = manifest
+            .delta_manifest
+            .as_ref()
+            .ok_or_else(|| invalid("QUIC resume manifest disappeared"))?;
+        let by_offset: BTreeMap<_, _> = layout
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.stream_offset, chunk))
+            .collect();
         let mut durable = BTreeMap::new();
         for receipt in &summary.durable_chunks {
             checkpoint(cx)?;
-            let chunk = by_offset.get(&receipt.chunk_offset).ok_or_else(|| invalid("QUIC resume receipt has unknown geometry"))?;
+            let chunk = by_offset
+                .get(&receipt.chunk_offset)
+                .ok_or_else(|| invalid("QUIC resume receipt has unknown geometry"))?;
             if receipt.chunk_size != chunk.size_bytes
                 || hex_encode(&receipt.chunk_hash) != chunk.content_id_hex
             {
-                return Err(invalid("QUIC resume receipt does not match the authenticated chunk"));
+                return Err(invalid(
+                    "QUIC resume receipt does not match the authenticated chunk",
+                ));
             }
             verify_range(cx, &mut payload, chunk)?;
             durable.insert(chunk.index, (*chunk).clone());
@@ -430,10 +510,20 @@ mod storage {
         same_handle(&payload_path, &payload, false)?;
         same_handle(&journal_path, &journal_directory, true)?;
         Ok(Store {
-            root, payload_path, transfer, total_bytes: manifest.total_bytes,
+            root,
+            payload_path,
+            transfer,
+            total_bytes: manifest.total_bytes,
             expected: layout.chunks.clone(),
             state: Mutex::new(State {
-                payload, directory, journal_directory, journal, key, records, failed: false, durable,
+                payload,
+                directory,
+                journal_directory,
+                journal,
+                key,
+                records,
+                failed: false,
+                durable,
             }),
             #[cfg(feature = "test-internals")]
             progress,
@@ -444,7 +534,10 @@ mod storage {
         /// Copy only a fully verified network chunk; sync it before recording
         /// reuse authority. The source is ordinary ephemeral receive staging.
         pub(in super::super) async fn checkpoint(
-            self: &Arc<Self>, cx: &Cx, chunk: &DeltaChunkWire, source: &Path,
+            self: &Arc<Self>,
+            cx: &Cx,
+            chunk: &DeltaChunkWire,
+            source: &Path,
         ) -> Result<(), QuicTransportError> {
             let store = Arc::clone(self);
             let chunk = chunk.clone();
@@ -452,20 +545,38 @@ mod storage {
             let timestamp = cx.now().as_nanos();
             blocking(cx, move |child| {
                 store.checkpoint_sync(&child, &chunk, &source, timestamp)
-            }).await
+            })
+            .await
         }
 
-        fn checkpoint_sync(&self, cx: &Cx, chunk: &DeltaChunkWire, source: &Path, timestamp: u64) -> io::Result<()> {
+        fn checkpoint_sync(
+            &self,
+            cx: &Cx,
+            chunk: &DeltaChunkWire,
+            source: &Path,
+            timestamp: u64,
+        ) -> io::Result<()> {
             checkpoint(cx)?;
             if self.expected.get(chunk.index as usize) != Some(chunk) {
-                return Err(invalid("QUIC resume checkpoint differs from its admitted manifest"));
+                return Err(invalid(
+                    "QUIC resume checkpoint differs from its admitted manifest",
+                ));
             }
             let mut state = self.state.lock();
-            if state.failed || state.records.checked_add(2).is_none_or(|count| count > MAX_RECORDS) {
+            if state.failed
+                || state
+                    .records
+                    .checked_add(2)
+                    .is_none_or(|count| count > MAX_RECORDS)
+            {
                 return Err(invalid("QUIC resume cache is failed or exhausted"));
             }
             if let Some(previous) = state.durable.get(&chunk.index) {
-                return if previous == chunk { Ok(()) } else { Err(invalid("QUIC resume chunk changed identity")) };
+                return if previous == chunk {
+                    Ok(())
+                } else {
+                    Err(invalid("QUIC resume chunk changed identity"))
+                };
             }
             same_handle(&self.root, &state.directory, true)?;
             same_handle(&self.payload_path, &state.payload, false)?;
@@ -506,15 +617,23 @@ mod storage {
             same_handle(&self.payload_path, &state.payload, false)?;
             same_handle(&self.root.join("journal"), &state.journal_directory, true)?;
             let verified = JournalRecord::ChunkVerified {
-                transfer_id: self.transfer.clone(), chunk_offset: chunk.stream_offset,
-                chunk_size: chunk.size_bytes, verified_hash: *hash.hash(), timestamp,
+                transfer_id: self.transfer.clone(),
+                chunk_offset: chunk.stream_offset,
+                chunk_size: chunk.size_bytes,
+                verified_hash: *hash.hash(),
+                timestamp,
                 auth_tag: AuthenticationTag::from_bytes([0; 32]),
-            }.with_signature(&state.key);
+            }
+            .with_signature(&state.key);
             let written = JournalRecord::ChunkWritten {
-                transfer_id: self.transfer.clone(), chunk_offset: chunk.stream_offset,
-                chunk_size: chunk.size_bytes, file_path: "payload".to_string(), timestamp,
+                transfer_id: self.transfer.clone(),
+                chunk_offset: chunk.stream_offset,
+                chunk_size: chunk.size_bytes,
+                file_path: "payload".to_string(),
+                timestamp,
                 auth_tag: AuthenticationTag::from_bytes([0; 32]),
-            }.with_signature(&state.key);
+            }
+            .with_signature(&state.key);
             journal_result(state.journal.append(verified))?;
             journal_result(state.journal.append(written))?;
             same_handle(&self.root, &state.directory, true)?;
@@ -524,16 +643,22 @@ mod storage {
             state.durable.insert(chunk.index, chunk.clone());
             state.failed = false;
             #[cfg(feature = "test-internals")]
-            self.progress.fetch_add(chunk.size_bytes, crate::sync::atomic::Ordering::Release);
+            self.progress
+                .fetch_add(chunk.size_bytes, crate::sync::atomic::Ordering::Release);
             Ok(())
         }
     }
 
     pub(in super::super) async fn plan(
-        cx: &Cx, dest_dir: &Path, config: &QuicConfig, manifest: &TransferManifest,
+        cx: &Cx,
+        dest_dir: &Path,
+        config: &QuicConfig,
+        manifest: &TransferManifest,
     ) -> Result<delta_chunks::ReceivePlan, QuicTransportError> {
         if !supported(manifest) {
-            return Err(QuicTransportError::Control("unsupported QUIC resume manifest".to_string()));
+            return Err(QuicTransportError::Control(
+                "unsupported QUIC resume manifest".to_string(),
+            ));
         }
         let identity = cache_identity(manifest)?;
         let transfer = format!("quic-resume-{}", hex_encode(&identity));
@@ -547,31 +672,59 @@ mod storage {
         let key = AuthKey::from_hmac_derived(*derived.as_bytes()).map_err(|error| {
             QuicTransportError::Config(format!("derive QUIC resume journal key: {error}"))
         })?;
-        cx.with_ambient(super::super::prepare_quic_destination_root(dest_dir)).await?;
-        cx.with_ambient(super::super::reject_quic_destination_symlink_prefix(dest_dir, &root)).await?;
+        cx.with_ambient(super::super::prepare_quic_destination_root(dest_dir))
+            .await?;
+        cx.with_ambient(super::super::reject_quic_destination_symlink_prefix(
+            dest_dir, &root,
+        ))
+        .await?;
         let owned_manifest = manifest.clone();
         let timestamp = cx.now().as_nanos();
-        let store = Arc::new(blocking(cx, move |child| {
-            open(&child, root, transfer, identity, key, owned_manifest, timestamp)
-        }).await?);
+        let store = Arc::new(
+            blocking(cx, move |child| {
+                open(
+                    &child,
+                    root,
+                    transfer,
+                    identity,
+                    key,
+                    owned_manifest,
+                    timestamp,
+                )
+            })
+            .await?,
+        );
         let mut reusable = BTreeMap::new();
         for chunk in store.state.lock().durable.values() {
-            reusable.entry(chunk.content_id_hex.clone()).or_insert(delta_chunks::ReusableRange {
-                path: store.payload_path.clone(), offset: chunk.entry_offset, size: chunk.size_bytes,
-            });
+            reusable
+                .entry(chunk.content_id_hex.clone())
+                .or_insert(delta_chunks::ReusableRange {
+                    path: store.payload_path.clone(),
+                    offset: chunk.entry_offset,
+                    size: chunk.size_bytes,
+                });
         }
-        if let Some(baseline) = cx.with_ambient(delta_chunks::plan(cx, dest_dir, config, manifest)).await? {
+        if let Some(baseline) = cx
+            .with_ambient(delta_chunks::plan(cx, dest_dir, config, manifest))
+            .await?
+        {
             for (content_id, range) in baseline.reusable {
                 reusable.entry(content_id).or_insert(range);
             }
         }
-        let layout = manifest.delta_manifest.as_ref().expect("validated resume manifest");
+        let layout = manifest
+            .delta_manifest
+            .as_ref()
+            .expect("validated resume manifest");
         let mut missing_chunks = Vec::new();
         let mut missing_bytes = 0u64;
         let mut have_chunks = Vec::new();
         let mut have_bytes = 0u64;
         for chunk in &layout.chunks {
-            if reusable.get(&chunk.content_id_hex).is_none_or(|range| range.size != chunk.size_bytes) {
+            if reusable
+                .get(&chunk.content_id_hex)
+                .is_none_or(|range| range.size != chunk.size_bytes)
+            {
                 missing_chunks.push(chunk.clone());
                 missing_bytes += chunk.size_bytes;
             } else {
@@ -579,34 +732,50 @@ mod storage {
                 // including the empty set on a fresh resumable attempt.
                 have_chunks.push(CasChunkRef {
                     index: u32::try_from(have_chunks.len()).expect("bounded have-set"),
-                    byte_offset: have_bytes, size_bytes: chunk.size_bytes,
-                    content_id: ContentId::new(quic_decode_delta_root(&chunk.content_id_hex, "resume have-set")?),
+                    byte_offset: have_bytes,
+                    size_bytes: chunk.size_bytes,
+                    content_id: ContentId::new(quic_decode_delta_root(
+                        &chunk.content_id_hex,
+                        "resume have-set",
+                    )?),
                 });
                 have_bytes += chunk.size_bytes;
             }
         }
-        let have = PersistentChunkManifest::new(hex_encode(&identity), have_chunks).map_err(|error| {
-            QuicTransportError::Control(format!("build QUIC resume have-set: {error}"))
-        })?;
+        let have =
+            PersistentChunkManifest::new(hex_encode(&identity), have_chunks).map_err(|error| {
+                QuicTransportError::Control(format!("build QUIC resume have-set: {error}"))
+            })?;
         let request = DeltaObjectRequest {
-            mode: DeltaWireMode::DeltaChunks, fallback_reason: Some(SELECTOR.to_string()),
+            mode: DeltaWireMode::DeltaChunks,
+            fallback_reason: Some(SELECTOR.to_string()),
             sender_merkle_root_hex: layout.merkle_root_hex.clone(),
             receiver_merkle_root_hex: Some(have.merkle_root.to_hex()),
             shared_chunks: (layout.chunks.len() - missing_chunks.len()) as u64,
-            missing_bytes, stale_chunks: 0, missing_chunks,
+            missing_bytes,
+            stale_chunks: 0,
+            missing_chunks,
         };
         delta_chunks::validate_request(manifest, &request)?;
         super::super::quic_progress(format_args!(
             "receiver: resume transfer={} reused_chunks={} missing_chunks={} missing_bytes={}",
-            manifest.transfer_id, request.shared_chunks, request.missing_chunks.len(), request.missing_bytes,
+            manifest.transfer_id,
+            request.shared_chunks,
+            request.missing_chunks.len(),
+            request.missing_bytes,
         ));
         Ok(delta_chunks::ReceivePlan {
-            request, baseline: dest_dir.to_path_buf(), reusable, resume: Some(store),
+            request,
+            baseline: dest_dir.to_path_buf(),
+            reusable,
+            resume: Some(store),
         })
     }
 
     #[cfg(feature = "test-internals")]
-    type Progress = std::sync::OnceLock<Mutex<BTreeMap<PathBuf, std::sync::Weak<crate::sync::atomic::AtomicU64>>>>;
+    type Progress = std::sync::OnceLock<
+        Mutex<BTreeMap<PathBuf, std::sync::Weak<crate::sync::atomic::AtomicU64>>>,
+    >;
     #[cfg(feature = "test-internals")]
     static PROGRESS: Progress = std::sync::OnceLock::new();
 
@@ -627,8 +796,8 @@ mod storage {
     #[cfg(all(test, unix))]
     mod tests {
         use super::{
-            AuthKey, Cx, File, MAX_HISTORY_BYTES, OpenOptions, Path, PathBuf, Read,
-            Seek, SeekFrom, Store, TransferManifest, Write, cache_identity, hex_encode, open,
+            AuthKey, Cx, File, MAX_HISTORY_BYTES, OpenOptions, Path, PathBuf, Read, Seek, SeekFrom,
+            Store, TransferManifest, Write, cache_identity, hex_encode, open,
         };
 
         fn fixture() -> (tempfile::TempDir, PathBuf, TransferManifest, Vec<u8>) {
@@ -639,11 +808,22 @@ mod storage {
             (dir, source, manifest, bytes)
         }
 
-        fn reopen(destination: &Path, manifest: &TransferManifest, seed: u64) -> std::io::Result<Store> {
+        fn reopen(
+            destination: &Path,
+            manifest: &TransferManifest,
+            seed: u64,
+        ) -> std::io::Result<Store> {
             let identity = cache_identity(manifest).unwrap();
             let transfer = format!("quic-resume-{}", hex_encode(&identity));
-            open(&Cx::for_testing(), destination.join(format!(".atp-{transfer}")),
-                transfer, identity, AuthKey::from_seed(seed), manifest.clone(), 123)
+            open(
+                &Cx::for_testing(),
+                destination.join(format!(".atp-{transfer}")),
+                transfer,
+                identity,
+                AuthKey::from_seed(seed),
+                manifest.clone(),
+                123,
+            )
         }
 
         #[test]
@@ -651,25 +831,59 @@ mod storage {
             let (dir, source, manifest, bytes) = fixture();
             let chunks = &manifest.delta_manifest.as_ref().unwrap().chunks;
             let store = reopen(dir.path(), &manifest, 138).unwrap();
-            store.checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124).unwrap();
-            assert!(reopen(dir.path(), &manifest, 138).is_err(), "live owner retains its lock");
+            store
+                .checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124)
+                .unwrap();
+            assert!(
+                reopen(dir.path(), &manifest, 138).is_err(),
+                "live owner retains its lock"
+            );
             {
                 let mut state = store.state.lock();
-                state.payload.seek(SeekFrom::Start(chunks[1].entry_offset)).unwrap();
+                state
+                    .payload
+                    .seek(SeekFrom::Start(chunks[1].entry_offset))
+                    .unwrap();
                 // A process can die after payload I/O but before its receipt.
-                state.payload.write_all(&bytes[super::super::CHUNK_BYTES..][..1024]).unwrap();
+                state
+                    .payload
+                    .write_all(&bytes[super::super::CHUNK_BYTES..][..1024])
+                    .unwrap();
                 state.payload.sync_all().unwrap();
             }
             drop(store);
             let mut reconnect = manifest.clone();
             reconnect.transfer_id = "cd".repeat(32);
-            assert_eq!(cache_identity(&manifest).unwrap(), cache_identity(&reconnect).unwrap());
+            assert_eq!(
+                cache_identity(&manifest).unwrap(),
+                cache_identity(&reconnect).unwrap()
+            );
             let store = reopen(dir.path(), &reconnect, 138).unwrap();
-            assert_eq!(store.state.lock().durable.keys().copied().collect::<Vec<_>>(), vec![0]);
-            store.checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125).unwrap();
+            assert_eq!(
+                store
+                    .state
+                    .lock()
+                    .durable
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![0]
+            );
+            store
+                .checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125)
+                .unwrap();
             drop(store);
             let store = reopen(dir.path(), &reconnect, 138).unwrap();
-            assert_eq!(store.state.lock().durable.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+            assert_eq!(
+                store
+                    .state
+                    .lock()
+                    .durable
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
         }
 
         #[test]
@@ -678,14 +892,22 @@ mod storage {
             let store = reopen(dir.path(), &manifest, 138).unwrap();
             let payload_path = store.payload_path.clone();
             let chunk = &manifest.delta_manifest.as_ref().unwrap().chunks[0];
-            store.checkpoint_sync(&Cx::for_testing(), chunk, &source, 124).unwrap();
+            store
+                .checkpoint_sync(&Cx::for_testing(), chunk, &source, 124)
+                .unwrap();
             drop(store);
-            assert!(reopen(dir.path(), &manifest, 139).is_err(), "CRC is not journal authority");
+            assert!(
+                reopen(dir.path(), &manifest, 139).is_err(),
+                "CRC is not journal authority"
+            );
             let mut file = OpenOptions::new().write(true).open(&payload_path).unwrap();
             file.write_all(&[0x99]).unwrap();
             file.sync_all().unwrap();
             drop(file);
-            assert!(reopen(dir.path(), &manifest, 138).is_err(), "journal receipts never substitute for a payload rehash");
+            assert!(
+                reopen(dir.path(), &manifest, 138).is_err(),
+                "journal receipts never substitute for a payload rehash"
+            );
         }
 
         #[test]
@@ -693,21 +915,38 @@ mod storage {
             let (dir, source, manifest, _) = fixture();
             let store = reopen(dir.path(), &manifest, 138).unwrap();
             let chunks = &manifest.delta_manifest.as_ref().unwrap().chunks;
-            store.checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124).unwrap();
+            store
+                .checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124)
+                .unwrap();
             let journal_dir = store.root.join("journal");
             drop(store);
-            let mut generations: Vec<_> = std::fs::read_dir(&journal_dir).unwrap()
-                .map(|entry| entry.unwrap().path()).collect();
+            let mut generations: Vec<_> = std::fs::read_dir(&journal_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
             generations.sort();
-            let mut tail = OpenOptions::new().append(true).open(generations.last().unwrap()).unwrap();
+            let mut tail = OpenOptions::new()
+                .append(true)
+                .open(generations.last().unwrap())
+                .unwrap();
             tail.write_all(&[64, 0, 0, 0, 1, 2]).unwrap();
             tail.sync_all().unwrap();
             drop(tail);
             let store = reopen(dir.path(), &manifest, 138).unwrap();
             assert_eq!(store.state.lock().durable.len(), 1);
-            store.checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125).unwrap();
+            store
+                .checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125)
+                .unwrap();
             drop(store);
-            assert_eq!(reopen(dir.path(), &manifest, 138).unwrap().state.lock().durable.len(), 2);
+            assert_eq!(
+                reopen(dir.path(), &manifest, 138)
+                    .unwrap()
+                    .state
+                    .lock()
+                    .durable
+                    .len(),
+                2
+            );
         }
 
         #[test]
@@ -729,11 +968,18 @@ mod storage {
             let journal = store.root.join("journal");
             drop(store);
             for generation in 1..4 {
-                std::fs::write(journal.join(format!("journal_gen_{generation:06}.dat")), [64, 0]).unwrap();
+                std::fs::write(
+                    journal.join(format!("journal_gen_{generation:06}.dat")),
+                    [64, 0],
+                )
+                .unwrap();
             }
             assert!(reopen(dir.path(), &manifest, 138).is_err());
-            assert_eq!(std::fs::read_dir(&journal).unwrap().count(), 4,
-                "recovery must not exceed the admitted generation count");
+            assert_eq!(
+                std::fs::read_dir(&journal).unwrap().count(),
+                4,
+                "recovery must not exceed the admitted generation count"
+            );
         }
 
         #[test]
@@ -743,9 +989,17 @@ mod storage {
             let chunk = &manifest.delta_manifest.as_ref().unwrap().chunks[0];
             let mut foreign = chunk.clone();
             foreign.entry_offset = super::MAX_BYTES;
-            assert!(store.checkpoint_sync(&Cx::for_testing(), &foreign, &source, 124).is_err());
+            assert!(
+                store
+                    .checkpoint_sync(&Cx::for_testing(), &foreign, &source, 124)
+                    .is_err()
+            );
             std::fs::write(&source, vec![0xff; super::super::CHUNK_BYTES]).unwrap();
-            assert!(store.checkpoint_sync(&Cx::for_testing(), chunk, &source, 124).is_err());
+            assert!(
+                store
+                    .checkpoint_sync(&Cx::for_testing(), chunk, &source, 124)
+                    .is_err()
+            );
             assert!(store.state.lock().durable.is_empty());
             assert_eq!(store.state.lock().payload.metadata().unwrap().len(), 0);
             drop(store);
@@ -757,7 +1011,9 @@ mod storage {
         fn durable_resume_refuses_symlinked_or_multiply_linked_payloads() {
             let (dir, source, manifest, bytes) = fixture();
             let identity = cache_identity(&manifest).unwrap();
-            let root = dir.path().join(format!(".atp-quic-resume-{}", hex_encode(&identity)));
+            let root = dir
+                .path()
+                .join(format!(".atp-quic-resume-{}", hex_encode(&identity)));
             std::fs::create_dir(&root).unwrap();
             std::os::unix::fs::symlink(&source, root.join("payload")).unwrap();
             assert!(reopen(dir.path(), &manifest, 138).is_err());
@@ -767,8 +1023,14 @@ mod storage {
             std::fs::hard_link(&source, other_root.join("payload")).unwrap();
             assert!(reopen(other.path(), &manifest, 138).is_err());
             let mut current = Vec::new();
-            File::open(&source).unwrap().read_to_end(&mut current).unwrap();
-            assert_eq!(current, bytes, "cache admission must not alter unrelated source files");
+            File::open(&source)
+                .unwrap()
+                .read_to_end(&mut current)
+                .unwrap();
+            assert_eq!(
+                current, bytes,
+                "cache admission must not alter unrelated source files"
+            );
         }
 
         #[test]
@@ -777,7 +1039,9 @@ mod storage {
                 let (dir, source, manifest, bytes) = fixture();
                 let store = reopen(dir.path(), &manifest, 138).unwrap();
                 let chunks = &manifest.delta_manifest.as_ref().unwrap().chunks;
-                store.checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124).unwrap();
+                store
+                    .checkpoint_sync(&Cx::for_testing(), &chunks[0], &source, 124)
+                    .unwrap();
                 let retained = dir.path().join("retained-owned-inode");
                 if replace_directory {
                     std::fs::rename(&store.root, &retained).unwrap();
@@ -786,21 +1050,38 @@ mod storage {
                     std::fs::rename(&store.payload_path, &retained).unwrap();
                 }
                 std::fs::write(&store.payload_path, b"unrelated replacement").unwrap();
-                assert!(store.checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125).is_err());
-                assert_eq!(std::fs::read(&store.payload_path).unwrap(), b"unrelated replacement");
-                let retained_payload = if replace_directory { retained.join("payload") } else { retained };
-                assert_eq!(std::fs::read(retained_payload).unwrap(), bytes[..super::super::CHUNK_BYTES]);
-                assert_eq!(store.state.lock().durable.len(), 1,
-                    "a replacement path cannot split the lock and receipt owners");
+                assert!(
+                    store
+                        .checkpoint_sync(&Cx::for_testing(), &chunks[1], &source, 125)
+                        .is_err()
+                );
+                assert_eq!(
+                    std::fs::read(&store.payload_path).unwrap(),
+                    b"unrelated replacement"
+                );
+                let retained_payload = if replace_directory {
+                    retained.join("payload")
+                } else {
+                    retained
+                };
+                assert_eq!(
+                    std::fs::read(retained_payload).unwrap(),
+                    bytes[..super::super::CHUNK_BYTES]
+                );
+                assert_eq!(
+                    store.state.lock().durable.len(),
+                    1,
+                    "a replacement path cannot split the lock and receipt owners"
+                );
             }
         }
     }
 }
 
-#[cfg(feature = "tls")]
-pub(super) use storage::{Store, plan};
 #[cfg(all(feature = "tls", feature = "test-internals"))]
 pub(super) use storage::checkpoint_bytes;
+#[cfg(feature = "tls")]
+pub(super) use storage::{Store, plan};
 
 #[cfg(test)]
 #[path = "resume_tests.rs"]

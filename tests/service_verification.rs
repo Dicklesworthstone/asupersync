@@ -1212,7 +1212,10 @@ mod tower_adapter_tests {
                 matches!(err, TowerAdapterError::Overloaded),
                 "quota 5 < floor 10 must be Overloaded, got {err:?}"
             );
-            let err = adapter.call(&exhausted, 1).await.expect_err("expected cancel");
+            let err = adapter
+                .call(&exhausted, 1)
+                .await
+                .expect_err("expected cancel");
             assert!(
                 matches!(err, TowerAdapterError::Cancelled),
                 "an exhausted poll quota must be Cancelled, got {err:?}"

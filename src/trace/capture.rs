@@ -329,7 +329,9 @@ pub enum ScheduleCaptureError {
         dropped_spans: u64,
     },
     /// A request lacks a complete, supported publication witness.
-    #[error("native task {task:?} has unsupported cancellation publication at sequence {seq}: {reason}")]
+    #[error(
+        "native task {task:?} has unsupported cancellation publication at sequence {seq}: {reason}"
+    )]
     CancellationPublication {
         /// Request or publication-start sequence.
         seq: u64,
@@ -339,7 +341,9 @@ pub enum ScheduleCaptureError {
         reason: &'static str,
     },
     /// Cancellation became visible while a worker could execute user code.
-    #[error("native task {task:?} cancellation at sequence {seq} overlaps a poll of {polling_task:?}")]
+    #[error(
+        "native task {task:?} cancellation at sequence {seq} overlaps a poll of {polling_task:?}"
+    )]
     CancellationDuringPoll {
         /// Request sequence.
         seq: u64,
@@ -633,7 +637,9 @@ fn project_cancellation_events(
             reason,
         };
         if live.get(task) != Some(region) {
-            return Err(refuse_order("target is not live in its captured owner region"));
+            return Err(refuse_order(
+                "target is not live in its captured owner region",
+            ));
         }
         let preceding_task_polls = last_polls.get(task).map_or(0, |(ordinal, _)| *ordinal);
         let (cleanup_budget, boundary, task_poll_ordinal) = match phase {
@@ -646,7 +652,9 @@ fn project_cancellation_events(
                     });
                 };
                 if requests.contains_key(task) {
-                    return Err(refuse_order("repeated or strengthened requests are not supported"));
+                    return Err(refuse_order(
+                        "repeated or strengthened requests are not supported",
+                    ));
                 }
                 requests.insert(
                     *task,
@@ -666,10 +674,14 @@ fn project_cancellation_events(
                 let Some(&(polling_task, task_poll_ordinal, poll_dispatch)) =
                     worker_polls.get(&worker)
                 else {
-                    return Err(refuse_order("acknowledgement has no originating worker poll"));
+                    return Err(refuse_order(
+                        "acknowledgement has no originating worker poll",
+                    ));
                 };
                 if polling_task != *task {
-                    return Err(refuse_order("acknowledgement does not belong to its worker's latest poll"));
+                    return Err(refuse_order(
+                        "acknowledgement does not belong to its worker's latest poll",
+                    ));
                 }
                 let Some(request) = requests.get_mut(task) else {
                     return Err(ScheduleCaptureError::MissingCancellationRequest {

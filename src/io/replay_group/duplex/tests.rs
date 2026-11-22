@@ -10,7 +10,11 @@ struct Fixture {
     read_error: bool,
 }
 impl AsyncRead for Fixture {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if std::mem::take(&mut this.read_error) {
             return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
@@ -22,15 +26,29 @@ impl AsyncRead for Fixture {
     }
 }
 impl AsyncWrite for Fixture {
-    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Poll::Ready(Ok(buf.len()))
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         Poll::Ready(Ok(bufs.iter().map(|buf| buf.len()).sum()))
     }
-    fn is_write_vectored(&self) -> bool { true }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 fn group() -> IoRecordingGroup {
@@ -40,13 +58,22 @@ fn group() -> IoRecordingGroup {
         per_stream: IoCaptureLimits::new(64, 4096, 4096, 16),
     })
 }
-fn read(io: &mut (impl AsyncRead + Unpin), size: usize, waker: &Waker) -> Poll<io::Result<Vec<u8>>> {
+fn read(
+    io: &mut (impl AsyncRead + Unpin),
+    size: usize,
+    waker: &Waker,
+) -> Poll<io::Result<Vec<u8>>> {
     let mut bytes = vec![0; size];
     let mut buf = ReadBuf::new(&mut bytes);
-    Pin::new(io).poll_read(&mut Context::from_waker(waker), &mut buf)
+    Pin::new(io)
+        .poll_read(&mut Context::from_waker(waker), &mut buf)
         .map(|result| result.map(|()| buf.filled().to_vec()))
 }
-fn write(io: &mut (impl AsyncWrite + Unpin), bytes: &[u8], waker: &Waker) -> Poll<io::Result<usize>> {
+fn write(
+    io: &mut (impl AsyncWrite + Unpin),
+    bytes: &[u8],
+    waker: &Waker,
+) -> Poll<io::Result<usize>> {
     Pin::new(io).poll_write(&mut Context::from_waker(waker), bytes)
 }
 fn value<T>(result: Poll<io::Result<T>>) -> T {
@@ -57,17 +84,31 @@ fn value<T>(result: Poll<io::Result<T>>) -> T {
 }
 fn exchange(write_first: bool) -> RecordedIoGroup {
     let group = group();
-    let mut io = group.register(11, Fixture { input: b"reply", ..Fixture::default() }).unwrap();
-    if write_first { value(write(&mut io, b"request", Waker::noop())); }
+    let mut io = group
+        .register(
+            11,
+            Fixture {
+                input: b"reply",
+                ..Fixture::default()
+            },
+        )
+        .unwrap();
+    if write_first {
+        value(write(&mut io, b"request", Waker::noop()));
+    }
     assert_eq!(value(read(&mut io, 5, Waker::noop())), b"reply");
-    if !write_first { value(write(&mut io, b"request", Waker::noop())); }
+    if !write_first {
+        value(write(&mut io, b"request", Waker::noop()));
+    }
     io.into_inner();
     group.finish().unwrap()
 }
 #[derive(Default)]
 struct Counter(AtomicUsize);
 impl Wake for Counter {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 fn counting() -> (Arc<Counter>, Waker) {
     let counter = Arc::new(Counter::default());
@@ -80,13 +121,19 @@ fn early_read_parks_until_recorded_write_without_spurious_self_wakes() {
     let replay = exchange(true).replay();
     let (mut reader, mut writer) = replay.open(11).unwrap().into_split();
     let (count, waker) = counting();
-    for _ in 0..8 { assert!(read(&mut reader, 5, &waker).is_pending()); }
+    for _ in 0..8 {
+        assert!(read(&mut reader, 5, &waker).is_pending());
+    }
     assert_eq!(count.0.load(Ordering::SeqCst), 0);
-    assert_eq!(replay.verify_complete(), Err(IoGroupCompletionError::Remaining(2)));
+    assert_eq!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Remaining(2))
+    );
     assert_eq!(value(write(&mut writer, b"request", Waker::noop())), 7);
     assert_eq!(count.0.load(Ordering::SeqCst), 1);
     assert_eq!(value(read(&mut reader, 5, &waker)), b"reply");
-    drop(reader); drop(writer);
+    drop(reader);
+    drop(writer);
     replay.verify_complete().unwrap();
 }
 
@@ -121,12 +168,29 @@ fn latest_waiter_replaces_cancelled_poll_without_consuming_observations() {
 #[test]
 fn cross_connection_prerequisite_wakes_both_parked_directions() {
     let group = group();
-    let mut a = group.register(1, Fixture { input: b"a", ..Fixture::default() }).unwrap();
-    let mut b = group.register(2, Fixture { input: b"b", ..Fixture::default() }).unwrap();
+    let mut a = group
+        .register(
+            1,
+            Fixture {
+                input: b"a",
+                ..Fixture::default()
+            },
+        )
+        .unwrap();
+    let mut b = group
+        .register(
+            2,
+            Fixture {
+                input: b"b",
+                ..Fixture::default()
+            },
+        )
+        .unwrap();
     value(read(&mut a, 1, Waker::noop()));
     value(write(&mut b, b"q", Waker::noop()));
     value(read(&mut b, 1, Waker::noop()));
-    a.into_inner(); b.into_inner();
+    a.into_inner();
+    b.into_inner();
     let replay = group.finish().unwrap().replay();
     let mut a = replay.open(1).unwrap();
     let (mut reader, mut writer) = replay.open(2).unwrap().into_split();
@@ -153,9 +217,16 @@ fn abandoned_write_half_fails_and_wakes_read_half() {
     drop(writer);
     assert_eq!(count.0.load(Ordering::SeqCst), 1);
     assert!(matches!(read(&mut reader, 5, &waker), Poll::Ready(Err(_))));
-    assert_eq!(replay.verify_complete(), Err(IoGroupCompletionError::Diverged(
-        IoGroupReplayError::AbandonedHalf { stream: 11, direction: ReplayDirection::Write, remaining: 1 }
-    )));
+    assert_eq!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Diverged(
+            IoGroupReplayError::AbandonedHalf {
+                stream: 11,
+                direction: ReplayDirection::Write,
+                remaining: 1
+            }
+        ))
+    );
 }
 
 #[test]
@@ -171,10 +242,19 @@ fn exhausted_half_can_drop_while_peer_finishes_but_extra_poll_is_divergence() {
     let replay = exchange(false).replay();
     let (mut reader, _writer) = replay.open(11).unwrap().into_split();
     value(read(&mut reader, 5, Waker::noop()));
-    assert!(matches!(read(&mut reader, 5, Waker::noop()), Poll::Ready(Err(_))));
-    assert_eq!(replay.verify_complete(), Err(IoGroupCompletionError::Diverged(
-        IoGroupReplayError::ExhaustedHalf { stream: 11, direction: ReplayDirection::Read }
-    )));
+    assert!(matches!(
+        read(&mut reader, 5, Waker::noop()),
+        Poll::Ready(Err(_))
+    ));
+    assert_eq!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Diverged(
+            IoGroupReplayError::ExhaustedHalf {
+                stream: 11,
+                direction: ReplayDirection::Read
+            }
+        ))
+    );
 }
 
 #[test]
@@ -182,18 +262,37 @@ fn changed_write_and_wrong_write_operation_remain_sticky_errors() {
     let replay = exchange(true).replay();
     let (mut reader, mut writer) = replay.open(11).unwrap().into_split();
     assert!(read(&mut reader, 5, Waker::noop()).is_pending());
-    assert!(matches!(write(&mut writer, b"WRONG!!", Waker::noop()), Poll::Ready(Err(_))));
-    assert!(matches!(read(&mut reader, 5, Waker::noop()), Poll::Ready(Err(_))));
-    assert!(matches!(replay.verify_complete(), Err(IoGroupCompletionError::Diverged(
-        IoGroupReplayError::Stream { stream: 11, .. }
-    ))));
+    assert!(matches!(
+        write(&mut writer, b"WRONG!!", Waker::noop()),
+        Poll::Ready(Err(_))
+    ));
+    assert!(matches!(
+        read(&mut reader, 5, Waker::noop()),
+        Poll::Ready(Err(_))
+    ));
+    assert!(matches!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Diverged(
+            IoGroupReplayError::Stream { stream: 11, .. }
+        ))
+    ));
 
     let replay = exchange(true).replay();
     let (_reader, mut writer) = replay.open(11).unwrap().into_split();
-    assert!(matches!(Pin::new(&mut writer).poll_flush(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(_))));
-    assert_eq!(replay.verify_complete(), Err(IoGroupCompletionError::Diverged(
-        IoGroupReplayError::Operation { stream: 11, expected: IoOperation::Write, actual: IoOperation::Flush }
-    )));
+    assert!(matches!(
+        Pin::new(&mut writer).poll_flush(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(_))
+    ));
+    assert_eq!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Diverged(
+            IoGroupReplayError::Operation {
+                stream: 11,
+                expected: IoOperation::Write,
+                actual: IoOperation::Flush
+            }
+        ))
+    );
 }
 
 #[test]
@@ -202,7 +301,10 @@ fn vectored_flush_shutdown_and_recorded_eof_keep_exact_accounting() {
     let mut io = group.register(7, Fixture::default()).unwrap();
     let bufs = [IoSlice::new(b"a"), IoSlice::new(b"bc")];
     let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(value(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)), 3);
+    assert_eq!(
+        value(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs)),
+        3
+    );
     assert_eq!(value(read(&mut io, 4, Waker::noop())), b"");
     value(Pin::new(&mut io).poll_flush(&mut cx));
     value(Pin::new(&mut io).poll_shutdown(&mut cx));
@@ -211,7 +313,10 @@ fn vectored_flush_shutdown_and_recorded_eof_keep_exact_accounting() {
     let (mut reader, mut writer) = replay.open(7).unwrap().into_split();
     assert!(writer.is_write_vectored());
     assert!(read(&mut reader, 4, Waker::noop()).is_pending());
-    assert_eq!(value(Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs)), 3);
+    assert_eq!(
+        value(Pin::new(&mut writer).poll_write_vectored(&mut cx, &bufs)),
+        3
+    );
     assert!(Pin::new(&mut writer).poll_flush(&mut cx).is_pending());
     assert_eq!(value(read(&mut reader, 4, Waker::noop())), b"");
     value(Pin::new(&mut writer).poll_flush(&mut cx));
@@ -222,13 +327,26 @@ fn vectored_flush_shutdown_and_recorded_eof_keep_exact_accounting() {
 #[test]
 fn original_io_error_consumes_read_observation_without_poisoning_write_half() {
     let group = group();
-    let mut io = group.register(9, Fixture { read_error: true, ..Fixture::default() }).unwrap();
-    assert!(matches!(read(&mut io, 2, Waker::noop()), Poll::Ready(Err(_))));
+    let mut io = group
+        .register(
+            9,
+            Fixture {
+                read_error: true,
+                ..Fixture::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        read(&mut io, 2, Waker::noop()),
+        Poll::Ready(Err(_))
+    ));
     value(write(&mut io, b"bye", Waker::noop()));
     io.into_inner();
     let replay = group.finish().unwrap().replay();
     let (mut reader, mut writer) = replay.open(9).unwrap().into_split();
-    assert!(matches!(read(&mut reader, 2, Waker::noop()), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset));
+    assert!(
+        matches!(read(&mut reader, 2, Waker::noop()), Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset)
+    );
     drop(reader);
     value(write(&mut writer, b"bye", Waker::noop()));
     replay.verify_complete().unwrap();
@@ -251,9 +369,16 @@ fn dropping_last_half_releases_shared_state_even_with_registered_group_waiter() 
     let (mut reader, writer) = replay.open(11).unwrap().into_split();
     let weak = Arc::downgrade(&reader.shared);
     assert!(read(&mut reader, 5, Waker::noop()).is_pending());
-    drop(reader); drop(writer);
-    assert!(weak.upgrade().is_none(), "no group-to-halves ownership cycle");
-    assert!(matches!(replay.verify_complete(), Err(IoGroupCompletionError::Diverged(_))));
+    drop(reader);
+    drop(writer);
+    assert!(
+        weak.upgrade().is_none(),
+        "no group-to-halves ownership cycle"
+    );
+    assert!(matches!(
+        replay.verify_complete(),
+        Err(IoGroupCompletionError::Diverged(_))
+    ));
 }
 
 #[test]

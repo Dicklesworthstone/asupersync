@@ -219,7 +219,7 @@ fn sqlite_dropped_before_first_vm_instruction_latches_cancellation_and_reuses_co
             let fixture = Fixture::new();
             let (worker_gate, entered, release) = gate();
             let (completed, completion) = std_mpsc::channel();
-            let operation = move |raw: &rusqlite::Connection| {
+            let operation = move |raw: &mut rusqlite::Connection| {
                 worker_gate.wait()?;
                 let result = raw
                     .query_row(FINITE_QUERY, [], |row| row.get::<_, i64>(0))
@@ -376,8 +376,8 @@ fn sqlite_panicking_operation_retires_handler_and_cannot_interrupt_its_successor
             let (completed, completion) = std_mpsc::channel();
             let inner = Arc::clone(&fixture.connection.inner);
             let successor = fixture.pool.handle().spawn(move || {
-                let guard = inner.lock();
-                let raw = guard.get().unwrap();
+                let mut guard = inner.lock();
+                let raw = guard.get_mut().unwrap();
                 let mut first = Some((running, vm_gate));
                 // This is a direct raw successor after the tested operation
                 // retired, not a replacement for its cancellation callback.

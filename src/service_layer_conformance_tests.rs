@@ -37,9 +37,9 @@
 //! - SL-RT05: Side effects occur exactly once despite retries
 
 #[cfg(any(test, feature = "test-internals"))]
-use std::collections::{HashMap, VecDeque};
-#[cfg(any(test, feature = "test-internals"))]
 use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "test-internals"))]
+use std::collections::{HashMap, VecDeque};
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::{Arc, Mutex};
 #[cfg(any(test, feature = "test-internals"))]

@@ -4,8 +4,8 @@
 //! polling order across directions is relaxed; no byte operation is skipped.
 
 use super::{
-    AsyncRead, AsyncWrite, IoGroupReplayError, IoOperation, ReadBuf, ReplayGroupIo,
-    ReplayShared, wake,
+    AsyncRead, AsyncWrite, IoGroupReplayError, IoOperation, ReadBuf, ReplayGroupIo, ReplayShared,
+    wake,
 };
 use parking_lot::Mutex;
 use std::fmt;
@@ -149,7 +149,12 @@ impl Shared {
         let Some(io) = io else {
             return Poll::Pending;
         };
-        let mut lease = Lease { shared: self, io: Some(io), slot, ready: false };
+        let mut lease = Lease {
+            shared: self,
+            io: Some(io),
+            slot,
+            ready: false,
+        };
         let result = match self.enter(direction) {
             Ok(false) => Poll::Pending,
             Err(error) => {
@@ -211,7 +216,11 @@ impl Drop for Lease<'_> {
             let mut state = self.shared.state.lock();
             debug_assert!(state.io.is_none());
             state.io = self.io.take();
-            let retired = if self.ready { state.waiters[self.slot].take() } else { None };
+            let retired = if self.ready {
+                state.waiters[self.slot].take()
+            } else {
+                None
+            };
             let contenders = std::array::from_fn(|slot| {
                 if std::mem::take(&mut state.contended[slot]) {
                     state.waiters[slot].take()
@@ -228,20 +237,28 @@ impl Drop for Lease<'_> {
 
 /// Owned read direction of one captured connection; not cloneable.
 /// Dropping it with unread observations invalidates the whole replay group.
-pub struct ReplayGroupReadHalf { shared: Arc<Shared> }
+pub struct ReplayGroupReadHalf {
+    shared: Arc<Shared>,
+}
 
 /// Owned write/flush/shutdown direction of one captured connection; not cloneable.
 /// Dropping it with unwritten observations invalidates the whole replay group.
-pub struct ReplayGroupWriteHalf { shared: Arc<Shared> }
+pub struct ReplayGroupWriteHalf {
+    shared: Arc<Shared>,
+}
 
 impl fmt::Debug for ReplayGroupReadHalf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplayGroupReadHalf").field("stream", &self.shared.id).finish_non_exhaustive()
+        f.debug_struct("ReplayGroupReadHalf")
+            .field("stream", &self.shared.id)
+            .finish_non_exhaustive()
     }
 }
 impl fmt::Debug for ReplayGroupWriteHalf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplayGroupWriteHalf").field("stream", &self.shared.id).finish_non_exhaustive()
+        f.debug_struct("ReplayGroupWriteHalf")
+            .field("stream", &self.shared.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -292,7 +309,12 @@ impl ReplayGroupIo {
             }),
             forward: Waker::from(Arc::new(Forward(Weak::clone(weak)))),
         });
-        (ReplayGroupReadHalf { shared: Arc::clone(&shared) }, ReplayGroupWriteHalf { shared })
+        (
+            ReplayGroupReadHalf {
+                shared: Arc::clone(&shared),
+            },
+            ReplayGroupWriteHalf { shared },
+        )
     }
 }
 
@@ -329,13 +351,18 @@ impl ReplayGroupReadHalf {
         }
         let (io, waiters) = {
             let mut state = self.shared.state.lock();
-            let io = state.io.take().expect("both half owners exclude an active lease");
+            let io = state
+                .io
+                .take()
+                .expect("both half owners exclude an active lease");
             state.reunited = true;
             state.contended = [false, false];
             let waiters = [state.waiters[0].take(), state.waiters[1].take()];
             (io, waiters)
         };
-        let forward = self.shared.group.state.lock().slots[self.shared.index].waiter.take();
+        let forward = self.shared.group.state.lock().slots[self.shared.index]
+            .waiter
+            .take();
         retire(forward);
         for waiter in waiters {
             retire(waiter);
@@ -349,30 +376,58 @@ impl ReplayGroupReadHalf {
 }
 
 impl AsyncRead for ReplayGroupReadHalf {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        self.shared.poll_with(ReplayDirection::Read, cx, |io, cx| Pin::new(io).poll_read(cx, buf))
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.shared.poll_with(ReplayDirection::Read, cx, |io, cx| {
+            Pin::new(io).poll_read(cx, buf)
+        })
     }
 }
 impl AsyncWrite for ReplayGroupWriteHalf {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| Pin::new(io).poll_write(cx, buf))
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| {
+            Pin::new(io).poll_write(cx, buf)
+        })
     }
-    fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
-        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| {
+            Pin::new(io).poll_write_vectored(cx, bufs)
+        })
     }
-    fn is_write_vectored(&self) -> bool { self.shared.vectored }
+    fn is_write_vectored(&self) -> bool {
+        self.shared.vectored
+    }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| Pin::new(io).poll_flush(cx))
+        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| {
+            Pin::new(io).poll_flush(cx)
+        })
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| Pin::new(io).poll_shutdown(cx))
+        self.shared.poll_with(ReplayDirection::Write, cx, |io, cx| {
+            Pin::new(io).poll_shutdown(cx)
+        })
     }
 }
 impl Drop for ReplayGroupReadHalf {
-    fn drop(&mut self) { self.shared.close(ReplayDirection::Read); }
+    fn drop(&mut self) {
+        self.shared.close(ReplayDirection::Read);
+    }
 }
 impl Drop for ReplayGroupWriteHalf {
-    fn drop(&mut self) { self.shared.close(ReplayDirection::Write); }
+    fn drop(&mut self) {
+        self.shared.close(ReplayDirection::Write);
+    }
 }
 
 #[cfg(test)]

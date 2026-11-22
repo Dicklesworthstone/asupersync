@@ -35,9 +35,9 @@ pub(super) fn run(
             let timeout = timers
                 .as_ref()
                 .and_then(|timer| {
-                    timer.next_deadline().map(|deadline| {
-                        Duration::from_nanos(deadline.duration_since(timer.now()))
-                    })
+                    timer
+                        .next_deadline()
+                        .map(|deadline| Duration::from_nanos(deadline.duration_since(timer.now())))
                 })
                 .map_or(MAX_POLL_WAIT, |wait| wait.min(MAX_POLL_WAIT));
             // Cloning the runtime's handle preserves its poll election. A

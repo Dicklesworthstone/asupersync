@@ -502,13 +502,19 @@ pub async fn commit_section<F, T>(cx: &Cx, max_polls: u32, f: F) -> T
 where
     F: Future<Output = T>,
 {
+    let mut wake_guard = cx.masked_poll_guard();
     let mut future = Box::pin(f);
     let mut masked_polls = 0u32;
     std::future::poll_fn(|task_cx| {
         if masked_polls < max_polls {
             masked_polls = masked_polls.saturating_add(1);
-            cx.masked(|| future.as_mut().poll(task_cx))
+            let keep_parked = masked_polls < max_polls;
+            let (polled, suppressed) =
+                cx.masked_poll(keep_parked, || future.as_mut().poll(task_cx));
+            wake_guard.set_suppressed(suppressed);
+            polled
         } else {
+            wake_guard.set_suppressed(false);
             future.as_mut().poll(task_cx)
         }
     })
@@ -525,13 +531,19 @@ pub async fn try_commit_section<F, T, E>(cx: &Cx, max_polls: u32, f: F) -> Resul
 where
     F: Future<Output = Result<T, E>>,
 {
+    let mut wake_guard = cx.masked_poll_guard();
     let mut future = Box::pin(f);
     let mut masked_polls = 0u32;
     std::future::poll_fn(|task_cx| {
         if masked_polls < max_polls {
             masked_polls = masked_polls.saturating_add(1);
-            cx.masked(|| future.as_mut().poll(task_cx))
+            let keep_parked = masked_polls < max_polls;
+            let (polled, suppressed) =
+                cx.masked_poll(keep_parked, || future.as_mut().poll(task_cx));
+            wake_guard.set_suppressed(suppressed);
+            polled
         } else {
+            wake_guard.set_suppressed(false);
             future.as_mut().poll(task_cx)
         }
     })

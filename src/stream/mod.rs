@@ -421,11 +421,7 @@ pub trait StreamExt: Stream {
     ///     Ok(())
     /// }
     /// ```
-    fn timeout<Caps>(
-        self,
-        cx: &crate::cx::Cx<Caps>,
-        duration: Duration,
-    ) -> Timeout<'_, Self, Caps>
+    fn timeout<Caps>(self, cx: &crate::cx::Cx<Caps>, duration: Duration) -> Timeout<'_, Self, Caps>
     where
         Self: Sized,
         Caps: crate::cx::cap::HasTime,

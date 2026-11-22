@@ -28,7 +28,10 @@ impl FetchStreamLimits {
     /// Construct explicit total-transfer and per-chunk limits. Zero is valid.
     #[must_use]
     pub const fn new(transfer: FetchBytesLimits, max_chunk_bytes: usize) -> Self {
-        Self { transfer, max_chunk_bytes }
+        Self {
+            transfer,
+            max_chunk_bytes,
+        }
     }
 }
 
@@ -63,25 +66,35 @@ impl fmt::Debug for FetchStream {
 impl FetchStream {
     /// HTTP status, including ordinary 4xx/5xx responses; not body completion.
     #[must_use]
-    pub const fn status(&self) -> u16 { self.status }
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
 
     /// Bytes successfully handed to the caller, excluding a refused chunk.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn received_bytes(&self) -> usize {
         #[cfg(target_arch = "wasm32")]
-        { self.body.received_bytes() }
+        {
+            self.body.received_bytes()
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        { 0 }
+        {
+            0
+        }
     }
 
     /// Poll one chunk. Empty chunks are `Some(Vec::new())`, never invented EOF.
     /// No new host read is started while the previous read is pending.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn poll_chunk(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Vec<u8>>, FetchBytesError>> {
         #[cfg(target_arch = "wasm32")]
-        { self.get_mut().body.poll_chunk(cx) }
+        {
+            self.get_mut().body.poll_chunk(cx)
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = (self, cx);
@@ -91,6 +104,7 @@ impl FetchStream {
 
     /// Wait for one chunk without losing an in-flight read when this wait is
     /// dropped. To cancel the transfer itself, drop the body or close its owner.
+    #[allow(clippy::future_not_send)]
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, FetchBytesError> {
         poll_fn(|cx| Pin::new(&mut *self).poll_chunk(cx)).await
     }
@@ -100,7 +114,7 @@ impl FetchStream {
 ///
 /// Scope, ABI, URL, method, credential and request-byte checks are the same as
 /// [`super::fetch_bytes`]. Redirects are refused before following them. The
-/// returned body keeps the canonical handle and AbortController alive until
+/// returned body keeps the canonical handle and `AbortController` alive until
 /// EOF, error or drop. No body read is issued merely to return the headers.
 ///
 /// On native targets no handle or network work is admitted; the result is
@@ -111,7 +125,9 @@ pub async fn fetch_stream(
     consumer_version: Option<WasmAbiVersion>,
 ) -> Result<FetchStream, FetchBytesError> {
     #[cfg(target_arch = "wasm32")]
-    { super::browser::stream::open(request, limits, consumer_version).await }
+    {
+        super::browser::stream::open(request, limits, consumer_version).await
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = (request, limits, consumer_version);
@@ -145,10 +161,14 @@ impl StreamBudget {
         // Validate both limits before attempting allocation or copying JS bytes.
         let _ = self.body.checked_end(self.received, length)?;
         if length > self.max_chunk_bytes {
-            return Err(FetchBytesError::ChunkLimit { limit: self.max_chunk_bytes });
+            return Err(FetchBytesError::ChunkLimit {
+                limit: self.max_chunk_bytes,
+            });
         }
         let mut bytes = Vec::new();
-        bytes.try_reserve_exact(length).map_err(|_| FetchBytesError::Allocation)?;
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| FetchBytesError::Allocation)?;
         bytes.resize(length, 0);
         Ok(bytes)
     }
@@ -158,7 +178,9 @@ impl StreamBudget {
         Ok(())
     }
 
-    pub(crate) const fn received(&self) -> usize { self.received }
+    pub(crate) const fn received(&self) -> usize {
+        self.received
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

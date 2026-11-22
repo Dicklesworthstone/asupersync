@@ -31,13 +31,13 @@
 //! }
 //! ```
 
+use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::pl::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -505,10 +505,9 @@ impl RateLimiter {
                 (total_fractional / u128::from(period_ms)).min(u128::from(u64::MAX)) as u64;
             let new_fractional = (total_fractional % u128::from(period_ms)) as u64;
 
-            state.tokens =
-                u64::from(state.tokens)
-                    .saturating_add(new_tokens)
-                    .min(u64::from(self.policy.burst)) as u32;
+            state.tokens = u64::from(state.tokens)
+                .saturating_add(new_tokens)
+                .min(u64::from(self.policy.burst)) as u32;
             state.fractional = new_fractional;
 
             if state.tokens == self.policy.burst {
@@ -1346,11 +1345,9 @@ impl SlidingWindow {
         for &(at, charged) in &self.entries {
             freed += u64::from(charged);
             if freed >= needed {
-                return u64::try_from(
-                    (u128::from(at) + u128::from(period_millis)) * 1_000_000,
-                )
-                .ok()
-                .map(Time::from_nanos);
+                return u64::try_from((u128::from(at) + u128::from(period_millis)) * 1_000_000)
+                    .ok()
+                    .map(Time::from_nanos);
             }
         }
         None
@@ -1582,9 +1579,8 @@ impl SlidingWindowRateLimiter {
             };
             let entry = &mut window.queue[index];
             entry.result = Some(result);
-            entry.waited = Duration::from_nanos(
-                now.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()),
-            );
+            entry.waited =
+                Duration::from_nanos(now.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()));
             self.record_wait(entry.waited);
             changed = true;
         }
@@ -1627,11 +1623,11 @@ impl SlidingWindowRateLimiter {
             window.next_id = id.checked_add(1);
             let enqueued_at = window.observed;
             let deadline = match self.policy.wait_strategy {
-                WaitStrategy::BlockWithTimeout(timeout) => u64::try_from(
-                    u128::from(enqueued_at.as_nanos()) + timeout.as_nanos(),
-                )
-                .ok()
-                .map(Time::from_nanos),
+                WaitStrategy::BlockWithTimeout(timeout) => {
+                    u64::try_from(u128::from(enqueued_at.as_nanos()) + timeout.as_nanos())
+                        .ok()
+                        .map(Time::from_nanos)
+                }
                 WaitStrategy::Block | WaitStrategy::Reject => None,
             };
             window.queue.push_back(SlidingWindowQueueEntry {
@@ -1798,9 +1794,9 @@ impl<'a> SlidingWindowQueueOwner<'a> {
                             grant,
                             refund: true,
                         })),
-                        Err(RejectionReason::Timeout) => {
-                            Err(RateLimitError::Timeout { waited: entry.waited })
-                        }
+                        Err(RejectionReason::Timeout) => Err(RateLimitError::Timeout {
+                            waited: entry.waited,
+                        }),
                     }
                 }
                 None => Ok(None),
@@ -1955,9 +1951,7 @@ impl FixedWindowState {
             return None;
         }
         let millis = u128::from(self.start_millis) + u128::from(period_millis);
-        u64::try_from(millis * 1_000_000)
-            .ok()
-            .map(Time::from_nanos)
+        u64::try_from(millis * 1_000_000).ok().map(Time::from_nanos)
     }
 }
 
@@ -2169,9 +2163,7 @@ impl FixedWindowRateLimiter {
             avg_wait_time: waited_ms
                 .checked_div(total_waited)
                 .map_or(Duration::ZERO, Duration::from_millis),
-            max_wait_time: Duration::from_millis(
-                self.max_wait_time_ms.load(Ordering::Relaxed),
-            ),
+            max_wait_time: Duration::from_millis(self.max_wait_time_ms.load(Ordering::Relaxed)),
             ..RateLimitMetrics::default()
         }
     }
@@ -2230,10 +2222,7 @@ impl FixedWindowRateLimiter {
                 continue;
             }
             let expired = entry.deadline.is_some_and(|deadline| now > deadline);
-            if !expired
-                && !blocked
-                && entry.cost <= self.policy.rate.saturating_sub(state.used)
-            {
+            if !expired && !blocked && entry.cost <= self.policy.rate.saturating_sub(state.used) {
                 state.used += entry.cost;
                 entry.result = Some(Ok(state.generation));
                 self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -2292,12 +2281,14 @@ impl FixedWindowRateLimiter {
             {
                 state.used += cost;
                 self.total_allowed.fetch_add(1, Ordering::Relaxed);
-                return Ok(FixedWindowAdmission::Immediate(FixedWindowRateLimitPermit {
-                    limiter: self,
-                    cost,
-                    generation: state.generation,
-                    refund: true,
-                }));
+                return Ok(FixedWindowAdmission::Immediate(
+                    FixedWindowRateLimitPermit {
+                        limiter: self,
+                        cost,
+                        generation: state.generation,
+                        refund: true,
+                    },
+                ));
             }
             if cost > self.policy.rate
                 || matches!(self.policy.wait_strategy, WaitStrategy::Reject)
@@ -2313,11 +2304,11 @@ impl FixedWindowRateLimiter {
             state.next_id = id.checked_add(1);
             let enqueued_at = state.observed;
             let deadline = match self.policy.wait_strategy {
-                WaitStrategy::BlockWithTimeout(timeout) => u64::try_from(
-                    u128::from(enqueued_at.as_nanos()) + timeout.as_nanos(),
-                )
-                .ok()
-                .map(Time::from_nanos),
+                WaitStrategy::BlockWithTimeout(timeout) => {
+                    u64::try_from(u128::from(enqueued_at.as_nanos()) + timeout.as_nanos())
+                        .ok()
+                        .map(Time::from_nanos)
+                }
                 WaitStrategy::Block | WaitStrategy::Reject => None,
             };
             state.queue.push_back(FixedWindowQueueEntry {
@@ -2463,7 +2454,10 @@ impl FixedWindowRateLimiter {
                 (queue, owner) => queue.or(owner),
             };
             let mut timer = std::pin::pin!(
-                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
+                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(
+                    deadline,
+                    driver.clone()
+                ))
             );
             poll_fn(|task| {
                 cancellation.register(task.waker());
@@ -2499,7 +2493,10 @@ impl<'a> FixedWindowQueueOwner<'a> {
         let result = if let Some(index) = state.queue.iter().position(|entry| entry.id == id) {
             match state.queue[index].result {
                 Some(result) => {
-                    let entry = state.queue.remove(index).expect("located fixed-window entry");
+                    let entry = state
+                        .queue
+                        .remove(index)
+                        .expect("located fixed-window entry");
                     self.entry_id = None;
                     match result {
                         Ok(generation) => Ok(Some(FixedWindowRateLimitPermit {
@@ -2508,9 +2505,9 @@ impl<'a> FixedWindowQueueOwner<'a> {
                             generation,
                             refund: true,
                         })),
-                        Err(RejectionReason::Timeout) => {
-                            Err(RateLimitError::Timeout { waited: entry.waited })
-                        }
+                        Err(RejectionReason::Timeout) => Err(RateLimitError::Timeout {
+                            waited: entry.waited,
+                        }),
                     }
                 }
                 None => Ok(None),
@@ -2538,13 +2535,19 @@ impl Drop for FixedWindowQueueOwner<'_> {
         let mut state = self.limiter.state.lock();
         state.observe(now, period_to_millis_ceil(self.limiter.policy.period));
         let removed = if let Some(index) = state.queue.iter().position(|entry| entry.id == id) {
-            let entry = state.queue.remove(index).expect("located fixed-window owner");
+            let entry = state
+                .queue
+                .remove(index)
+                .expect("located fixed-window owner");
             match entry.result {
                 Some(Ok(generation)) if generation.is_some() && generation == state.generation => {
                     state.used = state.used.saturating_sub(entry.cost);
                 }
                 None => self.limiter.record_wait(Duration::from_nanos(
-                    state.observed.as_nanos().saturating_sub(entry.enqueued_at.as_nanos()),
+                    state
+                        .observed
+                        .as_nanos()
+                        .saturating_sub(entry.enqueued_at.as_nanos()),
                 )),
                 Some(Ok(_) | Err(_)) => {}
             }
@@ -2690,7 +2693,10 @@ impl RateLimiter {
                 (queue, owner) => queue.or(owner),
             };
             let mut timer = std::pin::pin!(
-                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(deadline, driver.clone()))
+                wake_at.map(|deadline| crate::time::Sleep::with_timer_driver(
+                    deadline,
+                    driver.clone()
+                ))
             );
             poll_fn(|task| {
                 cancellation.register(task.waker());
@@ -2749,10 +2755,7 @@ impl RateLimiter {
             let needed = u128::from(head.cost - state.tokens)
                 * u128::from(period_to_millis_ceil(self.policy.period));
             let remaining = needed.saturating_sub(u128::from(state.fractional));
-            Some(
-                u128::from(state.last_refill)
-                    + remaining.div_ceil(u128::from(self.policy.rate)),
-            )
+            Some(u128::from(state.last_refill) + remaining.div_ceil(u128::from(self.policy.rate)))
         } else {
             None
         };

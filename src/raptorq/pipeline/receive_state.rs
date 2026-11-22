@@ -6,8 +6,8 @@ use super::{
     required_security, usize_to_u32_saturating,
 };
 use crate::decoding::{
-    BlockDecodeJob, BlockDecodeOutcome, DecodingConfig, DecodingPipeline, DeferredSymbolAcceptResult,
-    RejectReason, SymbolAcceptResult,
+    BlockDecodeJob, BlockDecodeOutcome, DecodingConfig, DecodingPipeline,
+    DeferredSymbolAcceptResult, RejectReason, SymbolAcceptResult,
 };
 
 pub(super) struct ReceiveState {
@@ -54,7 +54,9 @@ impl ReceiveState {
         };
         let reject_unauthenticated = require_authentication
             || (config.security.reject_unauthenticated
-                && security.as_ref().is_some_and(|ctx| ctx.mode() == AuthMode::Strict));
+                && security
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.mode() == AuthMode::Strict));
         Ok(Self {
             decoder,
             object_id: params.object_id,

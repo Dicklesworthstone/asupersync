@@ -39,20 +39,31 @@ impl WallWatchdog {
         let expired = signal.clone();
         let (stop, stopping) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if matches!(stopping.recv_timeout(WATCHDOG), Err(mpsc::RecvTimeoutError::Timeout)) {
+            if matches!(
+                stopping.recv_timeout(WATCHDOG),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
                 expired.expired.store(true, Ordering::Release);
                 let waiter = expired.waiter.lock().unwrap().take();
-                if let Some(waiter) = waiter { waiter.wake(); }
+                if let Some(waiter) = waiter {
+                    waiter.wake();
+                }
             }
         });
-        Self { signal, stop, thread: Some(thread) }
+        Self {
+            signal,
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
 impl Drop for WallWatchdog {
     fn drop(&mut self) {
         let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -65,14 +76,21 @@ where
     let owner = runtime.request_cx_with_budget(Budget::INFINITE);
     let driver = runtime.request_cx_with_budget(Budget::INFINITE);
     let watchdog = WallWatchdog::new();
-    runtime.block_on_with_cx(driver, Box::pin(async {
-        let mut future = Box::pin(test(owner));
-        poll_fn(|task| {
-            *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
-            assert!(!watchdog.signal.expired.load(Ordering::Acquire), "multipath symbol wall watchdog elapsed");
-            future.as_mut().poll(task)
-        }).await;
-    }));
+    runtime.block_on_with_cx(
+        driver,
+        Box::pin(async {
+            let mut future = Box::pin(test(owner));
+            poll_fn(|task| {
+                *watchdog.signal.waiter.lock().unwrap() = Some(task.waker().clone());
+                assert!(
+                    !watchdog.signal.expired.load(Ordering::Acquire),
+                    "multipath symbol wall watchdog elapsed"
+                );
+                future.as_mut().poll(task)
+            })
+            .await;
+        }),
+    );
     drop(watchdog);
     assert!(runtime.shutdown_timeout(WATCHDOG));
 }
@@ -104,9 +122,16 @@ fn accept(listener: &TcpListener) -> std::net::TcpStream {
 }
 
 fn wire(symbol: &AuthenticatedSymbol) -> Vec<u8> {
-    let encoded = encode_symbol_batch(std::slice::from_ref(symbol), SymbolBatchLimits {
-        max_encoded_bytes: 1024, max_symbols: 1, max_payload_bytes: 64, max_decoded_bytes: 1024,
-    }).unwrap();
+    let encoded = encode_symbol_batch(
+        std::slice::from_ref(symbol),
+        SymbolBatchLimits {
+            max_encoded_bytes: 1024,
+            max_symbols: 1,
+            max_payload_bytes: 64,
+            max_decoded_bytes: 1024,
+        },
+    )
+    .unwrap();
     let mut bytes = (encoded.as_ref().len() as u32).to_be_bytes().to_vec();
     bytes.extend_from_slice(encoded.as_ref());
     bytes
@@ -118,11 +143,16 @@ struct WitnessFailure<S> {
 }
 
 impl<S: SymbolStream + Unpin> SymbolStream for WitnessFailure<S> {
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.source).poll_next(cx);
         if matches!(&result, Poll::Ready(Some(Err(_)))) {
-            if let Some(signal) = this.signal.take() { let _ = signal.send(()); }
+            if let Some(signal) = this.signal.take() {
+                let _ = signal.send(());
+            }
         }
         result
     }
@@ -136,23 +166,45 @@ fn tcp_union_decodes_when_neither_peer_has_enough_symbols_and_one_fails_mid_fram
     config.encoding.symbol_size = 64;
     config.encoding.max_block_size = 512;
     config.encoding.repair_overhead = 1.0;
-    let mut sender = RaptorQSenderBuilder::new().config(config.clone())
+    let mut sender = RaptorQSenderBuilder::new()
+        .config(config.clone())
         .security(SecurityContext::new(AuthKey::from_seed(42)))
-        .transport(CollectingSink::new()).build().unwrap();
-    let sent = sender.send_object(&Cx::for_testing(), object, &data).unwrap();
+        .transport(CollectingSink::new())
+        .build()
+        .unwrap();
+    let sent = sender
+        .send_object(&Cx::for_testing(), object, &data)
+        .unwrap();
     assert_eq!(sent.source_symbols, 8);
     let symbols = sender.transport_mut().symbols().to_vec();
-    let first: Vec<_> = symbols.iter().filter(|symbol| symbol.symbol().esi() < 4).cloned().collect();
-    let second: Vec<_> = symbols.iter().filter(|symbol| symbol.symbol().esi() >= 3).cloned().collect();
+    let first: Vec<_> = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol().esi() < 4)
+        .cloned()
+        .collect();
+    let second: Vec<_> = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol().esi() >= 3)
+        .cloned()
+        .collect();
     assert_eq!(first.len(), 4);
     assert_eq!(second.len(), 5);
     let params = ObjectParams::new(object, data.len() as u64, 64, 1, 8);
     for subset in [first.clone(), second.clone()] {
-        let mut isolated = RaptorQReceiverBuilder::new().config(config.clone())
+        let mut isolated = RaptorQReceiverBuilder::new()
+            .config(config.clone())
             .security(SecurityContext::new(AuthKey::from_seed(42)))
-            .source(VecStream::new(subset)).build().unwrap();
-        assert_eq!(isolated.receive_object(&Cx::for_testing(), &params).unwrap_err().kind(), ErrorKind::InsufficientSymbols,
-            "neither individual peer can satisfy this object");
+            .source(VecStream::new(subset))
+            .build()
+            .unwrap();
+        assert_eq!(
+            isolated
+                .receive_object(&Cx::for_testing(), &params)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InsufficientSymbols,
+            "neither individual peer can satisfy this object"
+        );
     }
 
     let (a_listener, a_address) = listener();
@@ -160,7 +212,9 @@ fn tcp_union_decodes_when_neither_peer_has_enough_symbols_and_one_fails_mid_fram
     let (failure_seen, wait_failure) = mpsc::channel();
     let a_peer = std::thread::spawn(move || {
         let mut socket = accept(&a_listener);
-        for symbol in &first { socket.write_all(&wire(symbol)).unwrap(); }
+        for symbol in &first {
+            socket.write_all(&wire(symbol)).unwrap();
+        }
         // This peer disappears during its next frame. Its complete earlier
         // symbols must remain usable while the framing error retires this path.
         socket.write_all(&wire(&first[0])[..23]).unwrap();
@@ -169,12 +223,16 @@ fn tcp_union_decodes_when_neither_peer_has_enough_symbols_and_one_fails_mid_fram
     let b_peer = std::thread::spawn(move || {
         let mut socket = accept(&b_listener);
         for symbol in &second[..4] {
-            for chunk in wire(symbol).chunks(7) { socket.write_all(chunk).unwrap(); }
+            for chunk in wire(symbol).chunks(7) {
+                socket.write_all(chunk).unwrap();
+            }
         }
         socket.flush().unwrap();
         // Force the path failure to be observed before releasing the final
         // unique symbol; this does not rely on TCP coalescing or scheduling.
-        wait_failure.recv_timeout(WATCHDOG).expect("first path failure must reach the receiver");
+        wait_failure
+            .recv_timeout(WATCHDOG)
+            .expect("first path failure must reach the receiver");
         socket.write_all(&wire(&second[4])).unwrap();
         socket.flush().unwrap();
     });
@@ -183,14 +241,31 @@ fn tcp_union_decodes_when_neither_peer_has_enough_symbols_and_one_fails_mid_fram
         let first = TcpStream::connect(a_address).await.unwrap();
         let second = TcpStream::connect(b_address).await.unwrap();
         let frame_limits = SymbolFrameLimits::new(64).unwrap();
-        let mut source = MultipathSymbolStream::new(AuthKey::from_seed(42), MultipathStreamLimits::new(2, 64, 1, 8).unwrap());
-        source.add_path(PathId(1), WitnessFailure {
-            source: FramedSymbolStream::new(first, AuthKey::from_seed(42), frame_limits),
-            signal: Some(failure_seen),
-        }).unwrap();
-        source.add_path(PathId(2), FramedSymbolStream::new(second, AuthKey::from_seed(42), frame_limits)).unwrap();
-        let mut receiver = RaptorQReceiverBuilder::new().config(config)
-            .security(SecurityContext::new(AuthKey::from_seed(42))).source(source).build().unwrap();
+        let mut source = MultipathSymbolStream::new(
+            AuthKey::from_seed(42),
+            MultipathStreamLimits::new(2, 64, 1, 8).unwrap(),
+        );
+        source
+            .add_path(
+                PathId(1),
+                WitnessFailure {
+                    source: FramedSymbolStream::new(first, AuthKey::from_seed(42), frame_limits),
+                    signal: Some(failure_seen),
+                },
+            )
+            .unwrap();
+        source
+            .add_path(
+                PathId(2),
+                FramedSymbolStream::new(second, AuthKey::from_seed(42), frame_limits),
+            )
+            .unwrap();
+        let mut receiver = RaptorQReceiverBuilder::new()
+            .config(config)
+            .security(SecurityContext::new(AuthKey::from_seed(42)))
+            .source(source)
+            .build()
+            .unwrap();
         let decoded = {
             let mut session = receiver.start_receive_object(&owner, &params).unwrap();
             session.run().await.unwrap()
@@ -201,10 +276,18 @@ fn tcp_union_decodes_when_neither_peer_has_enough_symbols_and_one_fails_mid_fram
         let source = receiver.source_mut();
         let first = source.path_stats(PathId(1)).unwrap();
         let second = source.path_stats(PathId(2)).unwrap();
-        assert!(first.failed, "failure was observed before the last needed symbol");
-        assert!(matches!(source.path_error(PathId(1)), Some(StreamError::Io { source }) if source.kind() == io::ErrorKind::UnexpectedEof));
+        assert!(
+            first.failed,
+            "failure was observed before the last needed symbol"
+        );
+        assert!(
+            matches!(source.path_error(PathId(1)), Some(StreamError::Io { source }) if source.kind() == io::ErrorKind::UnexpectedEof)
+        );
         assert!(first.delivered_symbols > 0 && second.delivered_symbols > 0);
-        assert_eq!(first.authenticated_symbols + second.authenticated_symbols, 9);
+        assert_eq!(
+            first.authenticated_symbols + second.authenticated_symbols,
+            9
+        );
         assert_eq!(first.delivered_symbols + second.delivered_symbols, 8);
         assert_eq!(first.duplicate_symbols + second.duplicate_symbols, 1);
         assert_eq!(source.dedup_stats().duplicates_detected, 1);

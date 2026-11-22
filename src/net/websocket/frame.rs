@@ -578,13 +578,14 @@ impl Decoder for FrameCodec {
         // possible length field and the incoming role's masking key.
         let extended_len = if self.max_payload_size <= CONTROL_FRAME_MAX_PAYLOAD_LEN {
             0
-        } else if self.max_payload_size <= usize::from(u16::MAX) {
+        } else if u16::try_from(self.max_payload_size).is_ok() {
             2
         } else {
             8
         };
         let mask_len = if self.role == Role::Server { 4 } else { 0 };
-        self.max_payload_size.checked_add(2 + extended_len + mask_len)
+        self.max_payload_size
+            .checked_add(2 + extended_len + mask_len)
     }
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -645,8 +646,7 @@ impl FrameCodec {
                     let payload_len_7 = second_byte & 0x7F;
 
                     // Validate reserved bits
-                    let compressed_data = self.permessage_deflate
-                        && matches!(opcode_raw, 1 | 2);
+                    let compressed_data = self.permessage_deflate && matches!(opcode_raw, 1 | 2);
                     if self.validate_reserved_bits && ((rsv1 && !compressed_data) || rsv2 || rsv3) {
                         return Err(WsError::ReservedBitsSet);
                     }

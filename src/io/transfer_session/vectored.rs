@@ -69,7 +69,10 @@ impl<'a, W> WriteAllVectoredSession<'a, W> {
     pub fn new(writer: W, buffers: &'a [IoSlice<'a>]) -> io::Result<Self> {
         let total = buffers.iter().try_fold(0_usize, |total, buffer| {
             total.checked_add(buffer.len()).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "vectored write length overflow")
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "vectored write length overflow",
+                )
             })
         })?;
         Ok(Self {
@@ -203,8 +206,8 @@ impl<W: AsyncWrite + Unpin> WriteAllVectoredSession<'_, W> {
                     continue;
                 }
                 self.poison = Some(POISONED);
-                let result = Pin::new(&mut self.writer)
-                    .poll_write_vectored(task_cx, &window[..count]);
+                let result =
+                    Pin::new(&mut self.writer).poll_write_vectored(task_cx, &window[..count]);
                 self.poison = None;
                 match result {
                     Poll::Pending => return Poll::Pending,
@@ -216,7 +219,10 @@ impl<W: AsyncWrite + Unpin> WriteAllVectoredSession<'_, W> {
                         if accepted > offered {
                             let reason = "vectored writer accepted more bytes than offered";
                             self.poison = Some(reason);
-                            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, reason)));
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                reason,
+                            )));
                         }
                         self.advance(accepted);
                     }

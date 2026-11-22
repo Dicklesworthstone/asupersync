@@ -57,7 +57,12 @@ impl Frame {
             }
             _ => return Err(protocol_error(PbftAuthError::UnsupportedPhase)),
         };
-        Ok(Self { key, bytes, recipient: recipient.cloned(), request })
+        Ok(Self {
+            key,
+            bytes,
+            recipient: recipient.cloned(),
+            request,
+        })
     }
 }
 
@@ -71,7 +76,12 @@ pub(super) struct Outbox {
 impl Outbox {
     pub(super) fn can_forward(&self, request: &MessageDigest) -> bool {
         self.frames.contains_key(&Key::Forward(*request.as_bytes()))
-            || self.frames.keys().filter(|key| matches!(key, Key::Forward(_))).count() < MAX_FORWARDS
+            || self
+                .frames
+                .keys()
+                .filter(|key| matches!(key, Key::Forward(_)))
+                .count()
+                < MAX_FORWARDS
     }
 
     /// Admit an entire outgoing group before the first send can yield. In
@@ -85,12 +95,18 @@ impl Outbox {
             if let Key::Protocol(sequence, phase) = frame.key {
                 if sequence <= self.applied.saturating_sub(RETAIN_COMPLETED)
                     || sequence > self.applied.saturating_add(reorder::WINDOW)
-                    || sequence == u64::MAX || phase > 2
+                    || sequence == u64::MAX
+                    || phase > 2
                 {
-                    return Err(inbox_error(PbftIngressOutcome::OutsideWindow(SequenceNumber(sequence))));
+                    return Err(inbox_error(PbftIngressOutcome::OutsideWindow(
+                        SequenceNumber(sequence),
+                    )));
                 }
             }
-            let previous = self.frames.get(&frame.key).map(Arc::as_ref)
+            let previous = self
+                .frames
+                .get(&frame.key)
+                .map(Arc::as_ref)
                 .or_else(|| frames[..index].iter().find(|old| old.key == frame.key));
             if let Some(old) = previous {
                 if old.bytes != frame.bytes || old.recipient != frame.recipient {
@@ -101,20 +117,28 @@ impl Outbox {
                 new_forwards += 1;
             }
         }
-        let forwards = self.frames.keys().filter(|key| matches!(key, Key::Forward(_))).count();
+        let forwards = self
+            .frames
+            .keys()
+            .filter(|key| matches!(key, Key::Forward(_)))
+            .count();
         if forwards + new_forwards > MAX_FORWARDS {
             return Err(inbox_error(PbftIngressOutcome::BufferFull));
         }
         let mut retained = Vec::with_capacity(frames.len());
         for frame in frames {
-            let entry = self.frames.entry(frame.key).or_insert_with(|| Arc::new(frame));
+            let entry = self
+                .frames
+                .entry(frame.key)
+                .or_insert_with(|| Arc::new(frame));
             retained.push(Arc::clone(entry));
         }
         Ok(retained)
     }
 
     fn next(&self) -> Option<Arc<Frame>> {
-        self.cursor.as_ref()
+        self.cursor
+            .as_ref()
             .and_then(|cursor| self.frames.range((Excluded(cursor), Unbounded)).next())
             .or_else(|| self.frames.first_key_value())
             .map(|(_, frame)| Arc::clone(frame))
@@ -132,7 +156,8 @@ impl Outbox {
 
 fn next_deadline(now: Time, interval: Duration) -> Result<Time> {
     let nanos = u64::try_from(interval.as_nanos())
-        .ok().and_then(|nanos| now.as_nanos().checked_add(nanos))
+        .ok()
+        .and_then(|nanos| now.as_nanos().checked_add(nanos))
         .filter(|deadline| *deadline > now.as_nanos())
         .ok_or_else(|| Error::new(ErrorKind::DeadlineExceeded))?;
     Ok(Time::from_nanos(nanos))
@@ -162,21 +187,33 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             return Err(protocol_error(PbftAuthError::Configuration));
         }
         Self::build(
-            config, packets, auth, machine,
+            config,
+            packets,
+            auth,
+            machine,
             Some(Arc::new(InboxMutex::new(ReorderBuffer::default()))),
             Some(Arc::new(InboxMutex::new(Outbox::default()))),
         )
     }
 
     pub(super) fn sync_outbox(&self) -> Result<()> {
-        let Some(cache) = &self.outbox else { return Ok(()) };
+        let Some(cache) = &self.outbox else {
+            return Ok(());
+        };
         let applied = self.driver.last_applied()?;
         let pending = {
             let mut cache = cache.lock();
             cache.prune(applied);
-            cache.frames.iter().filter_map(|(key, frame)| {
-                frame.request.as_ref().map(|request| (*key, Arc::clone(request)))
-            }).collect::<Vec<_>>()
+            cache
+                .frames
+                .iter()
+                .filter_map(|(key, frame)| {
+                    frame
+                        .request
+                        .as_ref()
+                        .map(|request| (*key, Arc::clone(request)))
+                })
+                .collect::<Vec<_>>()
         };
         // Never hold the outbox lock while consulting the application ledger.
         for (key, request) in pending {
@@ -213,7 +250,9 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 let frame = cache.lock().next();
                 let Some(frame) = frame else { break };
                 if let Some(recipient) = &frame.recipient {
-                    self.packets.send_packet(recipient, frame.bytes.clone()).await?;
+                    self.packets
+                        .send_packet(recipient, frame.bytes.clone())
+                        .await?;
                 } else {
                     self.packets.broadcast_packet(frame.bytes.clone()).await?;
                 }
@@ -223,7 +262,8 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 crate::runtime::yield_now().await;
             }
             Ok(sent)
-        }).await
+        })
+        .await
     }
 
     /// Drive ingress and paced retries in this caller-owned task until stopped.
@@ -246,10 +286,12 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         until_stopped(cx, async {
             let mut deadline = next_deadline(cx.now(), interval)?;
             loop {
-                self.retry_step(cx, &mut deadline, interval, max_packets).await?;
+                self.retry_step(cx, &mut deadline, interval, max_packets)
+                    .await?;
                 crate::runtime::yield_now().await;
             }
-        }).await
+        })
+        .await
     }
 
     /// Submit and await the actual application response with paced packet repair.
@@ -268,7 +310,9 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         max_packets: usize,
     ) -> Result<ConsensusResponse> {
         self.validate_retries(interval, max_packets)?;
-        if duration.is_zero() { return Err(Error::new(ErrorKind::DeadlineExceeded)); }
+        if duration.is_zero() {
+            return Err(Error::new(ErrorKind::DeadlineExceeded));
+        }
         let operation = until_stopped(cx, async {
             self.prepare_submission(&request)?;
             self.driver.submit_request(cx, request.clone()).await?;
@@ -278,11 +322,13 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 if let Some(response) = self.driver.committed_response(&request)? {
                     return Ok(response);
                 }
-                self.retry_step(cx, &mut deadline, interval, max_packets).await?;
+                self.retry_step(cx, &mut deadline, interval, max_packets)
+                    .await?;
                 crate::runtime::yield_now().await;
             }
         });
-        crate::time::timeout(cx.now(), duration, operation).await
+        crate::time::timeout(cx.now(), duration, operation)
+            .await
             .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
     }
 
@@ -301,8 +347,11 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             // Only race IDLE reception. This block retires the borrowed receive
             // future before retry_pending can acquire the same socket for sends.
             let received = crate::time::timeout(
-                now, remaining, self.packets.receive_packet(self.auth.max_packet_bytes()),
-            ).await;
+                now,
+                remaining,
+                self.packets.receive_packet(self.auth.max_packet_bytes()),
+            )
+            .await;
             if let Ok(packet) = received {
                 let packet = packet?;
                 self.admit_packet(cx, &packet).await?;

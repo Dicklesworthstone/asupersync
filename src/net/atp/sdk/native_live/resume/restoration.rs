@@ -9,11 +9,11 @@ use super::super::super::super::{
     encode_prefix,
 };
 use super::super::super::LiveStreamCommitSink;
+use super::super::receiver_journal::shared::{JournaledReceiver, JournaledSession};
 use super::super::{
     Budget, Credit, ResumableReceiver, ResumeError, ResumeReport, decode_offer, initial, offer,
 };
 use super::{Capacity, ResumeSessionKey};
-use super::super::receiver_journal::shared::{JournaledReceiver, JournaledSession};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::net::atp::protocol::frames::FrameType;
@@ -64,8 +64,9 @@ impl<W> ServiceInit<W> {
         capacity: Arc<Capacity>,
     ) -> Result<ServiceReceiver<W>, LiveStreamError> {
         match self {
-            Self::Existing(initialized) =>
-                ServiceReceiver::new(initialized, key, acceptor, config, maximum, capacity),
+            Self::Existing(initialized) => {
+                ServiceReceiver::new(initialized, key, acceptor, config, maximum, capacity)
+            }
             Self::Journaled(initialized) => initialized
                 .initialize(cx, key, acceptor, config, maximum, capacity)
                 .await

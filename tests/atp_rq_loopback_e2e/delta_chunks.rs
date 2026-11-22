@@ -9,8 +9,8 @@ use asupersync::net::atp::transport_rq::{
     send_path_with_authenticated_control, send_path_with_cdc_delta, send_path_with_delta_chunks,
 };
 use std::io::Seek as _;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 // The existing bounded RQ manifest uses near-frame-sized fixed chunks.
@@ -43,7 +43,16 @@ fn sender_with_offer(
     config: RqConfig,
     offer_delta: bool,
 ) -> Result<SendReport, RqError> {
-    sender_with_mode(addr, source, config, if offer_delta { SenderMode::Fixed } else { SenderMode::Full })
+    sender_with_mode(
+        addr,
+        source,
+        config,
+        if offer_delta {
+            SenderMode::Fixed
+        } else {
+            SenderMode::Full
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -66,17 +75,19 @@ fn sender_with_mode(
         .expect("delta sender runtime");
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("delta sender context");
-        asupersync::time::timeout(
-            cx.now(),
-            Duration::from_secs(30),
-            async {
-                match mode {
-                    SenderMode::Cdc => send_path_with_cdc_delta(&cx, addr, &source, config, "sender").await,
-                    SenderMode::Fixed => send_path_with_delta_chunks(&cx, addr, &source, config, "sender").await,
-                    SenderMode::Full => send_path_with_authenticated_control(&cx, addr, &source, config, "sender").await,
+        asupersync::time::timeout(cx.now(), Duration::from_secs(30), async {
+            match mode {
+                SenderMode::Cdc => {
+                    send_path_with_cdc_delta(&cx, addr, &source, config, "sender").await
                 }
-            },
-        )
+                SenderMode::Fixed => {
+                    send_path_with_delta_chunks(&cx, addr, &source, config, "sender").await
+                }
+                SenderMode::Full => {
+                    send_path_with_authenticated_control(&cx, addr, &source, config, "sender").await
+                }
+            }
+        })
         .await
         .expect("delta sender reaches its terminal result")
     }))
@@ -84,7 +95,10 @@ fn sender_with_mode(
 
 fn receiver(
     destination: PathBuf,
-) -> (SocketAddr, thread::JoinHandle<Result<ReceiveReport, RqError>>) {
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<ReceiveReport, RqError>>,
+) {
     spawn_receiver_with_options(
         destination,
         config(),
@@ -97,8 +111,8 @@ fn payload(chunks: usize, tail: usize) -> Vec<u8> {
         .map(|index| {
             let chunk = (index / CHUNK_BYTES) as u32;
             let offset = (index % CHUNK_BYTES) as u32;
-            (offset.wrapping_mul(1_664_525).rotate_left(7)
-                ^ chunk.wrapping_mul(2_654_435_761)) as u8
+            (offset.wrapping_mul(1_664_525).rotate_left(7) ^ chunk.wrapping_mul(2_654_435_761))
+                as u8
         })
         .collect()
 }
@@ -116,7 +130,10 @@ fn fixture(label: &str, source_bytes: &[u8], baseline: &[u8]) -> (PathBuf, PathB
 }
 
 fn assert_clean_destination(destination: &Path, expected: &[u8]) {
-    assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), expected);
+    assert_eq!(
+        std::fs::read(destination.join("payload.bin")).unwrap(),
+        expected
+    );
     let mut names = std::fs::read_dir(destination)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -203,7 +220,11 @@ enum Attack {
     TamperCdcHello,
     StripCdcAck,
     TamperCdcAck,
-    MutateFile { path: PathBuf, offset: u64, byte: u8 },
+    MutateFile {
+        path: PathBuf,
+        offset: u64,
+        byte: u8,
+    },
 }
 
 impl Attack {
@@ -212,7 +233,9 @@ impl Attack {
             Self::Pass => None,
             Self::TamperData | Self::InterruptData => Some(FrameType::ObjectData),
             Self::TamperCompletion => Some(FrameType::ObjectComplete),
-            Self::StripOffer | Self::TamperOffer | Self::ObserveSchema(_) => Some(FrameType::ObjectManifest),
+            Self::StripOffer | Self::TamperOffer | Self::ObserveSchema(_) => {
+                Some(FrameType::ObjectManifest)
+            }
             Self::StripCdcHello | Self::TamperCdcHello => Some(FrameType::Handshake),
             Self::StripCdcAck | Self::TamperCdcAck => Some(FrameType::HandshakeAck),
             Self::MutateFile { .. } | Self::ObserveRequestMode(_) => Some(FrameType::ObjectRequest),
@@ -232,9 +255,8 @@ fn relay_direction(
     let mut input = [0u8; 8192];
     let result = (|| -> std::io::Result<()> {
         loop {
-            while let Some(mut frame) = codec
-                .decode(&mut buffered)
-                .map_err(std::io::Error::other)?
+            while let Some(mut frame) =
+                codec.decode(&mut buffered).map_err(std::io::Error::other)?
             {
                 if frame.frame_type() == FrameType::ObjectData {
                     data_payload_bytes.fetch_add(frame.payload.len(), Ordering::SeqCst);
@@ -243,7 +265,10 @@ fn relay_direction(
                 let authenticated = if target {
                     match &attack {
                         Attack::StripOffer | Attack::TamperOffer | Attack::ObserveSchema(_) => {
-                            frame.header.extensions.contains_key(&CHUNKS_OFFER_EXTENSION)
+                            frame
+                                .header
+                                .extensions
+                                .contains_key(&CHUNKS_OFFER_EXTENSION)
                         }
                         Attack::StripCdcHello | Attack::TamperCdcHello => {
                             frame.header.extensions.contains_key(&CDC_HELLO_EXTENSION)
@@ -252,26 +277,33 @@ fn relay_direction(
                             frame.header.extensions.contains_key(&CDC_ACK_EXTENSION)
                         }
                         Attack::ObserveRequestMode(_) => {
-                            serde_json::from_slice::<serde_json::Value>(frame.payload())
-                                .is_ok_and(|body| {
+                            serde_json::from_slice::<serde_json::Value>(frame.payload()).is_ok_and(
+                                |body| {
                                     body["control_seq"].as_u64() == Some(1)
-                                        && body["server_auth_tag"].as_array()
+                                        && body["server_auth_tag"]
+                                            .as_array()
                                             .is_some_and(|tag| tag.len() == 32)
-                                })
+                                },
+                            )
                         }
                         Attack::MutateFile { .. } => {
                             // The first request is signed inside its JSON envelope,
                             // before sequenced control begins. Mutate before forwarding
                             // it, so the source check and later baseline copy are causal.
-                            serde_json::from_slice::<serde_json::Value>(frame.payload())
-                                .is_ok_and(|body| {
+                            serde_json::from_slice::<serde_json::Value>(frame.payload()).is_ok_and(
+                                |body| {
                                     body["control_seq"].as_u64() == Some(1)
                                         && body["request"]["mode"].as_str() == Some("delta_chunks")
-                                        && body["server_auth_tag"].as_array()
+                                        && body["server_auth_tag"]
+                                            .as_array()
                                             .is_some_and(|tag| tag.len() == 32)
-                                })
+                                },
+                            )
                         }
-                        _ => frame.header.extensions.contains_key(&CONTROL_AUTH_EXTENSION),
+                        _ => frame
+                            .header
+                            .extensions
+                            .contains_key(&CONTROL_AUTH_EXTENSION),
                     }
                 } else {
                     false
@@ -292,22 +324,34 @@ fn relay_direction(
                             frame.header.extensions.remove(&CHUNKS_OFFER_EXTENSION);
                         }
                         Attack::TamperOffer => {
-                            frame.header.extensions.get_mut(&CHUNKS_OFFER_EXTENSION)
+                            frame
+                                .header
+                                .extensions
+                                .get_mut(&CHUNKS_OFFER_EXTENSION)
                                 .expect("offered capability")[0] ^= 1;
                         }
                         Attack::ObserveSchema(expected) => {
-                            let envelope: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
-                            assert_eq!(envelope["manifest"]["delta_manifest"]["schema"].as_str(), Some(*expected));
+                            let envelope: serde_json::Value =
+                                serde_json::from_slice(frame.payload()).unwrap();
+                            assert_eq!(
+                                envelope["manifest"]["delta_manifest"]["schema"].as_str(),
+                                Some(*expected)
+                            );
                         }
                         Attack::ObserveRequestMode(expected) => {
-                            let envelope: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
+                            let envelope: serde_json::Value =
+                                serde_json::from_slice(frame.payload()).unwrap();
                             assert_eq!(envelope["request"]["mode"].as_str(), Some(*expected));
                         }
                         Attack::StripCdcHello => {
                             frame.header.extensions.remove(&CDC_HELLO_EXTENSION);
                         }
                         Attack::TamperCdcHello => {
-                            frame.header.extensions.get_mut(&CDC_HELLO_EXTENSION).unwrap()[0] ^= 1;
+                            frame
+                                .header
+                                .extensions
+                                .get_mut(&CDC_HELLO_EXTENSION)
+                                .unwrap()[0] ^= 1;
                         }
                         Attack::StripCdcAck => {
                             frame.header.extensions.remove(&CDC_ACK_EXTENSION);
@@ -356,8 +400,12 @@ fn proxy(
         let (client, _) = listener.accept().unwrap();
         let server = std::net::TcpStream::connect(receiver).unwrap();
         for stream in [&client, &server] {
-            stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
             stream.set_nodelay(true).unwrap();
         }
         let client_read = client.try_clone().unwrap();
@@ -382,7 +430,11 @@ fn proxy(
 
 #[test]
 fn changed_chunk_offer_data_and_completion_tampering_preserve_the_original_destination() {
-    for attack in [Attack::TamperOffer, Attack::TamperData, Attack::TamperCompletion] {
+    for attack in [
+        Attack::TamperOffer,
+        Attack::TamperData,
+        Attack::TamperCompletion,
+    ] {
         let baseline = payload(2, 0);
         let mut updated = baseline.clone();
         updated[CHUNK_BYTES + 11] ^= 0x5A;
@@ -392,7 +444,10 @@ fn changed_chunk_offer_data_and_completion_tampering_preserve_the_original_desti
         let sent = sender(addr, source, config());
         let received = receive.join().unwrap();
         relay.join().unwrap();
-        assert!(observed.load(Ordering::SeqCst), "signed target frame was reached");
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "signed target frame was reached"
+        );
         assert!(sent.is_err());
         assert!(matches!(received, Err(RqError::Authentication(_))));
         assert_clean_destination(&destination, &baseline);
@@ -502,14 +557,24 @@ fn source_and_reused_baseline_changes_after_the_signed_request_prevent_commit() 
         let (receiver_addr, receive) = receiver(destination.clone());
         let (addr, relay, observed, _) = proxy(
             receiver_addr,
-            Attack::MutateFile { path, offset: offset as u64, byte },
+            Attack::MutateFile {
+                path,
+                offset: offset as u64,
+                byte,
+            },
         );
         let sent = sender(addr, source, config());
         let received = receive.join().unwrap();
         relay.join().unwrap();
-        assert!(observed.load(Ordering::SeqCst), "signed missing-chunk request was reached");
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "signed missing-chunk request was reached"
+        );
         if mutate_source {
-            assert!(matches!(sent, Err(RqError::Source(_) | RqError::Integrity(_))));
+            assert!(matches!(
+                sent,
+                Err(RqError::Source(_) | RqError::Integrity(_))
+            ));
             assert!(received.is_err());
         } else {
             assert!(sent.is_err());
@@ -521,16 +586,27 @@ fn source_and_reused_baseline_changes_after_the_signed_request_prevent_commit() 
 
 fn cdc_payload(len: usize) -> Vec<u8> {
     let mut state = 0x6a09_e667_f3bc_c909u64;
-    (0..len).map(|_| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state as u8
-    }).collect()
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
 }
 
-fn cdc_receiver(destination: PathBuf) -> (SocketAddr, thread::JoinHandle<Result<ReceiveReport, RqError>>) {
-    spawn_receiver_with_options(destination, config(), RqReceiveOptions::new().with_cdc_delta(true))
+fn cdc_receiver(
+    destination: PathBuf,
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<ReceiveReport, RqError>>,
+) {
+    spawn_receiver_with_options(
+        destination,
+        config(),
+        RqReceiveOptions::new().with_cdc_delta(true),
+    )
 }
 
 #[test]
@@ -549,12 +625,19 @@ fn cdc_insertions_and_deletions_reuse_the_shifted_tail_on_the_actual_wire() {
         for mode in [SenderMode::Fixed, SenderMode::Cdc] {
             let (source, destination) = fixture("cdc_shift", &updated, &baseline);
             let (receiver_addr, receive) = cdc_receiver(destination.clone());
-            let schema = if matches!(mode, SenderMode::Cdc) { CDC_SCHEMA } else { FIXED_SCHEMA };
+            let schema = if matches!(mode, SenderMode::Cdc) {
+                CDC_SCHEMA
+            } else {
+                FIXED_SCHEMA
+            };
             let (addr, relay, observed, data) = proxy(receiver_addr, Attack::ObserveSchema(schema));
             let sent = sender_with_mode(addr, source, config(), mode).unwrap();
             let received = receive.join().unwrap().unwrap();
             relay.join().unwrap();
-            assert!(observed.load(Ordering::SeqCst), "manifest crossed the wire with the expected negotiated schema");
+            assert!(
+                observed.load(Ordering::SeqCst),
+                "manifest crossed the wire with the expected negotiated schema"
+            );
             assert_delta(&sent, &received, sent.bytes_sent as usize);
             let bytes = data.load(Ordering::SeqCst);
             assert!(bytes >= sent.bytes_sent as usize);
@@ -562,9 +645,18 @@ fn cdc_insertions_and_deletions_reuse_the_shifted_tail_on_the_actual_wire() {
             wire_bytes.push(bytes);
             assert_clean_destination(&destination, &updated);
         }
-        assert!(wire_bytes[0] > baseline.len() / 2, "fixed boundaries lose the shifted tail");
-        assert!(wire_bytes[1] < baseline.len() / 8, "CDC must reuse the shifted tail: {wire_bytes:?}");
-        assert!(wire_bytes[1] * 4 < wire_bytes[0], "compare measured ObjectData, including binary headers");
+        assert!(
+            wire_bytes[0] > baseline.len() / 2,
+            "fixed boundaries lose the shifted tail"
+        );
+        assert!(
+            wire_bytes[1] < baseline.len() / 8,
+            "CDC must reuse the shifted tail: {wire_bytes:?}"
+        );
+        assert!(
+            wire_bytes[1] * 4 < wire_bytes[0],
+            "compare measured ObjectData, including binary headers"
+        );
     }
 }
 
@@ -574,19 +666,29 @@ fn cdc_reordered_and_repeated_chunks_reconstruct_without_object_data() {
     // previous run before the minimum cut, so their chunk IDs survive both
     // reordering and duplication at different destination offsets.
     let chunk_bytes = 64 * 1024;
-    let baseline = [vec![0x11; chunk_bytes], vec![0x22; chunk_bytes], vec![0x33; chunk_bytes]].concat();
+    let baseline = [
+        vec![0x11; chunk_bytes],
+        vec![0x22; chunk_bytes],
+        vec![0x33; chunk_bytes],
+    ]
+    .concat();
     let updated = [
         &baseline[2 * chunk_bytes..],
         &baseline[..chunk_bytes],
         &baseline[..chunk_bytes],
-    ].concat();
+    ]
+    .concat();
     let (source, destination) = fixture("cdc_reordered", &updated, &baseline);
     let (receiver_addr, receive) = cdc_receiver(destination.clone());
-    let (addr, relay, observed, data) = proxy(receiver_addr, Attack::ObserveRequestMode("delta_chunks"));
+    let (addr, relay, observed, data) =
+        proxy(receiver_addr, Attack::ObserveRequestMode("delta_chunks"));
     let sent = sender_with_mode(addr, source, config(), SenderMode::Cdc).unwrap();
     let received = receive.join().unwrap().unwrap();
     relay.join().unwrap();
-    assert!(observed.load(Ordering::SeqCst), "changed layout is reconstructed, not treated as a no-op");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "changed layout is reconstructed, not treated as a no-op"
+    );
     assert_delta(&sent, &received, 0);
     assert_eq!(data.load(Ordering::SeqCst), 0);
     assert_clean_destination(&destination, &updated);
@@ -600,7 +702,9 @@ fn cdc_negotiation_interoperates_with_prior_fixed_and_authenticated_full_surface
     for case in 0..3 {
         let (source, destination) = fixture("cdc_prior_peer", &updated, &baseline);
         let (receiver_addr, receive) = spawn_receiver_with_options(
-            destination.clone(), config(), match case {
+            destination.clone(),
+            config(),
+            match case {
                 0 => RqReceiveOptions::new().with_delta_chunks(true),
                 1 => RqReceiveOptions::new().with_authenticated_control(true),
                 2 => RqReceiveOptions::new().with_cdc_delta(true),
@@ -610,13 +714,24 @@ fn cdc_negotiation_interoperates_with_prior_fixed_and_authenticated_full_surface
         // The old receiver path applies the unchanged strict fixed-size
         // validator. The proxy also observes the exact old schema on wire.
         let (addr, relay, observed, _) = proxy(receiver_addr, Attack::ObserveSchema(FIXED_SCHEMA));
-        let mode = if case == 2 { SenderMode::Fixed } else { SenderMode::Cdc };
+        let mode = if case == 2 {
+            SenderMode::Fixed
+        } else {
+            SenderMode::Cdc
+        };
         let sent = sender_with_mode(addr, source, config(), mode).unwrap();
         let received = receive.join().unwrap().unwrap();
         relay.join().unwrap();
         assert!(observed.load(Ordering::SeqCst));
         assert!(sent.receipt.committed && received.committed);
-        assert_eq!(sent.bytes_sent, if case == 1 { updated.len() } else { CHUNK_BYTES } as u64);
+        assert_eq!(
+            sent.bytes_sent,
+            if case == 1 {
+                updated.len()
+            } else {
+                CHUNK_BYTES
+            } as u64
+        );
         assert_eq!(sent.bytes_sent, received.bytes_received);
         assert_clean_destination(&destination, &updated);
     }
@@ -649,7 +764,11 @@ fn forged_cdc_capabilities_are_rejected_before_any_object_data_or_installation()
     for tamper_ack in [false, true] {
         let (source, destination) = fixture("cdc_forged_capability", &updated, &baseline);
         let (receiver_addr, receive) = cdc_receiver(destination.clone());
-        let attack = if tamper_ack { Attack::TamperCdcAck } else { Attack::TamperCdcHello };
+        let attack = if tamper_ack {
+            Attack::TamperCdcAck
+        } else {
+            Attack::TamperCdcHello
+        };
         let (addr, relay, observed, data) = proxy(receiver_addr, attack);
         let sent = sender_with_mode(addr, source, config(), SenderMode::Cdc);
         let received = receive.join().unwrap();
@@ -676,17 +795,36 @@ fn cdc_revalidates_unrequested_source_and_reused_baseline_ranges() {
         let (source, destination) = fixture("cdc_mutated_range", &updated, &baseline);
         let offset = 17;
         let byte = baseline[offset] ^ 0x33;
-        let path = if mutate_source { source.clone() } else { destination.join("payload.bin") };
+        let path = if mutate_source {
+            source.clone()
+        } else {
+            destination.join("payload.bin")
+        };
         let mut expected_destination = baseline.clone();
-        if !mutate_source { expected_destination[offset] = byte; }
+        if !mutate_source {
+            expected_destination[offset] = byte;
+        }
         let (receiver_addr, receive) = cdc_receiver(destination.clone());
-        let (addr, relay, observed, _) = proxy(receiver_addr, Attack::MutateFile { path, offset: offset as u64, byte });
+        let (addr, relay, observed, _) = proxy(
+            receiver_addr,
+            Attack::MutateFile {
+                path,
+                offset: offset as u64,
+                byte,
+            },
+        );
         let sent = sender_with_mode(addr, source, config(), SenderMode::Cdc);
         let received = receive.join().unwrap();
         relay.join().unwrap();
-        assert!(observed.load(Ordering::SeqCst), "mutation follows the signed missing-chunk request");
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "mutation follows the signed missing-chunk request"
+        );
         if mutate_source {
-            assert!(matches!(sent, Err(RqError::Source(_) | RqError::Integrity(_))));
+            assert!(matches!(
+                sent,
+                Err(RqError::Source(_) | RqError::Integrity(_))
+            ));
             assert!(received.is_err());
         } else {
             assert!(sent.is_err());
@@ -716,10 +854,18 @@ fn cdc_interrupted_payload_preserves_prior_file_and_retires_staging() {
 fn cdc_manifest_supports_verified_noop_and_authenticated_full_fallback() {
     let updated = cdc_payload(256 * 1024 + 9);
     for same in [true, false] {
-        let baseline = if same { updated.as_slice() } else { b"unrelated old file" };
+        let baseline = if same {
+            updated.as_slice()
+        } else {
+            b"unrelated old file"
+        };
         let (source, destination) = fixture("cdc_terminal_modes", &updated, baseline);
         let (receiver_addr, receive) = cdc_receiver(destination.clone());
-        let mode = if same { "already_in_sync" } else { "full_object" };
+        let mode = if same {
+            "already_in_sync"
+        } else {
+            "full_object"
+        };
         let (addr, relay, observed, data) = proxy(receiver_addr, Attack::ObserveRequestMode(mode));
         let sent = sender_with_mode(addr, source, config(), SenderMode::Cdc).unwrap();
         let received = receive.join().unwrap().unwrap();
@@ -729,7 +875,11 @@ fn cdc_manifest_supports_verified_noop_and_authenticated_full_fallback() {
         assert!(received.committed);
         assert_eq!(sent.bytes_sent, if same { 0 } else { updated.len() as u64 });
         assert_eq!(sent.bytes_sent, received.bytes_received);
-        assert_eq!(data.load(Ordering::SeqCst), 0, "no-op sends no bytes and full fallback uses symbols");
+        assert_eq!(
+            data.load(Ordering::SeqCst),
+            0,
+            "no-op sends no bytes and full fallback uses symbols"
+        );
         assert_eq!(sent.symbols_sent == 0, same);
         assert_clean_destination(&destination, &updated);
     }
@@ -742,16 +892,21 @@ fn oversized_cdc_baseline_uses_authenticated_full_fallback() {
     // This sparse baseline passes the receiver's transfer-size policy but
     // exceeds CDC's independent 4096-chunk / 16 KiB minimum policy bound.
     // The receiver must select full transfer before building a baseline index.
-    let baseline = std::fs::OpenOptions::new().write(true)
-        .open(destination.join("payload.bin")).unwrap();
+    let baseline = std::fs::OpenOptions::new()
+        .write(true)
+        .open(destination.join("payload.bin"))
+        .unwrap();
     baseline.set_len(64 * 1024 * 1024 + 1).unwrap();
     drop(baseline);
     let mut receiver_config = config();
     receiver_config.max_transfer_bytes = 128 * 1024 * 1024;
     let (receiver_addr, receive) = spawn_receiver_with_options(
-        destination.clone(), receiver_config, RqReceiveOptions::new().with_cdc_delta(true),
+        destination.clone(),
+        receiver_config,
+        RqReceiveOptions::new().with_cdc_delta(true),
     );
-    let (addr, relay, observed, data) = proxy(receiver_addr, Attack::ObserveRequestMode("full_object"));
+    let (addr, relay, observed, data) =
+        proxy(receiver_addr, Attack::ObserveRequestMode("full_object"));
     let sent = sender_with_mode(addr, source, config(), SenderMode::Cdc).unwrap();
     let received = receive.join().unwrap().unwrap();
     relay.join().unwrap();

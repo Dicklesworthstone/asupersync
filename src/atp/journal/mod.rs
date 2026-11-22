@@ -35,11 +35,11 @@ pub use delta_cas::{
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
 pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
 #[cfg(not(target_arch = "wasm32"))]
-pub use receive::{ScopedReceive, ScopedReceiveError, ScopedReceiveOptions, ScopedReceiveResult};
-#[cfg(not(target_arch = "wasm32"))]
 pub use receive::{
     JournalReceivePreparation, JournalReceiveReport, JournalReceiveRequest, ScopedJournalReceive,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use receive::{ScopedReceive, ScopedReceiveError, ScopedReceiveOptions, ScopedReceiveResult};
 pub use recovery::{
     RecoveryContext, RecoveryError, RecoveryStats, load_recovered_or_create_bitmap,
     recover_journal_and_bitmap,
@@ -142,7 +142,8 @@ pub struct JournalCommitRequest {
     pub checkpoint: JournalCheckpointRequest,
     /// Independently trusted authority for chunk-only manifest-addressed files.
     /// Never derive this expected value from untrusted received metadata.
-    pub expected_chunk_commitment: Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
+    pub expected_chunk_commitment:
+        Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
 }
 
 /// This invocation's publication observation, independent of journal persistence.
@@ -236,7 +237,8 @@ pub struct JournalCommitRecoveryRequest {
     /// Trusted expected graph. Recovery authenticates the selected file's bytes.
     pub manifest: std::sync::Arc<crate::atp::manifest::Manifest>,
     /// Independent pin required for chunk-only manifest-addressed files.
-    pub expected_chunk_commitment: Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
+    pub expected_chunk_commitment:
+        Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
     /// Absolute, UTF-8 application path; no parent traversal or final symlink.
     /// Recovery never chooses this from CommitComplete or ChunkWritten strings.
     pub destination: std::path::PathBuf,

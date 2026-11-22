@@ -76,7 +76,10 @@ impl fmt::Display for DecompressionLimitExceeded {
 impl std::error::Error for DecompressionLimitExceeded {}
 
 pub(crate) fn decompression_limit_error(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, DecompressionLimitExceeded(message))
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        DecompressionLimitExceeded(message),
+    )
 }
 
 /// Typed marker for output-cap refusals, distinct from malformed codec input.
@@ -570,7 +573,9 @@ impl LimitedWriter {
     fn limit_error(&self) -> io::Error {
         match self.output {
             LimitedOutput::Compressed => compression_limit_error(),
-            LimitedOutput::Decompressed => decompression_limit_error("decompressed size exceeds limit"),
+            LimitedOutput::Decompressed => {
+                decompression_limit_error("decompressed size exceeds limit")
+            }
         }
     }
 }
@@ -1059,7 +1064,8 @@ impl DeflateDecompressor {
         if self.header_len < self.header.len() {
             let needed = self.header.len() - self.header_len;
             let copied = needed.min(input.len());
-            self.header[self.header_len..self.header_len + copied].copy_from_slice(&input[..copied]);
+            self.header[self.header_len..self.header_len + copied]
+                .copy_from_slice(&input[..copied]);
             self.header_len += copied;
             input = &input[copied..];
             if self.header_len < self.header.len() {

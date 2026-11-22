@@ -1,7 +1,7 @@
 //! Ordered tests of the actual gate and IoDriverHandle path. The backend is
 //! an explicit injected probe; these are not epoll or throughput benchmarks.
-use super::*;
 use super::super::{Event, Events, Interest, IoDriverHandle, Reactor, Source, Token};
+use super::*;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -43,7 +43,10 @@ impl Reactor for Probe {
     }
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         self.polls.fetch_add(1, Ordering::SeqCst);
-        assert!(!self.panic_poll.swap(false, Ordering::SeqCst), "injected poll panic");
+        assert!(
+            !self.panic_poll.swap(false, Ordering::SeqCst),
+            "injected poll panic"
+        );
         *self.timeout.lock() = Some(timeout);
         events.clear();
         Ok(0)
@@ -82,10 +85,20 @@ fn own_wake_interrupts_timed_and_indefinite_handle_turns_before_gate_release() {
         worker.join().unwrap();
         assert!(parked);
         wake.unwrap();
-        assert_eq!(result.expect("own wake, not gate release, must end the wait").unwrap(), Some(0));
+        assert_eq!(
+            result
+                .expect("own wake, not gate release, must end the wait")
+                .unwrap(),
+            Some(0)
+        );
         assert_eq!(polled_while_owned, 0, "never overlap physical polls");
         assert!(!participant.is_polling.load(Ordering::Acquire));
-        assert_eq!(participant.try_turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), Some(0));
+        assert_eq!(
+            participant
+                .try_turn_with(Some(Duration::ZERO), |_, _| {})
+                .unwrap(),
+            Some(0)
+        );
         assert_eq!(backend.polls.load(Ordering::SeqCst), 1);
     }
 }
@@ -104,7 +117,12 @@ fn wake_published_before_admission_is_not_lost_behind_a_competing_gate() {
     let result = received.recv_timeout(WATCHDOG);
     drop(gate);
     worker.join().unwrap();
-    assert_eq!(result.expect("retained wake must end the contended turn").unwrap(), Some(0));
+    assert_eq!(
+        result
+            .expect("retained wake must end the contended turn")
+            .unwrap(),
+        Some(0)
+    );
     assert_eq!(backend.polls.load(Ordering::SeqCst), 0);
 }
 
@@ -126,8 +144,16 @@ fn backend_wake_failure_does_not_strand_the_local_gate_waiter() {
     drop(gate);
     worker.join().unwrap();
     assert!(parked);
-    assert!(wake.is_err(), "backend failure remains visible to the publisher");
-    assert_eq!(result.expect("gate notification precedes backend wake").unwrap(), Some(0));
+    assert!(
+        wake.is_err(),
+        "backend failure remains visible to the publisher"
+    );
+    assert_eq!(
+        result
+            .expect("gate notification precedes backend wake")
+            .unwrap(),
+        Some(0)
+    );
     assert_eq!(backend.polls.load(Ordering::SeqCst), 0);
 }
 
@@ -143,8 +169,12 @@ fn each_participant_consumes_only_its_own_wake() {
     let a = first.clone();
     let b = second.clone();
     let workers = [
-        thread::spawn(move || { let _ = first_tx.send(a.try_turn_with(None, |_, _| {})); }),
-        thread::spawn(move || { let _ = second_tx.send(b.try_turn_with(None, |_, _| {})); }),
+        thread::spawn(move || {
+            let _ = first_tx.send(a.try_turn_with(None, |_, _| {}));
+        }),
+        thread::spawn(move || {
+            let _ = second_tx.send(b.try_turn_with(None, |_, _| {}));
+        }),
     ];
     let both_parked = eventually(|| leader._shared_owner.poll_gate.waiting_count() == 2);
     let first_wake = first.wake();
@@ -153,7 +183,9 @@ fn each_participant_consumes_only_its_own_wake() {
     let second_wake = second.wake();
     let second_result = second_rx.recv_timeout(WATCHDOG);
     drop(gate);
-    for worker in workers { worker.join().unwrap(); }
+    for worker in workers {
+        worker.join().unwrap();
+    }
     assert!(both_parked && second_still_pending);
     first_wake.unwrap();
     second_wake.unwrap();
@@ -220,7 +252,9 @@ fn finite_wait_expires_without_a_gate_release_or_backend_poll() {
     let worker_gate = gate.clone();
     let (sent, received) = mpsc::channel();
     let worker = thread::spawn(move || {
-        let expired = worker_gate.acquire(&AtomicBool::new(false), Some(Duration::from_millis(10))).is_none();
+        let expired = worker_gate
+            .acquire(&AtomicBool::new(false), Some(Duration::from_millis(10)))
+            .is_none();
         let _ = sent.send(expired);
     });
     let result = received.recv_timeout(WATCHDOG);
@@ -234,7 +268,10 @@ fn finite_wait_expires_without_a_gate_release_or_backend_poll() {
 fn zero_budget_never_parks_behind_an_owner() {
     let gate = PollGate::default();
     let _held = gate.lock();
-    assert!(gate.acquire(&AtomicBool::new(false), Some(Duration::ZERO)).is_none());
+    assert!(
+        gate.acquire(&AtomicBool::new(false), Some(Duration::ZERO))
+            .is_none()
+    );
     assert_eq!(gate.waiting_count(), 0);
 }
 
@@ -249,7 +286,12 @@ fn a_panicking_backend_releases_both_physical_and_participant_ownership() {
     }));
     assert!(result.is_err());
     assert!(!first.is_polling.load(Ordering::Acquire));
-    assert_eq!(second.try_turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), Some(0));
+    assert_eq!(
+        second
+            .try_turn_with(Some(Duration::ZERO), |_, _| {})
+            .unwrap(),
+        Some(0)
+    );
     assert_eq!(backend.polls.load(Ordering::SeqCst), 2);
 }
 
@@ -259,30 +301,39 @@ fn a_woken_successor_cannot_strand_other_waiters_on_a_free_gate() {
     let held = gate.lock();
     let flags: Vec<_> = (0..4).map(|_| Arc::new(AtomicBool::new(false))).collect();
     let (sent, received) = mpsc::channel();
-    let workers: Vec<_> = flags.iter().map(|flag| {
-        let gate = gate.clone();
-        let flag = flag.clone();
-        let sent = sent.clone();
-        thread::spawn(move || {
-            let claim = gate.acquire(&flag, None);
-            let claimed = claim.is_some();
-            drop(claim);
-            let _ = sent.send(claimed);
+    let workers: Vec<_> = flags
+        .iter()
+        .map(|flag| {
+            let gate = gate.clone();
+            let flag = flag.clone();
+            let sent = sent.clone();
+            thread::spawn(move || {
+                let claim = gate.acquire(&flag, None);
+                let claimed = claim.is_some();
+                drop(claim);
+                let _ = sent.send(claimed);
+            })
         })
-    }).collect();
+        .collect();
     let parked = eventually(|| gate.waiting_count() == flags.len());
     {
         // Crossing the predicate mutex after every waiter is published puts
         // them on the wait side of the atomic unlock-and-wait. Set wake bits
         // without a notification so only release's notify_one starts the chain.
         let _predicate = gate.claimed.lock();
-        for flag in &flags { flag.store(true, Ordering::Release); }
+        for flag in &flags {
+            flag.store(true, Ordering::Release);
+        }
     }
     drop(held);
-    let results: Vec<_> = (0..flags.len()).map(|_| received.recv_timeout(WATCHDOG)).collect();
+    let results: Vec<_> = (0..flags.len())
+        .map(|_| received.recv_timeout(WATCHDOG))
+        .collect();
     // Rescue on a regression before joining; rescue does not repair results.
     gate.interrupt_waiters();
-    for worker in workers { worker.join().unwrap(); }
+    for worker in workers {
+        worker.join().unwrap();
+    }
     assert!(parked);
     assert!(results.iter().all(|result| *result == Ok(true)));
     assert_eq!(gate.waiting_count(), 0);

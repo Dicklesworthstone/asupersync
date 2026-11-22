@@ -26,9 +26,9 @@
 use std::collections::BTreeMap;
 
 pub mod catalog;
-pub mod symbols;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub mod native;
+pub mod symbols;
 #[allow(clippy::redundant_pub_crate)]
 mod wire;
 

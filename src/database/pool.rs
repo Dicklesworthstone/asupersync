@@ -33,11 +33,11 @@ use crate::runtime::pool_sizing::{
     PoolSizingPolicy, PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
 };
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -1096,8 +1096,9 @@ impl<M: ConnectionManager> DbPool<M> {
                         // Authentication hooks are user code too. Retain the
                         // guard until every hook has returned, so an unwind
                         // retires both capacity and this client's quota.
-                        let current_auth_state =
-                            self.manager.authentication_state(guard.conn.as_ref().unwrap());
+                        let current_auth_state = self
+                            .manager
+                            .authentication_state(guard.conn.as_ref().unwrap());
                         match (&current_auth_state, &authenticated_for) {
                             (Some(current_client), Some(expected_client))
                                 if current_client != expected_client =>
@@ -2369,10 +2370,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         wakes.dispatch();
     }
 
-    fn release_client_quota_locked(
-        inner: &mut PoolInner<M::Connection>,
-        client_id: Option<&str>,
-    ) {
+    fn release_client_quota_locked(inner: &mut PoolInner<M::Connection>, client_id: Option<&str>) {
         if let Some(client_id) = client_id
             && let Some(count) = inner.client_connections.get_mut(client_id)
         {
@@ -2916,10 +2914,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         trace_async_pool_event(cx, "acquire", "start", "client");
         // If client quotas are disabled, delegate to regular get()
         if !self.config.enforce_client_quotas {
-            return self.acquire_on_clock(cx, owner_clock).await.map(|mut conn| {
-                conn.client_id = Some(client_id.to_string());
-                conn
-            });
+            return self
+                .acquire_on_clock(cx, owner_clock)
+                .await
+                .map(|mut conn| {
+                    conn.client_id = Some(client_id.to_string());
+                    conn
+                });
         }
 
         let client_id_owned = client_id.to_string();
@@ -2997,8 +2998,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         (AsyncAcquireStep::Discard(conn), wakes)
                     } else if let Some(idle) = candidate {
                         let granted_waiter = waiter_guard.slot.take();
-                        let wakes =
-                            self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        let wakes = self
+                            .complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
                             .entry(client_id_owned.clone())
@@ -3010,8 +3011,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     } else {
                         inner.total += 1;
                         let granted_waiter = waiter_guard.slot.take();
-                        let wakes =
-                            self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        let wakes = self
+                            .complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
                             .entry(client_id_owned.clone())
@@ -3154,8 +3155,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                     // br-asupersync-80525g: Additional authentication state validation after basic validation
                     if self.config.validate_authentication_state {
-                        let current_auth_state =
-                            self.manager.authentication_state(guard.conn.as_ref().unwrap());
+                        let current_auth_state = self
+                            .manager
+                            .authentication_state(guard.conn.as_ref().unwrap());
                         match (&current_auth_state, &idle.authenticated_for) {
                             (Some(current_client), Some(expected_client))
                                 if current_client != expected_client =>
@@ -3305,8 +3307,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                     // Keep the established close-response bound, but bind
                     // backoff to the supplied context rather than the poller.
-                    let wake_at =
-                        backoff_deadline.min(cx.now() + Duration::from_millis(10));
+                    let wake_at = backoff_deadline.min(cx.now() + Duration::from_millis(10));
                     let mut timer = std::pin::pin!(cx.sleep_until_on_clock(wake_at));
                     std::future::poll_fn(|task| timer.as_mut().poll_deadline(task)).await;
                 }

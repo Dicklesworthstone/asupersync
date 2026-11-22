@@ -28,9 +28,9 @@
 //! Every partition, heal, and dropped-during-partition event is logged
 //! to an [`EvidenceSink`].
 
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;

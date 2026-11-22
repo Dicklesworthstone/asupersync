@@ -2,11 +2,11 @@
 //!
 //! Provides counters, gauges, and histograms for runtime statistics.
 
+use crate::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use crate::types::{CancelKind, Outcome, RegionId, TaskId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use crate::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// A monotonically increasing counter.

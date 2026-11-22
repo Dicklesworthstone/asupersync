@@ -80,8 +80,16 @@ impl ContentDecodeLimits {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn tightened(self, total: usize) -> Self {
         Self {
-            max_encoded_bytes: if self.max_encoded_bytes < total { self.max_encoded_bytes } else { total },
-            max_decoded_bytes: if self.max_decoded_bytes < total { self.max_decoded_bytes } else { total },
+            max_encoded_bytes: if self.max_encoded_bytes < total {
+                self.max_encoded_bytes
+            } else {
+                total
+            },
+            max_decoded_bytes: if self.max_decoded_bytes < total {
+                self.max_decoded_bytes
+            } else {
+                total
+            },
             chunk_bytes: self.chunk_bytes,
         }
     }
@@ -132,7 +140,10 @@ impl<E: fmt::Display> fmt::Display for ContentDecodeError<E> {
             Self::Body(error) => write!(f, "encoded body source failed: {error}"),
             Self::Decode(error) => write!(f, "content decoding failed: {error}"),
             Self::EncodedLimit { actual, limit } => {
-                write!(f, "encoded body exceeds {limit} bytes (observed {actual:?})")
+                write!(
+                    f,
+                    "encoded body exceeds {limit} bytes (observed {actual:?})"
+                )
             }
             Self::Cancelled { kind } => write!(f, "content decoding cancelled: {kind:?}"),
         }
@@ -233,7 +244,10 @@ impl<B: Body> ContentDecodedBody<B> {
     /// Attach the caller's context, including while decoded output is queued.
     #[must_use]
     pub fn with_cx(mut self, cx: &Cx) -> Self {
-        self.cancellation = Some(DecodeCancellation { cx: cx.clone(), token: None });
+        self.cancellation = Some(DecodeCancellation {
+            cx: cx.clone(),
+            token: None,
+        });
         self
     }
 
@@ -253,7 +267,10 @@ struct DecodeCancellation {
 
 impl DecodeCancellation {
     fn register(&mut self, task: &Context<'_>) {
-        self.token = Some(self.cx.refresh_cancel_waker(self.token.take(), task.waker()));
+        self.token = Some(
+            self.cx
+                .refresh_cancel_waker(self.token.take(), task.waker()),
+        );
     }
 }
 
@@ -276,10 +293,17 @@ pub struct ContentDecodePlan {
 impl ContentDecodePlan {
     pub(crate) fn new(decoder: ContentDecoder, limits: ContentDecodeLimits) -> io::Result<Self> {
         let transformed = !decoder.is_identity();
-        let stages = decoder.codings.into_iter().rev()
+        let stages = decoder
+            .codings
+            .into_iter()
+            .rev()
             .map(|coding| DecoderStage::new(coding, limits.max_decoded_bytes))
             .collect::<io::Result<Vec<_>>>()?;
-        Ok(Self { limits, stages, transformed })
+        Ok(Self {
+            limits,
+            stages,
+            transformed,
+        })
     }
 }
 
@@ -302,20 +326,39 @@ impl DecoderStage {
     fn new(coding: Coding, limit: usize) -> io::Result<Self> {
         let codec = match coding {
             IDENTITY => Codec::Identity,
-            Coding::Standard(encoding) => Codec::Standard(decoder_for(encoding, DecompressionLimit::new(limit))?),
+            Coding::Standard(encoding) => {
+                Codec::Standard(decoder_for(encoding, DecompressionLimit::new(limit))?)
+            }
             #[cfg(feature = "zstd")]
             Coding::Zstd => Codec::Zstd(Box::new(asupersync_zstd::StreamDecoder::new(
                 asupersync_zstd::DecodeLimits::new(limit),
             ))),
             #[cfg(not(feature = "zstd"))]
-            Coding::Zstd => return Err(io::Error::new(io::ErrorKind::Unsupported, "content codec requires zstd feature")),
+            Coding::Zstd => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "content codec requires zstd feature",
+                ));
+            }
         };
-        Ok(Self { codec, produced: 0, limit, drain: false, finished: false })
+        Ok(Self {
+            codec,
+            produced: 0,
+            limit,
+            drain: false,
+            finished: false,
+        })
     }
 
     fn account(&mut self, count: usize) -> io::Result<()> {
-        let Some(total) = self.produced.checked_add(count).filter(|total| *total <= self.limit) else {
-            return Err(decompression_limit_error("decoded stage exceeds output limit"));
+        let Some(total) = self
+            .produced
+            .checked_add(count)
+            .filter(|total| *total <= self.limit)
+        else {
+            return Err(decompression_limit_error(
+                "decoded stage exceeds output limit",
+            ));
         };
         self.produced = total;
         Ok(())
@@ -333,7 +376,8 @@ impl DecoderStage {
             #[cfg(feature = "zstd")]
             Codec::Zstd(decoder) => {
                 let mut output = vec![0; quantum];
-                let progress = decoder.decode(&input, &mut output)
+                let progress = decoder
+                    .decode(&input, &mut output)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 output.truncate(progress.output_written);
                 self.drain = progress.status == asupersync_zstd::StreamStatus::NeedOutput;
@@ -355,7 +399,8 @@ impl DecoderStage {
             #[cfg(feature = "zstd")]
             Codec::Zstd(decoder) => {
                 output.resize(_quantum, 0);
-                let progress = decoder.finish(&mut output)
+                let progress = decoder
+                    .finish(&mut output)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 output.truncate(progress.output_written);
                 self.finished = progress.status == asupersync_zstd::StreamStatus::Finished;
@@ -414,7 +459,8 @@ impl<D: Buf> DecodeState<D> {
                 self.stages[index - 1].finished
             };
             if !self.buffers[index].is_empty() || self.stages[index].drain {
-                let (read, output) = self.stages[index].decode(&self.buffers[index], self.limits.chunk_bytes)?;
+                let (read, output) =
+                    self.stages[index].decode(&self.buffers[index], self.limits.chunk_bytes)?;
                 let remaining = &mut self.buffers[index];
                 let _ = remaining.split_to(read);
                 if remaining.is_empty() {
@@ -434,12 +480,17 @@ impl<D: Buf> DecodeState<D> {
     fn admit<E>(&mut self, data: D) -> Result<(), ContentDecodeError<E>> {
         let actual = self.encoded_bytes.checked_add(data.remaining());
         let Some(total) = actual.filter(|total| *total <= self.limits.max_encoded_bytes) else {
-            return Err(ContentDecodeError::EncodedLimit { actual, limit: self.limits.max_encoded_bytes });
+            return Err(ContentDecodeError::EncodedLimit {
+                actual,
+                limit: self.limits.max_encoded_bytes,
+            });
         };
         // With no Content-Encoding fields there is no codec stage to count
         // identity output, so enforce that ceiling at source admission.
         if self.stages.is_empty() && total > self.limits.max_decoded_bytes {
-            return Err(ContentDecodeError::Decode(decompression_limit_error("identity body exceeds output limit")));
+            return Err(ContentDecodeError::Decode(decompression_limit_error(
+                "identity body exceeds output limit",
+            )));
         }
         self.encoded_bytes = total;
         if data.has_remaining() {
@@ -467,7 +518,10 @@ impl<B: Body> Body for ContentDecodedBody<B> {
     type Data = BytesCursor;
     type Error = ContentDecodeError<B::Error>;
 
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let mut this = self.project();
         if this.state.done {
             return Poll::Ready(None);
@@ -484,7 +538,10 @@ impl<B: Body> Body for ContentDecodedBody<B> {
                 if let Some(cancellation) = this.cancellation.as_ref()
                     && cancellation.cx.checkpoint().is_err()
                 {
-                    let kind = cancellation.cx.cancel_reason().map_or(CancelKind::User, |reason| reason.kind());
+                    let kind = cancellation
+                        .cx
+                        .cancel_reason()
+                        .map_or(CancelKind::User, |reason| reason.kind());
                     break 'decoding ContentDecodeError::Cancelled { kind };
                 }
                 if let Some(output) = this.state.output() {
@@ -501,7 +558,8 @@ impl<B: Body> Body for ContentDecodedBody<B> {
                     // Buf may have multiple disjoint chunks; copy_to_bytes
                     // advances correctly across all of them, and BytesCursor
                     // provides a zero-copy implementation for native bodies.
-                    let chunk = data.copy_to_bytes(data.remaining().min(this.state.limits.chunk_bytes));
+                    let chunk =
+                        data.copy_to_bytes(data.remaining().min(this.state.limits.chunk_bytes));
                     this.state.buffers[0] = chunk;
                     if !data.has_remaining() {
                         this.state.source_data = None;
@@ -522,7 +580,10 @@ impl<B: Body> Body for ContentDecodedBody<B> {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Some(Ok(Frame::Data(data)))) => {
                         if this.state.trailers.is_some() {
-                            break 'decoding ContentDecodeError::Decode(io::Error::new(io::ErrorKind::InvalidData, "body data follows trailers"));
+                            break 'decoding ContentDecodeError::Decode(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "body data follows trailers",
+                            ));
                         }
                         if let Err(error) = this.state.admit(data) {
                             break 'decoding error;
@@ -530,7 +591,10 @@ impl<B: Body> Body for ContentDecodedBody<B> {
                     }
                     Poll::Ready(Some(Ok(Frame::Trailers(trailers)))) => {
                         if this.state.trailers.replace(trailers).is_some() {
-                            break 'decoding ContentDecodeError::Decode(io::Error::new(io::ErrorKind::InvalidData, "duplicate body trailer frame"));
+                            break 'decoding ContentDecodeError::Decode(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "duplicate body trailer frame",
+                            ));
                         }
                     }
                     Poll::Ready(Some(Err(error))) => {
@@ -560,7 +624,15 @@ impl<B: Body> Body for ContentDecodedBody<B> {
             SizeHint::with_exact(0)
         } else {
             let mut hint = SizeHint::new();
-            hint.set_upper(u64::try_from(self.state.limits.max_decoded_bytes.saturating_sub(self.state.emitted_bytes)).unwrap_or(u64::MAX));
+            hint.set_upper(
+                u64::try_from(
+                    self.state
+                        .limits
+                        .max_decoded_bytes
+                        .saturating_sub(self.state.emitted_bytes),
+                )
+                .unwrap_or(u64::MAX),
+            );
             hint
         }
     }

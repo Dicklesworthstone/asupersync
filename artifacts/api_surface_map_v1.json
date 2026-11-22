@@ -1,8 +1,8 @@
 {
   "counts": {
     "entry_points": 19,
-    "modules": 124,
-    "root_exports": 372
+    "modules": 125,
+    "root_exports": 373
   },
   "entry_points": [
     {
@@ -180,7 +180,7 @@
   "generated_by": "scripts/generate_api_surface_map.py",
   "generation": {
     "command": "rch exec -- python3 scripts/generate_api_surface_map.py --check",
-    "config_path": "/Users/jemanuel/projects/asupersync/scripts/api_surface_map_config_v1.json",
+    "config_path": "scripts/api_surface_map_config_v1.json",
     "notes": [
       "Default contract compares root public exports from src/lib.rs for fast drift detection.",
       "Pass --rustdoc-json to extend item-level extraction without changing the artifact contract."
@@ -188,7 +188,7 @@
     "rustdoc_json_input": null,
     "rustdoc_json_supported": true,
     "source_kind": "src-lib-rs-root-export-scan",
-    "source_path": "/Users/jemanuel/projects/asupersync/src/lib.rs"
+    "source_path": "src/lib.rs"
   },
   "modules": [
     {
@@ -208,7 +208,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 283,
+      "line": 295,
       "name": "actor_genserver_monitor_evidence_link_process_metamorphic_tests",
       "signature": "pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests",
       "stability": "test-internals"
@@ -260,7 +260,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 285,
+      "line": 297,
       "name": "atp_timing_security_conformance_tests",
       "signature": "pub mod atp_timing_security_conformance_tests",
       "stability": "test-internals"
@@ -292,7 +292,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 287,
+      "line": 299,
       "name": "bytes_io_time_metamorphic_tests",
       "signature": "pub mod bytes_io_time_metamorphic_tests",
       "stability": "test-internals"
@@ -314,7 +314,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 289,
+      "line": 301,
       "name": "cancel_cx_runtime_channel_metamorphic_tests",
       "signature": "pub mod cancel_cx_runtime_channel_metamorphic_tests",
       "stability": "test-internals"
@@ -336,7 +336,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 291,
+      "line": 303,
       "name": "channel_ordering_conformance_tests",
       "signature": "pub mod channel_ordering_conformance_tests",
       "stability": "test-internals"
@@ -348,7 +348,7 @@
         "cli"
       ],
       "kind": "module",
-      "line": 258,
+      "line": 260,
       "name": "cli",
       "signature": "pub mod cli",
       "stability": "feature-gated"
@@ -360,7 +360,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 293,
+      "line": 305,
       "name": "cli_metamorphic_tests",
       "signature": "pub mod cli_metamorphic_tests",
       "stability": "test-internals"
@@ -392,10 +392,22 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 295,
+      "line": 307,
       "name": "combinator_family_conformance_tests",
       "signature": "pub mod combinator_family_conformance_tests",
       "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"zstd\")]",
+      "doc": "",
+      "feature_flags": [
+        "zstd"
+      ],
+      "kind": "module",
+      "line": 262,
+      "name": "compression",
+      "signature": "pub mod compression",
+      "stability": "feature-gated"
     },
     {
       "cfg": null,
@@ -444,7 +456,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 297,
+      "line": 309,
       "name": "cx_obligation_trace_metamorphic_tests",
       "signature": "pub mod cx_obligation_trace_metamorphic_tests",
       "stability": "test-internals"
@@ -456,7 +468,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 299,
+      "line": 311,
       "name": "cx_scheduler_remote_metamorphic_tests",
       "signature": "pub mod cx_scheduler_remote_metamorphic_tests",
       "stability": "test-internals"
@@ -470,7 +482,7 @@
         "sqlite"
       ],
       "kind": "module",
-      "line": 260,
+      "line": 264,
       "name": "database",
       "signature": "pub mod database",
       "stability": "feature-gated"
@@ -482,7 +494,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 301,
+      "line": 313,
       "name": "database_grpc_metamorphic_tests",
       "signature": "pub mod database_grpc_metamorphic_tests",
       "stability": "test-internals"
@@ -494,7 +506,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 303,
+      "line": 315,
       "name": "database_pool_transaction_metamorphic_tests",
       "signature": "pub mod database_pool_transaction_metamorphic_tests",
       "stability": "test-internals"
@@ -506,7 +518,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 305,
+      "line": 317,
       "name": "database_primitives_conformance_tests",
       "signature": "pub mod database_primitives_conformance_tests",
       "stability": "test-internals"
@@ -552,7 +564,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 307,
+      "line": 319,
       "name": "deterministic_state_golden_tests",
       "signature": "pub mod deterministic_state_golden_tests",
       "stability": "test-internals"
@@ -574,7 +586,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 309,
+      "line": 321,
       "name": "distributed_obligation_metamorphic_tests",
       "signature": "pub mod distributed_obligation_metamorphic_tests",
       "stability": "test-internals"
@@ -586,7 +598,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 311,
+      "line": 323,
       "name": "distributed_primitives_conformance_tests",
       "signature": "pub mod distributed_primitives_conformance_tests",
       "stability": "test-internals"
@@ -598,7 +610,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 313,
+      "line": 325,
       "name": "distributed_security_codec_conformance_tests",
       "signature": "pub mod distributed_security_codec_conformance_tests",
       "stability": "test-internals"
@@ -610,7 +622,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 315,
+      "line": 327,
       "name": "distributed_service_messaging_metamorphic_tests",
       "signature": "pub mod distributed_service_messaging_metamorphic_tests",
       "stability": "test-internals"
@@ -652,7 +664,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 317,
+      "line": 329,
       "name": "error_message_golden_tests",
       "signature": "pub mod error_message_golden_tests",
       "stability": "test-internals"
@@ -682,7 +694,7 @@
       "doc": "Native filesystem surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 269,
+      "line": 273,
       "name": "fs",
       "signature": "pub mod fs",
       "stability": "native-only"
@@ -694,7 +706,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 319,
+      "line": 331,
       "name": "fs_config_metamorphic_tests",
       "signature": "pub mod fs_config_metamorphic_tests",
       "stability": "test-internals"
@@ -706,7 +718,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 321,
+      "line": 333,
       "name": "fs_protocol_conformance_tests",
       "signature": "pub mod fs_protocol_conformance_tests",
       "stability": "test-internals"
@@ -716,7 +728,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 233,
+      "line": 234,
       "name": "future",
       "signature": "pub mod future",
       "stability": "preview"
@@ -739,20 +751,23 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 329,
+      "line": 341,
       "name": "golden_artifacts_tests",
       "signature": "pub mod golden_artifacts_tests",
       "stability": "test-internals"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Native gRPC client/server surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 271,
+      "line": 276,
       "name": "grpc",
       "signature": "pub mod grpc",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -761,20 +776,23 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 331,
+      "line": 343,
       "name": "grpc_protocol_conformance_tests",
       "signature": "pub mod grpc_protocol_conformance_tests",
       "stability": "test-internals"
     },
     {
-      "cfg": null,
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Native HTTP protocol and client/server surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 212,
+      "line": 213,
       "name": "http",
       "signature": "pub mod http",
-      "stability": "core"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -783,7 +801,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 333,
+      "line": 345,
       "name": "http_grpc_protocol_metamorphic_tests",
       "signature": "pub mod http_grpc_protocol_metamorphic_tests",
       "stability": "test-internals"
@@ -793,7 +811,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 213,
+      "line": 214,
       "name": "io",
       "signature": "pub mod io",
       "stability": "core"
@@ -805,7 +823,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 335,
+      "line": 347,
       "name": "io_bytes_time_conformance_tests",
       "signature": "pub mod io_bytes_time_conformance_tests",
       "stability": "test-internals"
@@ -815,7 +833,7 @@
       "doc": "Deterministic lab runtime, virtual time, scenario runner, replay, and oracles.",
       "feature_flags": [],
       "kind": "module",
-      "line": 214,
+      "line": 215,
       "name": "lab",
       "signature": "pub mod lab",
       "stability": "core"
@@ -827,7 +845,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 337,
+      "line": 349,
       "name": "lab_determinism_conformance_tests",
       "signature": "pub mod lab_determinism_conformance_tests",
       "stability": "test-internals"
@@ -839,7 +857,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 339,
+      "line": 351,
       "name": "lab_trace_observability_security_metamorphic_tests",
       "signature": "pub mod lab_trace_observability_security_metamorphic_tests",
       "stability": "test-internals"
@@ -849,7 +867,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 215,
+      "line": 216,
       "name": "link",
       "signature": "pub mod link",
       "stability": "preview"
@@ -859,7 +877,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 273,
+      "line": 278,
       "name": "messaging",
       "signature": "pub mod messaging",
       "stability": "native-only"
@@ -872,7 +890,7 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 347,
+      "line": 359,
       "name": "messaging_primitives_conformance_tests",
       "signature": "pub mod messaging_primitives_conformance_tests",
       "stability": "test-internals"
@@ -884,7 +902,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 349,
+      "line": 361,
       "name": "messaging_scheduler_deep_metamorphic_tests",
       "signature": "pub mod messaging_scheduler_deep_metamorphic_tests",
       "stability": "test-internals"
@@ -894,7 +912,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 216,
+      "line": 217,
       "name": "migration",
       "signature": "pub mod migration",
       "stability": "preview"
@@ -904,7 +922,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 217,
+      "line": 218,
       "name": "monitor",
       "signature": "pub mod monitor",
       "stability": "preview"
@@ -914,7 +932,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 218,
+      "line": 219,
       "name": "net",
       "signature": "pub mod net",
       "stability": "core"
@@ -926,7 +944,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 351,
+      "line": 363,
       "name": "net_cli_audit_conformance_tests",
       "signature": "pub mod net_cli_audit_conformance_tests",
       "stability": "test-internals"
@@ -938,7 +956,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 353,
+      "line": 365,
       "name": "net_http_metamorphic_tests",
       "signature": "pub mod net_http_metamorphic_tests",
       "stability": "test-internals"
@@ -948,7 +966,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 219,
+      "line": 220,
       "name": "obligation",
       "signature": "pub mod obligation",
       "stability": "core"
@@ -960,7 +978,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 355,
+      "line": 367,
       "name": "obligation_choreography_record_metamorphic_tests",
       "signature": "pub mod obligation_choreography_record_metamorphic_tests",
       "stability": "test-internals"
@@ -972,7 +990,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 357,
+      "line": 369,
       "name": "obligation_combinator_metamorphic_tests",
       "signature": "pub mod obligation_combinator_metamorphic_tests",
       "stability": "test-internals"
@@ -984,7 +1002,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 359,
+      "line": 371,
       "name": "obligation_leak_conformance_tests",
       "signature": "pub mod obligation_leak_conformance_tests",
       "stability": "test-internals"
@@ -994,7 +1012,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 220,
+      "line": 221,
       "name": "observability",
       "signature": "pub mod observability",
       "stability": "core"
@@ -1004,7 +1022,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 221,
+      "line": 222,
       "name": "plan",
       "signature": "pub mod plan",
       "stability": "core"
@@ -1016,7 +1034,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 361,
+      "line": 373,
       "name": "plan_trace_metamorphic_tests",
       "signature": "pub mod plan_trace_metamorphic_tests",
       "stability": "test-internals"
@@ -1026,7 +1044,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 222,
+      "line": 223,
       "name": "prelude",
       "signature": "pub mod prelude",
       "stability": "preview"
@@ -1038,20 +1056,23 @@
         "proc-macros"
       ],
       "kind": "module",
-      "line": 523,
+      "line": 535,
       "name": "proc_macros",
       "signature": "pub mod proc_macros",
       "stability": "feature-gated"
     },
     {
-      "cfg": "#[cfg(all(not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\")))]",
-      "doc": "Native process lifecycle surfaces; retained for existing feature selections, omitted only by the explicit slim profile without process.",
-      "feature_flags": ["slim-runtime-profile", "process"],
+      "cfg": "#[cfg(all( not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\") ))]",
+      "doc": "Native process lifecycle surfaces.",
+      "feature_flags": [
+        "process",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 283,
+      "line": 286,
       "name": "process",
       "signature": "pub mod process",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
@@ -1061,7 +1082,7 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 369,
+      "line": 381,
       "name": "protocol_serialization_golden_tests",
       "signature": "pub mod protocol_serialization_golden_tests",
       "stability": "test-internals"
@@ -1073,7 +1094,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 371,
+      "line": 383,
       "name": "public_api_golden_tests",
       "signature": "pub mod public_api_golden_tests",
       "stability": "test-internals"
@@ -1083,7 +1104,7 @@
       "doc": "RaptorQ encoding, decoding, repair, and proof surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 223,
+      "line": 224,
       "name": "raptorq",
       "signature": "pub mod raptorq",
       "stability": "core"
@@ -1095,7 +1116,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 373,
+      "line": 385,
       "name": "raptorq_deep_dive_metamorphic_tests",
       "signature": "pub mod raptorq_deep_dive_metamorphic_tests",
       "stability": "test-internals"
@@ -1107,7 +1128,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 375,
+      "line": 387,
       "name": "raptorq_rfc6330_conformance_tests",
       "signature": "pub mod raptorq_rfc6330_conformance_tests",
       "stability": "test-internals"
@@ -1119,7 +1140,7 @@
         "channel-mpsc-select-e2e"
       ],
       "kind": "module",
-      "line": 377,
+      "line": 389,
       "name": "real_channel_mpsc_combinator_select_integration_e2e_tests",
       "signature": "pub mod real_channel_mpsc_combinator_select_integration_e2e_tests",
       "stability": "feature-gated"
@@ -1131,7 +1152,7 @@
         "cross-subsystem-recovery-e2e"
       ],
       "kind": "module",
-      "line": 379,
+      "line": 391,
       "name": "real_cross_subsystem_recovery_e2e_tests",
       "signature": "pub mod real_cross_subsystem_recovery_e2e_tests",
       "stability": "test-internals"
@@ -1143,7 +1164,7 @@
         "real-service-e2e"
       ],
       "kind": "module",
-      "line": 381,
+      "line": 393,
       "name": "real_e2e_hardening_consolidation",
       "signature": "pub mod real_e2e_hardening_consolidation",
       "stability": "test-internals"
@@ -1155,7 +1176,7 @@
         "h3-websocket-e2e"
       ],
       "kind": "module",
-      "line": 383,
+      "line": 395,
       "name": "real_http_h3_server_websocket_upgrade_e2e_tests",
       "signature": "pub mod real_http_h3_server_websocket_upgrade_e2e_tests",
       "stability": "test-internals"
@@ -1167,7 +1188,7 @@
         "obligation-cleanup-e2e"
       ],
       "kind": "module",
-      "line": 385,
+      "line": 397,
       "name": "real_obligation_leak_check_e2e_tests",
       "signature": "pub mod real_obligation_leak_check_e2e_tests",
       "stability": "feature-gated"
@@ -1179,7 +1200,7 @@
         "raptorq-roundtrip-e2e"
       ],
       "kind": "module",
-      "line": 387,
+      "line": 399,
       "name": "real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
       "signature": "pub mod real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
       "stability": "test-internals"
@@ -1189,7 +1210,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 224,
+      "line": 225,
       "name": "record",
       "signature": "pub mod record",
       "stability": "preview"
@@ -1199,7 +1220,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 225,
+      "line": 226,
       "name": "remote",
       "signature": "pub mod remote",
       "stability": "preview"
@@ -1209,7 +1230,7 @@
       "doc": "Runtime builders, handles, scheduler state, and region lifecycle surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 236,
+      "line": 237,
       "name": "runtime",
       "signature": "pub mod runtime",
       "stability": "core"
@@ -1221,7 +1242,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 389,
+      "line": 401,
       "name": "runtime_state_machine_conformance_tests",
       "signature": "pub mod runtime_state_machine_conformance_tests",
       "stability": "test-internals"
@@ -1233,7 +1254,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 391,
+      "line": 403,
       "name": "scheduler_priority_conformance_tests",
       "signature": "pub mod scheduler_priority_conformance_tests",
       "stability": "test-internals"
@@ -1243,20 +1264,23 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 237,
+      "line": 238,
       "name": "security",
       "signature": "pub mod security",
       "stability": "preview"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 277,
+      "line": 289,
       "name": "server",
       "signature": "pub mod server",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -1265,7 +1289,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 393,
+      "line": 405,
       "name": "server_session_evidence_epoch_spork_metamorphic_tests",
       "signature": "pub mod server_session_evidence_epoch_spork_metamorphic_tests",
       "stability": "test-internals"
@@ -1275,7 +1299,7 @@
       "doc": "Service and layer traits for middleware-style composition.",
       "feature_flags": [],
       "kind": "module",
-      "line": 238,
+      "line": 239,
       "name": "service",
       "signature": "pub mod service",
       "stability": "core"
@@ -1287,7 +1311,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 395,
+      "line": 407,
       "name": "service_layer_conformance_tests",
       "signature": "pub mod service_layer_conformance_tests",
       "stability": "test-internals"
@@ -1297,7 +1321,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 239,
+      "line": 240,
       "name": "session",
       "signature": "pub mod session",
       "stability": "preview"
@@ -1307,7 +1331,7 @@
       "doc": "Native signal handling surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 279,
+      "line": 291,
       "name": "signal",
       "signature": "pub mod signal",
       "stability": "native-only"
@@ -1317,7 +1341,7 @@
       "doc": "Supervised application topology, deterministic process-group models, and app harness surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 240,
+      "line": 241,
       "name": "spork",
       "signature": "pub mod spork",
       "stability": "core"
@@ -1327,7 +1351,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 241,
+      "line": 242,
       "name": "stream",
       "signature": "pub mod stream",
       "stability": "core"
@@ -1337,7 +1361,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 242,
+      "line": 243,
       "name": "supervision",
       "signature": "pub mod supervision",
       "stability": "core"
@@ -1349,7 +1373,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 397,
+      "line": 409,
       "name": "supervision_genserver_actor_io_fs_metamorphic_tests",
       "signature": "pub mod supervision_genserver_actor_io_fs_metamorphic_tests",
       "stability": "test-internals"
@@ -1359,7 +1383,7 @@
       "doc": "Cancel-aware mutex, rwlock, semaphore, pool, barrier, and once-cell primitives.",
       "feature_flags": [],
       "kind": "module",
-      "line": 243,
+      "line": 244,
       "name": "sync",
       "signature": "pub mod sync",
       "stability": "core"
@@ -1371,7 +1395,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 399,
+      "line": 411,
       "name": "sync_primitives_conformance_tests",
       "signature": "pub mod sync_primitives_conformance_tests",
       "stability": "test-internals"
@@ -1383,7 +1407,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 401,
+      "line": 413,
       "name": "sync_scheduler_metamorphic_tests",
       "signature": "pub mod sync_scheduler_metamorphic_tests",
       "stability": "test-internals"
@@ -1395,7 +1419,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 403,
+      "line": 415,
       "name": "test_logging",
       "signature": "pub mod test_logging",
       "stability": "test-internals"
@@ -1407,7 +1431,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 405,
+      "line": 417,
       "name": "test_ndjson",
       "signature": "pub mod test_ndjson",
       "stability": "test-internals"
@@ -1419,7 +1443,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 407,
+      "line": 419,
       "name": "test_utils",
       "signature": "pub mod test_utils",
       "stability": "test-internals"
@@ -1429,7 +1453,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 244,
+      "line": 245,
       "name": "time",
       "signature": "pub mod time",
       "stability": "core"
@@ -1441,7 +1465,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 409,
+      "line": 421,
       "name": "timer_wheel_conformance_tests",
       "signature": "pub mod timer_wheel_conformance_tests",
       "stability": "test-internals"
@@ -1451,7 +1475,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 261,
+      "line": 265,
       "name": "tls",
       "signature": "pub mod tls",
       "stability": "preview"
@@ -1463,7 +1487,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 411,
+      "line": 423,
       "name": "tls_test_helpers_comprehensive_tests",
       "signature": "pub mod tls_test_helpers_comprehensive_tests",
       "stability": "test-internals"
@@ -1473,7 +1497,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 245,
+      "line": 246,
       "name": "trace",
       "signature": "pub mod trace",
       "stability": "core"
@@ -1485,7 +1509,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 413,
+      "line": 425,
       "name": "trace_causality_conformance_tests",
       "signature": "pub mod trace_causality_conformance_tests",
       "stability": "test-internals"
@@ -1495,7 +1519,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 246,
+      "line": 247,
       "name": "tracing_compat",
       "signature": "pub mod tracing_compat",
       "stability": "preview"
@@ -1505,7 +1529,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 247,
+      "line": 248,
       "name": "transport",
       "signature": "pub mod transport",
       "stability": "core"
@@ -1515,7 +1539,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 248,
+      "line": 249,
       "name": "types",
       "signature": "pub mod types",
       "stability": "core"
@@ -1525,20 +1549,23 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 249,
+      "line": 250,
       "name": "util",
       "signature": "pub mod util",
       "stability": "preview"
     },
     {
-      "cfg": null,
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Router, extractors, handlers, and request-region web surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 250,
+      "line": 252,
       "name": "web",
       "signature": "pub mod web",
-      "stability": "core"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -1547,7 +1574,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 415,
+      "line": 427,
       "name": "web_protocol_conformance_tests",
       "signature": "pub mod web_protocol_conformance_tests",
       "stability": "test-internals"
@@ -1559,7 +1586,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 417,
+      "line": 429,
       "name": "web_tls_codec_raptorq_metamorphic_tests",
       "signature": "pub mod web_tls_codec_raptorq_metamorphic_tests",
       "stability": "test-internals"
@@ -1583,7 +1610,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 283,
+      "line": 295,
       "name": "actor_genserver_monitor_evidence_link_process_metamorphic_tests",
       "signature": "pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests",
       "stability": "test-internals"
@@ -1635,7 +1662,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 285,
+      "line": 297,
       "name": "atp_timing_security_conformance_tests",
       "signature": "pub mod atp_timing_security_conformance_tests",
       "stability": "test-internals"
@@ -1667,7 +1694,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 287,
+      "line": 299,
       "name": "bytes_io_time_metamorphic_tests",
       "signature": "pub mod bytes_io_time_metamorphic_tests",
       "stability": "test-internals"
@@ -1689,7 +1716,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 289,
+      "line": 301,
       "name": "cancel_cx_runtime_channel_metamorphic_tests",
       "signature": "pub mod cancel_cx_runtime_channel_metamorphic_tests",
       "stability": "test-internals"
@@ -1711,7 +1738,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 291,
+      "line": 303,
       "name": "channel_ordering_conformance_tests",
       "signature": "pub mod channel_ordering_conformance_tests",
       "stability": "test-internals"
@@ -1723,7 +1750,7 @@
         "cli"
       ],
       "kind": "module",
-      "line": 258,
+      "line": 260,
       "name": "cli",
       "signature": "pub mod cli",
       "stability": "feature-gated"
@@ -1735,7 +1762,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 293,
+      "line": 305,
       "name": "cli_metamorphic_tests",
       "signature": "pub mod cli_metamorphic_tests",
       "stability": "test-internals"
@@ -1767,10 +1794,22 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 295,
+      "line": 307,
       "name": "combinator_family_conformance_tests",
       "signature": "pub mod combinator_family_conformance_tests",
       "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"zstd\")]",
+      "doc": "",
+      "feature_flags": [
+        "zstd"
+      ],
+      "kind": "module",
+      "line": 262,
+      "name": "compression",
+      "signature": "pub mod compression",
+      "stability": "feature-gated"
     },
     {
       "cfg": null,
@@ -1819,7 +1858,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 297,
+      "line": 309,
       "name": "cx_obligation_trace_metamorphic_tests",
       "signature": "pub mod cx_obligation_trace_metamorphic_tests",
       "stability": "test-internals"
@@ -1831,7 +1870,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 299,
+      "line": 311,
       "name": "cx_scheduler_remote_metamorphic_tests",
       "signature": "pub mod cx_scheduler_remote_metamorphic_tests",
       "stability": "test-internals"
@@ -1845,7 +1884,7 @@
         "sqlite"
       ],
       "kind": "module",
-      "line": 260,
+      "line": 264,
       "name": "database",
       "signature": "pub mod database",
       "stability": "feature-gated"
@@ -1857,7 +1896,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 301,
+      "line": 313,
       "name": "database_grpc_metamorphic_tests",
       "signature": "pub mod database_grpc_metamorphic_tests",
       "stability": "test-internals"
@@ -1869,7 +1908,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 303,
+      "line": 315,
       "name": "database_pool_transaction_metamorphic_tests",
       "signature": "pub mod database_pool_transaction_metamorphic_tests",
       "stability": "test-internals"
@@ -1881,7 +1920,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 305,
+      "line": 317,
       "name": "database_primitives_conformance_tests",
       "signature": "pub mod database_primitives_conformance_tests",
       "stability": "test-internals"
@@ -1927,7 +1966,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 307,
+      "line": 319,
       "name": "deterministic_state_golden_tests",
       "signature": "pub mod deterministic_state_golden_tests",
       "stability": "test-internals"
@@ -1949,7 +1988,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 309,
+      "line": 321,
       "name": "distributed_obligation_metamorphic_tests",
       "signature": "pub mod distributed_obligation_metamorphic_tests",
       "stability": "test-internals"
@@ -1961,7 +2000,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 311,
+      "line": 323,
       "name": "distributed_primitives_conformance_tests",
       "signature": "pub mod distributed_primitives_conformance_tests",
       "stability": "test-internals"
@@ -1973,7 +2012,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 313,
+      "line": 325,
       "name": "distributed_security_codec_conformance_tests",
       "signature": "pub mod distributed_security_codec_conformance_tests",
       "stability": "test-internals"
@@ -1985,7 +2024,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 315,
+      "line": 327,
       "name": "distributed_service_messaging_metamorphic_tests",
       "signature": "pub mod distributed_service_messaging_metamorphic_tests",
       "stability": "test-internals"
@@ -2027,7 +2066,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 317,
+      "line": 329,
       "name": "error_message_golden_tests",
       "signature": "pub mod error_message_golden_tests",
       "stability": "test-internals"
@@ -2057,7 +2096,7 @@
       "doc": "Native filesystem surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 269,
+      "line": 273,
       "name": "fs",
       "signature": "pub mod fs",
       "stability": "native-only"
@@ -2069,7 +2108,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 319,
+      "line": 331,
       "name": "fs_config_metamorphic_tests",
       "signature": "pub mod fs_config_metamorphic_tests",
       "stability": "test-internals"
@@ -2081,7 +2120,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 321,
+      "line": 333,
       "name": "fs_protocol_conformance_tests",
       "signature": "pub mod fs_protocol_conformance_tests",
       "stability": "test-internals"
@@ -2091,7 +2130,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 233,
+      "line": 234,
       "name": "future",
       "signature": "pub mod future",
       "stability": "preview"
@@ -2114,20 +2153,23 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 329,
+      "line": 341,
       "name": "golden_artifacts_tests",
       "signature": "pub mod golden_artifacts_tests",
       "stability": "test-internals"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Native gRPC client/server surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 271,
+      "line": 276,
       "name": "grpc",
       "signature": "pub mod grpc",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -2136,20 +2178,23 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 331,
+      "line": 343,
       "name": "grpc_protocol_conformance_tests",
       "signature": "pub mod grpc_protocol_conformance_tests",
       "stability": "test-internals"
     },
     {
-      "cfg": null,
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Native HTTP protocol and client/server surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 212,
+      "line": 213,
       "name": "http",
       "signature": "pub mod http",
-      "stability": "core"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -2158,7 +2203,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 333,
+      "line": 345,
       "name": "http_grpc_protocol_metamorphic_tests",
       "signature": "pub mod http_grpc_protocol_metamorphic_tests",
       "stability": "test-internals"
@@ -2168,7 +2213,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 213,
+      "line": 214,
       "name": "io",
       "signature": "pub mod io",
       "stability": "core"
@@ -2180,7 +2225,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 335,
+      "line": 347,
       "name": "io_bytes_time_conformance_tests",
       "signature": "pub mod io_bytes_time_conformance_tests",
       "stability": "test-internals"
@@ -2190,7 +2235,7 @@
       "doc": "Deterministic lab runtime, virtual time, scenario runner, replay, and oracles.",
       "feature_flags": [],
       "kind": "module",
-      "line": 214,
+      "line": 215,
       "name": "lab",
       "signature": "pub mod lab",
       "stability": "core"
@@ -2202,7 +2247,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 337,
+      "line": 349,
       "name": "lab_determinism_conformance_tests",
       "signature": "pub mod lab_determinism_conformance_tests",
       "stability": "test-internals"
@@ -2214,7 +2259,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 339,
+      "line": 351,
       "name": "lab_trace_observability_security_metamorphic_tests",
       "signature": "pub mod lab_trace_observability_security_metamorphic_tests",
       "stability": "test-internals"
@@ -2224,7 +2269,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 215,
+      "line": 216,
       "name": "link",
       "signature": "pub mod link",
       "stability": "preview"
@@ -2234,7 +2279,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 273,
+      "line": 278,
       "name": "messaging",
       "signature": "pub mod messaging",
       "stability": "native-only"
@@ -2247,7 +2292,7 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 347,
+      "line": 359,
       "name": "messaging_primitives_conformance_tests",
       "signature": "pub mod messaging_primitives_conformance_tests",
       "stability": "test-internals"
@@ -2259,7 +2304,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 349,
+      "line": 361,
       "name": "messaging_scheduler_deep_metamorphic_tests",
       "signature": "pub mod messaging_scheduler_deep_metamorphic_tests",
       "stability": "test-internals"
@@ -2269,7 +2314,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 216,
+      "line": 217,
       "name": "migration",
       "signature": "pub mod migration",
       "stability": "preview"
@@ -2279,7 +2324,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 217,
+      "line": 218,
       "name": "monitor",
       "signature": "pub mod monitor",
       "stability": "preview"
@@ -2289,7 +2334,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 218,
+      "line": 219,
       "name": "net",
       "signature": "pub mod net",
       "stability": "core"
@@ -2301,7 +2346,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 351,
+      "line": 363,
       "name": "net_cli_audit_conformance_tests",
       "signature": "pub mod net_cli_audit_conformance_tests",
       "stability": "test-internals"
@@ -2313,7 +2358,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 353,
+      "line": 365,
       "name": "net_http_metamorphic_tests",
       "signature": "pub mod net_http_metamorphic_tests",
       "stability": "test-internals"
@@ -2323,7 +2368,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 219,
+      "line": 220,
       "name": "obligation",
       "signature": "pub mod obligation",
       "stability": "core"
@@ -2335,7 +2380,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 355,
+      "line": 367,
       "name": "obligation_choreography_record_metamorphic_tests",
       "signature": "pub mod obligation_choreography_record_metamorphic_tests",
       "stability": "test-internals"
@@ -2347,7 +2392,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 357,
+      "line": 369,
       "name": "obligation_combinator_metamorphic_tests",
       "signature": "pub mod obligation_combinator_metamorphic_tests",
       "stability": "test-internals"
@@ -2359,7 +2404,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 359,
+      "line": 371,
       "name": "obligation_leak_conformance_tests",
       "signature": "pub mod obligation_leak_conformance_tests",
       "stability": "test-internals"
@@ -2369,7 +2414,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 220,
+      "line": 221,
       "name": "observability",
       "signature": "pub mod observability",
       "stability": "core"
@@ -2379,7 +2424,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 221,
+      "line": 222,
       "name": "plan",
       "signature": "pub mod plan",
       "stability": "core"
@@ -2391,7 +2436,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 361,
+      "line": 373,
       "name": "plan_trace_metamorphic_tests",
       "signature": "pub mod plan_trace_metamorphic_tests",
       "stability": "test-internals"
@@ -2401,7 +2446,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 222,
+      "line": 223,
       "name": "prelude",
       "signature": "pub mod prelude",
       "stability": "preview"
@@ -2413,20 +2458,23 @@
         "proc-macros"
       ],
       "kind": "module",
-      "line": 523,
+      "line": 535,
       "name": "proc_macros",
       "signature": "pub mod proc_macros",
       "stability": "feature-gated"
     },
     {
-      "cfg": "#[cfg(all(not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\")))]",
-      "doc": "Native process lifecycle surfaces; retained for existing feature selections, omitted only by the explicit slim profile without process.",
-      "feature_flags": ["slim-runtime-profile", "process"],
+      "cfg": "#[cfg(all( not(target_arch = \"wasm32\"), any(not(feature = \"slim-runtime-profile\"), feature = \"process\") ))]",
+      "doc": "Native process lifecycle surfaces.",
+      "feature_flags": [
+        "process",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 283,
+      "line": 286,
       "name": "process",
       "signature": "pub mod process",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
@@ -2436,7 +2484,7 @@
         "serialization-golden-harnesses"
       ],
       "kind": "module",
-      "line": 369,
+      "line": 381,
       "name": "protocol_serialization_golden_tests",
       "signature": "pub mod protocol_serialization_golden_tests",
       "stability": "test-internals"
@@ -2448,7 +2496,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 371,
+      "line": 383,
       "name": "public_api_golden_tests",
       "signature": "pub mod public_api_golden_tests",
       "stability": "test-internals"
@@ -2458,7 +2506,7 @@
       "doc": "RaptorQ encoding, decoding, repair, and proof surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 223,
+      "line": 224,
       "name": "raptorq",
       "signature": "pub mod raptorq",
       "stability": "core"
@@ -2470,7 +2518,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 373,
+      "line": 385,
       "name": "raptorq_deep_dive_metamorphic_tests",
       "signature": "pub mod raptorq_deep_dive_metamorphic_tests",
       "stability": "test-internals"
@@ -2482,7 +2530,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 375,
+      "line": 387,
       "name": "raptorq_rfc6330_conformance_tests",
       "signature": "pub mod raptorq_rfc6330_conformance_tests",
       "stability": "test-internals"
@@ -2494,7 +2542,7 @@
         "channel-mpsc-select-e2e"
       ],
       "kind": "module",
-      "line": 377,
+      "line": 389,
       "name": "real_channel_mpsc_combinator_select_integration_e2e_tests",
       "signature": "pub mod real_channel_mpsc_combinator_select_integration_e2e_tests",
       "stability": "feature-gated"
@@ -2506,7 +2554,7 @@
         "cross-subsystem-recovery-e2e"
       ],
       "kind": "module",
-      "line": 379,
+      "line": 391,
       "name": "real_cross_subsystem_recovery_e2e_tests",
       "signature": "pub mod real_cross_subsystem_recovery_e2e_tests",
       "stability": "test-internals"
@@ -2518,7 +2566,7 @@
         "real-service-e2e"
       ],
       "kind": "module",
-      "line": 381,
+      "line": 393,
       "name": "real_e2e_hardening_consolidation",
       "signature": "pub mod real_e2e_hardening_consolidation",
       "stability": "test-internals"
@@ -2530,7 +2578,7 @@
         "h3-websocket-e2e"
       ],
       "kind": "module",
-      "line": 383,
+      "line": 395,
       "name": "real_http_h3_server_websocket_upgrade_e2e_tests",
       "signature": "pub mod real_http_h3_server_websocket_upgrade_e2e_tests",
       "stability": "test-internals"
@@ -2542,7 +2590,7 @@
         "obligation-cleanup-e2e"
       ],
       "kind": "module",
-      "line": 385,
+      "line": 397,
       "name": "real_obligation_leak_check_e2e_tests",
       "signature": "pub mod real_obligation_leak_check_e2e_tests",
       "stability": "feature-gated"
@@ -2554,7 +2602,7 @@
         "raptorq-roundtrip-e2e"
       ],
       "kind": "module",
-      "line": 387,
+      "line": 399,
       "name": "real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
       "signature": "pub mod real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
       "stability": "test-internals"
@@ -2564,7 +2612,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 224,
+      "line": 225,
       "name": "record",
       "signature": "pub mod record",
       "stability": "preview"
@@ -2574,7 +2622,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 225,
+      "line": 226,
       "name": "remote",
       "signature": "pub mod remote",
       "stability": "preview"
@@ -2584,7 +2632,7 @@
       "doc": "Runtime builders, handles, scheduler state, and region lifecycle surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 236,
+      "line": 237,
       "name": "runtime",
       "signature": "pub mod runtime",
       "stability": "core"
@@ -2596,7 +2644,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 389,
+      "line": 401,
       "name": "runtime_state_machine_conformance_tests",
       "signature": "pub mod runtime_state_machine_conformance_tests",
       "stability": "test-internals"
@@ -2608,7 +2656,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 391,
+      "line": 403,
       "name": "scheduler_priority_conformance_tests",
       "signature": "pub mod scheduler_priority_conformance_tests",
       "stability": "test-internals"
@@ -2618,20 +2666,23 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 237,
+      "line": 238,
       "name": "security",
       "signature": "pub mod security",
       "stability": "preview"
     },
     {
-      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 277,
+      "line": 289,
       "name": "server",
       "signature": "pub mod server",
-      "stability": "native-only"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -2640,7 +2691,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 393,
+      "line": 405,
       "name": "server_session_evidence_epoch_spork_metamorphic_tests",
       "signature": "pub mod server_session_evidence_epoch_spork_metamorphic_tests",
       "stability": "test-internals"
@@ -2650,7 +2701,7 @@
       "doc": "Service and layer traits for middleware-style composition.",
       "feature_flags": [],
       "kind": "module",
-      "line": 238,
+      "line": 239,
       "name": "service",
       "signature": "pub mod service",
       "stability": "core"
@@ -2662,7 +2713,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 395,
+      "line": 407,
       "name": "service_layer_conformance_tests",
       "signature": "pub mod service_layer_conformance_tests",
       "stability": "test-internals"
@@ -2672,7 +2723,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 239,
+      "line": 240,
       "name": "session",
       "signature": "pub mod session",
       "stability": "preview"
@@ -2682,7 +2733,7 @@
       "doc": "Native signal handling surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 279,
+      "line": 291,
       "name": "signal",
       "signature": "pub mod signal",
       "stability": "native-only"
@@ -2692,7 +2743,7 @@
       "doc": "Supervised application topology, deterministic process-group models, and app harness surfaces.",
       "feature_flags": [],
       "kind": "module",
-      "line": 240,
+      "line": 241,
       "name": "spork",
       "signature": "pub mod spork",
       "stability": "core"
@@ -2702,7 +2753,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 241,
+      "line": 242,
       "name": "stream",
       "signature": "pub mod stream",
       "stability": "core"
@@ -2712,7 +2763,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 242,
+      "line": 243,
       "name": "supervision",
       "signature": "pub mod supervision",
       "stability": "core"
@@ -2724,7 +2775,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 397,
+      "line": 409,
       "name": "supervision_genserver_actor_io_fs_metamorphic_tests",
       "signature": "pub mod supervision_genserver_actor_io_fs_metamorphic_tests",
       "stability": "test-internals"
@@ -2734,7 +2785,7 @@
       "doc": "Cancel-aware mutex, rwlock, semaphore, pool, barrier, and once-cell primitives.",
       "feature_flags": [],
       "kind": "module",
-      "line": 243,
+      "line": 244,
       "name": "sync",
       "signature": "pub mod sync",
       "stability": "core"
@@ -2746,7 +2797,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 399,
+      "line": 411,
       "name": "sync_primitives_conformance_tests",
       "signature": "pub mod sync_primitives_conformance_tests",
       "stability": "test-internals"
@@ -2758,7 +2809,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 401,
+      "line": 413,
       "name": "sync_scheduler_metamorphic_tests",
       "signature": "pub mod sync_scheduler_metamorphic_tests",
       "stability": "test-internals"
@@ -2770,7 +2821,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 403,
+      "line": 415,
       "name": "test_logging",
       "signature": "pub mod test_logging",
       "stability": "test-internals"
@@ -2782,7 +2833,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 405,
+      "line": 417,
       "name": "test_ndjson",
       "signature": "pub mod test_ndjson",
       "stability": "test-internals"
@@ -2794,7 +2845,7 @@
         "test-internals"
       ],
       "kind": "module",
-      "line": 407,
+      "line": 419,
       "name": "test_utils",
       "signature": "pub mod test_utils",
       "stability": "test-internals"
@@ -2804,7 +2855,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 244,
+      "line": 245,
       "name": "time",
       "signature": "pub mod time",
       "stability": "core"
@@ -2816,7 +2867,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 409,
+      "line": 421,
       "name": "timer_wheel_conformance_tests",
       "signature": "pub mod timer_wheel_conformance_tests",
       "stability": "test-internals"
@@ -2826,7 +2877,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 261,
+      "line": 265,
       "name": "tls",
       "signature": "pub mod tls",
       "stability": "preview"
@@ -2838,7 +2889,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 411,
+      "line": 423,
       "name": "tls_test_helpers_comprehensive_tests",
       "signature": "pub mod tls_test_helpers_comprehensive_tests",
       "stability": "test-internals"
@@ -2848,7 +2899,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 245,
+      "line": 246,
       "name": "trace",
       "signature": "pub mod trace",
       "stability": "core"
@@ -2860,7 +2911,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 413,
+      "line": 425,
       "name": "trace_causality_conformance_tests",
       "signature": "pub mod trace_causality_conformance_tests",
       "stability": "test-internals"
@@ -2870,7 +2921,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 246,
+      "line": 247,
       "name": "tracing_compat",
       "signature": "pub mod tracing_compat",
       "stability": "preview"
@@ -2880,7 +2931,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 247,
+      "line": 248,
       "name": "transport",
       "signature": "pub mod transport",
       "stability": "core"
@@ -2890,7 +2941,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 248,
+      "line": 249,
       "name": "types",
       "signature": "pub mod types",
       "stability": "core"
@@ -2900,20 +2951,23 @@
       "doc": "",
       "feature_flags": [],
       "kind": "module",
-      "line": 249,
+      "line": 250,
       "name": "util",
       "signature": "pub mod util",
       "stability": "preview"
     },
     {
-      "cfg": null,
+      "cfg": "#[cfg(any(not(feature = \"slim-runtime-profile\"), feature = \"service-protocols\"))]",
       "doc": "Router, extractors, handlers, and request-region web surfaces.",
-      "feature_flags": [],
+      "feature_flags": [
+        "service-protocols",
+        "slim-runtime-profile"
+      ],
       "kind": "module",
-      "line": 250,
+      "line": 252,
       "name": "web",
       "signature": "pub mod web",
-      "stability": "core"
+      "stability": "feature-gated"
     },
     {
       "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
@@ -2922,7 +2976,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 415,
+      "line": 427,
       "name": "web_protocol_conformance_tests",
       "signature": "pub mod web_protocol_conformance_tests",
       "stability": "test-internals"
@@ -2934,7 +2988,7 @@
         "legacy-internal-test-harnesses"
       ],
       "kind": "module",
-      "line": 417,
+      "line": 429,
       "name": "web_tls_codec_raptorq_metamorphic_tests",
       "signature": "pub mod web_tls_codec_raptorq_metamorphic_tests",
       "stability": "test-internals"
@@ -2946,7 +3000,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::ProtoMessage",
       "signature": "pub use asupersync_macros::ProtoMessage",
       "stability": "feature-gated"
@@ -2958,7 +3012,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::ProtoOneof",
       "signature": "pub use asupersync_macros::ProtoOneof",
       "stability": "feature-gated"
@@ -2970,7 +3024,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::join",
       "signature": "pub use asupersync_macros::join",
       "stability": "feature-gated"
@@ -2982,7 +3036,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::join_all",
       "signature": "pub use asupersync_macros::join_all",
       "stability": "feature-gated"
@@ -2994,7 +3048,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::lab_test",
       "signature": "pub use asupersync_macros::lab_test",
       "stability": "feature-gated"
@@ -3006,7 +3060,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::main",
       "signature": "pub use asupersync_macros::main",
       "stability": "feature-gated"
@@ -3018,7 +3072,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::race",
       "signature": "pub use asupersync_macros::race",
       "stability": "feature-gated"
@@ -3030,7 +3084,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::scope",
       "signature": "pub use asupersync_macros::scope",
       "stability": "feature-gated"
@@ -3042,7 +3096,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::select",
       "signature": "pub use asupersync_macros::select",
       "stability": "feature-gated"
@@ -3054,7 +3108,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::spawn",
       "signature": "pub use asupersync_macros::spawn",
       "stability": "feature-gated"
@@ -3066,7 +3120,7 @@
         "proc-macros"
       ],
       "kind": "reexport",
-      "line": 517,
+      "line": 529,
       "name": "asupersync_macros::test",
       "signature": "pub use asupersync_macros::test",
       "stability": "feature-gated"
@@ -3076,7 +3130,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::AdaptiveConfig",
       "signature": "pub use config::AdaptiveConfig",
       "stability": "core"
@@ -3086,7 +3140,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::BackoffConfig",
       "signature": "pub use config::BackoffConfig",
       "stability": "core"
@@ -3096,7 +3150,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::ConfigError",
       "signature": "pub use config::ConfigError",
       "stability": "core"
@@ -3106,7 +3160,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::ConfigLoader",
       "signature": "pub use config::ConfigLoader",
       "stability": "core"
@@ -3116,7 +3170,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::EncodingConfig",
       "signature": "pub use config::EncodingConfig",
       "stability": "core"
@@ -3126,7 +3180,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::PathSelectionStrategy",
       "signature": "pub use config::PathSelectionStrategy",
       "stability": "core"
@@ -3136,7 +3190,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::RaptorQConfig",
       "signature": "pub use config::RaptorQConfig",
       "stability": "core"
@@ -3146,7 +3200,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::ResourceConfig",
       "signature": "pub use config::ResourceConfig",
       "stability": "core"
@@ -3156,7 +3210,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::RuntimeProfile",
       "signature": "pub use config::RuntimeProfile",
       "stability": "core"
@@ -3166,7 +3220,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::SecurityConfig",
       "signature": "pub use config::SecurityConfig",
       "stability": "core"
@@ -3176,7 +3230,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::TimeoutConfig",
       "signature": "pub use config::TimeoutConfig",
       "stability": "core"
@@ -3186,7 +3240,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 420,
+      "line": 432,
       "name": "config::TransportConfig",
       "signature": "pub use config::TransportConfig",
       "stability": "core"
@@ -3206,7 +3260,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 425,
+      "line": 437,
       "name": "cx::Cx",
       "signature": "pub use cx::Cx",
       "stability": "core"
@@ -3216,7 +3270,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 425,
+      "line": 437,
       "name": "cx::Scope",
       "signature": "pub use cx::Scope",
       "stability": "core"
@@ -3226,7 +3280,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::DecodingConfig",
       "signature": "pub use decoding::DecodingConfig",
       "stability": "preview"
@@ -3236,7 +3290,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::DecodingError",
       "signature": "pub use decoding::DecodingError",
       "stability": "preview"
@@ -3246,7 +3300,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::DecodingPipeline",
       "signature": "pub use decoding::DecodingPipeline",
       "stability": "preview"
@@ -3256,7 +3310,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::DecodingProgress",
       "signature": "pub use decoding::DecodingProgress",
       "stability": "preview"
@@ -3266,7 +3320,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::RejectReason",
       "signature": "pub use decoding::RejectReason",
       "stability": "preview"
@@ -3276,7 +3330,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 426,
+      "line": 438,
       "name": "decoding::SymbolAcceptResult",
       "signature": "pub use decoding::SymbolAcceptResult",
       "stability": "preview"
@@ -3286,7 +3340,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 430,
+      "line": 442,
       "name": "encoding::EncodedSymbol",
       "signature": "pub use encoding::EncodedSymbol",
       "stability": "preview"
@@ -3296,7 +3350,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 430,
+      "line": 442,
       "name": "encoding::EncodingError",
       "signature": "pub use encoding::EncodingError",
       "stability": "preview"
@@ -3306,7 +3360,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 430,
+      "line": 442,
       "name": "encoding::EncodingPipeline",
       "signature": "pub use encoding::EncodingPipeline",
       "stability": "preview"
@@ -3316,7 +3370,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 430,
+      "line": 442,
       "name": "encoding::EncodingStats",
       "signature": "pub use encoding::EncodingStats",
       "stability": "preview"
@@ -3326,7 +3380,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::BarrierResult",
       "signature": "pub use epoch::BarrierResult",
       "stability": "preview"
@@ -3336,7 +3390,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::BarrierTrigger",
       "signature": "pub use epoch::BarrierTrigger",
       "stability": "preview"
@@ -3346,7 +3400,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::Epoch",
       "signature": "pub use epoch::Epoch",
       "stability": "preview"
@@ -3356,7 +3410,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochBarrier",
       "signature": "pub use epoch::EpochBarrier",
       "stability": "preview"
@@ -3366,7 +3420,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochBulkheadError",
       "signature": "pub use epoch::EpochBulkheadError",
       "stability": "preview"
@@ -3376,7 +3430,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochCircuitBreakerError",
       "signature": "pub use epoch::EpochCircuitBreakerError",
       "stability": "preview"
@@ -3386,7 +3440,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochClock",
       "signature": "pub use epoch::EpochClock",
       "stability": "preview"
@@ -3396,7 +3450,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochConfig",
       "signature": "pub use epoch::EpochConfig",
       "stability": "preview"
@@ -3406,7 +3460,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochContext",
       "signature": "pub use epoch::EpochContext",
       "stability": "preview"
@@ -3416,7 +3470,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochError",
       "signature": "pub use epoch::EpochError",
       "stability": "preview"
@@ -3426,7 +3480,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochId",
       "signature": "pub use epoch::EpochId",
       "stability": "preview"
@@ -3436,7 +3490,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochJoin2",
       "signature": "pub use epoch::EpochJoin2",
       "stability": "preview"
@@ -3446,7 +3500,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochPolicy",
       "signature": "pub use epoch::EpochPolicy",
       "stability": "preview"
@@ -3456,7 +3510,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochRace2",
       "signature": "pub use epoch::EpochRace2",
       "stability": "preview"
@@ -3466,7 +3520,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochScoped",
       "signature": "pub use epoch::EpochScoped",
       "stability": "preview"
@@ -3476,7 +3530,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochSelect",
       "signature": "pub use epoch::EpochSelect",
       "stability": "preview"
@@ -3486,7 +3540,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochSource",
       "signature": "pub use epoch::EpochSource",
       "stability": "preview"
@@ -3496,7 +3550,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochState",
       "signature": "pub use epoch::EpochState",
       "stability": "preview"
@@ -3506,7 +3560,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::EpochTransitionBehavior",
       "signature": "pub use epoch::EpochTransitionBehavior",
       "stability": "preview"
@@ -3516,7 +3570,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::SymbolValidityWindow",
       "signature": "pub use epoch::SymbolValidityWindow",
       "stability": "preview"
@@ -3526,7 +3580,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::bulkhead_call_in_epoch",
       "signature": "pub use epoch::bulkhead_call_in_epoch",
       "stability": "preview"
@@ -3536,7 +3590,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::bulkhead_call_weighted_in_epoch",
       "signature": "pub use epoch::bulkhead_call_weighted_in_epoch",
       "stability": "preview"
@@ -3546,7 +3600,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::circuit_breaker_call_in_epoch",
       "signature": "pub use epoch::circuit_breaker_call_in_epoch",
       "stability": "preview"
@@ -3556,7 +3610,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::epoch_join2",
       "signature": "pub use epoch::epoch_join2",
       "stability": "preview"
@@ -3566,7 +3620,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::epoch_race2",
       "signature": "pub use epoch::epoch_race2",
       "stability": "preview"
@@ -3576,7 +3630,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 431,
+      "line": 443,
       "name": "epoch::epoch_select",
       "signature": "pub use epoch::epoch_select",
       "stability": "preview"
@@ -3586,7 +3640,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::AcquireError",
       "signature": "pub use error::AcquireError",
       "stability": "core"
@@ -3596,7 +3650,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::BackoffHint",
       "signature": "pub use error::BackoffHint",
       "stability": "core"
@@ -3606,7 +3660,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::Error",
       "signature": "pub use error::Error",
       "stability": "core"
@@ -3616,7 +3670,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::ErrorCategory",
       "signature": "pub use error::ErrorCategory",
       "stability": "core"
@@ -3626,7 +3680,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::ErrorKind",
       "signature": "pub use error::ErrorKind",
       "stability": "core"
@@ -3636,7 +3690,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::Recoverability",
       "signature": "pub use error::Recoverability",
       "stability": "core"
@@ -3646,7 +3700,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::RecoveryAction",
       "signature": "pub use error::RecoveryAction",
       "stability": "core"
@@ -3656,7 +3710,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::RecvError",
       "signature": "pub use error::RecvError",
       "stability": "core"
@@ -3666,7 +3720,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::Result",
       "signature": "pub use error::Result",
       "stability": "core"
@@ -3676,7 +3730,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::ResultExt",
       "signature": "pub use error::ResultExt",
       "stability": "core"
@@ -3686,7 +3740,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 439,
+      "line": 451,
       "name": "error::SendError",
       "signature": "pub use error::SendError",
       "stability": "core"
@@ -3696,7 +3750,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 443,
+      "line": 455,
       "name": "lab::LabConfig",
       "signature": "pub use lab::LabConfig",
       "stability": "core"
@@ -3706,7 +3760,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 443,
+      "line": 455,
       "name": "lab::LabRuntime",
       "signature": "pub use lab::LabRuntime",
       "stability": "core"
@@ -3716,7 +3770,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::CancelRequest",
       "signature": "pub use remote::CancelRequest",
       "stability": "preview"
@@ -3726,7 +3780,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::CompensationResult",
       "signature": "pub use remote::CompensationResult",
       "stability": "preview"
@@ -3736,7 +3790,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::ComputationName",
       "signature": "pub use remote::ComputationName",
       "stability": "preview"
@@ -3748,7 +3802,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES",
       "signature": "pub use remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES",
       "stability": "feature-gated"
@@ -3760,7 +3814,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL",
       "signature": "pub use remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL",
       "stability": "feature-gated"
@@ -3772,7 +3826,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF",
       "signature": "pub use remote::DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF",
       "stability": "feature-gated"
@@ -3784,7 +3838,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT",
       "signature": "pub use remote::DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT",
       "stability": "feature-gated"
@@ -3794,7 +3848,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION",
       "signature": "pub use remote::DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION",
       "stability": "preview"
@@ -3804,7 +3858,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES",
       "signature": "pub use remote::DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES",
       "stability": "preview"
@@ -3814,7 +3868,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER",
       "signature": "pub use remote::DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER",
       "stability": "preview"
@@ -3824,7 +3878,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::DedupDecision",
       "signature": "pub use remote::DedupDecision",
       "stability": "preview"
@@ -3834,7 +3888,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::IdempotencyKey",
       "signature": "pub use remote::IdempotencyKey",
       "stability": "preview"
@@ -3844,7 +3898,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::IdempotencyRecord",
       "signature": "pub use remote::IdempotencyRecord",
       "stability": "preview"
@@ -3854,7 +3908,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::IdempotencyRequestFingerprint",
       "signature": "pub use remote::IdempotencyRequestFingerprint",
       "stability": "preview"
@@ -3864,7 +3918,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::IdempotencyStore",
       "signature": "pub use remote::IdempotencyStore",
       "stability": "preview"
@@ -3874,7 +3928,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::Lease",
       "signature": "pub use remote::Lease",
       "stability": "preview"
@@ -3884,7 +3938,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::LeaseError",
       "signature": "pub use remote::LeaseError",
       "stability": "preview"
@@ -3894,7 +3948,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::LeaseRenewal",
       "signature": "pub use remote::LeaseRenewal",
       "stability": "preview"
@@ -3904,7 +3958,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::LeaseState",
       "signature": "pub use remote::LeaseState",
       "stability": "preview"
@@ -3916,7 +3970,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteDiscoveryBuildError",
       "signature": "pub use remote::NativeRemoteDiscoveryBuildError",
       "stability": "feature-gated"
@@ -3928,7 +3982,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteDiscoveryConfig",
       "signature": "pub use remote::NativeRemoteDiscoveryConfig",
       "stability": "feature-gated"
@@ -3940,7 +3994,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteDiscoveryDriver",
       "signature": "pub use remote::NativeRemoteDiscoveryDriver",
       "stability": "feature-gated"
@@ -3952,7 +4006,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteDiscoveryError",
       "signature": "pub use remote::NativeRemoteDiscoveryError",
       "stability": "feature-gated"
@@ -3964,7 +4018,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteDiscoveryReport",
       "signature": "pub use remote::NativeRemoteDiscoveryReport",
       "stability": "feature-gated"
@@ -3976,7 +4030,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteRoute",
       "signature": "pub use remote::NativeRemoteRoute",
       "stability": "feature-gated"
@@ -3988,7 +4042,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteRuntime",
       "signature": "pub use remote::NativeRemoteRuntime",
       "stability": "feature-gated"
@@ -4000,7 +4054,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteRuntimeBuildError",
       "signature": "pub use remote::NativeRemoteRuntimeBuildError",
       "stability": "feature-gated"
@@ -4012,7 +4066,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::NativeRemoteRuntimeConfig",
       "signature": "pub use remote::NativeRemoteRuntimeConfig",
       "stability": "feature-gated"
@@ -4022,7 +4076,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::NodeId",
       "signature": "pub use remote::NodeId",
       "stability": "preview"
@@ -4032,7 +4086,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::Phase0RemoteFailure",
       "signature": "pub use remote::Phase0RemoteFailure",
       "stability": "preview"
@@ -4042,7 +4096,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::Phase0RetryPolicy",
       "signature": "pub use remote::Phase0RetryPolicy",
       "stability": "preview"
@@ -4052,7 +4106,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::Phase0SimulationConfig",
       "signature": "pub use remote::Phase0SimulationConfig",
       "stability": "preview"
@@ -4064,7 +4118,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::REMOTE_SERVICE_CONFIG_SCHEMA_VERSION",
       "signature": "pub use remote::REMOTE_SERVICE_CONFIG_SCHEMA_VERSION",
       "stability": "feature-gated"
@@ -4076,7 +4130,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::REMOTE_SERVICE_PROTOCOL_LABEL",
       "signature": "pub use remote::REMOTE_SERVICE_PROTOCOL_LABEL",
       "stability": "feature-gated"
@@ -4086,7 +4140,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteCap",
       "signature": "pub use remote::RemoteCap",
       "stability": "preview"
@@ -4098,7 +4152,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationClient",
       "signature": "pub use remote::RemoteComputationClient",
       "stability": "feature-gated"
@@ -4110,7 +4164,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationClientConfig",
       "signature": "pub use remote::RemoteComputationClientConfig",
       "stability": "feature-gated"
@@ -4122,7 +4176,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationClientError",
       "signature": "pub use remote::RemoteComputationClientError",
       "stability": "feature-gated"
@@ -4132,7 +4186,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteComputationDispatchError",
       "signature": "pub use remote::RemoteComputationDispatchError",
       "stability": "preview"
@@ -4142,7 +4196,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteComputationFuture",
       "signature": "pub use remote::RemoteComputationFuture",
       "stability": "preview"
@@ -4152,7 +4206,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteComputationInvocation",
       "signature": "pub use remote::RemoteComputationInvocation",
       "stability": "preview"
@@ -4164,7 +4218,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationListenerError",
       "signature": "pub use remote::RemoteComputationListenerError",
       "stability": "feature-gated"
@@ -4174,7 +4228,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteComputationRegistry",
       "signature": "pub use remote::RemoteComputationRegistry",
       "stability": "preview"
@@ -4186,7 +4240,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationService",
       "signature": "pub use remote::RemoteComputationService",
       "stability": "feature-gated"
@@ -4198,7 +4252,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::RemoteComputationServiceBootstrap",
       "signature": "pub use remote::RemoteComputationServiceBootstrap",
       "stability": "feature-gated"
@@ -4210,7 +4264,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::RemoteComputationServiceBootstrapError",
       "signature": "pub use remote::RemoteComputationServiceBootstrapError",
       "stability": "feature-gated"
@@ -4222,7 +4276,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationServiceConfig",
       "signature": "pub use remote::RemoteComputationServiceConfig",
       "stability": "feature-gated"
@@ -4232,7 +4286,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteComputationServiceError",
       "signature": "pub use remote::RemoteComputationServiceError",
       "stability": "preview"
@@ -4244,7 +4298,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationServiceHandle",
       "signature": "pub use remote::RemoteComputationServiceHandle",
       "stability": "feature-gated"
@@ -4256,7 +4310,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::RemoteComputationServiceIdentity",
       "signature": "pub use remote::RemoteComputationServiceIdentity",
       "stability": "feature-gated"
@@ -4268,7 +4322,7 @@
         "remote-service"
       ],
       "kind": "reexport",
-      "line": 472,
+      "line": 484,
       "name": "remote::RemoteComputationServiceListenScope",
       "signature": "pub use remote::RemoteComputationServiceListenScope",
       "stability": "feature-gated"
@@ -4280,7 +4334,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 460,
+      "line": 472,
       "name": "remote::RemoteComputationServiceReport",
       "signature": "pub use remote::RemoteComputationServiceReport",
       "stability": "feature-gated"
@@ -4292,7 +4346,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::RemoteComputationSession",
       "signature": "pub use remote::RemoteComputationSession",
       "stability": "feature-gated"
@@ -4304,7 +4358,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::RemoteComputationSessionStart",
       "signature": "pub use remote::RemoteComputationSessionStart",
       "stability": "feature-gated"
@@ -4314,7 +4368,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteError",
       "signature": "pub use remote::RemoteError",
       "stability": "preview"
@@ -4324,7 +4378,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteHandle",
       "signature": "pub use remote::RemoteHandle",
       "stability": "preview"
@@ -4334,7 +4388,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteMessage",
       "signature": "pub use remote::RemoteMessage",
       "stability": "preview"
@@ -4344,7 +4398,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteOutcome",
       "signature": "pub use remote::RemoteOutcome",
       "stability": "preview"
@@ -4354,7 +4408,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemotePeerAdmissionError",
       "signature": "pub use remote::RemotePeerAdmissionError",
       "stability": "preview"
@@ -4364,7 +4418,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemotePeerAdmissionPolicy",
       "signature": "pub use remote::RemotePeerAdmissionPolicy",
       "stability": "preview"
@@ -4374,7 +4428,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemotePeerHello",
       "signature": "pub use remote::RemotePeerHello",
       "stability": "preview"
@@ -4384,7 +4438,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemotePeerSession",
       "signature": "pub use remote::RemotePeerSession",
       "stability": "preview"
@@ -4394,7 +4448,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteProtocolVersion",
       "signature": "pub use remote::RemoteProtocolVersion",
       "stability": "preview"
@@ -4404,7 +4458,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteRuntime",
       "signature": "pub use remote::RemoteRuntime",
       "stability": "preview"
@@ -4414,7 +4468,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteServiceRejectionCode",
       "signature": "pub use remote::RemoteServiceRejectionCode",
       "stability": "preview"
@@ -4426,7 +4480,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::RemoteServiceSessionCommand",
       "signature": "pub use remote::RemoteServiceSessionCommand",
       "stability": "feature-gated"
@@ -4438,7 +4492,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::RemoteServiceSessionError",
       "signature": "pub use remote::RemoteServiceSessionError",
       "stability": "feature-gated"
@@ -4450,7 +4504,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::RemoteServiceSessionEvent",
       "signature": "pub use remote::RemoteServiceSessionEvent",
       "stability": "feature-gated"
@@ -4460,7 +4514,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteServiceWireLimits",
       "signature": "pub use remote::RemoteServiceWireLimits",
       "stability": "preview"
@@ -4470,7 +4524,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteServiceWireOutcome",
       "signature": "pub use remote::RemoteServiceWireOutcome",
       "stability": "preview"
@@ -4480,7 +4534,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteServiceWireRequest",
       "signature": "pub use remote::RemoteServiceWireRequest",
       "stability": "preview"
@@ -4490,7 +4544,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteServiceWireResponse",
       "signature": "pub use remote::RemoteServiceWireResponse",
       "stability": "preview"
@@ -4500,7 +4554,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::RemoteTaskId",
       "signature": "pub use remote::RemoteTaskId",
       "stability": "preview"
@@ -4510,7 +4564,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::ResultDelivery",
       "signature": "pub use remote::ResultDelivery",
       "stability": "preview"
@@ -4520,7 +4574,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::Saga",
       "signature": "pub use remote::Saga",
       "stability": "preview"
@@ -4530,7 +4584,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SagaState",
       "signature": "pub use remote::SagaState",
       "stability": "preview"
@@ -4540,7 +4594,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SagaStepError",
       "signature": "pub use remote::SagaStepError",
       "stability": "preview"
@@ -4550,7 +4604,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SpawnAck",
       "signature": "pub use remote::SpawnAck",
       "stability": "preview"
@@ -4560,7 +4614,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SpawnAckStatus",
       "signature": "pub use remote::SpawnAckStatus",
       "stability": "preview"
@@ -4570,7 +4624,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SpawnRejectReason",
       "signature": "pub use remote::SpawnRejectReason",
       "stability": "preview"
@@ -4580,7 +4634,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::SpawnRequest",
       "signature": "pub use remote::SpawnRequest",
       "stability": "preview"
@@ -4592,7 +4646,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::call_tls_computation_once",
       "signature": "pub use remote::call_tls_computation_once",
       "stability": "feature-gated"
@@ -4604,7 +4658,7 @@
         "tls"
       ],
       "kind": "reexport",
-      "line": 478,
+      "line": 490,
       "name": "remote::serve_tls_computation_once",
       "signature": "pub use remote::serve_tls_computation_once",
       "stability": "feature-gated"
@@ -4614,7 +4668,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 444,
+      "line": 456,
       "name": "remote::spawn_remote",
       "signature": "pub use remote::spawn_remote",
       "stability": "preview"
@@ -4624,7 +4678,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Budget",
       "signature": "pub use types::Budget",
       "stability": "core"
@@ -4634,7 +4688,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CancelKind",
       "signature": "pub use types::CancelKind",
       "stability": "core"
@@ -4644,7 +4698,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CancelReason",
       "signature": "pub use types::CancelReason",
       "stability": "core"
@@ -4654,7 +4708,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CapabilityBudget",
       "signature": "pub use types::CapabilityBudget",
       "stability": "core"
@@ -4664,7 +4718,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CapabilityBudgetDimension",
       "signature": "pub use types::CapabilityBudgetDimension",
       "stability": "core"
@@ -4674,7 +4728,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CapabilityBudgetRefusal",
       "signature": "pub use types::CapabilityBudgetRefusal",
       "stability": "core"
@@ -4684,7 +4738,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::CapabilityBudgetRequirements",
       "signature": "pub use types::CapabilityBudgetRequirements",
       "stability": "core"
@@ -4694,7 +4748,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::DeserializationError",
       "signature": "pub use types::DeserializationError",
       "stability": "core"
@@ -4704,7 +4758,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Deserializer",
       "signature": "pub use types::Deserializer",
       "stability": "core"
@@ -4714,7 +4768,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::NextjsBootstrapPhase",
       "signature": "pub use types::NextjsBootstrapPhase",
       "stability": "core"
@@ -4724,7 +4778,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::NextjsIntegrationSnapshot",
       "signature": "pub use types::NextjsIntegrationSnapshot",
       "stability": "core"
@@ -4734,7 +4788,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::NextjsNavigationType",
       "signature": "pub use types::NextjsNavigationType",
       "stability": "core"
@@ -4744,7 +4798,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::NextjsRenderEnvironment",
       "signature": "pub use types::NextjsRenderEnvironment",
       "stability": "core"
@@ -4754,7 +4808,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ObligationId",
       "signature": "pub use types::ObligationId",
       "stability": "core"
@@ -4764,7 +4818,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Outcome",
       "signature": "pub use types::Outcome",
       "stability": "core"
@@ -4774,7 +4828,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::OutcomeError",
       "signature": "pub use types::OutcomeError",
       "stability": "core"
@@ -4784,7 +4838,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::PanicPayload",
       "signature": "pub use types::PanicPayload",
       "stability": "core"
@@ -4794,7 +4848,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Policy",
       "signature": "pub use types::Policy",
       "stability": "core"
@@ -4804,7 +4858,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ProgressiveLoadSlot",
       "signature": "pub use types::ProgressiveLoadSlot",
       "stability": "core"
@@ -4814,7 +4868,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ProgressiveLoadSnapshot",
       "signature": "pub use types::ProgressiveLoadSnapshot",
       "stability": "core"
@@ -4824,7 +4878,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ReactProviderConfig",
       "signature": "pub use types::ReactProviderConfig",
       "stability": "core"
@@ -4834,7 +4888,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ReactProviderPhase",
       "signature": "pub use types::ReactProviderPhase",
       "stability": "core"
@@ -4844,7 +4898,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::ReactProviderState",
       "signature": "pub use types::ReactProviderState",
       "stability": "core"
@@ -4854,7 +4908,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::RegionId",
       "signature": "pub use types::RegionId",
       "stability": "core"
@@ -4864,7 +4918,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::RemainingBudget",
       "signature": "pub use types::RemainingBudget",
       "stability": "core"
@@ -4874,7 +4928,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SerdeCodec",
       "signature": "pub use types::SerdeCodec",
       "stability": "core"
@@ -4884,7 +4938,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SerializationError",
       "signature": "pub use types::SerializationError",
       "stability": "core"
@@ -4894,7 +4948,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SerializationFormat",
       "signature": "pub use types::SerializationFormat",
       "stability": "core"
@@ -4904,7 +4958,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Serializer",
       "signature": "pub use types::Serializer",
       "stability": "core"
@@ -4914,7 +4968,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Severity",
       "signature": "pub use types::Severity",
       "stability": "core"
@@ -4924,7 +4978,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SuspenseBoundaryState",
       "signature": "pub use types::SuspenseBoundaryState",
       "stability": "core"
@@ -4934,7 +4988,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SuspenseDiagnosticEvent",
       "signature": "pub use types::SuspenseDiagnosticEvent",
       "stability": "core"
@@ -4944,7 +4998,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SuspenseTaskConfig",
       "signature": "pub use types::SuspenseTaskConfig",
       "stability": "core"
@@ -4954,7 +5008,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SuspenseTaskSnapshot",
       "signature": "pub use types::SuspenseTaskSnapshot",
       "stability": "core"
@@ -4964,7 +5018,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::SystemPressure",
       "signature": "pub use types::SystemPressure",
       "stability": "core"
@@ -4974,7 +5028,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TYPED_SYMBOL_HEADER_LEN",
       "signature": "pub use types::TYPED_SYMBOL_HEADER_LEN",
       "stability": "core"
@@ -4984,7 +5038,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TYPED_SYMBOL_MAGIC",
       "signature": "pub use types::TYPED_SYMBOL_MAGIC",
       "stability": "core"
@@ -4994,7 +5048,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TYPED_SYMBOL_VERSION",
       "signature": "pub use types::TYPED_SYMBOL_VERSION",
       "stability": "core"
@@ -5004,7 +5058,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TaskId",
       "signature": "pub use types::TaskId",
       "stability": "core"
@@ -5014,7 +5068,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::Time",
       "signature": "pub use types::Time",
       "stability": "core"
@@ -5024,7 +5078,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TransitionTaskState",
       "signature": "pub use types::TransitionTaskState",
       "stability": "core"
@@ -5034,7 +5088,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypeDescriptor",
       "signature": "pub use types::TypeDescriptor",
       "stability": "core"
@@ -5044,7 +5098,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypeMismatchError",
       "signature": "pub use types::TypeMismatchError",
       "stability": "core"
@@ -5054,7 +5108,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypeRegistry",
       "signature": "pub use types::TypeRegistry",
       "stability": "core"
@@ -5064,7 +5118,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypedDecoder",
       "signature": "pub use types::TypedDecoder",
       "stability": "core"
@@ -5074,7 +5128,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypedEncoder",
       "signature": "pub use types::TypedEncoder",
       "stability": "core"
@@ -5084,7 +5138,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::TypedSymbol",
       "signature": "pub use types::TypedSymbol",
       "stability": "core"
@@ -5094,7 +5148,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WASM_ABI_MAJOR_VERSION",
       "signature": "pub use types::WASM_ABI_MAJOR_VERSION",
       "stability": "core"
@@ -5104,7 +5158,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WASM_ABI_MINOR_VERSION",
       "signature": "pub use types::WASM_ABI_MINOR_VERSION",
       "stability": "core"
@@ -5114,7 +5168,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WASM_ABI_SIGNATURES_V1",
       "signature": "pub use types::WASM_ABI_SIGNATURES_V1",
       "stability": "core"
@@ -5124,7 +5178,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WASM_ABI_SIGNATURE_FINGERPRINT_V1",
       "signature": "pub use types::WASM_ABI_SIGNATURE_FINGERPRINT_V1",
       "stability": "core"
@@ -5134,7 +5188,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiBoundaryEvent",
       "signature": "pub use types::WasmAbiBoundaryEvent",
       "stability": "core"
@@ -5144,7 +5198,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiCancellation",
       "signature": "pub use types::WasmAbiCancellation",
       "stability": "core"
@@ -5154,7 +5208,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiChangeClass",
       "signature": "pub use types::WasmAbiChangeClass",
       "stability": "core"
@@ -5164,7 +5218,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiCompatibilityDecision",
       "signature": "pub use types::WasmAbiCompatibilityDecision",
       "stability": "core"
@@ -5174,7 +5228,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiErrorCode",
       "signature": "pub use types::WasmAbiErrorCode",
       "stability": "core"
@@ -5184,7 +5238,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiFailure",
       "signature": "pub use types::WasmAbiFailure",
       "stability": "core"
@@ -5194,7 +5248,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiOutcomeEnvelope",
       "signature": "pub use types::WasmAbiOutcomeEnvelope",
       "stability": "core"
@@ -5204,7 +5258,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiPayloadShape",
       "signature": "pub use types::WasmAbiPayloadShape",
       "stability": "core"
@@ -5214,7 +5268,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiRecoverability",
       "signature": "pub use types::WasmAbiRecoverability",
       "stability": "core"
@@ -5224,7 +5278,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiSignature",
       "signature": "pub use types::WasmAbiSignature",
       "stability": "core"
@@ -5234,7 +5288,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiSymbol",
       "signature": "pub use types::WasmAbiSymbol",
       "stability": "core"
@@ -5244,7 +5298,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiValue",
       "signature": "pub use types::WasmAbiValue",
       "stability": "core"
@@ -5254,7 +5308,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiVersion",
       "signature": "pub use types::WasmAbiVersion",
       "stability": "core"
@@ -5264,7 +5318,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbiVersionBump",
       "signature": "pub use types::WasmAbiVersionBump",
       "stability": "core"
@@ -5274,7 +5328,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbortInteropSnapshot",
       "signature": "pub use types::WasmAbortInteropSnapshot",
       "stability": "core"
@@ -5284,7 +5338,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbortInteropUpdate",
       "signature": "pub use types::WasmAbortInteropUpdate",
       "stability": "core"
@@ -5294,7 +5348,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmAbortPropagationMode",
       "signature": "pub use types::WasmAbortPropagationMode",
       "stability": "core"
@@ -5304,7 +5358,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmBoundaryState",
       "signature": "pub use types::WasmBoundaryState",
       "stability": "core"
@@ -5314,7 +5368,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmBoundaryTransitionError",
       "signature": "pub use types::WasmBoundaryTransitionError",
       "stability": "core"
@@ -5324,7 +5378,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmExportDispatcher",
       "signature": "pub use types::WasmExportDispatcher",
       "stability": "core"
@@ -5334,7 +5388,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmHandleKind",
       "signature": "pub use types::WasmHandleKind",
       "stability": "core"
@@ -5344,7 +5398,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmHandleRef",
       "signature": "pub use types::WasmHandleRef",
       "stability": "core"
@@ -5354,7 +5408,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmOutcomeExt",
       "signature": "pub use types::WasmOutcomeExt",
       "stability": "core"
@@ -5364,7 +5418,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmTaskCancelRequest",
       "signature": "pub use types::WasmTaskCancelRequest",
       "stability": "core"
@@ -5374,7 +5428,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::WasmTaskSpawnBuilder",
       "signature": "pub use types::WasmTaskSpawnBuilder",
       "stability": "core"
@@ -5384,7 +5438,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::apply_abort_signal_event",
       "signature": "pub use types::apply_abort_signal_event",
       "stability": "core"
@@ -5394,7 +5448,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::apply_runtime_cancel_phase_event",
       "signature": "pub use types::apply_runtime_cancel_phase_event",
       "stability": "core"
@@ -5404,7 +5458,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::classify_wasm_abi_compatibility",
       "signature": "pub use types::classify_wasm_abi_compatibility",
       "stability": "core"
@@ -5414,7 +5468,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::is_valid_bootstrap_transition",
       "signature": "pub use types::is_valid_bootstrap_transition",
       "stability": "core"
@@ -5424,7 +5478,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::is_valid_wasm_boundary_transition",
       "signature": "pub use types::is_valid_wasm_boundary_transition",
       "stability": "core"
@@ -5434,7 +5488,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::join_outcomes",
       "signature": "pub use types::join_outcomes",
       "stability": "core"
@@ -5444,7 +5498,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::outcome_to_error_boundary_action",
       "signature": "pub use types::outcome_to_error_boundary_action",
       "stability": "core"
@@ -5454,7 +5508,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::outcome_to_suspense_state",
       "signature": "pub use types::outcome_to_suspense_state",
       "stability": "core"
@@ -5464,7 +5518,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::outcome_to_transition_state",
       "signature": "pub use types::outcome_to_transition_state",
       "stability": "core"
@@ -5474,7 +5528,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::required_wasm_abi_bump",
       "signature": "pub use types::required_wasm_abi_bump",
       "stability": "core"
@@ -5484,7 +5538,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::validate_wasm_boundary_transition",
       "signature": "pub use types::validate_wasm_boundary_transition",
       "stability": "core"
@@ -5494,7 +5548,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::wasm_abi_signature_fingerprint",
       "signature": "pub use types::wasm_abi_signature_fingerprint",
       "stability": "core"
@@ -5504,7 +5558,7 @@
       "doc": "",
       "feature_flags": [],
       "kind": "reexport",
-      "line": 483,
+      "line": 495,
       "name": "types::wasm_boundary_state_for_cancel_phase",
       "signature": "pub use types::wasm_boundary_state_for_cancel_phase",
       "stability": "core"

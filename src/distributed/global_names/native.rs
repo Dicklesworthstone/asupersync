@@ -10,10 +10,9 @@ use super::wire::{self, MAX_GLOBAL_NAME_MESSAGE_BYTES};
 use super::{GlobalNameError, GlobalNameRegistry, GlobalNameTarget};
 use crate::cx::Cx;
 use crate::remote::{
-    ComputationName, IdempotencyKey, NodeId, RemoteComputationClient,
-    RemoteComputationClientError, RemoteInput, RemotePeerHello, RemoteProtocolVersion,
-    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
-    RemoteTaskId, SpawnRequest,
+    ComputationName, IdempotencyKey, NodeId, RemoteComputationClient, RemoteComputationClientError,
+    RemoteInput, RemotePeerHello, RemoteProtocolVersion, RemoteServiceWireOutcome,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest,
 };
 use crate::sync::Semaphore;
 use crate::sync::semaphore::SemaphorePermit;
@@ -55,7 +54,10 @@ impl NativeGlobalNameConfig {
         {
             return Err(NativeGlobalNameError::Configuration);
         }
-        Ok(Self { max_in_flight, refresh_interval })
+        Ok(Self {
+            max_in_flight,
+            refresh_interval,
+        })
     }
 
     /// Maximum number of live native exchanges across clones.
@@ -279,7 +281,9 @@ impl NativeGlobalNameTransport {
     /// Occupied exchange credits across all clones.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.config.max_in_flight.saturating_sub(self.exchanges.available_permits())
+        self.config
+            .max_in_flight
+            .saturating_sub(self.exchanges.available_permits())
     }
 
     /// Finite immutable transport policy.
@@ -299,18 +303,21 @@ impl NativeGlobalNameTransport {
         cx: &Cx,
     ) -> Result<GlobalNameRoundReport, NativeGlobalNameError> {
         check_owner(cx)?;
-        let _round = ActiveGuard::acquire(&self.round_active)
-            .ok_or(NativeGlobalNameError::RoundRunning)?;
+        let _round =
+            ActiveGuard::acquire(&self.round_active).ok_or(NativeGlobalNameError::RoundRunning)?;
         let snapshot = self.registry.snapshot(cx)?;
         if snapshot.len() > MAX_GLOBAL_NAME_MESSAGE_BYTES {
             return Err(NativeGlobalNameError::Refused);
         }
         let peers: Vec<_> = self.routes.keys().collect();
-        let mut report = GlobalNameRoundReport { peers: Vec::with_capacity(peers.len()) };
+        let mut report = GlobalNameRoundReport {
+            peers: Vec::with_capacity(peers.len()),
+        };
         for batch in peers.chunks(self.config.max_in_flight) {
-            let mut calls = batch.iter().map(|peer| {
-                Some(Box::pin(self.send_snapshot(cx, peer, &snapshot)))
-            }).collect::<Vec<_>>();
+            let mut calls = batch
+                .iter()
+                .map(|peer| Some(Box::pin(self.send_snapshot(cx, peer, &snapshot))))
+                .collect::<Vec<_>>();
             let mut results = (0..calls.len()).map(|_| None).collect::<Vec<_>>();
             let joined = poll_fn(|task| {
                 for (index, call) in calls.iter_mut().enumerate() {
@@ -357,7 +364,9 @@ impl NativeGlobalNameTransport {
         if !self.routes.contains_key(owner) {
             return Err(NativeGlobalNameError::UnknownPeer);
         }
-        let permit = self.exchanges.try_acquire_checked(cx, 1)
+        let permit = self
+            .exchanges
+            .try_acquire_checked(cx, 1)
             .map_err(|_| NativeGlobalNameError::Admission)?;
         let operation = async {
             let request = wire::lookup_request(name, incarnation)?;
@@ -371,7 +380,14 @@ impl NativeGlobalNameTransport {
                 observed_at: cx.now(),
             })
         };
-        with_owner(cx, AdmittedExchange { future: Box::pin(operation), _permit: permit }).await?
+        with_owner(
+            cx,
+            AdmittedExchange {
+                future: Box::pin(operation),
+                _permit: permit,
+            },
+        )
+        .await?
     }
 
     async fn send_snapshot(
@@ -381,14 +397,23 @@ impl NativeGlobalNameTransport {
         snapshot: &[u8],
     ) -> Result<(), NativeGlobalNameError> {
         check_owner(cx)?;
-        let permit = self.exchanges.try_acquire_checked(cx, 1)
+        let permit = self
+            .exchanges
+            .try_acquire_checked(cx, 1)
             .map_err(|_| NativeGlobalNameError::Admission)?;
         let operation = async {
             let reply = self.call(cx, peer, snapshot.to_vec()).await?;
             wire::verify_snapshot_receipt(&reply, snapshot)?;
             Ok(())
         };
-        with_owner(cx, AdmittedExchange { future: Box::pin(operation), _permit: permit }).await?
+        with_owner(
+            cx,
+            AdmittedExchange {
+                future: Box::pin(operation),
+                _permit: permit,
+            },
+        )
+        .await?
     }
 
     async fn call(
@@ -401,7 +426,10 @@ impl NativeGlobalNameTransport {
         if input.len() > MAX_GLOBAL_NAME_MESSAGE_BYTES {
             return Err(NativeGlobalNameError::Refused);
         }
-        let client = self.routes.get(peer).ok_or(NativeGlobalNameError::UnknownPeer)?;
+        let client = self
+            .routes
+            .get(peer)
+            .ok_or(NativeGlobalNameError::UnknownPeer)?;
         let task = RemoteTaskId::next();
         let request = SpawnRequest {
             remote_task_id: task,
@@ -417,9 +445,14 @@ impl NativeGlobalNameTransport {
         let wire = RemoteServiceWireRequest::from_spawn_request(self.hello.clone(), &request)
             .map_err(|_| NativeGlobalNameError::Configuration)?;
         drop(request);
-        match client.call(cx, &wire).await.map_err(NativeGlobalNameError::Client)? {
+        match client
+            .call(cx, &wire)
+            .await
+            .map_err(NativeGlobalNameError::Client)?
+        {
             RemoteServiceWireResponse::Outcome {
-                outcome: RemoteServiceWireOutcome::Success(bytes), ..
+                outcome: RemoteServiceWireOutcome::Success(bytes),
+                ..
             } if bytes.len() <= MAX_GLOBAL_NAME_MESSAGE_BYTES => Ok(bytes),
             _ => Err(NativeGlobalNameError::Refused),
         }
@@ -432,10 +465,7 @@ impl NativeGlobalNameTransport {
     /// network flush. Core actor retirement/receipts remain the registry
     /// driver's responsibility. Failed peers and pending local retirement
     /// are retried at the next bounded interval without changing membership.
-    pub async fn run(
-        &self,
-        cx: &Cx,
-    ) -> Result<GlobalNamePropagationReport, NativeGlobalNameError> {
+    pub async fn run(&self, cx: &Cx) -> Result<GlobalNamePropagationReport, NativeGlobalNameError> {
         let _driver = ActiveGuard::acquire(&self.driver_active)
             .ok_or(NativeGlobalNameError::DriverRunning)?;
         let mut report = GlobalNamePropagationReport {
@@ -452,9 +482,10 @@ impl NativeGlobalNameTransport {
                 Ok(round) => {
                     let acknowledged = round.acknowledged();
                     report.completed_rounds = report.completed_rounds.saturating_add(1);
-                    report.acknowledgements = report.acknowledgements
-                        .saturating_add(acknowledged as u64);
-                    report.failed_exchanges = report.failed_exchanges
+                    report.acknowledgements =
+                        report.acknowledgements.saturating_add(acknowledged as u64);
+                    report.failed_exchanges = report
+                        .failed_exchanges
                         .saturating_add((round.peers.len() - acknowledged) as u64);
                     report.last_round = Some(round);
                     report.last_round_error = None;
@@ -477,11 +508,17 @@ impl NativeGlobalNameTransport {
                 }
                 Err(error) => return Err(error),
             }
-            let clock = cx.timer_driver().ok_or(NativeGlobalNameError::Configuration)?;
+            let clock = cx
+                .timer_driver()
+                .ok_or(NativeGlobalNameError::Configuration)?;
             let nanos = u64::try_from(self.config.refresh_interval.as_nanos())
                 .map_err(|_| NativeGlobalNameError::Configuration)?;
-            let deadline = Time::from_nanos(cx.now().as_nanos().checked_add(nanos)
-                .ok_or(NativeGlobalNameError::Deadline)?);
+            let deadline = Time::from_nanos(
+                cx.now()
+                    .as_nanos()
+                    .checked_add(nanos)
+                    .ok_or(NativeGlobalNameError::Deadline)?,
+            );
             let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, clock));
             let delay = poll_fn(|task| sleep.as_mut().poll_deadline(task));
             match with_owner(cx, delay).await {
@@ -516,8 +553,10 @@ struct ActiveGuard<'a>(&'a AtomicBool);
 
 impl<'a> ActiveGuard<'a> {
     fn acquire(active: &'a AtomicBool) -> Option<Self> {
-        active.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok().map(|_| Self(active))
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(active))
     }
 }
 
@@ -541,21 +580,27 @@ fn check_owner(cx: &Cx) -> Result<(), NativeGlobalNameError> {
     if !cx.capabilities().io || cx.io_driver_handle().is_none() || cx.timer_driver().is_none() {
         return Err(NativeGlobalNameError::Configuration);
     }
-    if cx.budget().deadline.is_some_and(|deadline| cx.now() >= deadline) {
+    if cx
+        .budget()
+        .deadline
+        .is_some_and(|deadline| cx.now() >= deadline)
+    {
         return Err(NativeGlobalNameError::Deadline);
     }
     Ok(())
 }
 
-async fn with_owner<F: Future>(
-    cx: &Cx,
-    operation: F,
-) -> Result<F::Output, NativeGlobalNameError> {
+async fn with_owner<F: Future>(cx: &Cx, operation: F) -> Result<F::Output, NativeGlobalNameError> {
     check_owner(cx)?;
-    let timer = cx.budget().deadline.map(|deadline| {
-        cx.timer_driver().map(|clock| Sleep::with_timer_driver(deadline, clock))
-            .ok_or(NativeGlobalNameError::Configuration)
-    }).transpose()?;
+    let timer = cx
+        .budget()
+        .deadline
+        .map(|deadline| {
+            cx.timer_driver()
+                .map(|clock| Sleep::with_timer_driver(deadline, clock))
+                .ok_or(NativeGlobalNameError::Configuration)
+        })
+        .transpose()?;
     let mut deadline = std::pin::pin!(timer);
     let mut cancelled = std::pin::pin!(cx.cancelled());
     let mut operation = std::pin::pin!(cx.with_ambient(operation));
@@ -563,7 +608,9 @@ async fn with_owner<F: Future>(
         if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
             return Poll::Ready(Err(owner_cancel_error(cx)));
         }
-        if deadline.as_mut().as_pin_mut()
+        if deadline
+            .as_mut()
+            .as_pin_mut()
             .is_some_and(|timer| timer.poll_deadline(task).is_ready())
         {
             // Preserve the typed terminal result if the runtime has also
@@ -578,5 +625,6 @@ async fn with_owner<F: Future>(
                 Err(error) => Poll::Ready(Err(error)),
             },
         }
-    }).await
+    })
+    .await
 }

@@ -14,38 +14,38 @@
 //! - [`ChunkedEncoder`]: Encoder for HTTP/1.1 chunked transfer encoding
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
+use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use parking_lot::Mutex;
 
 use crate::bytes::{Buf, Bytes, BytesCursor, BytesMut};
-use crate::channel::{mpsc, oneshot};
 use crate::channel::mpsc::{RecvError, SendError};
+use crate::channel::{mpsc, oneshot};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     CHUNK_METADATA_ALLOWANCE_BYTES, HttpError, chunk_size_line_metadata_bytes,
-    find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line,
-    parse_header_line, require_transfer_encoding_chunked, trim_ows, validate_header_field,
+    find_chunk_size_line_end, is_forbidden_trailer, parse_chunk_size_line, parse_header_line,
+    require_transfer_encoding_chunked, trim_ows, validate_header_field,
 };
 use crate::types::CancelKind;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod obligation;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use obligation::IncomingBodyAdmissionError;
-#[cfg(not(target_arch = "wasm32"))]
-use obligation::IncomingBodyObligation;
 #[cfg(all(
     not(target_arch = "wasm32"),
     any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
 ))]
 pub(crate) use obligation::FramedIncomingBodyGuard;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use obligation::IncomingBodyAdmissionError;
+#[cfg(not(target_arch = "wasm32"))]
+use obligation::IncomingBodyObligation;
 
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
@@ -638,7 +638,8 @@ impl IncomingBodyShared {
                         IncomingProducerTerminal::Failed
                     }
                 };
-                self.producer_terminal.store(terminal as u8, Ordering::Release);
+                self.producer_terminal
+                    .store(terminal as u8, Ordering::Release);
                 result
             }
         }
@@ -852,7 +853,11 @@ impl IncomingRequestBody {
         queued_byte_limit: usize,
         max_body_size: u64,
     ) -> Result<
-        (FramedIncomingRequestBodyWriter, Self, FramedIncomingBodyGuard),
+        (
+            FramedIncomingRequestBodyWriter,
+            Self,
+            FramedIncomingBodyGuard,
+        ),
         IncomingBodyAdmissionError,
     > {
         if let Some(actual) = declared_length
@@ -878,7 +883,11 @@ impl IncomingRequestBody {
         let guard = FramedIncomingBodyGuard::new(
             obligation,
             Arc::clone(&body.shared),
-            writer.sender.as_ref().expect("new open framed body").downgrade(),
+            writer
+                .sender
+                .as_ref()
+                .expect("new open framed body")
+                .downgrade(),
         );
         Ok((writer, body, guard))
     }
@@ -1442,7 +1451,10 @@ impl FramedIncomingRequestBodyWriter {
         self.checked_owner
             .as_ref()
             .filter(|owner| owner.is_cancel_requested())
-            .map_or(IncomingBodyError::ConsumerDropped, IncomingBodyError::cancelled)
+            .map_or(
+                IncomingBodyError::ConsumerDropped,
+                IncomingBodyError::cancelled,
+            )
     }
 
     /// Take the DATA bytes delivered to the consumer since the previous call.
@@ -1785,10 +1797,14 @@ impl FramedIncomingRequestBodyWriter {
 ))]
 impl Drop for FramedIncomingRequestBodyWriter {
     fn drop(&mut self) {
-        let error = self.checked_owner
+        let error = self
+            .checked_owner
             .as_ref()
             .filter(|owner| owner.is_cancel_requested())
-            .map_or(IncomingBodyError::SourceDisconnected, IncomingBodyError::cancelled);
+            .map_or(
+                IncomingBodyError::SourceDisconnected,
+                IncomingBodyError::cancelled,
+            );
         self.fail(error);
         #[cfg(feature = "http2-streaming")]
         {
@@ -2144,9 +2160,7 @@ impl IncomingRequestBodyWriter {
             )
             .is_ok();
         #[cfg(not(target_arch = "wasm32"))]
-        if completed
-            && let Some(mut obligation) = self.obligation.take()
-        {
+        if completed && let Some(mut obligation) = self.obligation.take() {
             obligation.commit();
         }
         #[cfg(target_arch = "wasm32")]
@@ -2772,8 +2786,16 @@ impl OutgoingBody {
     /// Merely dropping a sender or sending trailers never creates this proof.
     #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
     pub(crate) fn explicit_finish_bytes(&self) -> Option<u64> {
-        (self.channel_identity.explicit_finish_published.load(Ordering::Acquire) != 0)
-            .then(|| self.channel_identity.explicit_finish_bytes.load(Ordering::Relaxed))
+        (self
+            .channel_identity
+            .explicit_finish_published
+            .load(Ordering::Acquire)
+            != 0)
+            .then(|| {
+                self.channel_identity
+                    .explicit_finish_bytes
+                    .load(Ordering::Relaxed)
+            })
     }
 
     /// Subscribe before a zero peer window prevents ordinary DATA polling.
@@ -2792,7 +2814,10 @@ impl OutgoingBody {
         let mut incoming = Some(cx.waker().clone());
         let retired = {
             let mut registered = self.channel_identity.explicit_finish_waker.lock();
-            if registered.as_ref().is_some_and(|old| old.will_wake(cx.waker())) {
+            if registered
+                .as_ref()
+                .is_some_and(|old| old.will_wake(cx.waker()))
+            {
                 None
             } else {
                 std::mem::replace(&mut *registered, incoming.take())
@@ -3220,7 +3245,8 @@ impl OutgoingBodySender {
         // concurrent receiver. The dedicated wake also reaches a tunnel
         // driver parked with zero peer DATA credit and no data subscription.
         #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
-        self.channel_identity.publish_explicit_finish(self.total_bytes);
+        self.channel_identity
+            .publish_explicit_finish(self.total_bytes);
         self.close_sender();
         #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
         self.channel_identity.wake_explicit_finish();

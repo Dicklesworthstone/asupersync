@@ -136,7 +136,8 @@ impl SymbolRepairMembership {
                     return Poll::Ready(SymbolRepairMembershipStop::Cancelled(reason));
                 }
                 inner.as_mut().poll(task)
-            }).await
+            })
+            .await
         };
         SymbolRepairMembershipReport {
             source: self.observer.node().clone(),
@@ -159,7 +160,9 @@ impl SymbolRepairMembership {
                 return SymbolRepairMembershipStop::WorkerClosed;
             }
             let recovered = current.last_alive_transition != previous.last_alive_transition;
-            if current.stamp.is_some_and(|stamp| stamp.kind == MembershipKind::Alive)
+            if current
+                .stamp
+                .is_some_and(|stamp| stamp.kind == MembershipKind::Alive)
                 && (initial || recovered)
             {
                 // Check again immediately before publishing a hint. Concurrent
@@ -186,9 +189,12 @@ impl SymbolRepairMembership {
                 let mut membership = std::pin::pin!(self.observer.changed(current));
                 // changed(rounds_finished) deliberately ignores Stopping. Here
                 // admission closure must wake even while a round still drains.
-                let mut worker = std::pin::pin!(self.worker.shared.changed.wait_until(|| {
-                    worker_closed(&self.worker)
-                }));
+                let mut worker = std::pin::pin!(
+                    self.worker
+                        .shared
+                        .changed
+                        .wait_until(|| { worker_closed(&self.worker) })
+                );
                 poll_fn(|task| {
                     if worker.as_mut().poll(task).is_ready() {
                         return Poll::Ready(true);
@@ -197,7 +203,8 @@ impl SymbolRepairMembership {
                         return Poll::Ready(false);
                     }
                     Poll::Pending
-                }).await
+                })
+                .await
             };
             if closed {
                 return SymbolRepairMembershipStop::WorkerClosed;
@@ -261,11 +268,15 @@ impl Control {
     }
 
     fn now(&self) -> Time {
-        self.clock.as_ref().map_or_else(crate::time::wall_now, TimerDriverHandle::now)
+        self.clock
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
     }
 
     fn tighten(&mut self, cx: &Cx) {
-        let Some(deadline) = cx.budget().deadline else { return; };
+        let Some(deadline) = cx.budget().deadline else {
+            return;
+        };
         let source_clock = cx.timer_driver();
         let same_clock = match (&self.clock, &source_clock) {
             (Some(owner), Some(source)) => owner.ptr_eq(source),
@@ -279,20 +290,22 @@ impl Control {
             // Sample the destination clock first: a preemption between reads
             // may shorten a foreign deadline, but must never extend it.
             let owner_now = self.now();
-            let source_now = source_clock.as_ref()
+            let source_now = source_clock
+                .as_ref()
                 .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
-            owner_now.saturating_add_nanos(
-                deadline.as_nanos().saturating_sub(source_now.as_nanos()),
-            )
+            owner_now
+                .saturating_add_nanos(deadline.as_nanos().saturating_sub(source_now.as_nanos()))
         };
         if self.deadline.is_none_or(|current| translated < current) {
             self.deadline = Some(translated);
             match &mut self.sleep {
                 Some(sleep) => sleep.reset(translated),
-                None => self.sleep = Some(self.clock.as_ref().map_or_else(
-                    || Sleep::new(translated),
-                    |clock| Sleep::with_timer_driver(translated, clock.clone()),
-                )),
+                None => {
+                    self.sleep = Some(self.clock.as_ref().map_or_else(
+                        || Sleep::new(translated),
+                        |clock| Sleep::with_timer_driver(translated, clock.clone()),
+                    ))
+                }
             }
         }
     }
@@ -300,18 +313,25 @@ impl Control {
     fn check(&mut self, task: &mut Context<'_>) -> Option<CancelReason> {
         let current = Cx::current().filter(|current| {
             !Arc::ptr_eq(&current.inner, &self.owner.cx.inner)
-                && !self.initial.as_ref().is_some_and(|initial| {
-                    Arc::ptr_eq(&current.inner, &initial.cx.inner)
-                })
+                && !self
+                    .initial
+                    .as_ref()
+                    .is_some_and(|initial| Arc::ptr_eq(&current.inner, &initial.cx.inner))
         });
-        if current.as_ref().is_none_or(|current| self.poller.as_ref().is_none_or(|previous| {
-            !Arc::ptr_eq(&previous.cx.inner, &current.inner)
-        })) {
+        if current.as_ref().is_none_or(|current| {
+            self.poller
+                .as_ref()
+                .is_none_or(|previous| !Arc::ptr_eq(&previous.cx.inner, &current.inner))
+        }) {
             self.poller = current.map(Cancellation::new);
         }
         self.owner.register(task);
-        if let Some(initial) = &mut self.initial { initial.register(task); }
-        if let Some(poller) = &mut self.poller { poller.register(task); }
+        if let Some(initial) = &mut self.initial {
+            initial.register(task);
+        }
+        if let Some(poller) = &mut self.poller {
+            poller.register(task);
+        }
         let contexts = [
             Some(self.owner.cx.clone()),
             self.initial.as_ref().map(|guard| guard.cx.clone()),
@@ -325,17 +345,21 @@ impl Control {
         }
         {
             let _ambient = self.owner.cx.clone().set_current_restricted();
-            if self.sleep.as_mut().is_some_and(|sleep| {
-                Pin::new(sleep).poll_deadline(task).is_ready()
-            }) {
+            if self
+                .sleep
+                .as_mut()
+                .is_some_and(|sleep| Pin::new(sleep).poll_deadline(task).is_ready())
+            {
                 return Some(CancelReason::deadline());
             }
         }
         for cx in contexts.iter().flatten() {
             if cx.checkpoint().is_err() {
-                return Some(cx.cancel_reason().unwrap_or_else(|| {
-                    CancelReason::user("membership repair trigger cancelled")
-                }));
+                return Some(
+                    cx.cancel_reason().unwrap_or_else(|| {
+                        CancelReason::user("membership repair trigger cancelled")
+                    }),
+                );
             }
         }
         None

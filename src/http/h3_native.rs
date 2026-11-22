@@ -2033,7 +2033,11 @@ impl QpackBlockedStreamScheduler {
         let terminal = self
             .streams
             .values()
-            .filter(|sections| sections.iter().all(QpackBlockedStreamRecord::is_reapable_terminal))
+            .filter(|sections| {
+                sections
+                    .iter()
+                    .all(QpackBlockedStreamRecord::is_reapable_terminal)
+            })
             .count();
         if terminal <= MAX_RETAINED_TERMINAL_RECORDS {
             return;
@@ -2043,7 +2047,9 @@ impl QpackBlockedStreamScheduler {
             .streams
             .iter()
             .filter(|(_, sections)| {
-                sections.iter().all(QpackBlockedStreamRecord::is_reapable_terminal)
+                sections
+                    .iter()
+                    .all(QpackBlockedStreamRecord::is_reapable_terminal)
             })
             .take(excess)
             .map(|(stream_id, _)| *stream_id)
@@ -2091,10 +2097,16 @@ impl QpackBlockedStreamScheduler {
     #[must_use]
     pub fn stream_status(&self, stream_id: u64) -> Option<QpackBlockedStreamStatus> {
         let sections = self.streams.get(&stream_id)?;
-        if sections.iter().any(|record| record.status == QpackBlockedStreamStatus::Failed) {
+        if sections
+            .iter()
+            .any(|record| record.status == QpackBlockedStreamStatus::Failed)
+        {
             return Some(QpackBlockedStreamStatus::Failed);
         }
-        if sections.iter().any(|record| record.status == QpackBlockedStreamStatus::Blocked) {
+        if sections
+            .iter()
+            .any(|record| record.status == QpackBlockedStreamStatus::Blocked)
+        {
             return Some(QpackBlockedStreamStatus::Blocked);
         }
         sections.front().map(QpackBlockedStreamRecord::status)
@@ -2256,8 +2268,8 @@ impl QpackBlockedStreamScheduler {
             }
         };
 
-        let needs_inserts = metadata.required_insert_count()
-            > context.dynamic_table().insertion_counter();
+        let needs_inserts =
+            metadata.required_insert_count() > context.dynamic_table().insertion_counter();
         let follows_undecoded = self
             .records(stream_id)
             .any(|record| record.blocked_field_section.is_some());
@@ -2304,14 +2316,12 @@ impl QpackBlockedStreamScheduler {
             record.field_section_decoded = false;
             if !needs_inserts {
                 let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
-                let references = match qpack_decode_field_section_with_context(
-                    field_section,
-                    mode,
-                    context_opt,
-                ) {
-                    Ok(plan) => qpack_plan_dynamic_references(&plan),
-                    Err(error) => return self.fail(error),
-                };
+                let references =
+                    match qpack_decode_field_section_with_context(field_section, mode, context_opt)
+                    {
+                        Ok(plan) => qpack_plan_dynamic_references(&plan),
+                        Err(error) => return self.fail(error),
+                    };
                 if let Err(error) = Self::protect_received_references(context, &references) {
                     return self.fail(error);
                 }
@@ -2364,7 +2374,11 @@ impl QpackBlockedStreamScheduler {
         references: &[u64],
     ) -> Result<(), H3NativeError> {
         for insertion_id in references {
-            if context.dynamic_table().get_by_insertion_id(*insertion_id).is_none() {
+            if context
+                .dynamic_table()
+                .get_by_insertion_id(*insertion_id)
+                .is_none()
+            {
                 return Err(H3NativeError::InvalidFrame(
                     "unknown dynamic qpack reference for stream",
                 ));
@@ -2443,7 +2457,11 @@ impl QpackBlockedStreamScheduler {
                     .flat_map(|record| record.protected_references.iter().copied())
                     .collect();
                 for insertion_id in &unregistered {
-                    if context.dynamic_table().get_by_insertion_id(*insertion_id).is_none() {
+                    if context
+                        .dynamic_table()
+                        .get_by_insertion_id(*insertion_id)
+                        .is_none()
+                    {
                         return self.fail(H3NativeError::InvalidFrame(
                             "tracked dynamic qpack reference missing",
                         ));
@@ -2538,12 +2556,15 @@ impl QpackBlockedStreamScheduler {
             .streams
             .iter()
             .flat_map(|(stream_id, sections)| {
-                sections.iter().enumerate().filter_map(move |(index, record)| {
-                    (record.blocked_field_section.is_some()
-                        && !record.field_section_decoded
-                        && record.required_insert_count <= insertion_counter)
-                    .then_some((*stream_id, index))
-                })
+                sections
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, record)| {
+                        (record.blocked_field_section.is_some()
+                            && !record.field_section_decoded
+                            && record.required_insert_count <= insertion_counter)
+                            .then_some((*stream_id, index))
+                    })
             })
             .collect();
 
@@ -2557,23 +2578,32 @@ impl QpackBlockedStreamScheduler {
                 .ok_or(H3NativeError::InvalidFrame(
                     "qpack blocked field section missing",
                 ))?;
-            let field_section = record.blocked_field_section.as_ref().ok_or(
-                H3NativeError::InvalidFrame("qpack blocked field section missing"),
-            )?;
-            let metadata = record.blocked_metadata.as_ref().ok_or(
-                H3NativeError::InvalidFrame("qpack blocked field section metadata missing"),
-            )?;
+            let field_section =
+                record
+                    .blocked_field_section
+                    .as_ref()
+                    .ok_or(H3NativeError::InvalidFrame(
+                        "qpack blocked field section missing",
+                    ))?;
+            let metadata = record
+                .blocked_metadata
+                .as_ref()
+                .ok_or(H3NativeError::InvalidFrame(
+                    "qpack blocked field section metadata missing",
+                ))?;
             let context_opt = (mode == H3QpackMode::DynamicTableAllowed).then_some(&*context);
-            let plan =
-                match qpack_decode_field_section_with_metadata(
-                    field_section, mode, context_opt, metadata,
-                ) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        self.record_stream_error(stream_id, &error);
-                        return Err(error);
-                    }
-                };
+            let plan = match qpack_decode_field_section_with_metadata(
+                field_section,
+                mode,
+                context_opt,
+                metadata,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.record_stream_error(stream_id, &error);
+                    return Err(error);
+                }
+            };
             let references = qpack_plan_dynamic_references(&plan);
             if let Err(error) = Self::protect_received_references(context, &references) {
                 self.record_stream_error(stream_id, &error);
@@ -2602,8 +2632,8 @@ impl QpackBlockedStreamScheduler {
                     if !record.field_section_decoded {
                         break;
                     }
-                    if let Err(error) = feedback
-                        .register_protected_section(stream_id, &record.protected_references)
+                    if let Err(error) =
+                        feedback.register_protected_section(stream_id, &record.protected_references)
                     {
                         record.record_failure(&error);
                         failure = Some(error);
@@ -2882,10 +2912,13 @@ fn qpack_apply_directional_decoder_instruction(
     }
     match instruction {
         QpackDecoderInstruction::HeaderAcknowledgement { stream_id }
-            if !scheduler.acknowledgement_record(*stream_id).is_some_and(|record| {
-                record.required_insert_count() > 0
-                    && (!require_ready_ack || record.status() == QpackBlockedStreamStatus::Ready)
-            }) =>
+            if !scheduler
+                .acknowledgement_record(*stream_id)
+                .is_some_and(|record| {
+                    record.required_insert_count() > 0
+                        && (!require_ready_ack
+                            || record.status() == QpackBlockedStreamStatus::Ready)
+                }) =>
         {
             Err(H3NativeError::InvalidFrame(if require_ready_ack {
                 "qpack local acknowledgement requires a ready dynamic field section"
@@ -3194,7 +3227,9 @@ impl QpackInstructionStreamState {
             ));
         }
         if self.decoder_feedback.cancelled_streams.contains(&stream_id) {
-            return Err(H3NativeError::InvalidFrame("qpack stream already cancelled"));
+            return Err(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
+            ));
         }
         let metadata = qpack_field_section_metadata(field_section, self.mode, Some(&self.context))?;
         let plan = qpack_decode_field_section_with_metadata(
@@ -3274,7 +3309,9 @@ impl QpackInstructionStreamState {
             .cancelled_streams
             .contains(&section.stream_id)
         {
-            return Err(H3NativeError::InvalidFrame("qpack stream already cancelled"));
+            return Err(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
+            ));
         }
         Ok(())
     }
@@ -3348,9 +3385,9 @@ impl QpackInstructionStreamState {
             .values()
             .map(|section| section.stream_id)
             .collect();
-        self.blocked_scheduler.streams.retain(|_, records| {
-            records.iter().any(|record| !record.is_reapable_terminal())
-        });
+        self.blocked_scheduler
+            .streams
+            .retain(|_, records| records.iter().any(|record| !record.is_reapable_terminal()));
         let outstanding = &self.decoder_feedback.outstanding_references;
         self.decoder_feedback
             .acknowledged_streams
@@ -3395,7 +3432,9 @@ impl QpackInstructionStreamState {
     pub fn received_decoder_feedback(&self) -> &QpackDecoderFeedbackState {
         self.received
             .as_ref()
-            .map_or(&self.decoder_feedback, |received| &received.decoder_feedback)
+            .map_or(&self.decoder_feedback, |received| {
+                &received.decoder_feedback
+            })
     }
 
     /// Scheduler for received field sections and the local blocked-stream limit.
@@ -3403,7 +3442,9 @@ impl QpackInstructionStreamState {
     pub fn received_blocked_scheduler(&self) -> &QpackBlockedStreamScheduler {
         self.received
             .as_ref()
-            .map_or(&self.blocked_scheduler, |received| &received.blocked_scheduler)
+            .map_or(&self.blocked_scheduler, |received| {
+                &received.blocked_scheduler
+            })
     }
 
     /// Peer decoder-feedback state for outbound field sections.
@@ -3731,7 +3772,8 @@ impl QpackInstructionStreamState {
         #[cfg(feature = "http3")]
         if self.outbound_preparations.is_some()
             && qpack_field_section_metadata(field_section, self.mode, Some(&self.context))?
-                .required_insert_count() > 0
+                .required_insert_count()
+                > 0
         {
             self.check_outbound_section_admission(stream_id)?;
         }
@@ -3791,9 +3833,17 @@ impl QpackInstructionStreamState {
                 "received stream retirement requires directional state",
             ));
         };
-        if received.decoder_feedback.stream_outstanding_section_count(stream_id) != 0
-            || received.decoder_feedback.stream_outstanding_reference_count(stream_id) != 0
-            || received.blocked_scheduler.records(stream_id)
+        if received
+            .decoder_feedback
+            .stream_outstanding_section_count(stream_id)
+            != 0
+            || received
+                .decoder_feedback
+                .stream_outstanding_reference_count(stream_id)
+                != 0
+            || received
+                .blocked_scheduler
+                .records(stream_id)
                 .any(|record| !record.is_reapable_terminal())
         {
             return Err(H3NativeError::QpackPolicy(
@@ -3801,8 +3851,14 @@ impl QpackInstructionStreamState {
             ));
         }
         received.blocked_scheduler.streams.remove(&stream_id);
-        received.decoder_feedback.acknowledged_streams.remove(&stream_id);
-        received.decoder_feedback.cancelled_streams.remove(&stream_id);
+        received
+            .decoder_feedback
+            .acknowledged_streams
+            .remove(&stream_id);
+        received
+            .decoder_feedback
+            .cancelled_streams
+            .remove(&stream_id);
         Ok(())
     }
 
@@ -4351,8 +4407,9 @@ fn qpack_resolve_field<'a>(
             let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
                 "dynamic table context required",
             ))?;
-            let name = qpack_dynamic_name(context.dynamic_table(), *name_index)
-                .ok_or(H3NativeError::InvalidFrame("unknown dynamic qpack name index"))?;
+            let name = qpack_dynamic_name(context.dynamic_table(), *name_index).ok_or(
+                H3NativeError::InvalidFrame("unknown dynamic qpack name index"),
+            )?;
             Ok((name, value))
         }
         QpackFieldPlan::Literal { name, value } => Ok((name, value)),
@@ -4367,7 +4424,9 @@ pub(crate) fn qpack_plan_field_section_size(
 ) -> Result<u64, H3NativeError> {
     plan.iter().try_fold(0u64, |total, field| {
         let (name, value) = qpack_resolve_field(field, qpack_context)?;
-        let size = name.len().checked_add(value.len())
+        let size = name
+            .len()
+            .checked_add(value.len())
             .and_then(|size| size.checked_add(32))
             .and_then(|size| u64::try_from(size).ok())
             .and_then(|size| total.checked_add(size))

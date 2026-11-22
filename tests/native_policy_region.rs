@@ -178,10 +178,14 @@ async fn fail_fast_before_join(cx: Cx) {
     assert!(matches!(&report.outcomes[0], Outcome::Ok(11)));
     assert!(matches!(&report.outcomes[1], Outcome::Err(error)
         if error.message() == Some("typed failure")));
-    assert!(matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
-        if error.message() == Some("typed failure")));
-    assert!(matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
-        if *task == failing_task));
+    assert!(
+        matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
+        if error.message() == Some("typed failure"))
+    );
+    assert!(
+        matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
+        if *task == failing_task)
+    );
     assert!(!report.escalated);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -239,8 +243,10 @@ async fn collect_all_after_retirement(cx: Cx) {
     assert!(matches!(&report.outcomes[0], Outcome::Ok(21)));
     assert!(matches!(&report.outcomes[1], Outcome::Err(error)
         if error.message() == Some("collected failure")));
-    assert!(matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
-        if error.message() == Some("collected failure")));
+    assert!(
+        matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
+        if error.message() == Some("collected failure"))
+    );
     assert!(report.first_action.is_none());
     assert!(!report.escalated);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -309,8 +315,10 @@ async fn panic_before_join(cx: Cx) {
             payload,
             first_panic_index: 1,
         }) if payload.message() == message));
-        assert!(matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
-            if *task == panicking_task));
+        assert!(
+            matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
+            if *task == panicking_task)
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(!cx.is_cancel_requested());
     }
@@ -368,8 +376,14 @@ async fn owner_cancel_with_dependent_cleanup(cx: Cx) {
 
     let report = owner.join(&cx).await.unwrap();
     closed(&report);
-    assert!(matches!(&report.outcomes[0], Outcome::Ok((41, CancelKind::RaceLost))));
-    assert!(matches!(&report.outcomes[1], Outcome::Ok((42, CancelKind::RaceLost))));
+    assert!(matches!(
+        &report.outcomes[0],
+        Outcome::Ok((41, CancelKind::RaceLost))
+    ));
+    assert!(matches!(
+        &report.outcomes[1],
+        Outcome::Ok((42, CancelKind::RaceLost))
+    ));
     assert!(matches!(&report.decision, Ok(AggregateDecision::AllOk)));
     assert!(report.first_action.is_none());
     assert!(child_a.is_cancel_requested());
@@ -430,7 +444,10 @@ fn join_waits_for_member_descendants_after_typed_member_retirement() {
 
 async fn abandoned_join(cx: Cx) {
     for poll_first in [false, true] {
-        let outer = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+        let outer = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
         let drops = Arc::new(AtomicUsize::new(0));
         let child_drops = Arc::clone(&drops);
         let (ready, mut parked) = oneshot::channel();
@@ -540,9 +557,14 @@ async fn callback_panic_drains(cx: Cx) {
     assert!(matches!(&report.outcomes[0], Outcome::Ok(71)));
     assert!(matches!(&report.outcomes[1], Outcome::Err(error)
         if error.message() == Some("preserved despite policy panic")));
-    assert_eq!(report.decision.as_ref().unwrap_err().message(), "policy callback panic");
-    assert!(matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
-        if *task == failing_task));
+    assert_eq!(
+        report.decision.as_ref().unwrap_err().message(),
+        "policy callback panic"
+    );
+    assert!(
+        matches!(&report.first_action, Some((task, PolicyAction::CancelSiblings(_)))
+        if *task == failing_task)
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(!cx.is_cancel_requested());
 }
@@ -605,7 +627,10 @@ async fn aggregation_panic_after_close(cx: Cx) {
     let report = region.join().await;
     closed(&report);
     assert!(matches!(&report.outcomes[..], [Outcome::Ok(81)]));
-    assert_eq!(report.decision.as_ref().unwrap_err().message(), "policy aggregation panic");
+    assert_eq!(
+        report.decision.as_ref().unwrap_err().message(),
+        "policy aggregation panic"
+    );
     assert!(report.first_action.is_none());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(!cx.is_cancel_requested());
@@ -639,7 +664,10 @@ impl Policy for EscalatingPolicy {
 }
 
 async fn escalation_cancels_parent(cx: Cx) {
-    let parent = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let parent = cx
+        .open_child_region(ChildRegionSpec::inherit())
+        .await
+        .unwrap();
     let parent_id = parent.region_id();
     let drops = Arc::new(AtomicUsize::new(0));
     let peer_drops = Arc::clone(&drops);
@@ -686,7 +714,10 @@ async fn escalation_cancels_parent(cx: Cx) {
                 })
                 .unwrap();
             let report = region.join().await;
-            assert!(owner.is_cancel_requested(), "escalation reaches the actual opener");
+            assert!(
+                owner.is_cancel_requested(),
+                "escalation reaches the actual opener"
+            );
             report
         })
         .unwrap();
@@ -699,15 +730,22 @@ async fn escalation_cancels_parent(cx: Cx) {
     let failing_task = failed.recv(&cx).await.unwrap();
     closed(&report);
     assert!(report.escalated);
-    assert!(matches!(&report.first_action, Some((task, PolicyAction::Escalate))
-        if *task == failing_task));
+    assert!(
+        matches!(&report.first_action, Some((task, PolicyAction::Escalate))
+        if *task == failing_task)
+    );
     assert!(matches!(&report.outcomes[0], Outcome::Ok(91)));
     assert!(matches!(&report.outcomes[1], Outcome::Err(error)
         if error.message() == Some("escalate to owning parent")));
-    assert!(matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
-        if error.message() == Some("escalate to owning parent")));
+    assert!(
+        matches!(&report.decision, Ok(AggregateDecision::FirstError(error))
+        if error.message() == Some("escalate to owning parent"))
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 2);
-    assert!(!cx.is_cancel_requested(), "the enclosing root is outside the targeted parent");
+    assert!(
+        !cx.is_cancel_requested(),
+        "the enclosing root is outside the targeted parent"
+    );
     parent.close().await.unwrap();
 }
 

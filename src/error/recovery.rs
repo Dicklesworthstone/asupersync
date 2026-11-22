@@ -4,8 +4,8 @@
 //! like `ExponentialBackoff` and `CircuitBreaker`.
 
 use crate::error::{Error, Recoverability};
-use crate::types::Time;
 use crate::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use crate::types::Time;
 use std::time::Duration;
 
 /// Strategy for recovering from transient errors.

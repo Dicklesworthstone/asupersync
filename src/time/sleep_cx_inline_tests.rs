@@ -29,7 +29,10 @@ fn virtual_context(budget: Budget) -> (Cx, Arc<VirtualClock>, TimerDriverHandle)
 
 fn ready_result(future: impl Future<Output = Result<(), SleepError>>) -> Result<(), SleepError> {
     let mut future = std::pin::pin!(future);
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("expected a ready context-driven sleep"),
     }
@@ -75,7 +78,10 @@ fn relative_sleep_starts_on_first_poll_and_cleans_up_on_completion() {
     clock.advance_to(Time::from_millis(150));
     assert_eq!(driver.process_timers(), 1);
     assert!(counter.0.load(Ordering::Acquire) > 0);
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Ok(()))
+    ));
     // Terminal cleanup must not depend on dropping the completed future.
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
@@ -96,7 +102,10 @@ fn absolute_sleep_uses_the_explicit_context_instead_of_the_ambient_context() {
     assert!(ambient_driver.is_empty());
     clock.advance_to(Time::from_millis(100));
     assert_eq!(driver.process_timers(), 1);
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Ok(()))
+    ));
     assert!(driver.is_empty());
     assert!(ambient_driver.is_empty());
     assert_eq!(registrations(&cx), 0);
@@ -165,8 +174,7 @@ fn cancellation_wins_an_elapsed_timer_and_a_missing_timer() {
 
 #[test]
 fn owner_deadline_wakes_a_long_sleep_without_an_external_monitor() {
-    let (cx, clock, driver) =
-        virtual_context(Budget::new().with_deadline(Time::from_millis(10)));
+    let (cx, clock, driver) = virtual_context(Budget::new().with_deadline(Time::from_millis(10)));
     let counter = Arc::new(CountWake::default());
     let waker = Waker::from(Arc::clone(&counter));
     let mut task = Context::from_waker(&waker);
@@ -187,8 +195,7 @@ fn owner_deadline_wakes_a_long_sleep_without_an_external_monitor() {
 
 #[test]
 fn expired_masked_owner_deadline_parks_without_self_waking() {
-    let (cx, clock, driver) =
-        virtual_context(Budget::new().with_deadline(Time::from_millis(1)));
+    let (cx, clock, driver) = virtual_context(Budget::new().with_deadline(Time::from_millis(1)));
     clock.advance_to(Time::from_millis(2));
     let counter = Arc::new(CountWake::default());
     let waker = Waker::from(Arc::clone(&counter));
@@ -204,7 +211,10 @@ fn expired_masked_owner_deadline_parks_without_self_waking() {
             assert_eq!(counter.0.load(Ordering::Acquire), 0);
         }
     });
-    assert!(counter.0.load(Ordering::Acquire) > 0, "unmask wakes the wait");
+    assert!(
+        counter.0.load(Ordering::Acquire) > 0,
+        "unmask wakes the wait"
+    );
     assert!(matches!(
         waiting.as_mut().poll(&mut task),
         Poll::Ready(Err(SleepError::Cancelled(reason))) if reason.kind == CancelKind::Deadline
@@ -225,7 +235,10 @@ fn masked_cancellation_can_finish_at_the_requested_deadline() {
         assert_eq!(registrations(&cx), 1);
         clock.advance_to(Time::from_millis(100));
         assert_eq!(driver.process_timers(), 1);
-        assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(registrations(&cx), 0);
     });
     assert!(cx.checkpoint().is_err());
@@ -367,7 +380,10 @@ fn a_duration_beyond_the_time_domain_saturates_and_completes_at_max() {
     assert_eq!(driver.next_deadline(), Some(Time::MAX));
     clock.advance_to(Time::MAX);
     assert_eq!(driver.process_timers(), 1);
-    assert!(matches!(waiting.as_mut().poll(&mut task), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        waiting.as_mut().poll(&mut task),
+        Poll::Ready(Ok(()))
+    ));
     assert!(driver.is_empty());
     assert_eq!(registrations(&cx), 0);
     assert!(ready_result(sleep_cx(&cx, Duration::MAX)).is_ok());
@@ -440,10 +456,8 @@ fn native_foreign_owner_unmask_wakes_relative_and_absolute_sleeps() {
                                     .worker_threads(2)
                                     .with_sharded_state(true)
                             };
-                            let runtime = builder
-                                .with_timer_driver(driver.clone())
-                                .build()
-                                .unwrap();
+                            let runtime =
+                                builder.with_timer_driver(driver.clone()).build().unwrap();
                             let result = runtime.block_on(async {
                                 let mut waiting = std::pin::pin!(async {
                                     if absolute {
@@ -459,9 +473,7 @@ fn native_foreign_owner_unmask_wakes_relative_and_absolute_sleeps() {
                                     if result.is_pending() {
                                         *saved_waker.lock() = Some(task.waker().clone());
                                         let requested = cx.is_cancel_requested();
-                                        if !reported_initial
-                                            || (requested && !reported_requested)
-                                        {
+                                        if !reported_initial || (requested && !reported_requested) {
                                             reported_initial = true;
                                             reported_requested |= requested;
                                             parked_tx

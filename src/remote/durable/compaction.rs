@@ -95,7 +95,12 @@ impl<F: JournalIo> Journal<F> {
             .try_reserve_exact(self.entries.len())
             .map_err(|_| DurableRemoteError::Allocation)?;
         for (id, entry) in &self.entries {
-            if let EntryState::Terminal { expires_at, completion_sequence, .. } = &entry.state {
+            if let EntryState::Terminal {
+                expires_at,
+                completion_sequence,
+                ..
+            } = &entry.state
+            {
                 let completed_at = expires_at
                     .checked_sub(self.config.limits.retention_ms)
                     .ok_or(DurableRemoteError::Format)?;
@@ -109,7 +114,12 @@ impl<F: JournalIo> Journal<F> {
             let key = IdempotencyKey::from_raw(*raw_key);
             compacted.copy_reservation(peer, key, entry, completed_at)?;
             let reservation_sequence = compacted.sequence;
-            let EntryState::Terminal { expires_at, outcome, .. } = &entry.state else {
+            let EntryState::Terminal {
+                expires_at,
+                outcome,
+                ..
+            } = &entry.state
+            else {
                 unreachable!("terminal compaction index contains only terminal entries");
             };
             let mut payload = buffer(add(TERMINAL_BYTES, outcome.len())?)?;

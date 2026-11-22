@@ -154,9 +154,7 @@ fn nonnegative_integer<'a>(value: &Any<'a>) -> Result<&'a [u8], TlsError> {
     let Some(&first) = bytes.first() else {
         return Err(malformed());
     };
-    if first & 0x80 != 0
-        || (bytes.len() > 1 && first == 0 && bytes[1] & 0x80 == 0)
-    {
+    if first & 0x80 != 0 || (bytes.len() > 1 && first == 0 && bytes[1] & 0x80 == 0) {
         return Err(malformed());
     }
     // No allocation or conversion proportional to the salt length. This

@@ -18,8 +18,7 @@
 
 use super::{
     CancelWakerToken, Cx, DynamicChildCompletion, DynamicChildId, DynamicChildState,
-    DynamicSupervisorConfig, DynamicSupervisorError,
-    DynamicSupervisorReport, DynamicWorkerConfig,
+    DynamicSupervisorConfig, DynamicSupervisorError, DynamicSupervisorReport, DynamicWorkerConfig,
 };
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::supervision::{
@@ -31,8 +30,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 /// Explicit child, request and region limits for a control service.
@@ -49,7 +48,10 @@ impl DynamicServiceConfig {
     /// Inherit region authority and require explicit child/request ceilings.
     #[must_use]
     pub const fn new(max_children: usize, max_requests: usize) -> Self {
-        Self { supervisor: DynamicSupervisorConfig::new(max_children), max_requests }
+        Self {
+            supervisor: DynamicSupervisorConfig::new(max_children),
+            max_requests,
+        }
     }
 }
 
@@ -207,9 +209,14 @@ impl Credit {
     fn acquire(credits: &Arc<Credits>) -> Result<Self, DynamicControlError> {
         let mut active = credits.active.load(Ordering::Relaxed);
         loop {
-            if active >= credits.limit { return Err(DynamicControlError::Busy); }
+            if active >= credits.limit {
+                return Err(DynamicControlError::Busy);
+            }
             match credits.active.compare_exchange_weak(
-                active, active + 1, Ordering::AcqRel, Ordering::Relaxed,
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => return Ok(Self(Arc::clone(credits))),
                 Err(current) => active = current,
@@ -231,10 +238,14 @@ struct Completion<E> {
 impl<E> Completion<E> {
     fn take(&self) -> Option<DynamicChildCompletion<E>> {
         let value = self.value.lock().take();
-        if value.is_some() { self.signal.notify(); }
+        if value.is_some() {
+            self.signal.notify();
+        }
         value
     }
-    fn consumed(&self) -> bool { self.value.lock().is_none() }
+    fn consumed(&self) -> bool {
+        self.value.lock().is_none()
+    }
 }
 
 enum Response<E> {
@@ -294,8 +305,14 @@ impl<E> Future for RequestWait<'_, E> {
         let (value, old, credit) = {
             let mut reply = this.request.reply.lock();
             let value = reply.value.take();
-            if value.is_some() { reply.received = true; }
-            let credit = if value.is_some() { reply.credit.take() } else { None };
+            if value.is_some() {
+                reply.received = true;
+            }
+            let credit = if value.is_some() {
+                reply.credit.take()
+            } else {
+                None
+            };
             let old = if value.is_none() {
                 reply.waker.replace(replacement)
             } else {
@@ -324,10 +341,14 @@ impl<E> Future for RequestWait<'_, E> {
 }
 impl<E> Drop for RequestWait<'_, E> {
     fn drop(&mut self) {
-        if let Some(token) = self.cancel_waker.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
         let old = {
             let mut reply = self.request.reply.lock();
-            if !self.finished { reply.abandoned = true; }
+            if !self.finished {
+                reply.abandoned = true;
+            }
             reply.waker.take()
         };
         callback(|| drop(old));
@@ -337,7 +358,8 @@ impl<E> Drop for RequestWait<'_, E> {
 
 fn cancelled(cx: &Cx) -> DynamicControlError {
     DynamicControlError::Cancelled(
-        cx.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic service caller cancelled")),
+        cx.cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("dynamic service caller cancelled")),
     )
 }
 
@@ -430,14 +452,19 @@ pub struct DynamicSupervisorClient<E> {
     shared: Arc<Shared<E>>,
 }
 impl<E> Clone for DynamicSupervisorClient<E> {
-    fn clone(&self) -> Self { Self { shared: Arc::clone(&self.shared) } }
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
 }
 impl<E> fmt::Debug for DynamicSupervisorClient<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynamicSupervisorClient")
             .field("outstanding_requests", &self.outstanding_requests())
             .field("max_requests", &self.shared.credits.limit)
-            .field("closed", &self.is_closed()).finish_non_exhaustive()
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
     }
 }
 impl<E> DynamicSupervisorClient<E> {
@@ -448,20 +475,33 @@ impl<E> DynamicSupervisorClient<E> {
     }
     /// Control-plane closure, not proof of worker or region quiescence.
     #[must_use]
-    pub fn is_closed(&self) -> bool { self.shared.signal.closed.load(Ordering::Acquire) }
+    pub fn is_closed(&self) -> bool {
+        self.shared.signal.closed.load(Ordering::Acquire)
+    }
     /// Latest admitted-child snapshots in lexical name order; does not reap results.
     /// An admission currently awaiting its region mint is not yet listed.
     #[must_use]
     pub fn children(&self) -> Vec<DynamicServiceChildInfo> {
-        self.shared.mailbox.lock().routes.values().map(|route| route.info.clone()).collect()
+        self.shared
+            .mailbox
+            .lock()
+            .routes
+            .values()
+            .map(|route| route.info.clone())
+            .collect()
     }
     /// Non-queued, idempotent stop for this exact identity. No request credit needed.
     /// The service must still run to observe the flag and complete the drain.
     pub fn request_stop(&self, id: &DynamicChildId) -> Result<(), DynamicControlError> {
-        if self.is_closed() { return Err(DynamicControlError::Closed); }
+        if self.is_closed() {
+            return Err(DynamicControlError::Closed);
+        }
         let stop = {
             let mailbox = self.shared.mailbox.lock();
-            let route = mailbox.routes.get(id.name()).filter(|route| &route.info.id == id)
+            let route = mailbox
+                .routes
+                .get(id.name())
+                .filter(|route| &route.info.id == id)
                 .ok_or(DynamicControlError::StaleChild)?;
             Arc::clone(&route.stop)
         };
@@ -470,20 +510,43 @@ impl<E> DynamicSupervisorClient<E> {
         Ok(())
     }
 
-    fn submit<'a>(&self, cx: &'a Cx, operation: Operation<E>) -> Result<RequestWait<'a, E>, DynamicControlError> {
-        if cx.checkpoint().is_err() { return Err(cancelled(cx)); }
-        if self.is_closed() { return Err(DynamicControlError::Closed); }
+    fn submit<'a>(
+        &self,
+        cx: &'a Cx,
+        operation: Operation<E>,
+    ) -> Result<RequestWait<'a, E>, DynamicControlError> {
+        if cx.checkpoint().is_err() {
+            return Err(cancelled(cx));
+        }
+        if self.is_closed() {
+            return Err(DynamicControlError::Closed);
+        }
         let credit = Credit::acquire(&self.shared.credits)?;
         let request = Arc::new(Request {
-            reply: Mutex::new(Reply { value: None, waker: None, abandoned: false, received: false, credit: Some(credit) }),
+            reply: Mutex::new(Reply {
+                value: None,
+                waker: None,
+                abandoned: false,
+                received: false,
+                credit: Some(credit),
+            }),
             signal: Arc::clone(&self.shared.signal),
         });
         // Build the abandonment guard before publication, including unwind paths.
-        let wait = RequestWait { request: Arc::clone(&request), cx, cancel_waker: None, finished: false };
+        let wait = RequestWait {
+            request: Arc::clone(&request),
+            cx,
+            cancel_waker: None,
+            finished: false,
+        };
         {
             let mut mailbox = self.shared.mailbox.lock();
-            if self.is_closed() { return Err(DynamicControlError::Closed); }
-            mailbox.requests.retain(|request| request.strong_count() != 0);
+            if self.is_closed() {
+                return Err(DynamicControlError::Closed);
+            }
+            mailbox
+                .requests
+                .retain(|request| request.strong_count() != 0);
             mailbox.requests.push(Arc::downgrade(&request));
             mailbox.queue.push_back((operation, request));
         }
@@ -501,19 +564,31 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
     }
     /// Submit a managed tree. Abandonment before receipt acceptance cancels/drains it.
     pub fn start_child(
-        &self, cx: &Cx, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
+        &self,
+        cx: &Cx,
+        name: impl Into<ChildName>,
+        supervisor: ManagedSupervisor<E>,
     ) -> impl Future<Output = Result<DynamicChildId, DynamicControlError>> {
         let supervisor = UnstartedManagedSupervisor::new(supervisor);
         async move { self.start(cx, name.into(), Work::Tree(supervisor)).await }
     }
     /// Submit a retained worker factory using the existing managed restart engine.
     pub async fn start_worker(
-        &self, cx: &Cx, name: impl Into<ChildName>, config: DynamicWorkerConfig,
+        &self,
+        cx: &Cx,
+        name: impl Into<ChildName>,
+        config: DynamicWorkerConfig,
         factory: impl ManagedChildFactory<E>,
     ) -> Result<DynamicChildId, DynamicControlError> {
-        self.start(cx, name.into(), Work::Worker(config, Box::new(factory))).await
+        self.start(cx, name.into(), Work::Worker(config, Box::new(factory)))
+            .await
     }
-    async fn start(&self, cx: &Cx, name: ChildName, work: Work<E>) -> Result<DynamicChildId, DynamicControlError> {
+    async fn start(
+        &self,
+        cx: &Cx,
+        name: ChildName,
+        work: Work<E>,
+    ) -> Result<DynamicChildId, DynamicControlError> {
         match self.submit(cx, Operation::Start(name, work))?.await? {
             Response::Started(id) => Ok(id),
             _ => unreachable!("request and response kinds are paired internally"),
@@ -521,21 +596,32 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
     }
     /// Take one quiescent completion. A dropped wait leaves the result in the service.
     /// Concurrent waits compete for one result; later takers receive StaleChild.
-    pub async fn wait_child(&self, cx: &Cx, id: &DynamicChildId) -> Result<DynamicChildCompletion<E>, DynamicControlError> {
+    pub async fn wait_child(
+        &self,
+        cx: &Cx,
+        id: &DynamicChildId,
+    ) -> Result<DynamicChildCompletion<E>, DynamicControlError> {
         match self.submit(cx, Operation::Wait(id.clone()))?.await? {
-            Response::Completed(completion) => completion.take().ok_or(DynamicControlError::StaleChild),
+            Response::Completed(completion) => {
+                completion.take().ok_or(DynamicControlError::StaleChild)
+            }
             _ => unreachable!("request and response kinds are paired internally"),
         }
     }
     /// Stop first, then await quiescence. Busy/Cancelled while waiting never undoes stop.
     /// `wait_child` can be retried with the same identity to take the retained result.
-    pub async fn terminate_child(&self, cx: &Cx, id: &DynamicChildId) -> Result<DynamicChildCompletion<E>, DynamicControlError> {
+    pub async fn terminate_child(
+        &self,
+        cx: &Cx,
+        id: &DynamicChildId,
+    ) -> Result<DynamicChildCompletion<E>, DynamicControlError> {
         self.request_stop(id)?;
         self.wait_child(cx, id).await
     }
 }
 
-type ReportSlot<E> = Arc<Mutex<Option<Result<DynamicSupervisorReport<E>, Arc<DynamicSupervisorError>>>>>;
+type ReportSlot<E> =
+    Arc<Mutex<Option<Result<DynamicSupervisorReport<E>, Arc<DynamicSupervisorError>>>>>;
 
 /// Sole owner of the actual controller task; clients alone cannot keep it detached.
 pub struct DynamicServiceHandle<E> {
@@ -545,17 +631,23 @@ pub struct DynamicServiceHandle<E> {
 }
 impl<E> fmt::Debug for DynamicServiceHandle<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynamicServiceHandle").field("task", &self.task.task_id())
-            .field("client", &self.client).finish_non_exhaustive()
+        f.debug_struct("DynamicServiceHandle")
+            .field("task", &self.task.task_id())
+            .field("client", &self.client)
+            .finish_non_exhaustive()
     }
 }
 impl<E> DynamicServiceHandle<E> {
     /// Clone a control capability without transferring service lifetime ownership.
     #[must_use]
-    pub fn client(&self) -> DynamicSupervisorClient<E> { self.client.clone() }
+    pub fn client(&self) -> DynamicSupervisorClient<E> {
+        self.client.clone()
+    }
     /// Actual submitted controller identity.
     #[must_use]
-    pub fn task_id(&self) -> TaskId { self.task.task_id() }
+    pub fn task_id(&self) -> TaskId {
+        self.task.task_id()
+    }
     /// Out-of-band graceful shutdown; cannot be refused by a full request mailbox.
     pub fn request_shutdown(&self) {
         let mut panics = ShutdownPanics::new();
@@ -569,7 +661,10 @@ impl<E> DynamicServiceHandle<E> {
     pub async fn join(mut self) -> DynamicServiceExit<E> {
         let task_outcome = poll_fn(|cx| self.task.poll_join(cx)).await;
         let report = self.report.lock().take();
-        DynamicServiceExit { task_outcome, report }
+        DynamicServiceExit {
+            task_outcome,
+            report,
+        }
     }
     /// Request every worker stop, then await real owner shutdown.
     pub async fn shutdown(self) -> DynamicServiceExit<E> {
@@ -587,12 +682,19 @@ impl<E> Drop for DynamicServiceHandle<E> {
 // closes every client and releases queued factories outside the mailbox lock.
 struct Lifetime<E>(Arc<Shared<E>>);
 impl<E> Drop for Lifetime<E> {
-    fn drop(&mut self) { self.0.close(); }
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
-struct CancelRegistration<'a> { cx: &'a Cx, token: Option<CancelWakerToken> }
+struct CancelRegistration<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
 impl Drop for CancelRegistration<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
@@ -600,29 +702,47 @@ impl Cx {
     /// Submit a region-owned dynamic control task. `client.ready` observes root admission.
     /// No global executor, detached task, ambient authority or new runtime is used.
     pub fn spawn_dynamic_supervisor_service<E: Send + 'static>(
-        &self, config: DynamicServiceConfig,
+        &self,
+        config: DynamicServiceConfig,
     ) -> Result<DynamicServiceHandle<E>, DynamicControlError> {
-        if config.max_requests == 0 { return Err(DynamicControlError::Configuration); }
-        if self.checkpoint().is_err() { return Err(cancelled(self)); }
+        if config.max_requests == 0 {
+            return Err(DynamicControlError::Configuration);
+        }
+        if self.checkpoint().is_err() {
+            return Err(cancelled(self));
+        }
         let shared = Arc::new(Shared {
-            mailbox: Mutex::new(Mailbox { queue: VecDeque::new(), routes: BTreeMap::new(), requests: Vec::new() }),
-            credits: Arc::new(Credits { active: AtomicUsize::new(0), limit: config.max_requests }),
+            mailbox: Mutex::new(Mailbox {
+                queue: VecDeque::new(),
+                routes: BTreeMap::new(),
+                requests: Vec::new(),
+            }),
+            credits: Arc::new(Credits {
+                active: AtomicUsize::new(0),
+                limit: config.max_requests,
+            }),
             signal: Arc::new(Signal::default()),
         });
         let lifetime = Lifetime(Arc::clone(&shared));
         let report = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&report);
-        let task = self.spawn(move |cx| async move {
-            let _lifetime = lifetime;
-            // Retiring an abandoned/refused queued factory can fail. Retain
-            // that panic until accepted children drain and their real shutdown
-            // report is published; the task still terminates as Panicked.
-            let mut panics = ShutdownPanics::new();
-            let result = serve(&cx, config, &_lifetime.0, &mut panics).await;
-            _lifetime.0.close_with_panics(&mut panics);
-            *publication.lock() = Some(result);
-        }).map_err(DynamicControlError::Spawn)?;
-        Ok(DynamicServiceHandle { task, client: DynamicSupervisorClient { shared }, report })
+        let task = self
+            .spawn(move |cx| async move {
+                let _lifetime = lifetime;
+                // Retiring an abandoned/refused queued factory can fail. Retain
+                // that panic until accepted children drain and their real shutdown
+                // report is published; the task still terminates as Panicked.
+                let mut panics = ShutdownPanics::new();
+                let result = serve(&cx, config, &_lifetime.0, &mut panics).await;
+                _lifetime.0.close_with_panics(&mut panics);
+                *publication.lock() = Some(result);
+            })
+            .map_err(DynamicControlError::Spawn)?;
+        Ok(DynamicServiceHandle {
+            task,
+            client: DynamicSupervisorClient { shared },
+            report,
+        })
     }
 }
 
@@ -634,16 +754,24 @@ struct Record<E> {
     forgotten_start: bool,
     stop_sent: bool,
 }
-struct Delivery<E> { id: DynamicChildId, request: Arc<Request<E>> }
+struct Delivery<E> {
+    id: DynamicChildId,
+    request: Arc<Request<E>>,
+}
 
 async fn serve<E: Send + 'static>(
-    cx: &Cx, config: DynamicServiceConfig, shared: &Arc<Shared<E>>,
+    cx: &Cx,
+    config: DynamicServiceConfig,
+    shared: &Arc<Shared<E>>,
     panics: &mut ShutdownPanics,
 ) -> Result<DynamicSupervisorReport<E>, Arc<DynamicSupervisorError>> {
     if shared.signal.stopping.load(Ordering::Acquire) {
         return Err(Arc::new(DynamicSupervisorError::Closing));
     }
-    let mut owner = cx.open_dynamic_supervisor::<E>(config.supervisor).await.map_err(Arc::new)?;
+    let mut owner = cx
+        .open_dynamic_supervisor::<E>(config.supervisor)
+        .await
+        .map_err(Arc::new)?;
     let mut cancel = CancelRegistration { cx, token: None };
     let mut records: BTreeMap<ChildName, Record<E>> = BTreeMap::new();
     let mut deliveries: Vec<Delivery<E>> = Vec::new();
@@ -659,8 +787,12 @@ async fn serve<E: Send + 'static>(
             }
             deliveries.retain(|delivery| {
                 let (abandoned, received) = delivery.request.disposition();
-                if received { return false; }
-                let Some(record) = records.get_mut(delivery.id.name()) else { return false; };
+                if received {
+                    return false;
+                }
+                let Some(record) = records.get_mut(delivery.id.name()) else {
+                    return false;
+                };
                 if abandoned {
                     record.forgotten_start = true;
                     record.stop.store(true, Ordering::Release);
@@ -669,7 +801,9 @@ async fn serve<E: Send + 'static>(
                 true
             });
             for record in records.values_mut() {
-                if record.completion.is_some() || record.failure.is_some() { continue; }
+                if record.completion.is_some() || record.failure.is_some() {
+                    continue;
+                }
                 if !record.stop_sent && record.stop.load(Ordering::Acquire) {
                     // Exact IDs were published by this owner and never reassigned.
                     if let Err(error) = owner.request_stop(&record.id) {
@@ -684,17 +818,23 @@ async fn serve<E: Send + 'static>(
                 };
                 match result {
                     Poll::Pending => {}
-                    Poll::Ready(Ok(value)) => record.completion = Some(Arc::new(Completion {
-                        value: Mutex::new(Some(value)), signal: Arc::clone(&shared.signal),
-                    })),
+                    Poll::Ready(Ok(value)) => {
+                        record.completion = Some(Arc::new(Completion {
+                            value: Mutex::new(Some(value)),
+                            signal: Arc::clone(&shared.signal),
+                        }))
+                    }
                     Poll::Ready(Err(error)) => record.failure = Some(Arc::new(error)),
                 }
             }
             records.retain(|name, record| {
-                let reaped = record.completion.as_ref().is_some_and(|value| {
-                    record.forgotten_start || value.consumed()
-                });
-                if reaped { shared.mailbox.lock().routes.remove(name); }
+                let reaped = record
+                    .completion
+                    .as_ref()
+                    .is_some_and(|value| record.forgotten_start || value.consumed());
+                if reaped {
+                    shared.mailbox.lock().routes.remove(name);
+                }
                 !reaped
             });
             // Completion above can retire an abandoned admission in this very
@@ -706,20 +846,34 @@ async fn serve<E: Send + 'static>(
                 })
             });
             waits.retain(|(id, request)| {
-                if request.disposition().0 { return false; }
+                if request.disposition().0 {
+                    return false;
+                }
                 let result = match records.get(id.name()).filter(|record| &record.id == id) {
                     None => Some(Err(DynamicControlError::StaleChild)),
                     Some(record) => {
                         if let Some(error) = &record.failure {
                             Some(Err(DynamicControlError::Child(Arc::clone(error))))
                         } else {
-                            record.completion.as_ref().map(|value| Ok(Response::Completed(Arc::clone(value))))
+                            record
+                                .completion
+                                .as_ref()
+                                .map(|value| Ok(Response::Completed(Arc::clone(value))))
                         }
                     }
                 };
-                if let Some(result) = result { request.finish(result); false } else { true }
+                if let Some(result) = result {
+                    request.finish(result);
+                    false
+                } else {
+                    true
+                }
             });
-            let observed: BTreeMap<_, _> = owner.children().into_iter().map(|info| (info.id.name().to_owned(), info.state)).collect();
+            let observed: BTreeMap<_, _> = owner
+                .children()
+                .into_iter()
+                .map(|info| (info.id.name().to_owned(), info.state))
+                .collect();
             {
                 let mut mailbox = shared.mailbox.lock();
                 for (name, record) in &records {
@@ -729,15 +883,24 @@ async fn serve<E: Send + 'static>(
                         } else if record.completion.is_some() {
                             DynamicServiceChildState::Completed
                         } else {
-                            DynamicServiceChildState::Live(*observed.get(name.as_str()).unwrap_or(&DynamicChildState::Submitted))
+                            DynamicServiceChildState::Live(
+                                *observed
+                                    .get(name.as_str())
+                                    .unwrap_or(&DynamicChildState::Submitted),
+                            )
                         };
                     }
                 }
-                if let Some(command) = mailbox.queue.pop_front() { return Poll::Ready(Some(command)); }
+                if let Some(command) = mailbox.queue.pop_front() {
+                    return Poll::Ready(Some(command));
+                }
             }
             Poll::Pending
-        }).await;
-        let Some((operation, request)) = next else { break; };
+        })
+        .await;
+        let Some((operation, request)) = next else {
+            break;
+        };
         if request.disposition().0 {
             // An abandoned public start still owns its whole queued tree.
             // Dispose it like shutdown, outside the mailbox lock and without
@@ -828,12 +991,16 @@ async fn serve<E: Send + 'static>(
         }
     }
     shared.close_with_panics(panics);
-    for (_, request) in waits { request.finish(Err(DynamicControlError::Closed)); }
+    for (_, request) in waits {
+        request.finish(Err(DynamicControlError::Closed));
+    }
     // Existing owner shutdown starts every stop before polling all boundary closes.
     let mut report = owner.shutdown().await;
     for record in records.into_values() {
         if let Some(completion) = record.completion {
-            if let Some(value) = completion.take() { report.children.push(value); }
+            if let Some(value) = completion.take() {
+                report.children.push(value);
+            }
         }
     }
     report.children.sort_by(|a, b| a.id.name().cmp(b.id.name()));

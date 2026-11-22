@@ -147,6 +147,9 @@ use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use crate::sync::pl::Mutex;
+use crate::sync::pl::RwLock;
 use crate::time::TimerDriverHandle;
 #[cfg(feature = "full-runtime")]
 use crate::trace::capture::ScheduleCaptureRecorder;
@@ -156,12 +159,9 @@ use crate::tracing_compat::{error, trace};
 use crate::types::task_context::CxCancellationState;
 use crate::types::{CxInner, RegionId, TaskId, Time};
 use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
-use crate::sync::pl::Mutex;
-use crate::sync::pl::RwLock;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "full-runtime")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Weak};
@@ -5418,7 +5418,10 @@ pub struct StarvationStats {
 /// latency, bounded task poll duration, or global priority ordering across
 /// workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "full-serialization",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct PreemptionFairnessCertificate {
     /// Worker-local baseline cancel streak limit `L`.
     pub base_limit: usize,
@@ -6668,8 +6671,8 @@ impl ThreeLaneWorker {
                 self.drive_io_phase(return_when_idle, lifo_idle.wait_cap(lifo_watch_nanos()));
             // Include a successful zero-timeout miss: runnable work can race
             // the idle probe. Only a follower knows another poller owns I/O.
-            left_reactor = self.io_driver.is_some()
-                && !matches!(io_phase, IoPhaseOutcome::Follower);
+            left_reactor =
+                self.io_driver.is_some() && !matches!(io_phase, IoPhaseOutcome::Follower);
             // Election ran: a turn of its own, or another poller owns I/O.
             carried_reactor = false;
             if matches!(io_phase, IoPhaseOutcome::Progress) {
@@ -10000,7 +10003,8 @@ impl ThreeLaneWorker {
             }
             Ok(Poll::Pending) => {
                 #[cfg(feature = "full-runtime")]
-                if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
+                if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region)
+                {
                     let now = self.capture_now();
                     capture.record(Some(self.id), |seq| {
                         TraceEvent::yield_task(seq, now, task_id, region)
@@ -10614,7 +10618,11 @@ impl ThreeLaneWorker {
         let retirement_cx_inner = detached_record
             .as_ref()
             .and_then(|record| record.cx_inner.clone())
-            .or_else(|| state.task(task_id).and_then(|record| record.cx_inner.clone()));
+            .or_else(|| {
+                state
+                    .task(task_id)
+                    .and_then(|record| record.cx_inner.clone())
+            });
         let completion = match detached_record.as_mut() {
             Some(record) => state.task_completed_from_external_record_resuming_with_observers(
                 record,

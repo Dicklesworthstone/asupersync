@@ -70,20 +70,36 @@ impl Snapshot {
                 Some(1) => {
                     let doc: DocumentV1 = serde_json::from_slice(bytes)
                         .map_err(|_| invalid("invalid revocation policy document"))?;
-                    (doc.schema_version, doc.generation, doc.revoked_certificates, Vec::new())
+                    (
+                        doc.schema_version,
+                        doc.generation,
+                        doc.revoked_certificates,
+                        Vec::new(),
+                    )
                 }
                 Some(2) => {
                     let doc: DocumentV2 = serde_json::from_slice(bytes)
                         .map_err(|_| invalid("invalid session revocation policy document"))?;
-                    (doc.schema_version, doc.generation, doc.revoked_certificates, doc.revoked_sessions)
+                    (
+                        doc.schema_version,
+                        doc.generation,
+                        doc.revoked_certificates,
+                        doc.revoked_sessions,
+                    )
                 }
-                _ => return Err(invalid("invalid revocation policy version, generation or count")),
+                _ => {
+                    return Err(invalid(
+                        "invalid revocation policy version, generation or count",
+                    ));
+                }
             };
         if generation == 0
             || certificates.len() > MAX_REVOKED_RESUME_CLIENTS
             || session_denials.len() > MAX_REVOKED_RESUME_SESSIONS
         {
-            return Err(invalid("invalid revocation policy version, generation or count"));
+            return Err(invalid(
+                "invalid revocation policy version, generation or count",
+            ));
         }
         let mut revoked = BTreeSet::new();
         for certificate in certificates {
@@ -101,7 +117,12 @@ impl Snapshot {
                 return Err(invalid("duplicate revocation session"));
             }
         }
-        Ok(Self { version, generation, revoked, sessions })
+        Ok(Self {
+            version,
+            generation,
+            revoked,
+            sessions,
+        })
     }
 
     fn follows(&self, previous: &Self) -> io::Result<()> {
@@ -239,11 +260,13 @@ impl RevocationPolicy {
     ) -> io::Result<Value> {
         let clients: Vec<_> = snapshot.revoked.iter().copied().collect();
         let sessions: Vec<_> = snapshot.sessions.iter().copied().collect();
-        let changed = service.apply_revocations(
-            &clients,
-            &sessions,
-            CancelReason::user("atpd-live client revocation policy"),
-        ).map_err(|_| invalid("revocation service policy could not be applied"))?;
+        let changed = service
+            .apply_revocations(
+                &clients,
+                &sessions,
+                CancelReason::user("atpd-live client revocation policy"),
+            )
+            .map_err(|_| invalid("revocation service policy could not be applied"))?;
         let mut event = json!({"schema_version": 1, "event": "revocation_policy_applied",
             "generation": snapshot.generation, "revoked_clients": snapshot.revoked.len(),
             "newly_revoked": changed.newly_revoked_clients,
@@ -287,7 +310,8 @@ impl RevocationPolicy {
         // any task. A session-capacity refusal must not partly apply a policy.
         let clients: Vec<_> = candidate.snapshot.revoked.iter().copied().collect();
         let sessions: Vec<_> = candidate.snapshot.sessions.iter().copied().collect();
-        service.check_revocations(&clients, &sessions)
+        service
+            .check_revocations(&clients, &sessions)
             .map_err(|_| invalid("revocation service policy could not be admitted"))?;
         // Do not yield admission between TLS tightening and service revocation.
         self.apply_tls(&candidate.snapshot)?;

@@ -26,18 +26,34 @@ fn mismatch(extensions: &[String]) -> HandshakeError {
 
 fn parameters(value: &str, response: bool) -> Option<Parameters> {
     let mut fields = value.split(';').map(str::trim);
-    if fields.next()? != "permessage-deflate" { return None; }
+    if fields.next()? != "permessage-deflate" {
+        return None;
+    }
     let mut parsed = Parameters::default();
     for field in fields {
-        let (name, value) = field.split_once('=').map_or((field, None), |(name, value)| {
-            (name.trim(), Some(value.trim()))
-        });
+        let (name, value) = field
+            .split_once('=')
+            .map_or((field, None), |(name, value)| {
+                (name.trim(), Some(value.trim()))
+            });
         match name {
-            "server_no_context_takeover" if value.is_none() && !parsed.server_no_context => parsed.server_no_context = true,
-            "client_no_context_takeover" if value.is_none() && !parsed.client_no_context => parsed.client_no_context = true,
-            "server_max_window_bits" if value.is_some_and(window_fifteen) && !parsed.server_window => parsed.server_window = true,
-            "client_max_window_bits" if !parsed.client_window
-                && (value.is_some_and(window_fifteen) || (!response && value.is_none())) => parsed.client_window = true,
+            "server_no_context_takeover" if value.is_none() && !parsed.server_no_context => {
+                parsed.server_no_context = true
+            }
+            "client_no_context_takeover" if value.is_none() && !parsed.client_no_context => {
+                parsed.client_no_context = true
+            }
+            "server_max_window_bits"
+                if value.is_some_and(window_fifteen) && !parsed.server_window =>
+            {
+                parsed.server_window = true
+            }
+            "client_max_window_bits"
+                if !parsed.client_window
+                    && (value.is_some_and(window_fifteen) || (!response && value.is_none())) =>
+            {
+                parsed.client_window = true
+            }
             _ => return None,
         }
     }
@@ -45,7 +61,10 @@ fn parameters(value: &str, response: bool) -> Option<Parameters> {
 }
 
 fn window_fifteen(value: &str) -> bool {
-    let Some(quoted) = value.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
+    let Some(quoted) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
         return value == "15";
     };
     let mut input = quoted.bytes();
@@ -54,7 +73,9 @@ fn window_fifteen(value: &str) -> bool {
             Some(b'\\') => input.next(),
             other => other,
         };
-        if actual != Some(*expected) { return false; }
+        if actual != Some(*expected) {
+            return false;
+        }
     }
     input.next().is_none()
 }
@@ -63,8 +84,12 @@ fn window_fifteen(value: &str) -> bool {
 /// RFC 7692 permits both no-context-takeover parameters in the response even
 /// when absent from the offer. Window parameters are emitted only if offered.
 pub(crate) fn negotiate(extensions: &[String]) -> Result<Vec<String>, HandshakeError> {
-    if extensions.is_empty() { return Ok(Vec::new()); }
-    if !cfg!(feature = "compression") { return Err(mismatch(extensions)); }
+    if extensions.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !cfg!(feature = "compression") {
+        return Err(mismatch(extensions));
+    }
     let mut selected = None;
     for extension in extensions {
         // Multiple permessage-deflate offers are alternatives, not a stack.
@@ -76,21 +101,47 @@ pub(crate) fn negotiate(extensions: &[String]) -> Result<Vec<String>, HandshakeE
             selected.get_or_insert(parameters);
         }
     }
-    let Some(parameters) = selected else { return Err(mismatch(extensions)); };
-    let mut value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover".to_owned();
-    if parameters.server_window { value.push_str("; server_max_window_bits=15"); }
-    if parameters.client_window { value.push_str("; client_max_window_bits=15"); }
+    let Some(parameters) = selected else {
+        return Err(mismatch(extensions));
+    };
+    let mut value =
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover".to_owned();
+    if parameters.server_window {
+        value.push_str("; server_max_window_bits=15");
+    }
+    if parameters.client_window {
+        value.push_str("; client_max_window_bits=15");
+    }
     Ok(vec![value])
 }
 
-pub(super) fn negotiate_server(selected: &[String], offered: Option<&str>) -> Result<Vec<String>, HandshakeError> {
-    if selected.iter().any(|value| value.split(';').next().map(str::trim) == Some("permessage-deflate")) {
-        let mut alternatives: Vec<String> = offered.unwrap_or("").split(',')
-            .map(str::trim).filter(|value| value.split(';').next().map(str::trim) == Some("permessage-deflate"))
-            .map(str::to_owned).collect();
-        alternatives.extend(selected.iter().filter(|value| value.split(';').next().map(str::trim) != Some("permessage-deflate")).cloned());
+pub(super) fn negotiate_server(
+    selected: &[String],
+    offered: Option<&str>,
+) -> Result<Vec<String>, HandshakeError> {
+    if selected
+        .iter()
+        .any(|value| value.split(';').next().map(str::trim) == Some("permessage-deflate"))
+    {
+        let mut alternatives: Vec<String> = offered
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|value| value.split(';').next().map(str::trim) == Some("permessage-deflate"))
+            .map(str::to_owned)
+            .collect();
+        alternatives.extend(
+            selected
+                .iter()
+                .filter(|value| {
+                    value.split(';').next().map(str::trim) != Some("permessage-deflate")
+                })
+                .cloned(),
+        );
         negotiate(&alternatives)
-    } else { negotiate(selected) }
+    } else {
+        negotiate(selected)
+    }
 }
 
 /// Validate a completed negotiation; accepting takeover would require retaining
@@ -104,20 +155,36 @@ pub(super) fn negotiated_client(extensions: &[String]) -> Result<bool, Handshake
 }
 
 fn negotiated_for_role(extensions: &[String], client: bool) -> Result<bool, HandshakeError> {
-    if extensions.is_empty() { return Ok(false); }
+    if extensions.is_empty() {
+        return Ok(false);
+    }
     if !cfg!(feature = "compression") || extensions.len() != 1 {
         return Err(mismatch(extensions));
     }
     match parameters(&extensions[0], true) {
-        Some(parameters) if parameters.server_no_context && (client || parameters.client_no_context) => Ok(true),
+        Some(parameters)
+            if parameters.server_no_context && (client || parameters.client_no_context) =>
+        {
+            Ok(true)
+        }
         _ => Err(mismatch(extensions)),
     }
 }
 
-pub(super) fn outgoing(frame: Frame, enabled: bool, max_message: usize, max_encoded: usize) -> Result<Frame, WsError> {
-    if !enabled || !matches!(frame.opcode, Opcode::Text | Opcode::Binary) { return Ok(frame); }
+pub(super) fn outgoing(
+    frame: Frame,
+    enabled: bool,
+    max_message: usize,
+    max_encoded: usize,
+) -> Result<Frame, WsError> {
+    if !enabled || !matches!(frame.opcode, Opcode::Text | Opcode::Binary) {
+        return Ok(frame);
+    }
     if frame.payload.len() > max_message {
-        return Err(WsError::PayloadTooLarge { size: frame.payload.len() as u64, max: max_message });
+        return Err(WsError::PayloadTooLarge {
+            size: frame.payload.len() as u64,
+            max: max_message,
+        });
     }
     #[cfg(feature = "compression")]
     {
@@ -129,7 +196,9 @@ pub(super) fn outgoing(frame: Frame, enabled: bool, max_message: usize, max_enco
     #[cfg(not(feature = "compression"))]
     {
         let _ = max_encoded;
-        Err(WsError::ProtocolViolation("WebSocket compression feature is disabled"))
+        Err(WsError::ProtocolViolation(
+            "WebSocket compression feature is disabled",
+        ))
     }
 }
 
@@ -183,9 +252,24 @@ impl Inflation {
 
 #[cfg(feature = "compression")]
 fn append_bounded(out: &mut Vec<u8>, bytes: &[u8], max: usize) -> Result<(), WsError> {
-    let size = out.len().checked_add(bytes.len()).ok_or(WsError::PayloadTooLarge { size: u64::MAX, max })?;
-    if size > max { return Err(WsError::PayloadTooLarge { size: size as u64, max }); }
-    out.try_reserve(bytes.len()).map_err(|_| WsError::Io(std::io::Error::other("WebSocket compression allocation failed")))?;
+    let size = out
+        .len()
+        .checked_add(bytes.len())
+        .ok_or(WsError::PayloadTooLarge {
+            size: u64::MAX,
+            max,
+        })?;
+    if size > max {
+        return Err(WsError::PayloadTooLarge {
+            size: size as u64,
+            max,
+        });
+    }
+    out.try_reserve(bytes.len()).map_err(|_| {
+        WsError::Io(std::io::Error::other(
+            "WebSocket compression allocation failed",
+        ))
+    })?;
     out.extend_from_slice(bytes);
     Ok(())
 }
@@ -200,19 +284,24 @@ fn deflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
         let mut chunk = [0; 4096];
         let before_in = encoder.total_in();
         let before_out = encoder.total_out();
-        let status = encoder.compress(&payload[offset..], &mut chunk, FlushCompress::Sync)
+        let status = encoder
+            .compress(&payload[offset..], &mut chunk, FlushCompress::Sync)
             .map_err(|_| WsError::ProtocolViolation("WebSocket DEFLATE encoding failed"))?;
         let read = (encoder.total_in() - before_in) as usize;
         let written = (encoder.total_out() - before_out) as usize;
         offset += read;
         append_bounded(&mut output, &chunk[..written], max.saturating_add(4))?;
         if offset == payload.len() && written < chunk.len() {
-            if !output.ends_with(&[0, 0, 255, 255]) { return Err(WsError::ProtocolViolation("WebSocket DEFLATE flush failed")); }
+            if !output.ends_with(&[0, 0, 255, 255]) {
+                return Err(WsError::ProtocolViolation("WebSocket DEFLATE flush failed"));
+            }
             output.truncate(output.len() - 4);
             return Ok(Bytes::from(output));
         }
         if status == Status::StreamEnd || (read == 0 && written == 0) {
-            return Err(WsError::ProtocolViolation("WebSocket DEFLATE encoder made no progress"));
+            return Err(WsError::ProtocolViolation(
+                "WebSocket DEFLATE encoder made no progress",
+            ));
         }
     }
 }
@@ -424,7 +513,11 @@ impl Pass {
 }
 
 #[cfg(feature = "compression")]
-fn prime_dictionary(decoder: &mut flate2::Decompress, fill: u8, history: &[u8]) -> Result<(), WsError> {
+fn prime_dictionary(
+    decoder: &mut flate2::Decompress,
+    fill: u8,
+    history: &[u8],
+) -> Result<(), WsError> {
     // The pure-Rust flate2 backend has no public set_dictionary. A non-final
     // stored block loads a full window through its normal validated path: the
     // message's last 32 KiB of history, preceded by `fill` where there is less.
@@ -442,14 +535,23 @@ fn prime_dictionary(decoder: &mut flate2::Decompress, fill: u8, history: &[u8]) 
         let mut discard = [0; 4096];
         let before_in = decoder.total_in();
         let before_out = decoder.total_out();
-        let status = decoder.decompress(&primer[offset..], &mut discard, flate2::FlushDecompress::None)
+        let status = decoder
+            .decompress(
+                &primer[offset..],
+                &mut discard,
+                flate2::FlushDecompress::None,
+            )
             .map_err(|_| WsError::ProtocolViolation("WebSocket DEFLATE dictionary setup failed"))?;
         let read = (decoder.total_in() - before_in) as usize;
         let written = (decoder.total_out() - before_out) as usize;
         offset += read;
-        if offset == primer.len() && decoder.total_out() == WINDOW as u64 { return Ok(()); }
+        if offset == primer.len() && decoder.total_out() == WINDOW as u64 {
+            return Ok(());
+        }
         if status == flate2::Status::StreamEnd || (read == 0 && written == 0) {
-            return Err(WsError::ProtocolViolation("WebSocket DEFLATE dictionary made no progress"));
+            return Err(WsError::ProtocolViolation(
+                "WebSocket DEFLATE dictionary made no progress",
+            ));
         }
     }
 }
@@ -471,21 +573,41 @@ mod tests {
 
     #[test]
     fn permessage_deflate_negotiates_only_supported_parameters() {
-        for offer in ["permessage-deflate", "permessage-deflate; client_max_window_bits", OFFER] {
+        for offer in [
+            "permessage-deflate",
+            "permessage-deflate; client_max_window_bits",
+            OFFER,
+        ] {
             let selected = negotiate(&[offer.to_owned()]).unwrap();
             assert!(negotiated(&selected).unwrap());
         }
-        for offer in ["permessage-deflate; server_max_window_bits=14", "permessage-deflate; client_max_window_bits=8",
-            "permessage-deflate; server_no_context_takeover=1", "permessage-deflate; unknown", "x-unknown",
-            "permessage-deflate; client_max_window_bits; client_max_window_bits=15"] {
+        for offer in [
+            "permessage-deflate; server_max_window_bits=14",
+            "permessage-deflate; client_max_window_bits=8",
+            "permessage-deflate; server_no_context_takeover=1",
+            "permessage-deflate; unknown",
+            "x-unknown",
+            "permessage-deflate; client_max_window_bits; client_max_window_bits=15",
+        ] {
             assert!(negotiate(&[offer.to_owned()]).is_err(), "{offer}");
         }
         assert!(negotiated(&["permessage-deflate".to_owned()]).is_err());
-        assert!(negotiated(&["permessage-deflate; server_no_context_takeover".to_owned()]).is_err());
+        assert!(
+            negotiated(&["permessage-deflate; server_no_context_takeover".to_owned()]).is_err()
+        );
         assert!(negotiated(&[OFFER.to_owned(), OFFER.to_owned()]).is_err());
         assert!(!negotiated(&[]).unwrap());
-        assert!(negotiated_client(&["permessage-deflate; server_no_context_takeover; server_max_window_bits=\"15\"".to_owned()]).unwrap());
-        assert!(negotiate(&["permessage-deflate; client_max_window_bits=\"\\1\\5\"".to_owned()]).is_ok());
+        assert!(
+            negotiated_client(&[
+                "permessage-deflate; server_no_context_takeover; server_max_window_bits=\"15\""
+                    .to_owned()
+            ])
+            .unwrap()
+        );
+        assert!(
+            negotiate(&["permessage-deflate; client_max_window_bits=\"\\1\\5\"".to_owned()])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -494,22 +616,34 @@ mod tests {
         // produced by the implementation's encoder.
         for payload in [
             &[0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00][..],
-            &[0x00, 0x05, 0x00, 0xfa, 0xff, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00],
+            &[
+                0x00, 0x05, 0x00, 0xfa, 0xff, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00,
+            ],
             &[0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00],
-            &[0xf2, 0x48, 0x05, 0x00, 0x00, 0x00, 0xff, 0xff, 0xca, 0xc9, 0xc9, 0x07, 0x00],
+            &[
+                0xf2, 0x48, 0x05, 0x00, 0x00, 0x00, 0xff, 0xff, 0xca, 0xc9, 0xc9, 0x07, 0x00,
+            ],
         ] {
             assert_eq!(inflate(payload, 5).unwrap().as_ref(), b"Hello");
-            assert!(matches!(inflate(payload, 4), Err(WsError::PayloadTooLarge { .. })));
+            assert!(matches!(
+                inflate(payload, 4),
+                Err(WsError::PayloadTooLarge { .. })
+            ));
         }
         assert!(inflate(&[0], 0).unwrap().is_empty());
-        assert!(inflate(&[0xf2, 0x00, 0x11, 0x00, 0x00], 64).is_err(), "context-takeover references cannot cross message boundaries");
+        assert!(
+            inflate(&[0xf2, 0x00, 0x11, 0x00, 0x00], 64).is_err(),
+            "context-takeover references cannot cross message boundaries"
+        );
         assert!(inflate(&[0xff], 64).is_err());
         assert!(inflate(&[0xf2, 0x48], 64).is_err());
         assert!(inflate(&[0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x42], 64).is_err());
         // Independently produced by Python zlib: first raw compressor finishes
         // "Hello" (Z_FINISH); a second raw compressor is initialized with
         // zdict=b"Hello", then emits "Hello" with Z_SYNC_FLUSH (tail removed).
-        let cross_final = [0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0xf2, 0x00, 0x11, 0x00, 0x00];
+        let cross_final = [
+            0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0xf2, 0x00, 0x11, 0x00, 0x00,
+        ];
         assert_eq!(inflate(&cross_final, 10).unwrap().as_ref(), b"HelloHello");
     }
 
@@ -518,19 +652,28 @@ mod tests {
         let empty = deflate(&[], 1).unwrap();
         assert_eq!(empty.as_ref(), &[0]);
         assert!(inflate(&empty, 0).unwrap().is_empty());
-        assert!(matches!(deflate(&[], 0), Err(WsError::PayloadTooLarge { .. })));
+        assert!(matches!(
+            deflate(&[], 0),
+            Err(WsError::PayloadTooLarge { .. })
+        ));
         let input = vec![b'a'; 128 * 1024];
         let first = deflate(&input, input.len()).unwrap();
         let second = deflate(&input, input.len()).unwrap();
         assert_eq!(first, second);
         assert!(first.len() < 1024);
         assert_eq!(inflate(&first, input.len()).unwrap().as_ref(), input);
-        assert!(matches!(inflate(&first, 1024), Err(WsError::PayloadTooLarge { .. })));
+        assert!(matches!(
+            inflate(&first, 1024),
+            Err(WsError::PayloadTooLarge { .. })
+        ));
         assert!(deflate(&input, 2).is_err());
         // NUL output takes the second, 0xFF-filled decode; valid data decodes the same.
         let zeros = vec![0_u8; 4096];
         let packed = deflate(&zeros, zeros.len()).unwrap();
-        assert_eq!(inflate(&packed, zeros.len()).unwrap().as_ref(), zeros.as_slice());
+        assert_eq!(
+            inflate(&packed, zeros.len()).unwrap().as_ref(),
+            zeros.as_slice()
+        );
     }
 
     #[test]
@@ -541,7 +684,13 @@ mod tests {
         message.push(0);
         assert!(inflate(&message, 0).unwrap().is_empty());
         message.splice(..0, [1, 0, 0, 255, 255]);
-        assert!(matches!(inflate(&message, 0), Err(WsError::PayloadTooLarge { size: 257, max: 256 })));
+        assert!(matches!(
+            inflate(&message, 0),
+            Err(WsError::PayloadTooLarge {
+                size: 257,
+                max: 256
+            })
+        ));
     }
 
     /// Raw DEFLATE bits, least significant first (RFC 1951 section 3.1.1).

@@ -86,7 +86,11 @@ impl PgOutputError {
 impl fmt::Display for PgOutputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Truncated { offset, needed, remaining } => write!(
+            Self::Truncated {
+                offset,
+                needed,
+                remaining,
+            } => write!(
                 f,
                 "incomplete pgoutput field at byte {offset}: need {needed} bytes, have {remaining}"
             ),
@@ -520,7 +524,10 @@ fn decode_message<'a>(
         b'I' => {
             let relation_id = input.u32()?;
             input.expect(b'N')?;
-            PgOutputMessage::Insert { relation_id, new_tuple: input.tuple()? }
+            PgOutputMessage::Insert {
+                relation_id,
+                new_tuple: input.tuple()?,
+            }
         }
         b'U' => {
             let relation_id = input.u32()?;
@@ -532,12 +539,19 @@ fn decode_message<'a>(
                 input.expect(b'N')?;
                 Some(old)
             };
-            PgOutputMessage::Update { relation_id, old_tuple, new_tuple: input.tuple()? }
+            PgOutputMessage::Update {
+                relation_id,
+                old_tuple,
+                new_tuple: input.tuple()?,
+            }
         }
         b'D' => {
             let relation_id = input.u32()?;
             let tuple_tag = input.byte()?;
-            PgOutputMessage::Delete { relation_id, old_tuple: input.old_tuple(tuple_tag)? }
+            PgOutputMessage::Delete {
+                relation_id,
+                old_tuple: input.old_tuple(tuple_tag)?,
+            }
         }
         b'T' => {
             let count_offset = input.offset;
@@ -566,7 +580,12 @@ fn decode_message<'a>(
             let lsn = input.lsn()?;
             let prefix = input.string()?;
             let content = input.sized_bytes()?;
-            PgOutputMessage::Message { transactional, lsn, prefix, content }
+            PgOutputMessage::Message {
+                transactional,
+                lsn,
+                prefix,
+                content,
+            }
         }
         tag => return Err(PgOutputError::UnsupportedMessage { offset: 0, tag }),
     };
@@ -588,7 +607,10 @@ impl<'a> PgOutputMessages<'a> {
     /// Borrow a buffer containing zero or more complete messages.
     #[must_use]
     pub const fn new(data: &'a [u8]) -> Self {
-        Self { remaining: data, offset: 0 }
+        Self {
+            remaining: data,
+            offset: 0,
+        }
     }
 }
 
@@ -628,7 +650,11 @@ impl<'a> Input<'a> {
     fn ensure(&self, needed: usize) -> Result<(), PgOutputError> {
         let remaining = self.data.len() - self.offset;
         if needed > remaining {
-            return Err(PgOutputError::Truncated { offset: self.offset, needed, remaining });
+            return Err(PgOutputError::Truncated {
+                offset: self.offset,
+                needed,
+                remaining,
+            });
         }
         Ok(())
     }
@@ -676,13 +702,15 @@ impl<'a> Input<'a> {
     fn string(&mut self) -> Result<&'a str, PgOutputError> {
         let offset = self.offset;
         let remaining = &self.data[offset..];
-        let length = remaining.iter().position(|byte| *byte == 0).ok_or(
-            PgOutputError::Truncated {
-                offset,
-                needed: remaining.len().saturating_add(1),
-                remaining: remaining.len(),
-            },
-        )?;
+        let length =
+            remaining
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or(PgOutputError::Truncated {
+                    offset,
+                    needed: remaining.len().saturating_add(1),
+                    remaining: remaining.len(),
+                })?;
         let bytes = self.take(length + 1)?;
         std::str::from_utf8(&bytes[..length]).map_err(|_| PgOutputError::Invalid {
             offset,
@@ -693,7 +721,10 @@ impl<'a> Input<'a> {
     fn expect(&mut self, expected: u8) -> Result<(), PgOutputError> {
         let offset = self.offset;
         if self.byte()? != expected {
-            return Err(PgOutputError::Invalid { offset, reason: "expected a new-tuple marker" });
+            return Err(PgOutputError::Invalid {
+                offset,
+                reason: "expected a new-tuple marker",
+            });
         }
         Ok(())
     }
@@ -702,7 +733,10 @@ impl<'a> Input<'a> {
         let offset = self.offset;
         let flags = self.byte()?;
         if flags & !allowed != 0 {
-            return Err(PgOutputError::Invalid { offset, reason: "unknown flag bits" });
+            return Err(PgOutputError::Invalid {
+                offset,
+                reason: "unknown flag bits",
+            });
         }
         Ok(flags)
     }
@@ -730,7 +764,12 @@ impl<'a> Input<'a> {
                 b'u' => PgTupleValue::UnchangedToast,
                 b't' => PgTupleValue::Text(self.sized_bytes()?),
                 b'b' => PgTupleValue::Binary(self.sized_bytes()?),
-                _ => return Err(PgOutputError::Invalid { offset, reason: "unknown tuple value tag" }),
+                _ => {
+                    return Err(PgOutputError::Invalid {
+                        offset,
+                        reason: "unknown tuple value tag",
+                    });
+                }
             });
         }
         Ok(values)
@@ -757,7 +796,12 @@ impl<'a> Input<'a> {
             b'n' => PgReplicaIdentity::Nothing,
             b'f' => PgReplicaIdentity::Full,
             b'i' => PgReplicaIdentity::Index,
-            _ => return Err(PgOutputError::Invalid { offset, reason: "unknown replica identity" }),
+            _ => {
+                return Err(PgOutputError::Invalid {
+                    offset,
+                    reason: "unknown replica identity",
+                });
+            }
         };
         let count = usize::from(self.u16()?);
         // Minimum column representation: flags, NUL, type OID and modifier.
@@ -771,7 +815,13 @@ impl<'a> Input<'a> {
                 type_modifier: self.i32()?,
             });
         }
-        Ok(PgRelation { id, namespace, name, replica_identity, columns })
+        Ok(PgRelation {
+            id,
+            namespace,
+            name,
+            replica_identity,
+            columns,
+        })
     }
 }
 
@@ -795,9 +845,7 @@ mod tests {
     const TYPE: &[u8] = b"Y\0\0\xc3\x50custom\0widget_type\0";
     const ORIGIN: &[u8] = b"O\0\0\0\0\0\0\0\x0anode-a\0";
     const INSERT: &[u8] = &[
-        b'I', 0, 0, 0, 42, b'N', 0, 5,
-        b'n', b'u', b't', 0, 0, 0, 0,
-        b't', 0, 0, 0, 2, 0xff, 0,
+        b'I', 0, 0, 0, 42, b'N', 0, 5, b'n', b'u', b't', 0, 0, 0, 0, b't', 0, 0, 0, 2, 0xff, 0,
         b'b', 0, 0, 0, 3, 0, 1, 0xff,
     ];
     const UPDATE: &[u8] = b"U\0\0\0\x2aK\0\x01t\0\0\0\x03oldN\0\x01t\0\0\0\x03new";
@@ -834,36 +882,67 @@ mod tests {
         assert_eq!(relation.namespace, "public");
         assert_eq!(relation.name, "widgets");
         assert_eq!(relation.replica_identity, PgReplicaIdentity::Full);
-        assert_eq!(relation.columns, vec![
-            PgRelationColumn { key: true, name: "id", type_oid: 23, type_modifier: -1 },
-            PgRelationColumn { key: false, name: "payload", type_oid: 25, type_modifier: 100 },
-        ]);
+        assert_eq!(
+            relation.columns,
+            vec![
+                PgRelationColumn {
+                    key: true,
+                    name: "id",
+                    type_oid: 23,
+                    type_modifier: -1
+                },
+                PgRelationColumn {
+                    key: false,
+                    name: "payload",
+                    type_oid: 25,
+                    type_modifier: 100
+                },
+            ]
+        );
         assert_eq!(relation.namespace.as_ptr(), RELATION[5..].as_ptr());
         assert_eq!(
             decode_pgoutput(TYPE).unwrap(),
-            PgOutputMessage::Type { id: 50_000, namespace: "custom", name: "widget_type" },
+            PgOutputMessage::Type {
+                id: 50_000,
+                namespace: "custom",
+                name: "widget_type"
+            },
         );
         assert_eq!(
             decode_pgoutput(ORIGIN).unwrap(),
-            PgOutputMessage::Origin { origin_lsn: PgLsn::new(10), name: "node-a" },
+            PgOutputMessage::Origin {
+                origin_lsn: PgLsn::new(10),
+                name: "node-a"
+            },
         );
     }
 
     #[test]
     fn pgoutput_tuple_values_distinguish_null_toast_empty_text_and_binary_without_copies() {
-        let PgOutputMessage::Insert { relation_id, new_tuple } = decode_pgoutput(INSERT).unwrap() else {
+        let PgOutputMessage::Insert {
+            relation_id,
+            new_tuple,
+        } = decode_pgoutput(INSERT).unwrap()
+        else {
             panic!("expected an insert");
         };
         assert_eq!(relation_id, 42);
-        assert_eq!(new_tuple, vec![
-            PgTupleValue::Null,
-            PgTupleValue::UnchangedToast,
-            PgTupleValue::Text(b""),
-            PgTupleValue::Text(&[0xff, 0]),
-            PgTupleValue::Binary(&[0, 1, 0xff]),
-        ]);
-        let PgTupleValue::Text(text) = new_tuple[3] else { panic!("expected raw text bytes") };
-        let PgTupleValue::Binary(binary) = new_tuple[4] else { panic!("expected binary bytes") };
+        assert_eq!(
+            new_tuple,
+            vec![
+                PgTupleValue::Null,
+                PgTupleValue::UnchangedToast,
+                PgTupleValue::Text(b""),
+                PgTupleValue::Text(&[0xff, 0]),
+                PgTupleValue::Binary(&[0, 1, 0xff]),
+            ]
+        );
+        let PgTupleValue::Text(text) = new_tuple[3] else {
+            panic!("expected raw text bytes")
+        };
+        let PgTupleValue::Binary(binary) = new_tuple[4] else {
+            panic!("expected binary bytes")
+        };
         assert_eq!(text.as_ptr(), INSERT[20..].as_ptr());
         assert_eq!(binary.as_ptr(), INSERT[27..].as_ptr());
     }
@@ -931,19 +1010,27 @@ mod tests {
         );
         let mut message = MESSAGE.to_vec();
         message[1] = 0;
-        assert!(matches!(decode_pgoutput(&message), Ok(PgOutputMessage::Message {
-            transactional: false, ..
-        })));
+        assert!(matches!(
+            decode_pgoutput(&message),
+            Ok(PgOutputMessage::Message {
+                transactional: false,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn pgoutput_rejects_every_truncated_prefix_of_all_supported_message_families() {
-        for wire in [BEGIN, COMMIT, RELATION, TYPE, ORIGIN, INSERT, UPDATE, DELETE, TRUNCATE, MESSAGE] {
+        for wire in [
+            BEGIN, COMMIT, RELATION, TYPE, ORIGIN, INSERT, UPDATE, DELETE, TRUNCATE, MESSAGE,
+        ] {
             assert!(decode_pgoutput(wire).is_ok(), "fixture tag {}", wire[0]);
             for length in 0..wire.len() {
                 assert!(
                     decode_pgoutput(&wire[..length]).is_err(),
-                    "accepted incomplete tag {} at {length}/{}", wire[0], wire.len(),
+                    "accepted incomplete tag {} at {length}/{}",
+                    wire[0],
+                    wire.len(),
                 );
             }
         }
@@ -973,9 +1060,14 @@ mod tests {
         ] {
             let mut invalid = wire.to_vec();
             invalid[offset] = flags;
-            assert!(matches!(decode_pgoutput(&invalid), Err(PgOutputError::Invalid { .. })));
+            assert!(matches!(
+                decode_pgoutput(&invalid),
+                Err(PgOutputError::Invalid { .. })
+            ));
         }
-        for tag in [b'S', b'E', b'c', b'A', b'b', b'P', b'K', b'r', b'p', b'?', 0] {
+        for tag in [
+            b'S', b'E', b'c', b'A', b'b', b'P', b'K', b'r', b'p', b'?', 0,
+        ] {
             assert_eq!(
                 decode_pgoutput(&[tag]),
                 Err(PgOutputError::UnsupportedMessage { offset: 0, tag }),
@@ -1007,21 +1099,39 @@ mod tests {
         batch.extend_from_slice(COMMIT);
         assert_eq!(
             decode_pgoutput(&batch),
-            Err(PgOutputError::TrailingBytes { offset: BEGIN.len(), remaining: COMMIT.len() }),
+            Err(PgOutputError::TrailingBytes {
+                offset: BEGIN.len(),
+                remaining: COMMIT.len()
+            }),
         );
         let (first, consumed) = decode_pgoutput_prefix(&batch).unwrap();
         assert_eq!(first, decode_pgoutput(BEGIN).unwrap());
         assert_eq!(consumed, BEGIN.len());
-        let messages = PgOutputMessages::new(&batch).collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(messages, vec![decode_pgoutput(BEGIN).unwrap(), decode_pgoutput(COMMIT).unwrap()]);
+        let messages = PgOutputMessages::new(&batch)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            messages,
+            vec![
+                decode_pgoutput(BEGIN).unwrap(),
+                decode_pgoutput(COMMIT).unwrap()
+            ]
+        );
 
         batch.insert(BEGIN.len(), b'?');
         let mut messages = PgOutputMessages::new(&batch);
         assert!(messages.next().unwrap().is_ok());
-        assert_eq!(messages.next(), Some(Err(PgOutputError::UnsupportedMessage {
-            offset: BEGIN.len(), tag: b'?',
-        })));
-        assert!(messages.next().is_none(), "do not skip a bad record and expose a later commit");
+        assert_eq!(
+            messages.next(),
+            Some(Err(PgOutputError::UnsupportedMessage {
+                offset: BEGIN.len(),
+                tag: b'?',
+            }))
+        );
+        assert!(
+            messages.next().is_none(),
+            "do not skip a bad record and expose a later commit"
+        );
         assert!(messages.next().is_none());
         assert!(PgOutputMessages::new(&[]).next().is_none());
     }

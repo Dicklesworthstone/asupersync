@@ -17,9 +17,9 @@
 
 #![cfg(test)]
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 // Import the problematic implementation for testing
 use super::w3c_trace_context::TraceId;

@@ -1,8 +1,8 @@
 use super::*;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::CancelReason;
 use std::io::Cursor as IoCursor;
 use std::path::{Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 mod compaction;
 mod recovery;
@@ -131,7 +131,9 @@ fn execute(
     }
 }
 
-fn replay(admission: Result<DurableRemoteAdmission, DurableRemoteError>) -> RemoteServiceWireOutcome {
+fn replay(
+    admission: Result<DurableRemoteAdmission, DurableRemoteError>,
+) -> RemoteServiceWireOutcome {
     match admission.unwrap() {
         DurableRemoteAdmission::Replay(outcome) => outcome.into(),
         DurableRemoteAdmission::Execute(_) => panic!("expected an exact durable replay"),
@@ -170,7 +172,11 @@ fn linked_file() -> (PathBuf, File) {
 
 #[cfg(test)]
 fn open_file(path: &Path) -> File {
-    std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap()
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
 }
 
 #[test]
@@ -215,7 +221,11 @@ fn real_file_replays_exact_outcomes_with_peer_isolation_and_exclusive_ownership(
     ));
     drop(journal);
     let original = std::fs::read(&path).unwrap();
-    assert!(!original.windows(private_input.len()).any(|bytes| bytes == private_input));
+    assert!(
+        !original
+            .windows(private_input.len())
+            .any(|bytes| bytes == private_input)
+    );
 
     let mut restored = DurableRemoteJournal::open::<Vec<u8>, Vec<u8>>(
         open_file(&path),
@@ -225,8 +235,14 @@ fn real_file_replays_exact_outcomes_with_peer_isolation_and_exclusive_ownership(
         limits(),
     )
     .unwrap();
-    assert_eq!(replay(restored.admit(&alice, key(1), private_input, 14)), success().into());
-    assert_eq!(replay(restored.admit(&bob, key(1), b"different request", 14)), second.into());
+    assert_eq!(
+        replay(restored.admit(&alice, key(1), private_input, 14)),
+        success().into()
+    );
+    assert_eq!(
+        replay(restored.admit(&bob, key(1), b"different request", 14)),
+        second.into()
+    );
     assert_eq!(restored.status(), DurableRemoteJournalStatus::Writable);
     assert_eq!(restored.records(), 4);
     assert_eq!(restored.committed_bytes(), size);
@@ -241,7 +257,10 @@ fn terminal_expiry_is_exact_but_pending_survives_retention_and_restart() {
     let complete = execute(journal.admit(&peer, key(1), b"original", 10));
     journal.complete(complete, success(), 20).unwrap();
     let _pending = execute(journal.admit(&peer, key(2), b"uncertain", 21));
-    assert_eq!(replay(journal.admit(&peer, key(1), b"original", 119)), success().into());
+    assert_eq!(
+        replay(journal.admit(&peer, key(1), b"original", 119)),
+        success().into()
+    );
     assert!(matches!(
         journal.admit(&peer, key(2), b"uncertain", 118),
         Err(DurableRemoteError::ClockRegression)
@@ -259,7 +278,11 @@ fn terminal_expiry_is_exact_but_pending_survives_retention_and_restart() {
         Err(DurableRemoteError::ClockRegression)
     ));
     for value in [1, 2] {
-        let input: &[u8] = if value == 1 { b"replacement" } else { b"uncertain" };
+        let input: &[u8] = if value == 1 {
+            b"replacement"
+        } else {
+            b"uncertain"
+        };
         assert!(matches!(
             restored.admit(&peer, key(value), input, 100_000),
             Err(DurableRemoteError::InDoubt)
@@ -311,7 +334,10 @@ fn pending_reservations_preserve_exact_terminal_capacity_across_reopen() {
             ));
             assert_eq!(journal.file.bytes.get_ref(), &before);
             let completed = journal.complete(second, exact_outcome.clone(), 3).unwrap();
-            assert_eq!(RemoteServiceWireOutcome::from(completed), exact_outcome.clone().into());
+            assert_eq!(
+                RemoteServiceWireOutcome::from(completed),
+                exact_outcome.clone().into()
+            );
             assert_eq!(journal.reserved_terminal_bytes, terminal_size);
             assert_eq!(journal.retained_bytes, 2 * cap);
             if let Some(first) = first {
@@ -322,7 +348,10 @@ fn pending_reservations_preserve_exact_terminal_capacity_across_reopen() {
                 }
             }
             let mut restored = reopen(journal.file.bytes.into_inner(), bounds).unwrap();
-            assert_eq!(replay(restored.admit(&peer, key(2), b"two", 4)), exact_outcome.clone().into());
+            assert_eq!(
+                replay(restored.admit(&peer, key(2), b"two", 4)),
+                exact_outcome.clone().into()
+            );
             if restart {
                 assert_eq!(restored.reserved_terminal_bytes, terminal_size);
                 assert!(matches!(
@@ -331,7 +360,10 @@ fn pending_reservations_preserve_exact_terminal_capacity_across_reopen() {
                 ));
             } else {
                 assert_eq!(restored.reserved_terminal_bytes, 0);
-                assert_eq!(replay(restored.admit(&peer, key(1), b"one", 4)), exact_outcome.clone().into());
+                assert_eq!(
+                    replay(restored.admit(&peer, key(1), b"one", 4)),
+                    exact_outcome.clone().into()
+                );
             }
         }
     }
@@ -361,14 +393,19 @@ fn sync_uncertainty_poisoning_requires_reopen_before_exposing_results() {
         assert_eq!(journal.status, DurableRemoteJournalStatus::Poisoned);
         assert!(matches!(
             journal.admit(&peer, key(1), b"input", 3),
-            Err(DurableRemoteError::NotWritable(DurableRemoteJournalStatus::Poisoned))
+            Err(DurableRemoteError::NotWritable(
+                DurableRemoteJournalStatus::Poisoned
+            ))
         ));
         let bytes = journal.file.bytes.into_inner();
         let mut restored = reopen(bytes, limits()).unwrap();
         assert_eq!(restored.file.syncs, 1);
         assert_eq!(restored.sequence, records + 1);
         if terminal {
-            assert_eq!(replay(restored.admit(&peer, key(1), b"input", 3)), success().into());
+            assert_eq!(
+                replay(restored.admit(&peer, key(1), b"input", 3)),
+                success().into()
+            );
         } else {
             assert!(matches!(
                 restored.admit(&peer, key(1), b"input", 3),
@@ -379,10 +416,12 @@ fn sync_uncertainty_poisoning_requires_reopen_before_exposing_results() {
 
     let mut journal = journal(limits());
     journal.file.panic_sync = true;
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = journal.admit(&peer, key(2), b"panic during sync", 1);
-    }))
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = journal.admit(&peer, key(2), b"panic during sync", 1);
+        }))
+        .is_err()
+    );
     assert_eq!(journal.status, DurableRemoteJournalStatus::Poisoned);
     assert_eq!(journal.sequence, 0);
     let mut file = FaultFile::from(journal.file.bytes.into_inner());
@@ -411,14 +450,19 @@ fn torn_tail_preserves_exact_replay_and_unresolved_reservations_without_repair()
     assert_eq!(restored.status, DurableRemoteJournalStatus::ReadOnlyTail);
     assert_eq!(restored.offset, committed);
     assert_eq!(restored.sequence, 3);
-    assert_eq!(replay(restored.admit(&peer, key(1), b"complete", 5)), success().into());
+    assert_eq!(
+        replay(restored.admit(&peer, key(1), b"complete", 5)),
+        success().into()
+    );
     assert!(matches!(
         restored.admit(&peer, key(2), b"uncertain", 5),
         Err(DurableRemoteError::InDoubt)
     ));
     assert!(matches!(
         restored.admit(&peer, key(3), b"new", 5),
-        Err(DurableRemoteError::NotWritable(DurableRemoteJournalStatus::ReadOnlyTail))
+        Err(DurableRemoteError::NotWritable(
+            DurableRemoteJournalStatus::ReadOnlyTail
+        ))
     ));
     assert_eq!(restored.file.bytes.get_ref(), &bytes);
 
@@ -428,7 +472,13 @@ fn torn_tail_preserves_exact_replay_and_unresolved_reservations_without_repair()
     let start = complete_log.offset as usize;
     complete_log.complete(third, success(), 6).unwrap();
     let complete_bytes = complete_log.file.bytes.into_inner();
-    for end in [start + 1, start + PREFIX_BYTES - 1, start + PREFIX_BYTES, complete_bytes.len() - TAG_BYTES, complete_bytes.len() - 1] {
+    for end in [
+        start + 1,
+        start + PREFIX_BYTES - 1,
+        start + PREFIX_BYTES,
+        complete_bytes.len() - TAG_BYTES,
+        complete_bytes.len() - 1,
+    ] {
         let prefix = complete_bytes[..end].to_vec();
         let mut restored = reopen(prefix.clone(), limits()).unwrap();
         assert_eq!(restored.status, DurableRemoteJournalStatus::ReadOnlyTail);
@@ -450,7 +500,16 @@ fn complete_corruption_and_authenticated_semantic_damage_fail_the_entire_open() 
     let reserved = original_log.offset as usize;
     original_log.complete(reservation, success(), 2).unwrap();
     let bytes = original_log.file.bytes.into_inner();
-    for index in [0, header - 1, header, header + 8, header + PREFIX_BYTES, reserved - 1, reserved, bytes.len() - 1] {
+    for index in [
+        0,
+        header - 1,
+        header,
+        header + 8,
+        header + PREFIX_BYTES,
+        reserved - 1,
+        reserved,
+        bytes.len() - 1,
+    ] {
         let mut changed = bytes.clone();
         changed[index] ^= 1;
         assert!(reopen(changed, limits()).is_err(), "corrupt byte {index}");
@@ -472,7 +531,10 @@ fn complete_corruption_and_authenticated_semantic_damage_fail_the_entire_open() 
         LENGTH_DOMAIN,
         &prefix_payload(body_len, 1, log.last),
     );
-    log.file.bytes.get_mut().extend_from_slice(&body_len.to_le_bytes());
+    log.file
+        .bytes
+        .get_mut()
+        .extend_from_slice(&body_len.to_le_bytes());
     log.file.bytes.get_mut().extend_from_slice(tag.as_bytes());
     assert!(matches!(
         reopen(log.file.bytes.into_inner(), limits()),
@@ -494,8 +556,12 @@ fn complete_corruption_and_authenticated_semantic_damage_fail_the_entire_open() 
         payload.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
         payload.extend_from_slice(&encoded);
         let timestamp = if variant == 3 { 0 } else { 2 };
-        log.append_record(COMPLETE, &peer, key(1), &payload, timestamp).unwrap();
-        assert!(reopen(log.file.bytes.into_inner(), limits()).is_err(), "semantic variant {variant}");
+        log.append_record(COMPLETE, &peer, key(1), &payload, timestamp)
+            .unwrap();
+        assert!(
+            reopen(log.file.bytes.into_inner(), limits()).is_err(),
+            "semantic variant {variant}"
+        );
     }
 }
 
@@ -525,7 +591,10 @@ fn header_requires_original_key_schema_version_name_and_every_limit() {
             9 => cfg.limits.max_journal_bytes += 1,
             _ => cfg.limits.retention_ms += 1,
         }
-        assert!(Journal::open(FaultFile::from(bytes.clone()), cfg).is_err(), "configuration variant {variant}");
+        assert!(
+            Journal::open(FaultFile::from(bytes.clone()), cfg).is_err(),
+            "configuration variant {variant}"
+        );
     }
     assert!(matches!(
         Journal::create(FaultFile::from(bytes), config(limits())),
@@ -534,7 +603,12 @@ fn header_requires_original_key_schema_version_name_and_every_limit() {
     let mut bounds = limits();
     bounds.retention_ms = 0;
     assert!(matches!(
-        Config::new::<Vec<u8>, Vec<u8>>(COMPUTATION.to_owned(), APPLICATION_VERSION, AuthKey::from_seed(99), bounds),
+        Config::new::<Vec<u8>, Vec<u8>>(
+            COMPUTATION.to_owned(),
+            APPLICATION_VERSION,
+            AuthKey::from_seed(99),
+            bounds
+        ),
         Err(DurableRemoteError::Configuration)
     ));
 }
@@ -597,11 +671,17 @@ fn terminal_variants_round_trip_through_the_existing_strict_wire_codec() {
     for (index, expected) in outcomes.iter().enumerate() {
         let reservation = execute(journal.admit(&peer, key(index as u128), b"input", 1));
         let result = journal.complete(reservation, expected.clone(), 1).unwrap();
-        assert_eq!(RemoteServiceWireOutcome::from(result), expected.clone().into());
+        assert_eq!(
+            RemoteServiceWireOutcome::from(result),
+            expected.clone().into()
+        );
     }
     let mut restored = reopen(journal.file.bytes.into_inner(), limits()).unwrap();
     for (index, expected) in outcomes.into_iter().enumerate() {
-        assert_eq!(replay(restored.admit(&peer, key(index as u128), b"input", 2)), expected.into());
+        assert_eq!(
+            replay(restored.admit(&peer, key(index as u128), b"input", 2)),
+            expected.into()
+        );
     }
 }
 
@@ -619,8 +699,13 @@ fn cache_growth_capacity_is_compacted_charged_and_released_at_expiry() {
     let mut journal = journal(bounds);
     let first = execute(journal.admit(&peer, key(1), b"one", 1));
     journal.complete(first, outcome.clone(), 2).unwrap();
-    let EntryState::Terminal { outcome: cached, .. } =
-        &journal.entries.get(&(peer.clone(), key(1).raw())).unwrap().state
+    let EntryState::Terminal {
+        outcome: cached, ..
+    } = &journal
+        .entries
+        .get(&(peer.clone(), key(1).raw()))
+        .unwrap()
+        .state
     else {
         panic!("completion did not retain an outcome");
     };
@@ -688,9 +773,9 @@ fn reconciliation(
     }
 }
 
-fn reconciled(decision: Result<DurableRemoteReconciliation, DurableRemoteError>)
-    -> RemoteServiceWireOutcome
-{
+fn reconciled(
+    decision: Result<DurableRemoteReconciliation, DurableRemoteError>,
+) -> RemoteServiceWireOutcome {
     match decision.unwrap() {
         DurableRemoteReconciliation::Replay(outcome) => outcome.into(),
         DurableRemoteReconciliation::Pending(_) => panic!("expected a saved terminal result"),
@@ -704,32 +789,76 @@ fn reconciliation_refuses_live_current_owners_and_requires_exact_pending_identit
     let first = execute(journal.admit(&peer, key(1), b"original", 10));
     let second = execute(journal.admit(&peer, key(2), b"other", 10));
     let original = journal.file.bytes.get_ref().clone();
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"original", 10),
-        Err(DurableRemoteError::Busy)));
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"changed", 10),
-        Err(DurableRemoteError::Conflict)));
-    assert!(matches!(journal.prepare_reconciliation(&NodeId::new("foreign"), key(1), b"original", 10),
-        Err(DurableRemoteError::InvalidReservation)));
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(3), b"missing", 10),
-        Err(DurableRemoteError::InvalidReservation)));
+    assert!(matches!(
+        journal.prepare_reconciliation(&peer, key(1), b"original", 10),
+        Err(DurableRemoteError::Busy)
+    ));
+    assert!(matches!(
+        journal.prepare_reconciliation(&peer, key(1), b"changed", 10),
+        Err(DurableRemoteError::Conflict)
+    ));
+    assert!(matches!(
+        journal.prepare_reconciliation(&NodeId::new("foreign"), key(1), b"original", 10),
+        Err(DurableRemoteError::InvalidReservation)
+    ));
+    assert!(matches!(
+        journal.prepare_reconciliation(&peer, key(3), b"missing", 10),
+        Err(DurableRemoteError::InvalidReservation)
+    ));
     drop(first);
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"original", 10),
-        Err(DurableRemoteError::Busy)), "another live key conservatively owns the journal instance");
+    assert!(
+        matches!(
+            journal.prepare_reconciliation(&peer, key(1), b"original", 10),
+            Err(DurableRemoteError::Busy)
+        ),
+        "another live key conservatively owns the journal instance"
+    );
     drop(second);
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"original", 10));
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"original", 10),
-        Err(DurableRemoteError::Busy)), "two resolvers cannot race the same terminal publication");
-    assert_eq!(journal.file.bytes.get_ref(), &original, "preparation writes nothing");
+    assert!(
+        matches!(
+            journal.prepare_reconciliation(&peer, key(1), b"original", 10),
+            Err(DurableRemoteError::Busy)
+        ),
+        "two resolvers cannot race the same terminal publication"
+    );
+    assert_eq!(
+        journal.file.bytes.get_ref(),
+        &original,
+        "preparation writes nothing"
+    );
     drop(permit);
-    assert!(matches!(journal.admit(&peer, key(1), b"original", 10), Err(DurableRemoteError::InDoubt)));
+    assert!(matches!(
+        journal.admit(&peer, key(1), b"original", 10),
+        Err(DurableRemoteError::InDoubt)
+    ));
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"original", 11));
-    assert_eq!(RemoteServiceWireOutcome::from(journal.complete_reconciliation(permit, success(), 11).unwrap()), success().into());
-    assert_eq!(journal.sequence, 3, "two reservations and exactly one terminal record");
+    assert_eq!(
+        RemoteServiceWireOutcome::from(
+            journal
+                .complete_reconciliation(permit, success(), 11)
+                .unwrap()
+        ),
+        success().into()
+    );
+    assert_eq!(
+        journal.sequence, 3,
+        "two reservations and exactly one terminal record"
+    );
     let committed = journal.file.bytes.get_ref().clone();
-    assert_eq!(reconciled(journal.prepare_reconciliation(&peer, key(1), b"original", 12)), success().into());
-    assert_eq!(replay(journal.admit(&peer, key(1), b"original", 12)), success().into());
+    assert_eq!(
+        reconciled(journal.prepare_reconciliation(&peer, key(1), b"original", 12)),
+        success().into()
+    );
+    assert_eq!(
+        replay(journal.admit(&peer, key(1), b"original", 12)),
+        success().into()
+    );
     assert_eq!(journal.file.bytes.get_ref(), &committed);
-    assert!(matches!(journal.admit(&peer, key(2), b"other", 12), Err(DurableRemoteError::InDoubt)));
+    assert!(matches!(
+        journal.admit(&peer, key(2), b"other", 12),
+        Err(DurableRemoteError::InDoubt)
+    ));
 }
 
 #[test]
@@ -741,39 +870,64 @@ fn reconciliation_permits_cannot_cross_reopen_identity_or_replaced_reservation()
     let bytes = original.file.bytes.get_ref().clone();
     drop(original);
     let mut journal = reopen(bytes.clone(), limits()).unwrap();
-    assert!(matches!(journal.complete_reconciliation(old_instance, success(), 11),
-        Err(DurableRemoteError::InvalidReservation)));
+    assert!(matches!(
+        journal.complete_reconciliation(old_instance, success(), 11),
+        Err(DurableRemoteError::InvalidReservation)
+    ));
     assert_eq!(journal.file.bytes.get_ref(), &bytes);
 
     let mut bad_input = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
     bad_input.digest[0] ^= 1;
-    assert!(matches!(journal.complete_reconciliation(bad_input, success(), 11),
-        Err(DurableRemoteError::InvalidReservation)));
-    let mut bad_version = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
+    assert!(matches!(
+        journal.complete_reconciliation(bad_input, success(), 11),
+        Err(DurableRemoteError::InvalidReservation)
+    ));
+    let mut bad_version =
+        reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
     bad_version.application_version[0] ^= 1;
-    assert!(matches!(journal.complete_reconciliation(bad_version, success(), 11),
-        Err(DurableRemoteError::InvalidReservation)));
+    assert!(matches!(
+        journal.complete_reconciliation(bad_version, success(), 11),
+        Err(DurableRemoteError::InvalidReservation)
+    ));
 
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
     // A public permit is deliberately not Clone. Forge a duplicate inside the
     // private test module to exercise the generation fence independently.
     let stale = DurableRemoteReconciliationPermit {
         reservation: DurableRemoteReservation {
-            instance: Arc::clone(&permit.reservation.instance), peer: peer.clone(), key: key(1),
+            instance: Arc::clone(&permit.reservation.instance),
+            peer: peer.clone(),
+            key: key(1),
             sequence: permit.reservation.sequence,
         },
-        input_len: permit.input_len, digest: permit.digest, schema: permit.schema,
+        input_len: permit.input_len,
+        digest: permit.digest,
+        schema: permit.schema,
         application_version: permit.application_version,
     };
-    journal.complete_reconciliation(permit, success(), 11).unwrap();
+    journal
+        .complete_reconciliation(permit, success(), 11)
+        .unwrap();
     let completed = journal.file.bytes.get_ref().clone();
-    assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"input", 111),
-        Err(DurableRemoteError::InvalidReservation)), "expiry must not create recovery authority");
+    assert!(
+        matches!(
+            journal.prepare_reconciliation(&peer, key(1), b"input", 111),
+            Err(DurableRemoteError::InvalidReservation)
+        ),
+        "expiry must not create recovery authority"
+    );
     assert_eq!(journal.file.bytes.get_ref(), &completed);
     let replacement = execute(journal.admit(&peer, key(1), b"input", 111));
-    assert!(matches!(journal.complete_reconciliation(stale, success(), 112),
-        Err(DurableRemoteError::InvalidReservation)), "old permits cannot complete a new reservation");
-    journal.complete(replacement, RemoteOutcome::Failed("new result".into()), 112).unwrap();
+    assert!(
+        matches!(
+            journal.complete_reconciliation(stale, success(), 112),
+            Err(DurableRemoteError::InvalidReservation)
+        ),
+        "old permits cannot complete a new reservation"
+    );
+    journal
+        .complete(replacement, RemoteOutcome::Failed("new result".into()), 112)
+        .unwrap();
     assert_eq!(journal.sequence, 4);
 }
 
@@ -784,21 +938,46 @@ fn reconciliation_write_uncertainty_requires_reopen_and_never_repairs_a_torn_tai
         let mut journal = journal(limits());
         drop(execute(journal.admit(&peer, key(1), b"input", 10)));
         let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
-        if partial { journal.file.budget = Some(1); } else { journal.file.fail_sync = true; }
-        assert!(journal.complete_reconciliation(permit, success(), 11).is_err());
+        if partial {
+            journal.file.budget = Some(1);
+        } else {
+            journal.file.fail_sync = true;
+        }
+        assert!(
+            journal
+                .complete_reconciliation(permit, success(), 11)
+                .is_err()
+        );
         assert_eq!(journal.status, DurableRemoteJournalStatus::Poisoned);
-        assert!(matches!(journal.prepare_reconciliation(&peer, key(1), b"input", 12),
-            Err(DurableRemoteError::NotWritable(DurableRemoteJournalStatus::Poisoned))));
+        assert!(matches!(
+            journal.prepare_reconciliation(&peer, key(1), b"input", 12),
+            Err(DurableRemoteError::NotWritable(
+                DurableRemoteJournalStatus::Poisoned
+            ))
+        ));
         let bytes = journal.file.bytes.get_ref().clone();
         let mut reopened = reopen(bytes.clone(), limits()).unwrap();
         if partial {
             assert_eq!(reopened.status, DurableRemoteJournalStatus::ReadOnlyTail);
-            assert!(matches!(reopened.prepare_reconciliation(&peer, key(1), b"input", 12),
-                Err(DurableRemoteError::NotWritable(DurableRemoteJournalStatus::ReadOnlyTail))));
-            assert!(matches!(reopened.admit(&peer, key(1), b"input", 12), Err(DurableRemoteError::InDoubt)));
+            assert!(matches!(
+                reopened.prepare_reconciliation(&peer, key(1), b"input", 12),
+                Err(DurableRemoteError::NotWritable(
+                    DurableRemoteJournalStatus::ReadOnlyTail
+                ))
+            ));
+            assert!(matches!(
+                reopened.admit(&peer, key(1), b"input", 12),
+                Err(DurableRemoteError::InDoubt)
+            ));
         } else {
-            assert_eq!(reconciled(reopened.prepare_reconciliation(&peer, key(1), b"input", 12)), success().into());
-            assert_eq!(replay(reopened.admit(&peer, key(1), b"input", 12)), success().into());
+            assert_eq!(
+                reconciled(reopened.prepare_reconciliation(&peer, key(1), b"input", 12)),
+                success().into()
+            );
+            assert_eq!(
+                replay(reopened.admit(&peer, key(1), b"input", 12)),
+                success().into()
+            );
         }
         assert_eq!(reopened.file.bytes.get_ref(), &bytes);
     }
@@ -813,16 +992,29 @@ fn refused_reconciliation_completion_preserves_reserved_capacity_and_pending_fen
     let bytes = journal.retained_bytes;
     let capacity = journal.reserved_terminal_bytes;
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
-    assert!(matches!(journal.complete_reconciliation(permit,
-        RemoteOutcome::Success(vec![0; limits().max_outcome_bytes + 1]), 11), Err(DurableRemoteError::Limit)));
+    assert!(matches!(
+        journal.complete_reconciliation(
+            permit,
+            RemoteOutcome::Success(vec![0; limits().max_outcome_bytes + 1]),
+            11
+        ),
+        Err(DurableRemoteError::Limit)
+    ));
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 11));
-    assert!(matches!(journal.complete_reconciliation(permit, success(), 10),
-        Err(DurableRemoteError::ClockRegression)));
+    assert!(matches!(
+        journal.complete_reconciliation(permit, success(), 10),
+        Err(DurableRemoteError::ClockRegression)
+    ));
     assert_eq!(journal.file.bytes.get_ref(), &original);
     assert_eq!(journal.retained_bytes, bytes);
     assert_eq!(journal.reserved_terminal_bytes, capacity);
-    assert!(matches!(journal.admit(&peer, key(1), b"input", 12), Err(DurableRemoteError::InDoubt)));
+    assert!(matches!(
+        journal.admit(&peer, key(1), b"input", 12),
+        Err(DurableRemoteError::InDoubt)
+    ));
     let permit = reconciliation(journal.prepare_reconciliation(&peer, key(1), b"input", 12));
-    journal.complete_reconciliation(permit, success(), 12).unwrap();
+    journal
+        .complete_reconciliation(permit, success(), 12)
+        .unwrap();
     assert_eq!(journal.reserved_terminal_bytes, 0);
 }

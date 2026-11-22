@@ -522,11 +522,13 @@ fn lab_cancel_state_rollback_is_reported_once_and_survives_retirement() {
                     .cancellation_protocol
                     .all_violations()
                     .iter()
-                    .filter(|violation| matches!(
-                        violation,
-                        CancellationProtocolViolation::SkippedState { task: id, .. }
-                            if *id == task
-                    ))
+                    .filter(|violation| {
+                        matches!(
+                            violation,
+                            CancellationProtocolViolation::SkippedState { task: id, .. }
+                                if *id == task
+                        )
+                    })
                     .count()
             };
             assert_eq!(rollback_count(&lab), 1);
@@ -547,7 +549,10 @@ fn lab_cancel_state_rollback_is_reported_once_and_survives_retirement() {
             lab.run_until_quiescent();
             assert!(lab.state.task(task).is_none());
             let retired = lab.report();
-            let entry = retired.oracle_report.entry("cancellation_protocol").unwrap();
+            let entry = retired
+                .oracle_report
+                .entry("cancellation_protocol")
+                .unwrap();
             assert!(!entry.passed, "retirement must preserve rollback evidence");
             assert_eq!(rollback_count(&lab), 1);
         }

@@ -16,21 +16,33 @@ struct Fragmented {
 
 impl Fragmented {
     fn new(bytes: Vec<u8>, max_read: usize) -> Self {
-        Self { bytes, position: 0, max_read, pending: false, alternate_pending: true, polls: 0 }
+        Self {
+            bytes,
+            position: 0,
+            max_read,
+            pending: false,
+            alternate_pending: true,
+            polls: 0,
+        }
     }
 }
 
 impl AsyncRead for Fragmented {
-    fn poll_read(mut self: Pin<&mut Self>, task: &mut Context<'_>, buf: &mut ReadBuf<'_>)
-        -> Poll<io::Result<()>>
-    {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.polls += 1;
         if self.pending {
             self.pending = false;
             task.waker().wake_by_ref();
             return Poll::Pending;
         }
-        let n = buf.remaining().min(self.max_read).min(self.bytes.len() - self.position);
+        let n = buf
+            .remaining()
+            .min(self.max_read)
+            .min(self.bytes.len() - self.position);
         buf.put_slice(&self.bytes[self.position..self.position + n]);
         self.position += n;
         self.pending = self.alternate_pending && n > 0;
@@ -54,14 +66,19 @@ struct Script {
 
 impl Script {
     fn new(steps: impl IntoIterator<Item = (&'static [u8], Reply)>) -> Self {
-        Self { steps: steps.into_iter().collect(), polls: 0 }
+        Self {
+            steps: steps.into_iter().collect(),
+            polls: 0,
+        }
     }
 }
 
 impl AsyncRead for Script {
-    fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>)
-        -> Poll<io::Result<()>>
-    {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.polls += 1;
         let (bytes, reply) = self.steps.pop_front().unwrap_or((b"", Reply::Ready));
         if matches!(reply, Reply::Replace) {
@@ -76,7 +93,10 @@ impl AsyncRead for Script {
         match reply {
             Reply::Ready => Poll::Ready(Ok(())),
             Reply::Pending => Poll::Pending,
-            Reply::Error => Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "source error"))),
+            Reply::Error => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "source error",
+            ))),
             Reply::Panic => panic!("source panic after writing bytes"),
             Reply::Replace => unreachable!(),
         }
@@ -86,8 +106,12 @@ impl AsyncRead for Script {
 struct WakeCount(AtomicUsize);
 
 impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn wake_counter() -> (Arc<WakeCount>, Waker) {
@@ -118,8 +142,10 @@ fn arbitrary_fragmentation_preserves_payloads_descriptors_and_hashes() {
             for chunk_size in [1, 2, 7, 16, 64] {
                 for max_read in [1, 3, 23] {
                     let mut reader = StreamChunkReader::new(
-                        Fragmented::new(bytes.clone(), max_read), chunk_size,
-                    ).unwrap();
+                        Fragmented::new(bytes.clone(), max_read),
+                        chunk_size,
+                    )
+                    .unwrap();
                     let mut offset = 0;
                     let mut index = 0;
                     while let Some(chunk) = reader.next_chunk().await.unwrap() {
@@ -130,7 +156,11 @@ fn arbitrary_fragmentation_preserves_payloads_descriptors_and_hashes() {
                         assert_eq!(chunk.boundary.size_bytes, (end - offset) as u64);
                         let expected_hash: [u8; 32] = Sha256::digest(&bytes[offset..end]).into();
                         assert_eq!(chunk.boundary.content_hash, expected_hash);
-                        assert_eq!(reader.get_ref().position, end, "no read-ahead past emitted chunk");
+                        assert_eq!(
+                            reader.get_ref().position,
+                            end,
+                            "no read-ahead past emitted chunk"
+                        );
                         assert_eq!(reader.emitted_bytes(), end as u64);
                         assert!(reader.buffered_bytes().is_empty());
                         offset = end;
@@ -150,26 +180,46 @@ fn arbitrary_fragmentation_preserves_payloads_descriptors_and_hashes() {
 #[test]
 fn a_complete_chunk_is_returned_before_eof_without_speculative_reads() {
     let mut reader = StreamChunkReader::new(
-        Script::new([(b"abcd".as_slice(), Reply::Ready), (b"", Reply::Pending)]), 4,
-    ).unwrap();
-    let chunk = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+        Script::new([(b"abcd".as_slice(), Reply::Ready), (b"", Reply::Pending)]),
+        4,
+    )
+    .unwrap();
+    let chunk = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     assert_eq!(chunk.bytes, b"abcd");
     assert_eq!(reader.get_ref().polls, 1);
     assert!(!reader.is_eof());
-    assert_eq!(reader.buffer.capacity(), 0, "no next-chunk allocation until requested");
+    assert_eq!(
+        reader.buffer.capacity(),
+        0,
+        "no next-chunk allocation until requested"
+    );
 }
 
 #[test]
 fn dropped_borrowing_wait_keeps_its_partial_chunk() {
-    let mut reader = StreamChunkReader::new(Script::new([
-        (b"ab".as_slice(), Reply::Ready), (b"", Reply::Pending), (b"cd", Reply::Ready),
-    ]), 4).unwrap();
+    let mut reader = StreamChunkReader::new(
+        Script::new([
+            (b"ab".as_slice(), Reply::Ready),
+            (b"", Reply::Pending),
+            (b"cd", Reply::Ready),
+        ]),
+        4,
+    )
+    .unwrap();
     let mut wait = Box::pin(reader.next_chunk());
-    assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    assert!(
+        wait.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
     drop(wait);
     assert_eq!(reader.buffered_bytes(), b"ab");
     assert_eq!(reader.emitted_bytes(), 0);
-    let chunk = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+    let chunk = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     assert_eq!(chunk.bytes, b"abcd");
     assert_eq!(chunk.boundary.index, 0);
     assert_eq!(chunk.boundary.byte_offset, 0);
@@ -178,24 +228,40 @@ fn dropped_borrowing_wait_keeps_its_partial_chunk() {
 #[test]
 fn original_errors_with_progress_preserve_partial_and_full_chunks_for_retry() {
     for error_bytes in [b"c".as_slice(), b"cd".as_slice()] {
-        let mut steps = vec![(b"ab".as_slice(), Reply::Ready), (error_bytes, Reply::Error)];
-        if error_bytes.len() == 1 { steps.push((b"d", Reply::Ready)); }
+        let mut steps = vec![
+            (b"ab".as_slice(), Reply::Ready),
+            (error_bytes, Reply::Error),
+        ];
+        if error_bytes.len() == 1 {
+            steps.push((b"d", Reply::Ready));
+        }
         let mut reader = StreamChunkReader::new(Script::new(steps), 4).unwrap();
         let error = futures_lite::future::block_on(reader.next_chunk()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(error.to_string(), "source error");
         assert_eq!(reader.buffered_bytes(), &b"abcd"[..2 + error_bytes.len()]);
-        let chunk = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+        let chunk = futures_lite::future::block_on(reader.next_chunk())
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.bytes, b"abcd");
-        assert_eq!(reader.get_ref().polls, if error_bytes.len() == 1 { 3 } else { 2 });
+        assert_eq!(
+            reader.get_ref().polls,
+            if error_bytes.len() == 1 { 3 } else { 2 }
+        );
     }
 }
 
 #[test]
 fn positive_pending_progress_is_retained_and_woken_but_empty_pending_is_not() {
-    let mut reader = StreamChunkReader::new(Script::new([
-        (b"ab".as_slice(), Reply::Pending), (b"", Reply::Pending), (b"cd", Reply::Pending),
-    ]), 4).unwrap();
+    let mut reader = StreamChunkReader::new(
+        Script::new([
+            (b"ab".as_slice(), Reply::Pending),
+            (b"", Reply::Pending),
+            (b"cd", Reply::Pending),
+        ]),
+        4,
+    )
+    .unwrap();
     let (count, waker) = wake_counter();
     let mut task = Context::from_waker(&waker);
     assert!(reader.poll_next_chunk(&mut task).is_pending());
@@ -216,23 +282,33 @@ fn ready_short_reads_yield_after_the_per_poll_budget() {
     source.alternate_pending = false;
     let mut reader = StreamChunkReader::new(source, 32).unwrap();
     let (count, waker) = wake_counter();
-    assert!(reader.poll_next_chunk(&mut Context::from_waker(&waker)).is_pending());
+    assert!(
+        reader
+            .poll_next_chunk(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
     assert_eq!(reader.get_ref().polls, READS_PER_POLL);
     assert_eq!(reader.buffered_bytes(), vec![7; READS_PER_POLL]);
     assert_eq!(count.0.load(Ordering::SeqCst), 1);
-    let first = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+    let first = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     assert_eq!(first.bytes, vec![7; 32]);
     assert_eq!(reader.get_ref().position, 32);
-    let tail = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+    let tail = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     assert_eq!(tail.bytes, vec![7; 8]);
     assert!(reader.is_eof());
 }
 
 #[test]
 fn provider_storage_replacement_is_a_sticky_refusal() {
-    let mut reader = StreamChunkReader::new(Script::new([
-        (b"ab".as_slice(), Reply::Ready), (b"", Reply::Replace),
-    ]), 4).unwrap();
+    let mut reader = StreamChunkReader::new(
+        Script::new([(b"ab".as_slice(), Reply::Ready), (b"", Reply::Replace)]),
+        4,
+    )
+    .unwrap();
     let error = futures_lite::future::block_on(reader.next_chunk()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(reader.buffered_bytes(), b"ab");
@@ -243,9 +319,11 @@ fn provider_storage_replacement_is_a_sticky_refusal() {
 
 #[test]
 fn provider_panic_propagates_without_allowing_unknown_progress_to_be_replayed() {
-    let mut reader = StreamChunkReader::new(Script::new([
-        (b"ab".as_slice(), Reply::Ready), (b"c", Reply::Panic),
-    ]), 4).unwrap();
+    let mut reader = StreamChunkReader::new(
+        Script::new([(b"ab".as_slice(), Reply::Ready), (b"c", Reply::Panic)]),
+        4,
+    )
+    .unwrap();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         futures_lite::future::block_on(reader.next_chunk())
     }));
@@ -262,41 +340,75 @@ fn provider_panic_propagates_without_allowing_unknown_progress_to_be_replayed() 
 fn counters_do_not_wrap_and_last_representable_index_can_reach_eof() {
     let mut reader = StreamChunkReader::new(Fragmented::new(b"a".to_vec(), 1), 1).unwrap();
     reader.next_index = u64::from(u32::MAX);
-    let last = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+    let last = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     assert_eq!(last.boundary.index, u32::MAX);
-    assert!(futures_lite::future::block_on(reader.next_chunk()).unwrap().is_none());
+    assert!(
+        futures_lite::future::block_on(reader.next_chunk())
+            .unwrap()
+            .is_none()
+    );
 
     let mut reader = StreamChunkReader::new(Fragmented::new(b"ab".to_vec(), 1), 1).unwrap();
     reader.next_index = u64::from(u32::MAX);
-    assert!(futures_lite::future::block_on(reader.next_chunk()).unwrap().is_some());
-    assert!(futures_lite::future::block_on(reader.next_chunk()).unwrap_err().to_string().contains("index overflow"));
+    assert!(
+        futures_lite::future::block_on(reader.next_chunk())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        futures_lite::future::block_on(reader.next_chunk())
+            .unwrap_err()
+            .to_string()
+            .contains("index overflow")
+    );
 
     let mut reader = StreamChunkReader::new(Fragmented::new(b"abc".to_vec(), 3), 4).unwrap();
     reader.offset = u64::MAX - 2;
-    assert!(futures_lite::future::block_on(reader.next_chunk()).unwrap_err().to_string().contains("offset overflow"));
+    assert!(
+        futures_lite::future::block_on(reader.next_chunk())
+            .unwrap_err()
+            .to_string()
+            .contains("offset overflow")
+    );
     assert_eq!(reader.emitted_bytes(), u64::MAX - 2);
 }
 
 #[test]
 fn a_pinned_non_unpin_source_is_supported_by_the_stream_adapter() {
+    use crate::stream::StreamExt;
     use std::cell::Cell;
     use std::marker::PhantomPinned;
-    use crate::stream::StreamExt;
 
-    struct PinnedSource { done: Cell<bool>, address: Cell<usize>, _pin: PhantomPinned }
+    struct PinnedSource {
+        done: Cell<bool>,
+        address: Cell<usize>,
+        _pin: PhantomPinned,
+    }
     impl AsyncRead for PinnedSource {
-        fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>)
-            -> Poll<io::Result<()>>
-        {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             let this = self.as_ref().get_ref();
             let address = std::ptr::from_ref(this).addr();
-            if this.address.get() != 0 { assert_eq!(this.address.get(), address); }
+            if this.address.get() != 0 {
+                assert_eq!(this.address.get(), address);
+            }
             this.address.set(address);
-            if !this.done.replace(true) { buf.put_slice(b"abc"); }
+            if !this.done.replace(true) {
+                buf.put_slice(b"abc");
+            }
             Poll::Ready(Ok(()))
         }
     }
-    let source = PinnedSource { done: Cell::new(false), address: Cell::new(0), _pin: PhantomPinned };
+    let source = PinnedSource {
+        done: Cell::new(false),
+        address: Cell::new(0),
+        _pin: PhantomPinned,
+    };
     let stream = StreamChunkReader::new(source, 3).unwrap();
     let chunks = futures_lite::future::block_on(stream.collect::<Vec<_>>());
     assert_eq!(chunks.len(), 1);
@@ -306,12 +418,13 @@ fn a_pinned_non_unpin_source_is_supported_by_the_stream_adapter() {
 #[test]
 fn rolling_updates_are_deterministic_provisional_descriptors_not_verification() {
     let mut reader = StreamChunkReader::new(Fragmented::new(b"abc".to_vec(), 3), 3).unwrap();
-    let chunk = futures_lite::future::block_on(reader.next_chunk()).unwrap().unwrap();
+    let chunk = futures_lite::future::block_on(reader.next_chunk())
+        .unwrap()
+        .unwrap();
     let expected = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
     ];
     assert_eq!(chunk.boundary.content_hash, expected);
     let update = chunk.rolling_update(42);

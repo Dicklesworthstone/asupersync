@@ -11,9 +11,9 @@
 //! - Work-stealing correctness
 //! - Queue consistency and integrity
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{TaskId, Time};
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]

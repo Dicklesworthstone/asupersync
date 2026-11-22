@@ -190,12 +190,12 @@ impl NotifyCausality {
         )
     }
 
-    fn broadcast(&mut self, publication: &Option<Arc<NotifyPublication>>) {
+    fn broadcast(&mut self, publication: Option<&Arc<NotifyPublication>>) {
         if self.activation_broadcast.is_none() {
-            self.activation_broadcast = Some(publication.clone());
+            self.activation_broadcast = Some(publication.cloned());
         }
         if let Some(receipt) = self.broadcast.take() {
-            let _ = receipt.set(publication.clone());
+            let _ = receipt.set(publication.cloned());
         }
     }
 }
@@ -568,7 +568,7 @@ impl Notify {
         }
         let causality = waiters.causality.as_ref()?;
         if generation == causality.activation_generation {
-            causality.activation_broadcast.as_ref().cloned().flatten()
+            causality.activation_broadcast.clone().flatten()
         } else {
             None
         }
@@ -695,7 +695,7 @@ impl Notify {
             // Publish receipts before the generation release. A constructor
             // sampling that generation must see causal activation too.
             if let Some(causality) = &mut waiters.causality {
-                causality.broadcast(&publication);
+                causality.broadcast(publication.as_ref());
             }
             let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
 
@@ -707,7 +707,7 @@ impl Notify {
                     let entry = &mut waiters.entries[index];
                     entry.generation = new_generation;
                     entry.notified = true;
-                    entry.publication = publication.clone();
+                    entry.publication.clone_from(&publication);
                     if let Some(waker) = entry.waker.take() {
                         wakers.push(waker);
                     }

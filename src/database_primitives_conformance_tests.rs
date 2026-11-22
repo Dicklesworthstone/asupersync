@@ -36,11 +36,11 @@
 //! - SHOULD: Pool sizing adapts to workload patterns
 
 #![allow(dead_code)]
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[cfg(test)]

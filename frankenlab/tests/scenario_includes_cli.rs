@@ -82,9 +82,15 @@ fn exact_search_exhaustion_requires_real_work_and_preserves_seeded_mode() {
     assert_eq!(seeded["seeds_explored"], 2);
     assert_eq!(seeded["failed"], 0);
     let conflicting = run("explore", &path, false, &["--exact", "--seeds", "2"]);
-    assert!(!conflicting.status.success(), "explicit search modes conflict");
+    assert!(
+        !conflicting.status.success(),
+        "explicit search modes conflict"
+    );
     let missing_mode = run("explore", &path, false, &["--max-runs", "2"]);
-    assert!(!missing_mode.status.success(), "exact limits require --exact");
+    assert!(
+        !missing_mode.status.success(),
+        "exact limits require --exact"
+    );
 }
 
 #[test]
@@ -93,8 +99,16 @@ fn exact_cli_checkpoint_resumes_remaining_work_without_claiming_verified_history
     let path = exact_workload(&dir);
     let first_checkpoint = dir.join("first.bin");
     let first = run(
-        "explore", &path, false,
-        &["--exact", "--max-runs", "1", "--checkpoint-out", first_checkpoint.to_str().unwrap()],
+        "explore",
+        &path,
+        false,
+        &[
+            "--exact",
+            "--max-runs",
+            "1",
+            "--checkpoint-out",
+            first_checkpoint.to_str().unwrap(),
+        ],
     );
     assert!(!first.status.success(), "a limited search must not pass");
     let first_report: Value = serde_json::from_slice(&first.stdout).unwrap();
@@ -106,11 +120,23 @@ fn exact_cli_checkpoint_resumes_remaining_work_without_claiming_verified_history
 
     let second_checkpoint = dir.join("second.bin");
     let second = run(
-        "explore", &path, false,
-        &["--exact", "--max-runs", "1", "--resume", first_checkpoint.to_str().unwrap(),
-          "--checkpoint-out", second_checkpoint.to_str().unwrap()],
+        "explore",
+        &path,
+        false,
+        &[
+            "--exact",
+            "--max-runs",
+            "1",
+            "--resume",
+            first_checkpoint.to_str().unwrap(),
+            "--checkpoint-out",
+            second_checkpoint.to_str().unwrap(),
+        ],
     );
-    assert!(!second.status.success(), "loaded historical observations remain unverified");
+    assert!(
+        !second.status.success(),
+        "loaded historical observations remain unverified"
+    );
     let second_report: Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_eq!(second_report["progress"]["runs"], 2);
     assert_eq!(second_report["runs"].as_array().unwrap().len(), 1);
@@ -119,24 +145,42 @@ fn exact_cli_checkpoint_resumes_remaining_work_without_claiming_verified_history
     assert_ne!(fs::read(&second_checkpoint).unwrap(), original_checkpoint);
 
     let overwrite = run(
-        "explore", &path, false,
-        &["--exact", "--checkpoint-out", first_checkpoint.to_str().unwrap()],
+        "explore",
+        &path,
+        false,
+        &[
+            "--exact",
+            "--checkpoint-out",
+            first_checkpoint.to_str().unwrap(),
+        ],
     );
     assert!(!overwrite.status.success());
     assert!(String::from_utf8_lossy(&overwrite.stderr).contains("already exists"));
     assert_eq!(fs::read(&first_checkpoint).unwrap(), original_checkpoint);
 
     let too_large = run(
-        "explore", &path, false,
-        &["--exact", "--resume", first_checkpoint.to_str().unwrap(), "--checkpoint-max-bytes", "32"],
+        "explore",
+        &path,
+        false,
+        &[
+            "--exact",
+            "--resume",
+            first_checkpoint.to_str().unwrap(),
+            "--checkpoint-max-bytes",
+            "32",
+        ],
     );
     assert!(!too_large.status.success());
     assert!(String::from_utf8_lossy(&too_large.stderr).contains("byte limit"));
 
-    let changed = fs::read_to_string(&path).unwrap().replace("messages: 1", "messages: 2");
+    let changed = fs::read_to_string(&path)
+        .unwrap()
+        .replace("messages: 1", "messages: 2");
     let changed_path = write(&dir, "changed.yaml", &changed);
     let mismatch = run(
-        "explore", &changed_path, false,
+        "explore",
+        &changed_path,
+        false,
         &["--exact", "--resume", first_checkpoint.to_str().unwrap()],
     );
     assert!(!mismatch.status.success());
@@ -166,7 +210,12 @@ fn exact_cli_refuses_unsupported_models_and_preserves_real_workload_failures() {
     assert_eq!(report["passed"], false);
     assert_eq!(report["scenario_failed"], 1);
     assert_eq!(report["termination"], "stopped");
-    assert!(!report["runs"][0]["invariant_violations"].as_array().unwrap().is_empty());
+    assert!(
+        !report["runs"][0]["invariant_violations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

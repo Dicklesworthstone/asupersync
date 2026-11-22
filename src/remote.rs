@@ -60,6 +60,9 @@ use crate::distributed::{
     ComputationRegistryFingerprint, ComputationSchemaRegistry, ComputationSchemaRegistryError,
     HasSchema,
 };
+#[cfg(feature = "tls")]
+use crate::sync::atomic::AtomicUsize;
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[cfg(all(feature = "remote-service", unix))]
 use crate::tls::{
     Certificate, CertificateChain, CertificatePinSet, ClientAuth, PrivateKey, RootCertStore,
@@ -103,9 +106,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(feature = "tls")]
-use crate::sync::atomic::AtomicUsize;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -115,17 +115,17 @@ pub mod durable;
 pub mod typed;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod write_progress;
-pub use typed::{
-    PreparedTypedRemoteCall, TypedRemoteComputation, TypedRemoteError, TypedRemoteHandle,
-    TypedRemoteLimits, TypedRemoteOutcome, TypedRemoteRunError, TypedRemoteRunHandle,
-    TypedRemoteRunReply, TypedRemoteRunReport, TypedRemoteStage, spawn_remote_typed,
-    spawn_remote_typed_owned,
-};
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use admission::{
     AdmittedNativeRemoteRuntime, NativeRemoteAdmissionError, NativeRemoteAdmissionLimits,
     NativeRemoteAdmissionUsage, NativeRemoteAdmittedHandle, NativeRemoteMembershipError,
     NativeRemoteOwnedError, NativeRemotePeerAdmissionLimits, NativeRemoteReservation,
+};
+pub use typed::{
+    PreparedTypedRemoteCall, TypedRemoteComputation, TypedRemoteError, TypedRemoteHandle,
+    TypedRemoteLimits, TypedRemoteOutcome, TypedRemoteRunError, TypedRemoteRunHandle,
+    TypedRemoteRunReply, TypedRemoteRunReport, TypedRemoteStage, spawn_remote_typed,
+    spawn_remote_typed_owned,
 };
 
 // ---------------------------------------------------------------------------
@@ -3296,7 +3296,9 @@ impl RemoteServiceWireRequest {
         request: &SpawnRequest,
     ) -> Result<Self, RemoteComputationServiceError> {
         if hello.protocol_version().uses_relative_deadline()
-            && request.budget.is_some_and(|budget| budget.deadline.is_some())
+            && request
+                .budget
+                .is_some_and(|budget| budget.deadline.is_some())
         {
             return Err(Self::missing_origin_clock());
         }
@@ -3355,7 +3357,9 @@ impl RemoteServiceWireRequest {
     #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
     fn has_relative_deadline(&self) -> bool {
         self.hello.protocol_version().uses_relative_deadline()
-            && self.budget.is_some_and(|budget| budget.deadline_nanos.is_some())
+            && self
+                .budget
+                .is_some_and(|budget| budget.deadline_nanos.is_some())
     }
 
     /// Peer negotiation metadata presented on the authenticated stream.
@@ -3931,9 +3935,8 @@ impl RemoteServiceIdempotency {
         max_frame_bytes: usize,
         session_envelope: bool,
     ) -> Arc<RemoteServiceReservation> {
-        let generation = Arc::clone(
-            &self.inner.lock().peers[peer].reservations[&request.idempotency_key],
-        );
+        let generation =
+            Arc::clone(&self.inner.lock().peers[peer].reservations[&request.idempotency_key]);
         Arc::new(RemoteServiceReservation {
             state: self.clone(),
             peer: peer.clone(),
@@ -3948,7 +3951,12 @@ impl RemoteServiceIdempotency {
         })
     }
 
-    fn reservation_is_current(&self, peer: &NodeId, key: IdempotencyKey, generation: &Arc<()>) -> bool {
+    fn reservation_is_current(
+        &self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        generation: &Arc<()>,
+    ) -> bool {
         self.inner
             .lock()
             .peers
@@ -3967,9 +3975,10 @@ impl RemoteServiceIdempotency {
             // notify_one stores a permit if completion races this condition
             // check and the first poll, so the first deadline cannot be lost.
             let mut changed = core::pin::pin!(self.expiry_changed.notified());
-            let now = clock
-                .as_ref()
-                .map_or_else(crate::time::raw_wall_now, crate::time::TimerDriverHandle::now);
+            let now = clock.as_ref().map_or_else(
+                crate::time::raw_wall_now,
+                crate::time::TimerDriverHandle::now,
+            );
             let deadline = self.inner.lock().evict_expired(now);
             let mut timer = deadline.map(|deadline| match &clock {
                 Some(clock) => crate::time::Sleep::with_timer_driver(deadline, clock.clone()),
@@ -4094,7 +4103,10 @@ struct RemoteServicePendingTask {
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl RemoteServicePendingTask {
-    fn new(task: RemoteServiceTaskHandle, reservation: Option<&Arc<RemoteServiceReservation>>) -> Self {
+    fn new(
+        task: RemoteServiceTaskHandle,
+        reservation: Option<&Arc<RemoteServiceReservation>>,
+    ) -> Self {
         if let Some(reservation) = reservation {
             reservation.set_task(RemoteServiceRetainedTask::ExchangeOwned);
         }
@@ -4104,7 +4116,10 @@ impl RemoteServicePendingTask {
         }
     }
 
-    fn poll_join(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<RemoteServiceJoined> {
+    fn poll_join(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<RemoteServiceJoined> {
         let Some(task) = self.task.as_mut() else {
             return std::task::Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion));
         };
@@ -4135,7 +4150,10 @@ impl Drop for RemoteServicePendingTask {
 #[cfg(feature = "tls")]
 impl Drop for RemoteServiceReservation {
     fn drop(&mut self) {
-        if !self.state.reservation_is_current(&self.peer, self.key, &self.generation) {
+        if !self
+            .state
+            .reservation_is_current(&self.peer, self.key, &self.generation)
+        {
             return;
         }
         let slot = std::mem::replace(self.task.get_mut(), RemoteServiceRetainedTask::Unstarted);
@@ -4151,13 +4169,15 @@ impl Drop for RemoteServiceReservation {
             },
             _ => None,
         };
-        let terminal = published.map(remote_service_joined_outcome).unwrap_or_else(|| {
-            Err(RemoteComputationDispatchError::Execution(
-                RemoteError::TransportError(
-                    "remote computation exchange ended before terminal publication".to_owned(),
-                ),
-            ))
-        });
+        let terminal = published
+            .map(remote_service_joined_outcome)
+            .unwrap_or_else(|| {
+                Err(RemoteComputationDispatchError::Execution(
+                    RemoteError::TransportError(
+                        "remote computation exchange ended before terminal publication".to_owned(),
+                    ),
+                ))
+            });
         let (response, commit) = match terminal {
             Ok(outcome) => (
                 RemoteServiceWireResponse::Outcome {
@@ -4200,7 +4220,9 @@ impl Drop for RemoteServiceReservation {
             crate::time::TimerDriverHandle::now,
         );
         if let Some(commit) = commit {
-            let _ = self.state.complete_terminal(commit, now, Some(&self.generation));
+            let _ = self
+                .state
+                .complete_terminal(commit, now, Some(&self.generation));
         }
     }
 }
@@ -5472,7 +5494,10 @@ async fn remote_service_dispatch_with_idempotency(
             (response, commit)
         }
     };
-    (response, commit.map(|commit| commit.with_reservation(reservation)))
+    (
+        response,
+        commit.map(|commit| commit.with_reservation(reservation)),
+    )
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -5636,39 +5661,39 @@ where
         RemoteServiceIdempotencyAdmission::Execute => {}
     }
 
-    let reservation = idempotency.protect_in_flight(
-        cx, session.peer_node(), &request, max_frame_bytes, true,
-    );
+    let reservation =
+        idempotency.protect_in_flight(cx, session.peer_node(), &request, max_frame_bytes, true);
     let accepted_at = cx.now();
     let mut expires_at = accepted_at + remote_service_clamp_lease(request.lease);
     let child_spec = remote_service_child_spec(cx.budget(), request.budget);
-    let child = match remote_service_open_child(cx, child_spec, peer_permit, Some(&reservation)).await {
-        Ok(child) => child,
-        Err(error) => {
-            let diagnostic =
-                format!("remote computation lifecycle could not create child region: {error}");
-            let response = RemoteServiceWireResponse::Rejected {
-                remote_task_id: remote_task_id.raw(),
-                code: RemoteServiceRejectionCode::ExecutionFailed,
-                diagnostic: diagnostic.clone(),
-            };
-            let commit = RemoteServiceTerminalCommit::ExecutionRejection {
-                peer: session.peer_node().clone(),
-                key: request.idempotency_key,
-                canonical_task_id: remote_task_id,
-                diagnostic,
-            };
-            return remote_service_v3_send_terminal(
-                cx,
-                framed,
-                response,
-                Some(commit.with_reservation(Some(Arc::clone(&reservation)))),
-                idempotency,
-                max_frame_bytes,
-            )
-            .await;
-        }
-    };
+    let child =
+        match remote_service_open_child(cx, child_spec, peer_permit, Some(&reservation)).await {
+            Ok(child) => child,
+            Err(error) => {
+                let diagnostic =
+                    format!("remote computation lifecycle could not create child region: {error}");
+                let response = RemoteServiceWireResponse::Rejected {
+                    remote_task_id: remote_task_id.raw(),
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    diagnostic: diagnostic.clone(),
+                };
+                let commit = RemoteServiceTerminalCommit::ExecutionRejection {
+                    peer: session.peer_node().clone(),
+                    key: request.idempotency_key,
+                    canonical_task_id: remote_task_id,
+                    diagnostic,
+                };
+                return remote_service_v3_send_terminal(
+                    cx,
+                    framed,
+                    response,
+                    Some(commit.with_reservation(Some(Arc::clone(&reservation)))),
+                    idempotency,
+                    max_frame_bytes,
+                )
+                .await;
+            }
+        };
     let child_region_id = child.region_id();
 
     let accepted = RemoteServiceSessionEvent::Accepted {
@@ -5988,7 +6013,8 @@ where
         }
     };
 
-    let (response, commit) = remote_service_v3_terminal_response(session, &request, terminal, &reservation);
+    let (response, commit) =
+        remote_service_v3_terminal_response(session, &request, terminal, &reservation);
     remote_service_v3_send_terminal(cx, framed, response, commit, idempotency, max_frame_bytes)
         .await
 }
@@ -6114,7 +6140,10 @@ fn remote_service_v3_terminal_response(
             )
         }
     };
-    (response, commit.map(|commit| commit.with_reservation(Some(Arc::clone(reservation)))))
+    (
+        response,
+        commit.map(|commit| commit.with_reservation(Some(Arc::clone(reservation)))),
+    )
 }
 
 #[cfg(feature = "tls")]
@@ -7028,17 +7057,25 @@ impl RemoteRequestOrigin {
 
     fn cancellation_reason(&self) -> Option<CancelReason> {
         let _current = self.cx.clone().set_current_restricted();
-        if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
+        if self
+            .deadline()
+            .is_some_and(|deadline| self.cx.now() >= deadline)
+        {
             return Some(self.deadline_reason());
         }
         self.cx.checkpoint().err().map(|_| {
-            self.cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)
+            self.cx
+                .cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled)
         })
     }
 
     async fn cancellation(&self) -> CancelReason {
         let mut cancellation = std::pin::pin!(async {
-            if self.deadline().is_some_and(|deadline| self.cx.now() >= deadline) {
+            if self
+                .deadline()
+                .is_some_and(|deadline| self.cx.now() >= deadline)
+            {
                 return self.deadline_reason();
             }
             let cancelled = async {
@@ -7472,7 +7509,10 @@ impl RemoteComputationClient {
             // V3 sends an Accepted/Terminal session envelope, not the bare
             // V1/V2 response. Retain the session's framed decoder through
             // terminal collection so buffered events are not discarded.
-            return match self.start_session_once(endpoint, cx, request, None, None).await? {
+            return match self
+                .start_session_once(endpoint, cx, request, None, None)
+                .await?
+            {
                 RemoteComputationSessionStart::Running(session) => session
                     .wait(cx)
                     .await
@@ -8022,7 +8062,9 @@ pub(crate) trait NativeRemoteDiscoveryRoutes: Send + Sync {
     }
 
     fn refresh_discovered_route(
-        &self, destination: &NodeId, endpoints: Vec<SocketAddr>,
+        &self,
+        destination: &NodeId,
+        endpoints: Vec<SocketAddr>,
     ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError>;
 }
 
@@ -8080,14 +8122,17 @@ where
     }
 
     fn stopped(
-        &self, reason: NativeRemoteDiscoveryStop, mut report: NativeRemoteDiscoveryReport,
+        &self,
+        reason: NativeRemoteDiscoveryStop,
+        mut report: NativeRemoteDiscoveryReport,
     ) -> Result<NativeRemoteDiscoveryReport, NativeRemoteDiscoveryError> {
         report.final_route_generation = self.runtime.route_generation();
         match reason {
             NativeRemoteDiscoveryStop::Cancelled => Ok(report),
             NativeRemoteDiscoveryStop::DestinationRemoved => {
                 Err(NativeRemoteDiscoveryError::DestinationRemoved {
-                    destination: self.destination.clone(), report,
+                    destination: self.destination.clone(),
+                    report,
                 })
             }
         }
@@ -8907,10 +8952,12 @@ async fn drive_native_remote_session(
         .start_session_before_dispatch(cx, request, origin, Some(&before_dispatch))
         .await
         .map_err(|error| {
-            origin.and_then(RemoteRequestOrigin::cancellation_reason).map_or_else(
-                || map_native_remote_client_error(cx, error),
-                RemoteError::Cancelled,
-            )
+            origin
+                .and_then(RemoteRequestOrigin::cancellation_reason)
+                .map_or_else(
+                    || map_native_remote_client_error(cx, error),
+                    RemoteError::Cancelled,
+                )
         })?;
     let mut session = match started {
         RemoteComputationSessionStart::Running(session) => {
@@ -9232,10 +9279,14 @@ pub(crate) enum NativeRemoteRouteRefreshError {
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl NativeRemoteDiscoveryRoutes for NativeRemoteRuntime {
-    fn route_generation(&self) -> u64 { NativeRemoteRuntime::route_generation(self) }
+    fn route_generation(&self) -> u64 {
+        NativeRemoteRuntime::route_generation(self)
+    }
 
     fn refresh_discovered_route(
-        &self, destination: &NodeId, endpoints: Vec<SocketAddr>,
+        &self,
+        destination: &NodeId,
+        endpoints: Vec<SocketAddr>,
     ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError> {
         NativeRemoteRuntime::refresh_discovered_route(self, destination, endpoints)
     }
@@ -9620,10 +9671,20 @@ impl RemoteRuntime for NativeRemoteRuntime {
         envelope: MessageEnvelope<RemoteMessage>,
     ) -> Result<(), RemoteError> {
         match envelope.payload {
-            RemoteMessage::SpawnRequest(request) => {
-                self.send_spawn_with_admission(destination, &envelope.sender, request, Some(cx), None)
-            }
-            payload => self.send_message(destination, MessageEnvelope { payload, ..envelope }),
+            RemoteMessage::SpawnRequest(request) => self.send_spawn_with_admission(
+                destination,
+                &envelope.sender,
+                request,
+                Some(cx),
+                None,
+            ),
+            payload => self.send_message(
+                destination,
+                MessageEnvelope {
+                    payload,
+                    ..envelope
+                },
+            ),
         }
     }
 
@@ -10192,7 +10253,9 @@ impl RemoteComputationServiceBootstrap {
         let mut service_config = RemoteComputationServiceConfig::new()
             .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
             .with_max_connections(Some(config.max_connections))
-            .with_write_progress_timeout(config.write_progress_timeout_ms.map(Duration::from_millis))
+            .with_write_progress_timeout(
+                config.write_progress_timeout_ms.map(Duration::from_millis),
+            )
             .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
             .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
             .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))

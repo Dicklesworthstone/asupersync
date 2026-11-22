@@ -112,9 +112,10 @@ fn run_pair(
         .with_max_steps(20_000);
     let mut runtime = LabRuntimeTarget::create_runtime(config);
     LabRuntimeTarget::block_on(&mut runtime, async move {
-        let chain = CertificateChain::from_pem(include_bytes!("../../tests/fixtures/tls/server.crt"))
-            .unwrap()
-            .into_inner();
+        let chain =
+            CertificateChain::from_pem(include_bytes!("../../tests/fixtures/tls/server.crt"))
+                .unwrap()
+                .into_inner();
         let key = PrivateKey::from_pem(include_bytes!("../../tests/fixtures/tls/server.key"))
             .unwrap()
             .clone_inner();
@@ -239,8 +240,15 @@ fn zero_transport_write_after_acceptance_counts_plaintext_once() {
                     assert_zero_is_terminal(stream);
                     let mut bytes = [0; 256];
                     let mut buf = ReadBuf::new(&mut bytes);
-                    assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
-                    assert!(buf.filled().is_empty(), "incomplete record released plaintext");
+                    assert!(
+                        Pin::new(&mut *peer)
+                            .poll_read(&mut cx, &mut buf)
+                            .is_pending()
+                    );
+                    assert!(
+                        buf.filled().is_empty(),
+                        "incomplete record released plaintext"
+                    );
                 });
             }
         }
@@ -252,7 +260,11 @@ fn zero_transport_write_with_full_tls_buffer_returns_error_without_spinning() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
         for client_side in [true, false] {
             run_pair(version, move |mut client, mut server| {
-                let stream = if client_side { &mut client } else { &mut server };
+                let stream = if client_side {
+                    &mut client
+                } else {
+                    &mut server
+                };
                 match &mut stream.conn {
                     TlsConnection::Client(conn) => conn.set_buffer_limit(Some(64)),
                     TlsConnection::Server(conn) => conn.set_buffer_limit(Some(64)),
@@ -267,14 +279,26 @@ fn zero_transport_write_with_full_tls_buffer_returns_error_without_spinning() {
                     Poll::Ready(Ok(n)) if n == prefix.len()
                 ));
                 // Witness real rustls backpressure; the probe accepts no bytes.
-                assert_eq!(io::Write::write(&mut stream.conn.writer(), b"probe").unwrap(), 0);
-                assert!(Pin::new(&mut *stream).poll_write(&mut cx, b"suffix").is_pending());
+                assert_eq!(
+                    io::Write::write(&mut stream.conn.writer(), b"probe").unwrap(),
+                    0
+                );
+                assert!(
+                    Pin::new(&mut *stream)
+                        .poll_write(&mut cx, b"suffix")
+                        .is_pending()
+                );
                 assert!(stream.is_ready());
                 assert_eq!(stream.io.zeros, 0);
                 assert_eq!(counter.0.load(Ordering::Relaxed), 0);
                 stream.io.block = false;
                 stream.io.before_zero = Some(0);
-                stream.io.waiter.take().expect("pending write registered readiness").wake();
+                stream
+                    .io
+                    .waiter
+                    .take()
+                    .expect("pending write registered readiness")
+                    .wake();
                 let wakes = counter.0.load(Ordering::Relaxed);
                 let calls = stream.io.calls;
                 assert!(matches!(
@@ -283,7 +307,11 @@ fn zero_transport_write_with_full_tls_buffer_returns_error_without_spinning() {
                 ));
                 assert_eq!(stream.io.zeros, 1);
                 assert_eq!(stream.io.calls, calls + 1);
-                assert_eq!(counter.0.load(Ordering::Relaxed), wakes, "zero write self-woke");
+                assert_eq!(
+                    counter.0.load(Ordering::Relaxed),
+                    wakes,
+                    "zero write self-woke"
+                );
                 assert_zero_is_terminal(stream);
             });
         }
@@ -330,8 +358,15 @@ fn explicit_flush_keeps_its_existing_retryable_write_zero_contract() {
                 ));
                 assert_eq!(buf.filled(), message);
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
-                assert!(buf.filled().is_empty(), "plaintext delivered more than once");
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
+                assert!(
+                    buf.filled().is_empty(),
+                    "plaintext delivered more than once"
+                );
                 assert_eq!(stream.tls_exporter_channel_binding().ok(), binding);
                 assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
             });

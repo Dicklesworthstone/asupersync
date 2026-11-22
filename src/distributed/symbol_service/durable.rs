@@ -99,7 +99,9 @@ pub enum DurableSymbolError {
 }
 
 impl From<io::Error> for DurableSymbolError {
-    fn from(error: io::Error) -> Self { Self::Io(error) }
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Restartable immutable symbol store. All operations serialize on one disk owner.
@@ -119,7 +121,8 @@ pub struct DurableSymbolReplicaStore {
 impl fmt::Debug for DurableSymbolReplicaStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DurableSymbolReplicaStore")
-            .field("stats", &self.stats()).field("status", &self.status())
+            .field("stats", &self.stats())
+            .field("status", &self.status())
             .finish_non_exhaustive()
     }
 }
@@ -132,14 +135,21 @@ impl DurableSymbolReplicaStore {
     /// journal key authenticates origin labels and sequence independently of the
     /// symbol key. No entropy, directory or path authority is acquired here.
     pub fn create(
-        file: File, replica: impl Into<String>, symbol_key: AuthKey,
-        journal_key: AuthKey, limits: DurableSymbolLimits,
+        file: File,
+        replica: impl Into<String>,
+        symbol_key: AuthKey,
+        journal_key: AuthKey,
+        limits: DurableSymbolLimits,
     ) -> Result<Self, DurableSymbolError> {
         let replica = replica.into();
         validate_identity(&replica)?;
         lock(&file)?;
         let journal = Journal::create(file, &replica, symbol_key, journal_key, limits)?;
-        Ok(Self { replica, batch_limits: limits.batch, state: Mutex::new(journal) })
+        Ok(Self {
+            replica,
+            batch_limits: limits.batch,
+            state: Mutex::new(journal),
+        })
     }
 
     /// Reopen, authenticate and sync a bounded journal before serving any data.
@@ -151,37 +161,55 @@ impl DurableSymbolReplicaStore {
     /// Complete corrupt records, wrong keys, changed limits and invalid headers
     /// fail closed. This function never creates or repairs the file.
     pub fn open(
-        file: File, replica: impl Into<String>, symbol_key: AuthKey,
-        journal_key: AuthKey, limits: DurableSymbolLimits,
+        file: File,
+        replica: impl Into<String>,
+        symbol_key: AuthKey,
+        journal_key: AuthKey,
+        limits: DurableSymbolLimits,
     ) -> Result<Self, DurableSymbolError> {
         let replica = replica.into();
         validate_identity(&replica)?;
         lock(&file)?;
         let journal = Journal::open(file, &replica, symbol_key, journal_key, limits)?;
-        Ok(Self { replica, batch_limits: limits.batch, state: Mutex::new(journal) })
+        Ok(Self {
+            replica,
+            batch_limits: limits.batch,
+            state: Mutex::new(journal),
+        })
     }
 
     /// Receiver identity used by the existing symbol-service receipt.
     #[must_use]
-    pub fn replica_id(&self) -> &str { &self.replica }
+    pub fn replica_id(&self) -> &str {
+        &self.replica
+    }
 
     // Immutable configuration can be read without waiting behind a disk commit.
-    pub(super) const fn batch_limits(&self) -> SymbolBatchLimits { self.batch_limits }
+    pub(super) const fn batch_limits(&self) -> SymbolBatchLimits {
+        self.batch_limits
+    }
 
     /// Retained committed batches and canonical bytes (not on-disk framing).
     #[must_use]
     pub fn stats(&self) -> SymbolStoreStats {
         let state = self.state.lock();
-        SymbolStoreStats { batches: state.entries.entries.len(), bytes: state.entries.bytes }
+        SymbolStoreStats {
+            batches: state.entries.entries.len(),
+            bytes: state.entries.bytes,
+        }
     }
 
     /// Current append posture; read-only recovery is never reported as writable.
     #[must_use]
-    pub fn status(&self) -> JournalStatus { self.state.lock().status }
+    pub fn status(&self) -> JournalStatus {
+        self.state.lock().status
+    }
 
     /// Byte offset just after the last completely authenticated, synced record.
     #[must_use]
-    pub fn committed_bytes(&self) -> u64 { self.state.lock().offset }
+    pub fn committed_bytes(&self) -> u64 {
+        self.state.lock().offset
+    }
 
     /// Verify and durably append, or return an already committed identical batch.
     ///
@@ -191,21 +219,27 @@ impl DurableSymbolReplicaStore {
     /// poisons this owner and publishes no new in-memory entry, even if a subsequent
     /// reopen finds that the entire record reached disk. Do not infer rollback.
     pub fn put(
-        &self, peer: &NodeId, bytes: &[u8],
+        &self,
+        peer: &NodeId,
+        bytes: &[u8],
     ) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
         self.state.lock().put(peer, bytes)
     }
 
     /// Retrieve an exact committed batch from the admitted origin's namespace.
     pub fn get(
-        &self, peer: &NodeId, key: SymbolBatchKey,
+        &self,
+        peer: &NodeId,
+        key: SymbolBatchKey,
     ) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
         self.state.lock().get(peer, key)
     }
 }
 
 fn validate_identity(value: &str) -> Result<(), DurableSymbolError> {
-    if !valid_identity(value) { return Err(SymbolStoreError::InvalidIdentity.into()); }
+    if !valid_identity(value) {
+        return Err(SymbolStoreError::InvalidIdentity.into());
+    }
     Ok(())
 }
 
@@ -215,7 +249,9 @@ fn lock(file: &File) -> Result<(), DurableSymbolError> {
         Err(TryLockError::WouldBlock) => return Err(DurableSymbolError::Locked),
         Err(TryLockError::Error(error)) => return Err(error.into()),
     }
-    if !file.metadata()?.is_file() { return Err(DurableSymbolError::NotRegular); }
+    if !file.metadata()?.is_file() {
+        return Err(DurableSymbolError::NotRegular);
+    }
     Ok(())
 }
 
@@ -226,8 +262,12 @@ trait JournalIo: Read + Write + Seek {
     fn sync(&mut self) -> io::Result<()>;
 }
 impl JournalIo for File {
-    fn length(&self) -> io::Result<u64> { Ok(self.metadata()?.len()) }
-    fn sync(&mut self) -> io::Result<()> { self.sync_all() }
+    fn length(&self) -> io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+    fn sync(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
 }
 
 struct Journal<F> {
@@ -244,11 +284,14 @@ struct Journal<F> {
 
 fn reserve(length: usize) -> Result<Zeroizing<Vec<u8>>, DurableSymbolError> {
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes.try_reserve_exact(length).map_err(|_| SymbolStoreError::Allocation)?;
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| SymbolStoreError::Allocation)?;
     Ok(bytes)
 }
 fn add(a: usize, b: usize) -> Result<usize, DurableSymbolError> {
-    a.checked_add(b).ok_or_else(|| SymbolStoreError::Overflow.into())
+    a.checked_add(b)
+        .ok_or_else(|| SymbolStoreError::Overflow.into())
 }
 fn size64(length: usize) -> Result<u64, DurableSymbolError> {
     u64::try_from(length).map_err(|_| SymbolStoreError::Overflow.into())
@@ -272,52 +315,98 @@ fn prefix_payload(length: u64, sequence: u64, previous: AuthenticationTag) -> [u
 
 impl<F: JournalIo> Journal<F> {
     fn create(
-        mut file: F, replica: &str, symbol_key: AuthKey,
-        journal_key: AuthKey, limits: DurableSymbolLimits,
+        mut file: F,
+        replica: &str,
+        symbol_key: AuthKey,
+        journal_key: AuthKey,
+        limits: DurableSymbolLimits,
     ) -> Result<Self, DurableSymbolError> {
-        if file.length()? != 0 { return Err(DurableSymbolError::NotEmpty); }
+        if file.length()? != 0 {
+            return Err(DurableSymbolError::NotEmpty);
+        }
         let mut bytes = header(replica)?;
-        let tag = AuthenticationTag::compute_for_domain_payload(&journal_key, HEADER_DOMAIN, &bytes);
+        let tag =
+            AuthenticationTag::compute_for_domain_payload(&journal_key, HEADER_DOMAIN, &bytes);
         bytes.extend_from_slice(tag.as_bytes());
         let offset = size64(bytes.len())?;
-        if offset > limits.max_journal_bytes { return Err(DurableSymbolError::JournalLimit); }
+        if offset > limits.max_journal_bytes {
+            return Err(DurableSymbolError::JournalLimit);
+        }
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&bytes)?;
         file.sync()?;
-        Ok(Self { file, symbol_key, journal_key, limits, entries: State::default(),
-            offset, sequence: 0, last: tag, status: JournalStatus::Writable })
+        Ok(Self {
+            file,
+            symbol_key,
+            journal_key,
+            limits,
+            entries: State::default(),
+            offset,
+            sequence: 0,
+            last: tag,
+            status: JournalStatus::Writable,
+        })
     }
 
     fn open(
-        mut file: F, replica: &str, symbol_key: AuthKey,
-        journal_key: AuthKey, limits: DurableSymbolLimits,
+        mut file: F,
+        replica: &str,
+        symbol_key: AuthKey,
+        journal_key: AuthKey,
+        limits: DurableSymbolLimits,
     ) -> Result<Self, DurableSymbolError> {
         let length = file.length()?;
-        if length > limits.max_journal_bytes { return Err(DurableSymbolError::JournalLimit); }
+        if length > limits.max_journal_bytes {
+            return Err(DurableSymbolError::JournalLimit);
+        }
         let expected = header(replica)?;
         let header_len = expected.len() + TAG_BYTES;
-        if length < size64(header_len)? { return Err(DurableSymbolError::Format); }
+        if length < size64(header_len)? {
+            return Err(DurableSymbolError::Format);
+        }
         let mut bytes = reserve(header_len)?;
         bytes.resize(header_len, 0);
         file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut bytes)?;
-        if bytes[..expected.len()] != expected[..] { return Err(DurableSymbolError::Format); }
-        let tag = AuthenticationTag::from_bytes(bytes[expected.len()..].try_into().expect("header tag"));
+        if bytes[..expected.len()] != expected[..] {
+            return Err(DurableSymbolError::Format);
+        }
+        let tag =
+            AuthenticationTag::from_bytes(bytes[expected.len()..].try_into().expect("header tag"));
         if !tag.verify_domain_payload(&journal_key, HEADER_DOMAIN, &bytes[..expected.len()]) {
             return Err(DurableSymbolError::Authentication);
         }
-        let mut journal = Self { file, symbol_key, journal_key, limits, entries: State::default(),
-            offset: size64(header_len)?, sequence: 0, last: tag, status: JournalStatus::Writable };
+        let mut journal = Self {
+            file,
+            symbol_key,
+            journal_key,
+            limits,
+            entries: State::default(),
+            offset: size64(header_len)?,
+            sequence: 0,
+            last: tag,
+            status: JournalStatus::Writable,
+        };
         while journal.offset < length {
             let remaining = length - journal.offset;
-            if remaining < PREFIX_BYTES as u64 { journal.status = JournalStatus::ReadOnlyTail; break; }
+            if remaining < PREFIX_BYTES as u64 {
+                journal.status = JournalStatus::ReadOnlyTail;
+                break;
+            }
             let mut prefix = [0; PREFIX_BYTES];
             journal.file.read_exact(&mut prefix)?;
             let body_len = u64::from_le_bytes(prefix[..8].try_into().expect("length bytes"));
-            let next = journal.sequence.checked_add(1).ok_or(SymbolStoreError::Overflow)?;
-            let length_tag = AuthenticationTag::from_bytes(prefix[8..].try_into().expect("length tag"));
-            if !length_tag.verify_domain_payload(&journal.journal_key, PREFIX_DOMAIN,
-                &prefix_payload(body_len, next, journal.last)) {
+            let next = journal
+                .sequence
+                .checked_add(1)
+                .ok_or(SymbolStoreError::Overflow)?;
+            let length_tag =
+                AuthenticationTag::from_bytes(prefix[8..].try_into().expect("length tag"));
+            if !length_tag.verify_domain_payload(
+                &journal.journal_key,
+                PREFIX_DOMAIN,
+                &prefix_payload(body_len, next, journal.last),
+            ) {
                 if journal.tail_is_zero(journal.offset, length)? {
                     journal.status = JournalStatus::ReadOnlyTail;
                     break;
@@ -328,8 +417,13 @@ impl<F: JournalIo> Journal<F> {
             if body_len < (RECORD_FIXED + 1 + 32) as u64 || body_len > max_body {
                 return Err(DurableSymbolError::Format);
             }
-            let record_len = body_len.checked_add((PREFIX_BYTES + TAG_BYTES) as u64).ok_or(SymbolStoreError::Overflow)?;
-            if record_len > remaining { journal.status = JournalStatus::ReadOnlyTail; break; }
+            let record_len = body_len
+                .checked_add((PREFIX_BYTES + TAG_BYTES) as u64)
+                .ok_or(SymbolStoreError::Overflow)?;
+            if record_len > remaining {
+                journal.status = JournalStatus::ReadOnlyTail;
+                break;
+            }
             let n = usize::try_from(record_len).map_err(|_| SymbolStoreError::Overflow)?;
             let mut record = reserve(n)?;
             record.extend_from_slice(&prefix);
@@ -344,9 +438,14 @@ impl<F: JournalIo> Journal<F> {
                 }
                 result => result?,
             }
-            journal.offset = journal.offset.checked_add(record_len).ok_or(SymbolStoreError::Overflow)?;
+            journal.offset = journal
+                .offset
+                .checked_add(record_len)
+                .ok_or(SymbolStoreError::Overflow)?;
         }
-        if journal.file.length()? != length { return Err(DurableSymbolError::Changed); }
+        if journal.file.length()? != length {
+            return Err(DurableSymbolError::Changed);
+        }
         // A complete unacknowledged record may be present after a crash. Make
         // every admitted prefix durable before exposing it as committed storage.
         journal.file.sync()?;
@@ -376,84 +475,154 @@ impl<F: JournalIo> Journal<F> {
 
     fn replay_record(&mut self, record: &[u8]) -> Result<(), DurableSymbolError> {
         let signed_end = record.len() - TAG_BYTES;
-        let tag = AuthenticationTag::from_bytes(record[signed_end..].try_into().expect("record tag"));
+        let tag =
+            AuthenticationTag::from_bytes(record[signed_end..].try_into().expect("record tag"));
         if !tag.verify_domain_payload(&self.journal_key, RECORD_DOMAIN, &record[..signed_end]) {
             return Err(DurableSymbolError::Authentication);
         }
         let body = &record[PREFIX_BYTES..signed_end];
         let sequence = u64::from_le_bytes(body[..8].try_into().expect("sequence"));
-        let expected = self.sequence.checked_add(1).ok_or(SymbolStoreError::Overflow)?;
+        let expected = self
+            .sequence
+            .checked_add(1)
+            .ok_or(SymbolStoreError::Overflow)?;
         if sequence != expected || &body[8..40] != self.last.as_bytes() {
             return Err(DurableSymbolError::Format);
         }
         let peer_len = usize::from(body[40]);
         let peer_end = add(RECORD_FIXED, peer_len)?;
-        if peer_len == 0 || peer_end > body.len() { return Err(DurableSymbolError::Format); }
-        let peer = std::str::from_utf8(&body[RECORD_FIXED..peer_end]).map_err(|_| DurableSymbolError::Format)?;
+        if peer_len == 0 || peer_end > body.len() {
+            return Err(DurableSymbolError::Format);
+        }
+        let peer = std::str::from_utf8(&body[RECORD_FIXED..peer_end])
+            .map_err(|_| DurableSymbolError::Format)?;
         let peer = NodeId::new(peer);
-        let batch = Arc::new(batch::verified_bytes(&body[peer_end..], &self.symbol_key, self.limits.batch)?);
-        if self.entries.entries.contains_key(&(peer.clone(), batch.key().object_id)) {
+        let batch = Arc::new(batch::verified_bytes(
+            &body[peer_end..],
+            &self.symbol_key,
+            self.limits.batch,
+        )?);
+        if self
+            .entries
+            .entries
+            .contains_key(&(peer.clone(), batch.key().object_id))
+        {
             return Err(DurableSymbolError::Format);
         }
         let total = self.admit(&peer, &batch)?;
-        self.entries.entries.insert((peer, batch.key().object_id), batch);
+        self.entries
+            .entries
+            .insert((peer, batch.key().object_id), batch);
         self.entries.bytes = total;
         self.sequence = sequence;
         self.last = tag;
         Ok(())
     }
 
-    fn admit(&self, peer: &NodeId, batch: &EncodedSymbolBatch) -> Result<usize, DurableSymbolError> {
+    fn admit(
+        &self,
+        peer: &NodeId,
+        batch: &EncodedSymbolBatch,
+    ) -> Result<usize, DurableSymbolError> {
         let bounds = self.limits.store;
-        if self.entries.entries.len() >= bounds.max_batches { return Err(SymbolStoreError::Limit("batches").into()); }
+        if self.entries.entries.len() >= bounds.max_batches {
+            return Err(SymbolStoreError::Limit("batches").into());
+        }
         let total = add(self.entries.bytes, batch.as_ref().len())?;
-        if total > bounds.max_bytes { return Err(SymbolStoreError::Limit("stored bytes").into()); }
+        if total > bounds.max_bytes {
+            return Err(SymbolStoreError::Limit("stored bytes").into());
+        }
         let mut count = 0usize;
         let mut bytes = 0usize;
         for ((origin, _), existing) in &self.entries.entries {
-            if origin == peer { count = add(count, 1)?; bytes = add(bytes, existing.as_ref().as_ref().len())?; }
+            if origin == peer {
+                count = add(count, 1)?;
+                bytes = add(bytes, existing.as_ref().as_ref().len())?;
+            }
         }
-        if count >= bounds.max_batches_per_peer { return Err(SymbolStoreError::Limit("peer batches").into()); }
+        if count >= bounds.max_batches_per_peer {
+            return Err(SymbolStoreError::Limit("peer batches").into());
+        }
         if add(bytes, batch.as_ref().len())? > bounds.max_bytes_per_peer {
             return Err(SymbolStoreError::Limit("peer bytes").into());
         }
         Ok(total)
     }
 
-    fn get(&self, peer: &NodeId, key: SymbolBatchKey) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
+    fn get(
+        &self,
+        peer: &NodeId,
+        key: SymbolBatchKey,
+    ) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
         validate_identity(peer.as_str())?;
-        if self.status == JournalStatus::Poisoned { return Err(DurableSymbolError::NotWritable(self.status)); }
-        self.entries.entries.get(&(peer.clone(), key.object_id)).filter(|batch| batch.key() == key)
-            .map(Arc::clone).ok_or_else(|| SymbolStoreError::NotFound.into())
+        if self.status == JournalStatus::Poisoned {
+            return Err(DurableSymbolError::NotWritable(self.status));
+        }
+        self.entries
+            .entries
+            .get(&(peer.clone(), key.object_id))
+            .filter(|batch| batch.key() == key)
+            .map(Arc::clone)
+            .ok_or_else(|| SymbolStoreError::NotFound.into())
     }
 
-    fn put(&mut self, peer: &NodeId, bytes: &[u8]) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
+    fn put(
+        &mut self,
+        peer: &NodeId,
+        bytes: &[u8],
+    ) -> Result<Arc<EncodedSymbolBatch>, DurableSymbolError> {
         validate_identity(peer.as_str())?;
-        if self.status == JournalStatus::Poisoned { return Err(DurableSymbolError::NotWritable(self.status)); }
-        let batch = Arc::new(batch::verified_bytes(bytes, &self.symbol_key, self.limits.batch)?);
+        if self.status == JournalStatus::Poisoned {
+            return Err(DurableSymbolError::NotWritable(self.status));
+        }
+        let batch = Arc::new(batch::verified_bytes(
+            bytes,
+            &self.symbol_key,
+            self.limits.batch,
+        )?);
         let id = (peer.clone(), batch.key().object_id);
         if let Some(existing) = self.entries.entries.get(&id) {
-            return if existing.as_ref().as_ref() == bytes { Ok(Arc::clone(existing)) }
-                else { Err(SymbolStoreError::Conflict.into()) };
+            return if existing.as_ref().as_ref() == bytes {
+                Ok(Arc::clone(existing))
+            } else {
+                Err(SymbolStoreError::Conflict.into())
+            };
         }
-        if self.status != JournalStatus::Writable { return Err(DurableSymbolError::NotWritable(self.status)); }
+        if self.status != JournalStatus::Writable {
+            return Err(DurableSymbolError::NotWritable(self.status));
+        }
         let total = self.admit(peer, &batch)?;
-        let sequence = self.sequence.checked_add(1).ok_or(SymbolStoreError::Overflow)?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(SymbolStoreError::Overflow)?;
         let body_len = add(add(RECORD_FIXED, peer.as_str().len())?, bytes.len())?;
         let record_len = add(PREFIX_BYTES + TAG_BYTES, body_len)?;
-        let end = self.offset.checked_add(size64(record_len)?).ok_or(SymbolStoreError::Overflow)?;
-        if end > self.limits.max_journal_bytes { return Err(DurableSymbolError::JournalLimit); }
+        let end = self
+            .offset
+            .checked_add(size64(record_len)?)
+            .ok_or(SymbolStoreError::Overflow)?;
+        if end > self.limits.max_journal_bytes {
+            return Err(DurableSymbolError::JournalLimit);
+        }
         let mut record = reserve(record_len)?;
         record.extend_from_slice(&size64(body_len)?.to_le_bytes());
-        let length_tag = AuthenticationTag::compute_for_domain_payload(&self.journal_key, PREFIX_DOMAIN,
-            &prefix_payload(size64(body_len)?, sequence, self.last));
+        let length_tag = AuthenticationTag::compute_for_domain_payload(
+            &self.journal_key,
+            PREFIX_DOMAIN,
+            &prefix_payload(size64(body_len)?, sequence, self.last),
+        );
         record.extend_from_slice(length_tag.as_bytes());
         record.extend_from_slice(&sequence.to_le_bytes());
         record.extend_from_slice(self.last.as_bytes());
         record.push(peer.as_str().len() as u8);
         record.extend_from_slice(peer.as_str().as_bytes());
         record.extend_from_slice(bytes);
-        let tag = AuthenticationTag::compute_for_domain_payload(&self.journal_key, RECORD_DOMAIN, &record);
+        let tag = AuthenticationTag::compute_for_domain_payload(
+            &self.journal_key,
+            RECORD_DOMAIN,
+            &record,
+        );
         record.extend_from_slice(tag.as_bytes());
 
         // From here on, both errors and unwinding leave a poisoned owner. Never

@@ -122,20 +122,23 @@ impl Fixture {
         state.lock().unwrap().set_spawn_gateway(gateway);
         let obligations = Arc::new(ObligationMailbox::new());
         scheduler.attach_obligation_mailbox(&obligations);
-        state.lock().unwrap().set_obligation_gateway(Arc::new(
-            ObligationGateway::new(
+        state
+            .lock()
+            .unwrap()
+            .set_obligation_gateway(Arc::new(ObligationGateway::new(
                 Arc::clone(&obligations),
                 scheduler.obligation_posted_notifier(),
                 Arc::downgrade(&liveness),
-            ),
-        ));
+            )));
         let completion_post = CompletionPost::default();
         let poll_post = Arc::clone(&completion_post);
         let (healthy, healthy_handle, principal, effects) = {
             let mut runtime = state.lock().unwrap();
-            let mut target = table.as_ref().map_or(AdmissionTaskTarget::Embedded, |table| {
-                AdmissionTaskTarget::External(table.lock().unwrap())
-            });
+            let mut target = table
+                .as_ref()
+                .map_or(AdmissionTaskTarget::Embedded, |table| {
+                    AdmissionTaskTarget::External(table.lock().unwrap())
+                });
             let (task, handle, effects) = runtime
                 .create_task_with_deferred_spawn_effects_in(
                     root,
@@ -193,9 +196,12 @@ impl Fixture {
     ) -> (TaskId, Cx, ObligationToken) {
         let (holder, handle, cx, sender, effects) = {
             let mut state = self.state.lock().unwrap();
-            let mut target = self.table.as_ref().map_or(AdmissionTaskTarget::Embedded, |table| {
-                AdmissionTaskTarget::External(table.lock().unwrap())
-            });
+            let mut target = self
+                .table
+                .as_ref()
+                .map_or(AdmissionTaskTarget::Embedded, |table| {
+                    AdmissionTaskTarget::External(table.lock().unwrap())
+                });
             state
                 .create_task_infrastructure_in::<()>(
                     &self.principal,
@@ -255,7 +261,10 @@ impl Fixture {
                 break;
             }
         }
-        assert!(completed, "the native worker must still complete unrelated work");
+        assert!(
+            completed,
+            "the native worker must still complete unrelated work"
+        );
         assert_eq!(self.healthy_handle.try_join().unwrap(), Some(19));
         let state = self
             .state
@@ -281,16 +290,13 @@ fn run_queued_close(layout: TableLayout, command: CloseCommand, panic: ClosePani
     let mut fixture = Fixture::new(layout);
     let child = fixture.open_child();
     let child_id = child.region_id();
-    let probe = CloseProbe::install(
-        &fixture.state,
-        fixture.table.as_ref(),
-        child_id,
-        panic,
-    );
+    let probe = CloseProbe::install(&fixture.state, fixture.table.as_ref(), child_id, panic);
     let expected_commands = match command {
         CloseCommand::Close => 1,
         CloseCommand::Cancel => {
-            child.cancel(CancelReason::user("queued cancellation")).unwrap();
+            child
+                .cancel(CancelReason::user("queued cancellation"))
+                .unwrap();
             2
         }
         CloseCommand::CancelWithBudget => {
@@ -313,7 +319,10 @@ fn run_queued_close(layout: TableLayout, command: CloseCommand, panic: ClosePani
         Poll::Ready(Ok(receipt)) => receipt,
         result => panic!("queued close did not publish its receipt: {result:?}"),
     };
-    assert!(matches!(receipt.outcome, crate::types::Outcome::Cancelled(_)));
+    assert!(matches!(
+        receipt.outcome,
+        crate::types::Outcome::Cancelled(_)
+    ));
     assert!(receipt.cleanup_outcome.is_none());
     {
         let state = fixture.state.lock().unwrap();
@@ -409,10 +418,7 @@ fn queued_child_close_keeps_earlier_notifications_when_a_parent_leak_panics() {
         let payload = applied.expect_err("the parent leak must exercise the unwind path");
         std::mem::forget(payload);
         probe.assert_delivered();
-        assert!(matches!(
-            close.as_mut().poll(&mut poll),
-            Poll::Ready(Ok(_))
-        ));
+        assert!(matches!(close.as_mut().poll(&mut poll), Poll::Ready(Ok(_))));
         {
             let state = fixture
                 .state
@@ -467,7 +473,10 @@ fn run_obligation_close(
         Poll::Ready(Ok(receipt)) => receipt,
         result => panic!("obligation settlement did not publish close: {result:?}"),
     };
-    assert!(matches!(receipt.outcome, crate::types::Outcome::Cancelled(_)));
+    assert!(matches!(
+        receipt.outcome,
+        crate::types::Outcome::Cancelled(_)
+    ));
     assert!(receipt.cleanup_outcome.is_none());
     {
         let state = fixture.state.lock().unwrap();
@@ -475,15 +484,27 @@ fn run_obligation_close(
         assert!(state.region(child_id).is_none());
         assert_eq!(state.region(fixture.root).unwrap().child_count(), 0);
         assert_eq!(state.pending_obligation_count(), 0);
-        assert_eq!(state.leak_count(), u64::from(matches!(terminal, ObligationTerminal::Leak)));
+        assert_eq!(
+            state.leak_count(),
+            u64::from(matches!(terminal, ObligationTerminal::Leak))
+        );
     }
     let stats = fixture.obligations.stats();
     assert_eq!(stats.posted, 2);
     assert_eq!(stats.applied, stats.posted);
     assert_eq!(stats.reserved, 1);
-    assert_eq!(stats.committed, u64::from(matches!(terminal, ObligationTerminal::Commit)));
-    assert_eq!(stats.aborted, u64::from(matches!(terminal, ObligationTerminal::Abort)));
-    assert_eq!(stats.leaked, u64::from(matches!(terminal, ObligationTerminal::Leak)));
+    assert_eq!(
+        stats.committed,
+        u64::from(matches!(terminal, ObligationTerminal::Commit))
+    );
+    assert_eq!(
+        stats.aborted,
+        u64::from(matches!(terminal, ObligationTerminal::Abort))
+    );
+    assert_eq!(
+        stats.leaked,
+        u64::from(matches!(terminal, ObligationTerminal::Leak))
+    );
     assert_eq!(stats.refused, 0);
     assert_eq!(fixture.obligations.open_tickets(), 0);
     if matches!(drain, ObligationDrain::Dispatch) {
@@ -493,7 +514,11 @@ fn run_obligation_close(
 
 #[test]
 fn native_obligation_terminal_closes_notify_after_dispatch_and_completion_unlock() {
-    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+    for layout in [
+        TableLayout::Embedded,
+        TableLayout::Sharded,
+        TableLayout::ExternalOnly,
+    ] {
         for checked in [false, true] {
             for terminal in [
                 ObligationTerminal::Commit,
@@ -512,7 +537,11 @@ fn native_obligation_terminal_closes_notify_after_dispatch_and_completion_unlock
 
 #[test]
 fn native_obligation_drain_delivers_closed_region_before_resuming_a_later_leak_panic() {
-    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+    for layout in [
+        TableLayout::Embedded,
+        TableLayout::Sharded,
+        TableLayout::ExternalOnly,
+    ] {
         let mut fixture = Fixture::new(layout);
         let child = fixture.open_child();
         let child_id = child.region_id();
@@ -544,12 +573,19 @@ fn native_obligation_drain_delivers_closed_region_before_resuming_a_later_leak_p
             fixture.worker.drain_spawn_admissions();
         }));
         let payload = applied.expect_err("the later leak must retain fail-fast behavior");
-        assert!(payload.downcast_ref::<String>().is_some_and(|message| message.contains("obligation")));
+        assert!(
+            payload
+                .downcast_ref::<String>()
+                .is_some_and(|message| message.contains("obligation"))
+        );
         std::mem::forget(payload);
         probe.assert_delivered();
         assert!(matches!(close.as_mut().poll(&mut poll), Poll::Ready(Ok(_))));
         {
-            let state = fixture.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = fixture
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(state.region_was_closed(child_id));
             assert!(state.region(child_id).is_none());
             assert_eq!(state.leak_count(), 1);
@@ -577,9 +613,12 @@ fn native_obligation_close_keeps_notifications_when_its_parent_walk_panics() {
         {
             let mut state = fixture.state.lock().unwrap();
             state.set_obligation_leak_response(ObligationLeakResponse::Panic);
-            let mut target = fixture.table.as_ref().map_or(AdmissionTaskTarget::Embedded, |table| {
-                AdmissionTaskTarget::External(table.lock().unwrap())
-            });
+            let mut target = fixture
+                .table
+                .as_ref()
+                .map_or(AdmissionTaskTarget::Embedded, |table| {
+                    AdmissionTaskTarget::External(table.lock().unwrap())
+                });
             let (orphan, handle, orphan_cx, sender, effects) = state
                 .create_task_infrastructure_in::<()>(
                     &fixture.principal,
@@ -621,12 +660,19 @@ fn native_obligation_close_keeps_notifications_when_its_parent_walk_panics() {
             fixture.worker.drain_spawn_admissions();
         }));
         let payload = applied.expect_err("the same post must reach the parent leak panic");
-        assert!(payload.downcast_ref::<String>().is_some_and(|message| message.contains("obligation")));
+        assert!(
+            payload
+                .downcast_ref::<String>()
+                .is_some_and(|message| message.contains("obligation"))
+        );
         std::mem::forget(payload);
         probe.assert_delivered();
         assert!(matches!(close.as_mut().poll(&mut poll), Poll::Ready(Ok(_))));
         {
-            let state = fixture.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = fixture
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(state.region_was_closed(child_id));
             assert!(state.region_was_closed(parent_id));
             assert_eq!(state.leak_count(), 1);
@@ -639,13 +685,16 @@ fn native_obligation_close_keeps_notifications_when_its_parent_walk_panics() {
     }
 }
 
-
 #[test]
 fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
     use crate::runtime::obligation_mailbox::ObligationAdmissionError;
     use crate::sync::{CheckedAcquireError, OwnedSemaphorePermit, Semaphore};
 
-    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+    for layout in [
+        TableLayout::Embedded,
+        TableLayout::Sharded,
+        TableLayout::ExternalOnly,
+    ] {
         for limit in [0_usize, 1, 3] {
             let mut fixture = Fixture::new(layout);
             let child = fixture.open_child();
@@ -667,14 +716,26 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
                     let cx = Cx::current().expect("real native finalizer context");
                     *cleanup_retained.lock() = Some(cx.clone());
                     // Zero units never consume quota, including a zero quota.
-                    drop(OwnedSemaphorePermit::acquire_checked(
-                        Arc::clone(&cleanup_semaphore), &cx, 0,
-                    ).await.unwrap());
+                    drop(
+                        OwnedSemaphorePermit::acquire_checked(
+                            Arc::clone(&cleanup_semaphore),
+                            &cx,
+                            0,
+                        )
+                        .await
+                        .unwrap(),
+                    );
                     let mut permits = Vec::new();
                     for _ in 0..limit {
-                        permits.push(OwnedSemaphorePermit::acquire_checked(
-                            Arc::clone(&cleanup_semaphore), &cx, 1,
-                        ).await.expect("live cleanup admits tracked resources"));
+                        permits.push(
+                            OwnedSemaphorePermit::acquire_checked(
+                                Arc::clone(&cleanup_semaphore),
+                                &cx,
+                                1,
+                            )
+                            .await
+                            .expect("live cleanup admits tracked resources"),
+                        );
                     }
                     assert!(matches!(
                         cleanup_semaphore.try_acquire_checked(&cx, 1),
@@ -692,7 +753,10 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
                 }));
             }
             let probe = CloseProbe::install(
-                &fixture.state, fixture.table.as_ref(), child_id, ClosePanic::None,
+                &fixture.state,
+                fixture.table.as_ref(),
+                child_id,
+                ClosePanic::None,
             );
             let mut close = std::pin::pin!(child.close_with_outcome());
             let mut poll = Context::from_waker(Waker::noop());
@@ -711,7 +775,10 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
             {
                 let mut state = fixture.state.lock().unwrap();
                 let region = state.region(child_id).unwrap();
-                assert_eq!(region.state(), crate::record::region::RegionState::Finalizing);
+                assert_eq!(
+                    region.state(),
+                    crate::record::region::RegionState::Finalizing
+                );
                 assert_eq!(region.pending_obligations(), limit);
                 assert_eq!(region.unapplied_obligation_count(), limit);
                 assert!(matches!(
@@ -719,7 +786,11 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
                     Err(crate::record::AdmissionError::Closed)
                 ));
                 assert!(!state.can_region_complete_close(child_id));
-                assert!(state.create_child_region(child_id, Budget::INFINITE).is_err());
+                assert!(
+                    state
+                        .create_child_region(child_id, Budget::INFINITE)
+                        .is_err()
+                );
             }
             // Cleanup checked credits do not widen the direct-ID contract.
             assert!(matches!(
@@ -735,12 +806,14 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
                 Poll::Ready(Ok(receipt)) => receipt,
                 result => panic!("checked cleanup failed to retire: {result:?}"),
             };
-            assert!(matches!(receipt.cleanup_outcome, Some(crate::types::Outcome::Ok(()))));
+            assert!(matches!(
+                receipt.cleanup_outcome,
+                Some(crate::types::Outcome::Ok(()))
+            ));
             assert_eq!(semaphore.available_permits(), limit + 1);
             assert!(matches!(
-                cleanup_cx.try_register_obligation_checked(
-                    ObligationKind::SemaphorePermit, finalizer,
-                ),
+                cleanup_cx
+                    .try_register_obligation_checked(ObligationKind::SemaphorePermit, finalizer,),
                 Err(ObligationAdmissionError::RegionClosed)
             ));
             let stats = fixture.obligations.stats();
@@ -759,20 +832,27 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
     }
 }
 
-
 fn spawn_native_cleanup_probe(
     fixture: &mut Fixture,
     future: impl Future<Output = u8> + Send + 'static,
 ) -> (TaskId, TaskHandle<u8>) {
     let (task, handle, effects) = {
         let mut state = fixture.state.lock().unwrap();
-        let mut target = fixture.table.as_ref().map_or(AdmissionTaskTarget::Embedded, |table| {
-            AdmissionTaskTarget::External(table.lock().unwrap())
-        });
-        state.create_task_with_deferred_spawn_effects_in(
-            fixture.root, Budget::INFINITE, future, &mut target,
-            &AdmissionRegionTarget::Embedded,
-        ).unwrap()
+        let mut target = fixture
+            .table
+            .as_ref()
+            .map_or(AdmissionTaskTarget::Embedded, |table| {
+                AdmissionTaskTarget::External(table.lock().unwrap())
+            });
+        state
+            .create_task_with_deferred_spawn_effects_in(
+                fixture.root,
+                Budget::INFINITE,
+                future,
+                &mut target,
+                &AdmissionRegionTarget::Embedded,
+            )
+            .unwrap()
     };
     effects.dispatch();
     fixture._scheduler.inject_ready(task, 50);
@@ -781,11 +861,13 @@ fn spawn_native_cleanup_probe(
 
 #[test]
 fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destination() {
-    use crate::runtime::obligation_mailbox::{
-        ObligationAdmissionError, ObligationTransferError,
-    };
+    use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationTransferError};
 
-    for layout in [TableLayout::Embedded, TableLayout::Sharded, TableLayout::ExternalOnly] {
+    for layout in [
+        TableLayout::Embedded,
+        TableLayout::Sharded,
+        TableLayout::ExternalOnly,
+    ] {
         let mut fixture = Fixture::new(layout);
         let child = fixture.open_child();
         let child_id = child.region_id();
@@ -817,7 +899,10 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
             }));
         }
         let probe = CloseProbe::install(
-            &fixture.state, fixture.table.as_ref(), child_id, ClosePanic::None,
+            &fixture.state,
+            fixture.table.as_ref(),
+            child_id,
+            ClosePanic::None,
         );
         let mut close = std::pin::pin!(child.close_with_outcome());
         let mut poll = Context::from_waker(Waker::noop());
@@ -829,7 +914,13 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
         let cleanup_cx = retained.lock().as_ref().unwrap().clone();
         assert_eq!(cleanup_cx.task_id(), finalizer);
         assert_eq!(
-            fixture.state.lock().unwrap().region(child_id).unwrap().state(),
+            fixture
+                .state
+                .lock()
+                .unwrap()
+                .region(child_id)
+                .unwrap()
+                .state(),
             crate::record::region::RegionState::Finalizing,
         );
         probe.assert_pending();
@@ -838,9 +929,10 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
         let (release_source, mut source_released) = crate::channel::oneshot::channel::<()>();
         let (source, mut source_handle) = spawn_native_cleanup_probe(&mut fixture, async move {
             let cx = Cx::current().expect("real native source context");
-            let token = cx.try_register_obligation_checked(
-                ObligationKind::Lease, cx.task_id(),
-            ).unwrap().unwrap();
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                .unwrap()
+                .unwrap();
             published.send_blocking(token).unwrap();
             source_released.recv_uninterruptible().await.unwrap();
             41_u8
@@ -851,16 +943,24 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
         let original_ticket = token.ticket();
         assert_eq!(fixture.worker.drain_spawn_admissions(), 0);
         let original_id = fixture.obligations.ticket_binding(original_ticket).unwrap();
-        let moved = token.try_transfer(&cleanup_cx).expect("live cleanup receives ownership");
+        let moved = token
+            .try_transfer(&cleanup_cx)
+            .expect("live cleanup receives ownership");
         let destination_ticket = moved.ticket();
         assert_eq!(fixture.worker.drain_spawn_admissions(), 0);
         assert_eq!(fixture.obligations.ticket_binding(original_ticket), None);
-        assert_eq!(fixture.obligations.ticket_binding(destination_ticket), Some(original_id));
+        assert_eq!(
+            fixture.obligations.ticket_binding(destination_ticket),
+            Some(original_id)
+        );
         {
             let state = fixture.state.lock().unwrap();
             assert_eq!(state.region(fixture.root).unwrap().pending_obligations(), 0);
             assert_eq!(state.region(child_id).unwrap().pending_obligations(), 1);
-            assert_eq!(state.region(child_id).unwrap().unapplied_obligation_count(), 1);
+            assert_eq!(
+                state.region(child_id).unwrap().unapplied_obligation_count(),
+                1
+            );
         }
 
         // The original native owner can retire without leaking the obligation
@@ -882,7 +982,10 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
             Poll::Ready(Ok(receipt)) => receipt,
             result => panic!("transferred cleanup failed to retire: {result:?}"),
         };
-        assert!(matches!(receipt.cleanup_outcome, Some(crate::types::Outcome::Ok(()))));
+        assert!(matches!(
+            receipt.cleanup_outcome,
+            Some(crate::types::Outcome::Ok(()))
+        ));
 
         // Reuse the actual scheduler/task arena after cleanup retirement. A
         // retained cleanup context must not admit into the retired generation;
@@ -891,9 +994,10 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
             spawn_native_cleanup_probe(&mut fixture, async move {
                 let cx = Cx::current().expect("replacement native source context");
                 assert_ne!(cx.task_id(), cleanup_cx.task_id());
-                let token = cx.try_register_obligation_checked(
-                    ObligationKind::Lease, cx.task_id(),
-                ).unwrap().unwrap();
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                    .unwrap()
+                    .unwrap();
                 let ticket = token.ticket();
                 let failure = token.try_transfer(&cleanup_cx).unwrap_err();
                 assert_eq!(
@@ -923,4 +1027,3 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
         assert!(state.region(fixture.root).unwrap().task_ids().is_empty());
     }
 }
-

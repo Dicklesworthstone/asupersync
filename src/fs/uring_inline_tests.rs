@@ -1,2241 +1,2318 @@
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::expect_fun_call,
-        clippy::map_unwrap_or,
-        clippy::cast_possible_wrap,
-        clippy::future_not_send
-    )]
-    use super::*;
-    #[cfg(unix)]
-    use std::ffi::OsString;
-    use std::os::fd::IntoRawFd;
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStringExt;
-    use tempfile::tempdir;
+#![allow(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::expect_fun_call,
+    clippy::map_unwrap_or,
+    clippy::cast_possible_wrap,
+    clippy::future_not_send
+)]
+use super::*;
+#[cfg(unix)]
+use std::ffi::OsString;
+use std::os::fd::IntoRawFd;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+use tempfile::tempdir;
 
-    fn init_test(name: &str) {
-        crate::test_utils::init_test_logging();
-        crate::test_phase!(name);
+fn init_test(name: &str) {
+    crate::test_utils::init_test_logging();
+    crate::test_phase!(name);
+}
+
+fn noop_waker() -> Waker {
+    std::task::Waker::noop().clone()
+}
+
+/// The only worker stays occupied until released. This makes first-poll
+/// Pending assertions independent of syscall or scheduler timing. Dropping
+/// the guard releases the worker even if an assertion panics.
+struct OccupiedTraitPool {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    pool: crate::runtime::BlockingPool,
+}
+
+impl OccupiedTraitPool {
+    fn new() -> Self {
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        pool.spawn(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        let occupied = Self {
+            release: Some(release_tx),
+            pool,
+        };
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("blocking-pool worker did not start");
+        occupied
     }
 
-    fn noop_waker() -> Waker {
-        std::task::Waker::noop().clone()
+    fn release_and_drain(&mut self) {
+        // The one-worker pool is FIFO: this marker follows the submitted
+        // file operation and proves its worker has retired before return.
+        let marker = self.pool.spawn(|| {});
+        drop(self.release.take());
+        assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
     }
+}
 
-    /// The only worker stays occupied until released. This makes first-poll
-    /// Pending assertions independent of syscall or scheduler timing. Dropping
-    /// the guard releases the worker even if an assertion panics.
-    struct OccupiedTraitPool {
-        release: Option<std::sync::mpsc::Sender<()>>,
-        pool: crate::runtime::BlockingPool,
+impl Drop for OccupiedTraitPool {
+    fn drop(&mut self) {
+        drop(self.release.take());
     }
+}
 
-    impl OccupiedTraitPool {
-        fn new() -> Self {
-            let pool = crate::runtime::BlockingPool::new(1, 1);
-            let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            pool.spawn(move || {
-                started_tx.send(()).unwrap();
-                let _ = release_rx.recv();
-            });
-            let occupied = Self {
-                release: Some(release_tx),
-                pool,
-            };
-            started_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .expect("blocking-pool worker did not start");
-            occupied
-        }
+#[derive(Default)]
+struct TraitWakeCount(AtomicU64);
 
-        fn release_and_drain(&mut self) {
-            // The one-worker pool is FIFO: this marker follows the submitted
-            // file operation and proves its worker has retired before return.
-            let marker = self.pool.spawn(|| {});
-            drop(self.release.take());
-            assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
-        }
+impl Wake for TraitWakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Release);
     }
+}
 
-    impl Drop for OccupiedTraitPool {
-        fn drop(&mut self) {
-            drop(self.release.take());
-        }
+fn read_via_trait(file: &mut IoUringFile, bytes: &mut [u8]) -> io::Result<usize> {
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        let mut read = ReadBuf::new(bytes);
+        Pin::new(&mut *file)
+            .poll_read(cx, &mut read)
+            .map_ok(|()| read.filled().len())
+    }))
+}
+
+fn assert_polled_after_completion(err: &io::Error, operation: &str) {
+    assert_eq!(err.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        err.to_string(),
+        format!("io_uring {operation} future polled after completion")
+    );
+}
+
+fn assert_poll_fails_closed<T: std::fmt::Debug>(poll: Poll<io::Result<T>>, operation: &str) {
+    assert!(
+        matches!(&poll, Poll::Ready(Err(_))),
+        "expected fail-closed {operation} repoll, got {poll:?}"
+    );
+    if let Poll::Ready(Err(err)) = poll {
+        assert_polled_after_completion(&err, operation);
     }
+}
 
-    #[derive(Default)]
-    struct TraitWakeCount(AtomicU64);
-
-    impl Wake for TraitWakeCount {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Release);
-        }
+#[test]
+fn test_uring_offsets_stay_in_the_nonnegative_kernel_range() {
+    init_test("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
+    let largest = u64::try_from(i64::MAX).unwrap();
+    for offset in [0, 1, largest] {
+        assert_eq!(IoUringFile::checked_io_offset(offset).unwrap(), offset);
     }
-
-    fn read_via_trait(file: &mut IoUringFile, bytes: &mut [u8]) -> io::Result<usize> {
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            let mut read = ReadBuf::new(bytes);
-            Pin::new(&mut *file)
-                .poll_read(cx, &mut read)
-                .map_ok(|()| read.filled().len())
-        }))
-    }
-
-    fn assert_polled_after_completion(err: &io::Error, operation: &str) {
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+    for offset in [largest + 1, u64::MAX] {
         assert_eq!(
-            err.to_string(),
-            format!("io_uring {operation} future polled after completion")
+            IoUringFile::checked_io_offset(offset).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
         );
     }
-
-    fn assert_poll_fails_closed<T: std::fmt::Debug>(poll: Poll<io::Result<T>>, operation: &str) {
-        assert!(
-            matches!(&poll, Poll::Ready(Err(_))),
-            "expected fail-closed {operation} repoll, got {poll:?}"
-        );
-        if let Poll::Ready(Err(err)) = poll {
-            assert_polled_after_completion(&err, operation);
-        }
-    }
-
-    #[test]
-    fn test_uring_offsets_stay_in_the_nonnegative_kernel_range() {
-        init_test("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
-        let largest = u64::try_from(i64::MAX).unwrap();
-        for offset in [0, 1, largest] {
-            assert_eq!(IoUringFile::checked_io_offset(offset).unwrap(), offset);
-        }
-        for offset in [largest + 1, u64::MAX] {
-            assert_eq!(
-                IoUringFile::checked_io_offset(offset).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput
-            );
-        }
-        assert_eq!(IoUringFile::checked_seek_target(largest, 0).unwrap(), largest);
-        assert_eq!(IoUringFile::checked_seek_target(largest, -i64::MAX).unwrap(), 0);
-        for (base, delta) in [(0, -1), (largest, 1), (1, i64::MAX), (u64::MAX, 1)] {
-            assert_eq!(
-                IoUringFile::checked_seek_target(base, delta).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput
-            );
-        }
-        crate::test_complete!("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
-    }
-
-    #[test]
-    fn test_uring_positioned_offsets_never_select_the_kernel_cursor() {
-        init_test("test_uring_positioned_offsets_never_select_the_kernel_cursor");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("positioned_offset_range.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-
-        // Prove a real six-byte read has completed before consuming only its
-        // prefix. Rejected positioned I/O must preserve this unread suffix.
-        let mut whole = [0; 6];
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(
-                    &mut Context::from_waker(Waker::noop()),
-                    &mut ReadBuf::new(&mut whole),
-                )
-                .is_pending()
-        );
-        occupied.release_and_drain();
-        let mut prefix = [0; 2];
-        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
-        assert_eq!(&prefix, b"ab");
-        assert_eq!(file.position(), 2);
-        assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
-        assert_eq!(file.trait_io.lock().unread_len(), 4);
-        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
-        for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
-            assert_eq!(
-                file.seek(SeekFrom::Start(offset)).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput
-            );
-            assert!(matches!(
-                Pin::new(&mut file).poll_seek(
-                    &mut Context::from_waker(Waker::noop()),
-                    SeekFrom::Start(offset),
-                ),
-                Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
-            ));
-            assert_eq!(file.position(), 2);
-            assert_eq!(file.trait_io.lock().unread_len(), 4);
-        }
-        let file = Arc::new(file);
-
-        for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
-            let mut read = [0xA5; 2];
-            let error = futures_lite::future::block_on(file.read_at(&mut read, offset))
-                .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(read, [0xA5; 2]);
-            let error = futures_lite::future::block_on(file.write_at(b"XY", offset))
-                .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-
-            let (result, read) = futures_lite::future::block_on(
-                Arc::clone(&file).read_at_owned(vec![0xA5; 2], offset),
-            );
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(read, [0xA5; 2]);
-            let (result, written) = futures_lite::future::block_on(
-                Arc::clone(&file).write_at_owned(b"XY".to_vec(), offset),
-            );
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(written, b"XY");
-
-            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
-            assert_eq!(file.position(), 2, "logical cursor stays at the consumed prefix");
-            assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
-            assert_eq!(file.trait_io.lock().unread_len(), 4);
-            assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
-        }
-
-        let mut file = Arc::try_unwrap(file).unwrap();
-        let mut suffix = [0; 4];
-        assert_eq!(read_via_trait(&mut file, &mut suffix).unwrap(), 4);
-        assert_eq!(&suffix, b"cdef");
-        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
-        crate::test_complete!("test_uring_positioned_offsets_never_select_the_kernel_cursor");
-    }
-
-    #[test]
-    fn test_uring_invalid_absolute_seek_preserves_a_completed_write_retry() {
-        init_test("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("invalid_seek_write_retry.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut file).poll_write(&mut task, b"XY").is_pending());
-        assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
-        occupied.release_and_drain();
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_flush(cx)
-        }))
-        .unwrap();
-        assert_eq!(file.position(), 2);
-        assert!(file.trait_io.lock().write_credit.is_some());
-        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
-
+    assert_eq!(
+        IoUringFile::checked_seek_target(largest, 0).unwrap(),
+        largest
+    );
+    assert_eq!(
+        IoUringFile::checked_seek_target(largest, -i64::MAX).unwrap(),
+        0
+    );
+    for (base, delta) in [(0, -1), (largest, 1), (1, i64::MAX), (u64::MAX, 1)] {
         assert_eq!(
-            file.seek(SeekFrom::Start(u64::MAX)).unwrap_err().kind(),
+            IoUringFile::checked_seek_target(base, delta)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    crate::test_complete!("test_uring_offsets_stay_in_the_nonnegative_kernel_range");
+}
+
+#[test]
+fn test_uring_positioned_offsets_never_select_the_kernel_cursor() {
+    init_test("test_uring_positioned_offsets_never_select_the_kernel_cursor");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("positioned_offset_range.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+    // Prove a real six-byte read has completed before consuming only its
+    // prefix. Rejected positioned I/O must preserve this unread suffix.
+    let mut whole = [0; 6];
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(
+                &mut Context::from_waker(Waker::noop()),
+                &mut ReadBuf::new(&mut whole),
+            )
+            .is_pending()
+    );
+    occupied.release_and_drain();
+    let mut prefix = [0; 2];
+    assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(file.position(), 2);
+    assert_eq!(
+        IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(),
+        0
+    );
+    assert_eq!(file.trait_io.lock().unread_len(), 4);
+    let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+    for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
+        assert_eq!(
+            file.seek(SeekFrom::Start(offset)).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
         assert!(matches!(
-            Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Start(u64::MAX)),
+            Pin::new(&mut file).poll_seek(
+                &mut Context::from_waker(Waker::noop()),
+                SeekFrom::Start(offset),
+            ),
             Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
         ));
-        assert!(matches!(
-            Pin::new(&mut file).poll_write(&mut task, b"XY"),
-            Poll::Ready(Ok(2))
-        ));
+        assert_eq!(file.position(), 2);
+        assert_eq!(file.trait_io.lock().unread_len(), 4);
+    }
+    let file = Arc::new(file);
+
+    for offset in [u64::try_from(i64::MAX).unwrap() + 1, u64::MAX] {
+        let mut read = [0xA5; 2];
+        let error = futures_lite::future::block_on(file.read_at(&mut read, offset)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(read, [0xA5; 2]);
+        let error = futures_lite::future::block_on(file.write_at(b"XY", offset)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let (result, read) =
+            futures_lite::future::block_on(Arc::clone(&file).read_at_owned(vec![0xA5; 2], offset));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(read, [0xA5; 2]);
+        let (result, written) = futures_lite::future::block_on(
+            Arc::clone(&file).write_at_owned(b"XY".to_vec(), offset),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(written, b"XY");
+
         assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
-        assert_eq!(file.position(), 2);
-        assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
-        crate::test_complete!("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
-    }
-
-    #[test]
-    fn test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io() {
-        init_test("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("seek_offset_range.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        let pool = crate::runtime::BlockingPool::new(1, 1);
-        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let largest = u64::try_from(i64::MAX).unwrap();
-        for position in [
-            SeekFrom::Start(largest + 1),
-            SeekFrom::Start(u64::MAX),
-            SeekFrom::Current(i64::MAX),
-            SeekFrom::End(i64::MAX),
-        ] {
-            file.seek(SeekFrom::Start(2)).unwrap();
-            assert_eq!(file.seek(position).unwrap_err().kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(file.position(), 2);
-            let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                Pin::new(&mut file).poll_seek(cx, position)
-            }))
-            .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(file.position(), 2);
-        }
-
-        assert_eq!(file.seek(SeekFrom::Start(largest)).unwrap(), largest);
-        assert_eq!(
-            file.seek(SeekFrom::Current(1)).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert_eq!(file.position(), largest);
-        assert_eq!(file.seek(SeekFrom::Current(-i64::MAX)).unwrap(), 0);
-        assert_eq!(futures_lite::future::block_on(file.write(b"XY")).unwrap(), 2);
-        assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
-        let mut rest = [0; 4];
-        assert_eq!(futures_lite::future::block_on(file.read(&mut rest)).unwrap(), 4);
-        assert_eq!(&rest, b"cdef");
-        assert_eq!(IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(), 0);
-        crate::test_complete!("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
-    }
-
-    #[test]
-    fn test_submitted_completion_wait_retries_syscall_errors() {
-        init_test("test_submitted_completion_wait_retries_syscall_errors");
-        let mut attempts = 0;
-
-        let result = wait_until_submitted_completion(|| {
-            attempts += 1;
-            match attempts {
-                1 => (Err(io::Error::from(io::ErrorKind::Interrupted)), None),
-                2 => (Err(io::Error::from(io::ErrorKind::WouldBlock)), None),
-                3 => (Err(io::Error::from_raw_os_error(libc::EIO)), None),
-                4 => (Ok(1), Some(23)),
-                _ => panic!("completion driver retried after terminal CQE"),
-            }
-        });
-
-        crate::assert_with_log!(result == 23, "terminal CQE result", 23, result);
-        crate::assert_with_log!(attempts == 4, "wait attempts", 4, attempts);
-        crate::test_complete!("test_submitted_completion_wait_retries_syscall_errors");
-    }
-
-    #[test]
-    fn test_submitted_completion_is_observed_alongside_wait_error() {
-        init_test("test_submitted_completion_is_observed_alongside_wait_error");
-        let mut attempts = 0;
-
-        let result = wait_until_submitted_completion(|| {
-            attempts += 1;
-            (
-                Err(io::Error::from(io::ErrorKind::Interrupted)),
-                Some(-libc::ECANCELED),
-            )
-        });
-
-        crate::assert_with_log!(
-            result == -libc::ECANCELED,
-            "negative matching CQE is terminal",
-            -libc::ECANCELED,
-            result
-        );
-        crate::assert_with_log!(attempts == 1, "wait attempts", 1, attempts);
-        crate::test_complete!("test_submitted_completion_is_observed_alongside_wait_error");
-    }
-
-    #[test]
-    fn test_submitted_completion_tracked_drain_survives_unrelated_cqe() {
-        init_test("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
-        let target = OpKind::Read.encode(41);
-        let state = Mutex::new(OpState::Pending {
-            user_data: target,
-            waker: None,
-        });
-        let mut script = std::collections::VecDeque::from([
-            (Err(io::Error::from_raw_os_error(libc::EIO)), Vec::new()),
-            (
-                Err(io::Error::from(io::ErrorKind::Interrupted)),
-                vec![(UNKNOWN_CQE_USER_DATA, 0)],
-            ),
-            (
-                Err(io::Error::from(io::ErrorKind::Interrupted)),
-                vec![(target, -libc::ECANCELED)],
-            ),
-        ]);
-        let mut wait_cycles = 0;
-        let mut completion_batches = 0;
-
-        drain_tracked_until_quiescent(
-            || state_pending_user_data(&state).is_some(),
-            || {
-                completion_batches += 1;
-                wait_until_submitted_completion(|| {
-                    wait_cycles += 1;
-                    let (wait_result, completions) = script
-                        .pop_front()
-                        .expect("tracked drain requested an unexpected wait cycle");
-                    let completion = (!completions.is_empty()).then_some(completions);
-                    (wait_result, completion)
-                })
-            },
-            |user_data, result| {
-                let _ = mark_op_complete(&state, user_data, result);
-            },
-        );
-
-        let terminal_result = match &*state.lock() {
-            OpState::Complete(result) => *result,
-            state => panic!("tracked state did not reach completion: {state:?}"),
-        };
-        crate::assert_with_log!(wait_cycles == 3, "wait cycles", 3, wait_cycles);
-        crate::assert_with_log!(
-            completion_batches == 2,
-            "completion batches",
-            2,
-            completion_batches
-        );
-        crate::assert_with_log!(
-            terminal_result == -libc::ECANCELED,
-            "matching cancellation CQE",
-            -libc::ECANCELED,
-            terminal_result
-        );
-        crate::test_complete!("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
-        init_test("test_path_to_cstring_accepts_non_utf8_unix_paths");
-        let raw = vec![b'f', b'i', b'l', b'e', b'_', 0xFD];
-        let path = std::path::PathBuf::from(OsString::from_vec(raw.clone()));
-
-        let c = path_to_cstring(&path).expect("non-utf8 unix path should be accepted");
-        crate::assert_with_log!(
-            c.as_bytes() == raw.as_slice(),
-            "raw bytes preserved",
-            raw.as_slice(),
-            c.as_bytes()
-        );
-        crate::test_complete!("test_path_to_cstring_accepts_non_utf8_unix_paths");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_path_to_cstring_rejects_nul_bytes() {
-        init_test("test_path_to_cstring_rejects_nul_bytes");
-        let path = std::path::PathBuf::from(OsString::from_vec(vec![b'b', b'a', b'd', 0, b'x']));
-
-        let err = path_to_cstring(&path).expect_err("path with nul must be rejected");
-        crate::assert_with_log!(
-            err.kind() == io::ErrorKind::InvalidInput,
-            "invalid input error",
-            io::ErrorKind::InvalidInput,
-            err.kind()
-        );
-        crate::test_complete!("test_path_to_cstring_rejects_nul_bytes");
-    }
-
-    #[test]
-    fn test_uring_file_create_write_read() {
-        init_test("test_uring_file_create_write_read");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_test.txt");
-
-            // Create and write
-            let file = IoUringFile::create(&path).unwrap();
-            let n = file.write(b"hello io_uring").await.unwrap();
-            crate::assert_with_log!(n == 14, "bytes written", 14usize, n);
-            file.sync_all().await.unwrap();
-            drop(file);
-
-            // Read back
-            let file = IoUringFile::open(&path).unwrap();
-            let mut buf = vec![0u8; 32];
-            let n = file.read(&mut buf).await.unwrap();
-            crate::assert_with_log!(n == 14, "bytes read", 14usize, n);
-            crate::assert_with_log!(
-                &buf[..n] == b"hello io_uring",
-                "content",
-                "hello io_uring",
-                String::from_utf8_lossy(&buf[..n])
-            );
-        });
-        crate::test_complete!("test_uring_file_create_write_read");
-    }
-
-    #[test]
-    fn test_uring_file_drop_drains_pending_read() {
-        init_test("test_uring_file_drop_drains_pending_read");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_drop_pending_read.txt");
-        std::fs::write(&path, b"hello").unwrap();
-
-        let file = IoUringFile::open(&path).unwrap();
-
-        // Submit a read without waiting for it in user code, then rely on Drop to
-        // drain the CQE before tearing down the ring mapping.
-        let pending = file.submit_pending_read_for_test(5, 0).unwrap();
-        let buf = pending.finish_buffer();
-
-        let read_completed = buf == b"hello";
-        let read_cancelled = buf.iter().all(|byte| *byte == 0);
-        crate::assert_with_log!(
-            read_completed || read_cancelled,
-            "drop drained read to completion or cancellation",
-            "completed_or_cancelled",
-            String::from_utf8_lossy(&buf)
-        );
-        let file_contents = std::fs::read(&path).unwrap();
-        crate::assert_with_log!(
-            file_contents == b"hello",
-            "drop drained read leaves source file intact",
-            "hello",
-            String::from_utf8_lossy(&file_contents)
-        );
-        crate::test_complete!("test_uring_file_drop_drains_pending_read");
-    }
-
-    #[test]
-    fn test_uring_file_drop_drains_pending_write() {
-        init_test("test_uring_file_drop_drains_pending_write");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_drop_pending_write.txt");
-
-        let file = IoUringFile::open_with_flags(
-            &path,
-            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-            0o644,
-        )
-        .unwrap();
-        let payload = b"drop-drained-write";
-
-        let pending = file
-            .submit_pending_write_for_test(payload.to_vec(), 0)
-            .unwrap();
-        pending.drain();
-
-        let contents = std::fs::read(&path).unwrap();
-        let write_completed = contents.as_slice() == payload;
-        let write_cancelled = contents.is_empty();
-        crate::assert_with_log!(
-            write_completed || write_cancelled,
-            "drop drained write to completion or cancellation",
-            "completed_or_cancelled",
-            String::from_utf8_lossy(&contents)
-        );
-        crate::test_complete!("test_uring_file_drop_drains_pending_write");
-    }
-
-    #[test]
-    fn test_uring_file_drop_drains_pending_sync() {
-        init_test("test_uring_file_drop_drains_pending_sync");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_drop_pending_sync.txt");
-        std::fs::write(&path, b"sync-before-drop").unwrap();
-
-        let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-
-        let pending = file.submit_pending_sync_for_test(false).unwrap();
-        pending.drain();
-
-        let contents = std::fs::read(&path).unwrap();
-        crate::assert_with_log!(
-            contents.as_slice() == b"sync-before-drop",
-            "drop drained sync without corrupting file",
-            "sync-before-drop",
-            String::from_utf8_lossy(&contents)
-        );
-        crate::test_complete!("test_uring_file_drop_drains_pending_sync");
-    }
-
-    #[test]
-    fn test_uring_file_read_at_write_at() {
-        init_test("test_uring_file_read_at_write_at");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_offset_test.txt");
-
-            // Create file with content
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            // Write at offset 0
-            let n = file.write_at(b"AAAAAAAAAA", 0).await.unwrap();
-            crate::assert_with_log!(n == 10, "first write", 10usize, n);
-
-            // Write at offset 5 (overwrite middle)
-            let n = file.write_at(b"BBBBB", 5).await.unwrap();
-            crate::assert_with_log!(n == 5, "second write", 5usize, n);
-
-            file.sync_all().await.unwrap();
-
-            // Read at offset 0
-            let mut buf = vec![0u8; 10];
-            let n = file.read_at(&mut buf, 0).await.unwrap();
-            crate::assert_with_log!(n == 10, "read back", 10usize, n);
-            crate::assert_with_log!(
-                &buf[..n] == b"AAAAABBBBB",
-                "content",
-                "AAAAABBBBB",
-                String::from_utf8_lossy(&buf[..n])
-            );
-        });
-        crate::test_complete!("test_uring_file_read_at_write_at");
-    }
-
-    #[test]
-    fn test_uring_completion_attribution_ignores_unrelated_cqe() {
-        init_test("test_uring_completion_attribution_ignores_unrelated_cqe");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_unrelated_cqe.txt");
-            std::fs::write(&path, b"hello").unwrap();
-
-            let file = IoUringFile::open(&path).unwrap();
-
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
-                .unwrap();
-
-            let mut buf = [0u8; 5];
-            let n = file.read(&mut buf).await.unwrap();
-            crate::assert_with_log!(n == 5, "read length", 5usize, n);
-            crate::assert_with_log!(
-                &buf == b"hello",
-                "read ignores unrelated CQE and returns actual data",
-                "hello",
-                String::from_utf8_lossy(&buf)
-            );
-        });
-        crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe");
-    }
-
-    #[test]
-    fn test_uring_completion_attribution_ignores_unrelated_cqe_before_write() {
-        init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_write");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_unrelated_cqe_write.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
-                .unwrap();
-
-            let n = file.write(b"hello").await.unwrap();
-            crate::assert_with_log!(n == 5, "write length", 5usize, n);
-            file.sync_all().await.unwrap();
-            drop(file);
-
-            let contents = std::fs::read(&path).unwrap();
-            crate::assert_with_log!(
-                contents.as_slice() == b"hello",
-                "write ignores unrelated CQE and persists actual data",
-                "hello",
-                String::from_utf8_lossy(&contents)
-            );
-        });
-        crate::test_complete!(
-            "test_uring_completion_attribution_ignores_unrelated_cqe_before_write"
-        );
-    }
-
-    #[test]
-    fn test_uring_completion_attribution_ignores_unrelated_cqe_before_sync() {
-        init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_sync");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_unrelated_cqe_sync.txt");
-            std::fs::write(&path, b"hello").unwrap();
-
-            let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
-                .unwrap();
-
-            file.sync_all().await.unwrap();
-            drop(file);
-
-            let contents = std::fs::read(&path).unwrap();
-            crate::assert_with_log!(
-                contents.as_slice() == b"hello",
-                "sync ignores unrelated CQE and preserves actual data",
-                "hello",
-                String::from_utf8_lossy(&contents)
-            );
-        });
-        crate::test_complete!(
-            "test_uring_completion_attribution_ignores_unrelated_cqe_before_sync"
-        );
-    }
-
-    #[test]
-    fn test_uring_set_len_has_no_async_truncate_completion() {
-        init_test("test_uring_set_len_has_no_async_truncate_completion");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_truncate_no_pending.txt");
-        std::fs::write(&path, b"truncate-boundary").unwrap();
-
-        let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        file.set_len(8).unwrap();
-
-        crate::assert_with_log!(
-            !any_ops_pending(&file.inner),
-            "set_len uses synchronous ftruncate and leaves no io_uring state",
-            false,
-            any_ops_pending(&file.inner)
-        );
-        crate::assert_with_log!(
-            file.metadata().unwrap().len() == 8,
-            "truncated len",
-            8u64,
-            file.metadata().unwrap().len()
-        );
-        crate::test_complete!("test_uring_set_len_has_no_async_truncate_completion");
-    }
-
-    #[test]
-    fn test_uring_sq_full_recovers_by_submitting_and_retrying() {
-        init_test("test_uring_sq_full_recovers_by_submitting_and_retrying");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_sq_full_retry.txt");
-            std::fs::write(&path, b"hello").unwrap();
-
-            let file = IoUringFile::open(&path).unwrap();
-
-            {
-                let mut ring = file.inner.ring.lock();
-                let mut next_user_data = 1u64;
-                loop {
-                    let entry = opcode::Nop::new()
-                        .build()
-                        .user_data(0xFF00_0000_AA00_0000u64.wrapping_add(next_user_data));
-                    // SAFETY: NOP has no external buffer dependencies.
-                    let push_result = unsafe { ring.submission().push(&entry) };
-                    if push_result.is_err() {
-                        break;
-                    }
-                    next_user_data = next_user_data.saturating_add(1);
-                }
-            }
-
-            let mut buf = [0u8; 5];
-            let n = file.read(&mut buf).await.unwrap();
-            assert_eq!(n, 5, "read length after SQ recovery");
-            assert_eq!(&buf, b"hello", "read succeeds after SQ-full recovery");
-        });
-        crate::test_complete!("test_uring_sq_full_recovers_by_submitting_and_retrying");
-    }
-
-    #[test]
-    fn test_uring_file_position_tracking() {
-        init_test("test_uring_file_position_tracking");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_position_test.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            // Initial position should be 0
-            crate::assert_with_log!(
-                file.position() == 0,
-                "initial position",
-                0u64,
-                file.position()
-            );
-
-            // Write updates position
-            let n = file.write(b"hello").await.unwrap();
-            crate::assert_with_log!(n == 5, "write", 5usize, n);
-            crate::assert_with_log!(
-                file.position() == 5,
-                "position after write",
-                5u64,
-                file.position()
-            );
-
-            // write_at does NOT update position
-            let n = file.write_at(b"world", 10).await.unwrap();
-            crate::assert_with_log!(n == 5, "write_at", 5usize, n);
-            crate::assert_with_log!(
-                file.position() == 5,
-                "position after write_at",
-                5u64,
-                file.position()
-            );
-
-            // Seek updates position
-            let pos = file.seek(SeekFrom::Start(0)).unwrap();
-            crate::assert_with_log!(pos == 0, "seek result", 0u64, pos);
-            crate::assert_with_log!(
-                file.position() == 0,
-                "position after seek",
-                0u64,
-                file.position()
-            );
-        });
-        crate::test_complete!("test_uring_file_position_tracking");
-    }
-
-    #[test]
-    fn test_uring_seek_current_uses_logical_position() {
-        init_test("test_uring_seek_current_uses_logical_position");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_seek_current_position.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            let n = file.write(b"abcdef").await.unwrap();
-            crate::assert_with_log!(n == 6, "write length", 6usize, n);
-
-            let current = file.seek(SeekFrom::Current(0)).unwrap();
-            crate::assert_with_log!(current == 6, "current seek result", 6u64, current);
-            crate::assert_with_log!(
-                file.position() == 6,
-                "position after current seek",
-                6u64,
-                file.position()
-            );
-
-            let current = file.seek(SeekFrom::Current(-2)).unwrap();
-            crate::assert_with_log!(current == 4, "rewound seek result", 4u64, current);
-            crate::assert_with_log!(
-                file.position() == 4,
-                "position after rewind",
-                4u64,
-                file.position()
-            );
-
-            let mut tail = [0u8; 2];
-            let n = file.read(&mut tail).await.unwrap();
-            crate::assert_with_log!(n == 2, "tail read length", 2usize, n);
-            crate::assert_with_log!(
-                &tail == b"ef",
-                "tail read bytes",
-                "ef",
-                String::from_utf8_lossy(&tail)
-            );
-        });
-        crate::test_complete!("test_uring_seek_current_uses_logical_position");
-    }
-
-    #[test]
-    fn test_uring_from_raw_fd_preserves_existing_cursor_position() {
-        init_test("test_uring_from_raw_fd_preserves_existing_cursor_position");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_from_raw_fd_cursor.txt");
-
-            std::fs::write(&path, b"abcdef").unwrap();
-            let mut std_file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            std::io::Seek::seek(&mut std_file, SeekFrom::Start(2)).unwrap();
-
-            let raw_fd = std_file.into_raw_fd();
-            let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();
-
-            crate::assert_with_log!(
-                file.position() == 2,
-                "initial logical cursor preserves raw fd offset",
-                2u64,
-                file.position()
-            );
-            let current = file.seek(SeekFrom::Current(0)).unwrap();
-            crate::assert_with_log!(current == 2, "seek current", 2u64, current);
-
-            let mut buf = [0u8; 2];
-            let n = file.read(&mut buf).await.unwrap();
-            crate::assert_with_log!(n == 2, "read length", 2usize, n);
-            crate::assert_with_log!(
-                &buf == b"cd",
-                "read starts from transferred cursor",
-                "cd",
-                String::from_utf8_lossy(&buf)
-            );
-            crate::assert_with_log!(
-                file.position() == 4,
-                "position after read from transferred cursor",
-                4u64,
-                file.position()
-            );
-        });
-        crate::test_complete!("test_uring_from_raw_fd_preserves_existing_cursor_position");
-    }
-
-    #[test]
-    fn test_uring_from_raw_fd_closes_fd_when_position_probe_fails() {
-        init_test("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
-
-        let mut fds = [0; 2];
-        let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(pipe_result, 0, "pipe creation should succeed");
-
-        let read_fd = fds[0];
-        let write_fd = fds[1];
-
-        let err = unsafe { IoUringFile::from_raw_fd(read_fd) }
-            .expect_err("non-seekable fds must fail position probe");
-        crate::assert_with_log!(
-            err.raw_os_error() == Some(libc::ESPIPE),
-            "pipe fd fails with ESPIPE",
-            Some(libc::ESPIPE),
-            err.raw_os_error()
-        );
-
-        // The failed constructor owned `read_fd` and closed it. Probe the pipe, not the
-        // number: closing `read_fd` again here can close an fd a concurrent test was just
-        // handed (it did on 2026-09-29, and the lib test binary died with SIGBUS right
-        // after). With no reader left, a write fails with EPIPE; Rust ignores SIGPIPE.
-        let write_result = unsafe { libc::write(write_fd, [0u8].as_ptr().cast(), 1) };
-        let write_errno = io::Error::last_os_error().raw_os_error();
-        crate::assert_with_log!(
-            write_result == -1,
-            "failed construction must still consume and close the transferred fd",
-            -1,
-            write_result
-        );
-        crate::assert_with_log!(
-            write_errno == Some(libc::EPIPE),
-            "the pipe has no reader left",
-            Some(libc::EPIPE),
-            write_errno
-        );
-
-        let write_close_result = unsafe { libc::close(write_fd) };
-        crate::assert_with_log!(
-            write_close_result == 0,
-            "write end remains open for explicit cleanup",
-            0,
-            write_close_result
-        );
-
-        crate::test_complete!("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
-    }
-
-    #[test]
-    fn test_uring_write_uses_position_at_poll_time() {
-        init_test("test_uring_write_uses_position_at_poll_time");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_lazy_write_position.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            let first = file.write(b"abc");
-            let second = file.write(b"def");
-
-            let n = first.await.unwrap();
-            crate::assert_with_log!(n == 3, "first write length", 3usize, n);
-            crate::assert_with_log!(
-                file.position() == 3,
-                "position after first write",
-                3u64,
-                file.position()
-            );
-
-            let n = second.await.unwrap();
-            crate::assert_with_log!(n == 3, "second write length", 3usize, n);
-            crate::assert_with_log!(
-                file.position() == 6,
-                "position after second write",
-                6u64,
-                file.position()
-            );
-
-            file.sync_all().await.unwrap();
-
-            let mut buf = [0u8; 6];
-            let n = file.read_at(&mut buf, 0).await.unwrap();
-            crate::assert_with_log!(n == 6, "read back length", 6usize, n);
-            crate::assert_with_log!(
-                &buf == b"abcdef",
-                "write futures append in poll order",
-                "abcdef",
-                String::from_utf8_lossy(&buf)
-            );
-        });
-        crate::test_complete!("test_uring_write_uses_position_at_poll_time");
-    }
-
-    #[test]
-    fn test_uring_read_uses_position_at_poll_time() {
-        init_test("test_uring_read_uses_position_at_poll_time");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_lazy_read_position.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-            file.write_at(b"abcdef", 0).await.unwrap();
-            file.seek(SeekFrom::Start(0)).unwrap();
-
-            let mut first_buf = [0u8; 3];
-            let mut second_buf = [0u8; 3];
-            let first = file.read(&mut first_buf);
-            let second = file.read(&mut second_buf);
-
-            let n = first.await.unwrap();
-            crate::assert_with_log!(n == 3, "first read length", 3usize, n);
-            crate::assert_with_log!(
-                &first_buf == b"abc",
-                "first read bytes",
-                "abc",
-                String::from_utf8_lossy(&first_buf)
-            );
-            crate::assert_with_log!(
-                file.position() == 3,
-                "position after first read",
-                3u64,
-                file.position()
-            );
-
-            let n = second.await.unwrap();
-            crate::assert_with_log!(n == 3, "second read length", 3usize, n);
-            crate::assert_with_log!(
-                &second_buf == b"def",
-                "second read bytes",
-                "def",
-                String::from_utf8_lossy(&second_buf)
-            );
-            crate::assert_with_log!(
-                file.position() == 6,
-                "position after second read",
-                6u64,
-                file.position()
-            );
-        });
-        crate::test_complete!("test_uring_read_uses_position_at_poll_time");
-    }
-
-    #[test]
-    fn test_uring_file_sync_data() {
-        init_test("test_uring_file_sync_data");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_sync_test.txt");
-
-            let file = IoUringFile::create(&path).unwrap();
-            file.write(b"sync test data").await.unwrap();
-
-            // sync_data should succeed
-            file.sync_data().await.unwrap();
-
-            // sync_all should succeed
-            file.sync_all().await.unwrap();
-        });
-        crate::test_complete!("test_uring_file_sync_data");
-    }
-
-    #[test]
-    fn test_uring_read_future_second_poll_fails_closed() {
-        init_test("test_uring_read_future_second_poll_fails_closed");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_read_repoll.txt");
-        std::fs::write(&path, b"hello").unwrap();
-
-        let file = IoUringFile::open(&path).unwrap();
-        let mut buf = [0u8; 5];
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        {
-            let mut future = file.read(&mut buf);
-            let first = Pin::new(&mut future).poll(&mut cx);
-            assert!(matches!(first, Poll::Ready(Ok(5))));
-            assert_eq!(file.position(), 5);
-
-            assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "read");
-        }
-        assert_eq!(&buf, b"hello");
-        assert_eq!(file.position(), 5);
-        crate::test_complete!("test_uring_read_future_second_poll_fails_closed");
-    }
-
-    #[test]
-    fn test_uring_write_future_second_poll_fails_closed() {
-        init_test("test_uring_write_future_second_poll_fails_closed");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_write_repoll.txt");
-
-        let file = IoUringFile::open_with_flags(
-            &path,
-            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-            0o644,
-        )
-        .unwrap();
-        let mut future = file.write(b"abc");
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let first = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(first, Poll::Ready(Ok(3))));
-        assert_eq!(file.position(), 3);
-
-        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
-        assert_eq!(file.position(), 3);
-
-        let mut buf = [0u8; 3];
-        let n = futures_lite::future::block_on(file.read_at(&mut buf, 0)).unwrap();
-        assert_eq!(n, 3);
-        assert_eq!(&buf, b"abc");
-        crate::test_complete!("test_uring_write_future_second_poll_fails_closed");
-    }
-
-    #[test]
-    fn test_uring_sync_future_second_poll_fails_closed() {
-        init_test("test_uring_sync_future_second_poll_fails_closed");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_sync_repoll.txt");
-
-        let file = IoUringFile::create(&path).unwrap();
-        let mut future = file.sync_all();
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let first = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(first, Poll::Ready(Ok(()))));
-
-        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "sync");
-        crate::test_complete!("test_uring_sync_future_second_poll_fails_closed");
-    }
-
-    #[test]
-    fn test_uring_error_terminal_still_fails_closed_on_repoll() {
-        init_test("test_uring_error_terminal_still_fails_closed_on_repoll");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("uring_error_repoll.txt");
-        std::fs::write(&path, b"hello").unwrap();
-
-        let file = IoUringFile::open(&path).unwrap();
-        let mut future = file.write(b"abc");
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let first = Pin::new(&mut future).poll(&mut cx);
-        assert!(matches!(first, Poll::Ready(Err(_))));
-        assert_eq!(file.position(), 0);
-
-        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
-        assert_eq!(file.position(), 0);
-        crate::test_complete!("test_uring_error_terminal_still_fails_closed_on_repoll");
-    }
-
-    #[test]
-    fn test_uring_file_set_len_truncate() {
-        init_test("test_uring_file_set_len_truncate");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_truncate_test.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            // Write 20 bytes
-            file.write(b"01234567890123456789").await.unwrap();
-            file.sync_all().await.unwrap();
-
-            // Truncate to 10
-            file.set_len(10).unwrap();
-
-            // Position should be clamped from 19 to 10
-            crate::assert_with_log!(
-                file.position() <= 10,
-                "position clamped after truncate",
-                true,
-                file.position() <= 10
-            );
-
-            // Read back and verify
-            file.seek(SeekFrom::Start(0)).unwrap();
-            let mut buf = vec![0u8; 32];
-            let n = file.read(&mut buf).await.unwrap();
-            crate::assert_with_log!(n == 10, "truncated read length", 10usize, n);
-            crate::assert_with_log!(
-                &buf[..n] == b"0123456789",
-                "truncated content",
-                "0123456789",
-                String::from_utf8_lossy(&buf[..n])
-            );
-        });
-        crate::test_complete!("test_uring_file_set_len_truncate");
-    }
-
-    #[test]
-    fn test_uring_file_set_len_extend() {
-        init_test("test_uring_file_set_len_extend");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_extend_test.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            file.write(b"hello").await.unwrap();
-            file.sync_all().await.unwrap();
-
-            // Extend to 10 bytes (zero-filled beyond 5)
-            file.set_len(10).unwrap();
-
-            let meta = file.metadata().unwrap();
-            crate::assert_with_log!(meta.len() == 10, "extended length", 10u64, meta.len());
-
-            // Read the extended region
-            file.seek(SeekFrom::Start(0)).unwrap();
-            let mut buf = vec![0u8; 10];
-            let n = file.read_at(&mut buf, 0).await.unwrap();
-            crate::assert_with_log!(n == 10, "read length", 10usize, n);
-            crate::assert_with_log!(
-                &buf[..5] == b"hello",
-                "original content preserved",
-                "hello",
-                String::from_utf8_lossy(&buf[..5])
-            );
-            crate::assert_with_log!(
-                buf[5..] == [0u8; 5],
-                "extended bytes are zero",
-                true,
-                buf[5..] == [0u8; 5]
-            );
-        });
-        crate::test_complete!("test_uring_file_set_len_extend");
-    }
-
-    #[test]
-    fn test_uring_file_metadata() {
-        init_test("test_uring_file_metadata");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_metadata_test.txt");
-
-            let file = IoUringFile::create(&path).unwrap();
-            file.write(b"metadata test").await.unwrap();
-            file.sync_all().await.unwrap();
-
-            let meta = file.metadata().unwrap();
-            crate::assert_with_log!(meta.is_file(), "is_file", true, meta.is_file());
-            crate::assert_with_log!(meta.len() == 13, "file length", 13u64, meta.len());
-        });
-        crate::test_complete!("test_uring_file_metadata");
-    }
-
-    #[test]
-    fn test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper() {
-        init_test("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_metadata_permissions_roundtrip.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            let mut permissions = file.metadata().unwrap().permissions();
-            permissions.set_readonly(true);
-            file.set_permissions(permissions).unwrap();
-            let readonly = file.metadata().unwrap().permissions().readonly();
-            crate::assert_with_log!(
-                readonly,
-                "io_uring file permissions set readonly through fs wrapper",
-                true,
-                readonly
-            );
-
-            let mut permissions = file.metadata().unwrap().permissions();
-            permissions.set_readonly(false);
-            file.set_permissions(permissions).unwrap();
-            let readonly = file.metadata().unwrap().permissions().readonly();
-            crate::assert_with_log!(
-                !readonly,
-                "io_uring file permissions reset through fs wrapper",
-                false,
-                readonly
-            );
-        });
-        crate::test_complete!("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
-    }
-
-    #[test]
-    fn test_uring_file_large_io() {
-        init_test("test_uring_file_large_io");
-        futures_lite::future::block_on(async {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("uring_large_test.txt");
-
-            let file = IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o644,
-            )
-            .unwrap();
-
-            // Write 64KB of data in 4KB chunks
-            let data: Vec<u8> = (0..65536u32).map(|i| (i % 256) as u8).collect();
-            let mut written = 0usize;
-            while written < data.len() {
-                let end = std::cmp::min(written + 4096, data.len());
-                let n = file
-                    .write_at(&data[written..end], written as u64)
-                    .await
-                    .unwrap();
-                written += n;
-            }
-            file.sync_all().await.unwrap();
-
-            // Read back in one shot and verify
-            let mut buf = vec![0u8; 65536];
-            let mut read_total = 0usize;
-            while read_total < buf.len() {
-                let n = file
-                    .read_at(&mut buf[read_total..], read_total as u64)
-                    .await
-                    .unwrap();
-                if n == 0 {
-                    break;
-                }
-                read_total += n;
-            }
-            crate::assert_with_log!(read_total == 65536, "total read", 65536usize, read_total);
-            crate::assert_with_log!(buf == data, "data integrity", true, buf == data);
-        });
-        crate::test_complete!("test_uring_file_large_io");
-    }
-
-    #[test]
-    fn test_uring_traits_queue_owned_write_and_preserve_interleaved_credit() {
-        init_test("test_uring_traits_queue_owned_write_and_preserve_interleaved_credit");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_interleaved.txt");
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open_with_flags(
-            &path,
-            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-            0o600,
-        )
-        .unwrap();
-
-        let writer_wakes = Arc::new(TraitWakeCount::default());
-        let reader_wakes = Arc::new(TraitWakeCount::default());
-        let flusher_wakes = Arc::new(TraitWakeCount::default());
-        let writer = Waker::from(Arc::clone(&writer_wakes));
-        let reader = Waker::from(Arc::clone(&reader_wakes));
-        let flusher = Waker::from(Arc::clone(&flusher_wakes));
-        let mut submitted = b"hello".to_vec();
-        assert!(
-            Pin::new(&mut file)
-                .poll_write(&mut Context::from_waker(&writer), &submitted)
-                .is_pending()
-        );
-        // A dropped borrowing write must leave the owned original bytes alive.
-        submitted.fill(b'x');
-        drop(submitted);
-        let mut bytes = [0; 8];
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(
-                    &mut Context::from_waker(&reader),
-                    &mut ReadBuf::new(&mut bytes),
-                )
-                .is_pending()
-        );
-        assert!(
-            Pin::new(&mut file)
-                .poll_flush(&mut Context::from_waker(&flusher))
-                .is_pending()
-        );
-
-        // The synchronous API cannot overtake a queued trait operation.
-        assert_eq!(
-            file.seek(SeekFrom::Start(0)).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-        assert_eq!(file.set_len(0).unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(
-            futures_lite::future::block_on(file.read_at(&mut bytes, 0))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::WouldBlock
-        );
-        assert_eq!(
-            futures_lite::future::block_on(file.sync_data())
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::WouldBlock
-        );
-
-        occupied.release_and_drain();
-        assert!(writer_wakes.0.load(Ordering::Acquire) > 0);
-        assert!(reader_wakes.0.load(Ordering::Acquire) > 0);
-        assert!(flusher_wakes.0.load(Ordering::Acquire) > 0);
-        assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 0);
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_flush(cx)
-        }))
-        .unwrap();
-
-        // The read collected the write and the flush preserved its result;
-        // its caller still gets the count without submitting the bytes again.
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            Pin::new(&mut file).poll_write(&mut task, b"hello"),
-            Poll::Ready(Ok(5))
-        ));
-        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
-        assert_eq!(file.position(), 5);
-
-        // Leave another successful write's credit unclaimed, then seek.
-        // Seeking starts a new write sequence even for identical bytes.
-        let mut second = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(second.pool.handle()));
-        let _second_current = crate::cx::Cx::set_current(Some(cx));
-        assert!(Pin::new(&mut file).poll_write(&mut task, b"hello").is_pending());
-        assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
-        second.release_and_drain();
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_flush(cx)
-        }))
-        .unwrap();
-        assert_eq!(file.position(), 10);
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
-        }))
-        .unwrap();
-        let written = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_write(cx, b"hello")
-        }))
-        .unwrap();
-        assert_eq!(written, 5);
-        assert_eq!(std::fs::read(&path).unwrap(), b"hellohellohello");
-        crate::test_complete!(
-            "test_uring_traits_queue_owned_write_and_preserve_interleaved_credit"
-        );
-    }
-
-    #[test]
-    fn test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder() {
-        init_test("test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_read_ahead.txt");
-        std::fs::write(&path, b"abcdefghij").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open(&path).unwrap();
-        let mut first = vec![0; 6];
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(&mut task, &mut ReadBuf::new(&mut first))
-                .is_pending()
-        );
-        drop(first);
-        occupied.release_and_drain();
-        assert_eq!(file.inner.position.load(Ordering::Relaxed), 6);
-        assert_eq!(file.position(), 0, "uncollected bytes are still unread");
-
-        let mut prefix = [0; 2];
-        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
-        assert_eq!(&prefix, b"ab");
-        assert_eq!(file.position(), 2);
-        let mut next = [0; 1];
-        assert_eq!(read_via_trait(&mut file, &mut next).unwrap(), 1);
-        assert_eq!(&next, b"c");
-        assert_eq!(file.position(), 3);
-
-        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(0))
-        }))
-        .unwrap();
-        assert_eq!(position, 3, "seek reconciles unread read-ahead");
-        let mut remaining = [0; 7];
-        assert_eq!(read_via_trait(&mut file, &mut remaining).unwrap(), 7);
-        assert_eq!(&remaining, b"defghij");
-        crate::test_complete!(
-            "test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder"
-        );
-    }
-
-    #[test]
-    fn test_uring_positioned_write_invalidates_trait_read_ahead() {
-        init_test("test_uring_positioned_write_invalidates_trait_read_ahead");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_positioned_write.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        let mut first = [0; 6];
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(&mut task, &mut ReadBuf::new(&mut first))
-                .is_pending()
-        );
-        occupied.release_and_drain();
-        let mut prefix = [0; 2];
-        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
-        assert_eq!(&prefix, b"ab");
-        assert_eq!(
-            futures_lite::future::block_on(file.write_at(b"XY", 2)).unwrap(),
-            2
-        );
         assert_eq!(
             file.position(),
             2,
-            "positioned writes retain the logical cursor"
+            "logical cursor stays at the consumed prefix"
         );
-        let mut rest = [0; 4];
-        assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
-        assert_eq!(&rest, b"XYef", "read-ahead must not mask a file mutation");
-        crate::test_complete!("test_uring_positioned_write_invalidates_trait_read_ahead");
+        assert_eq!(
+            IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(),
+            0
+        );
+        assert_eq!(file.trait_io.lock().unread_len(), 4);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
     }
 
-    #[test]
-    fn test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool() {
-        init_test("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
-        for seek in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("trait_seek_sync.txt");
-            std::fs::write(&path, b"abcdef").unwrap();
-            let mut occupied = OccupiedTraitPool::new();
-            let cx = crate::cx::Cx::for_testing()
-                .with_blocking_pool_handle(Some(occupied.pool.handle()));
-            let _current = crate::cx::Cx::set_current(Some(cx));
-            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-            let mut task = Context::from_waker(Waker::noop());
-            if seek {
-                assert!(
-                    Pin::new(&mut file)
-                        .poll_seek(&mut task, SeekFrom::End(-2))
-                        .is_pending()
-                );
-            } else {
-                assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
-            }
-            occupied.release_and_drain();
-            if seek {
-                assert!(matches!(
-                    Pin::new(&mut file).poll_seek(&mut task, SeekFrom::End(-2)),
-                    Poll::Ready(Ok(4))
-                ));
-                assert_eq!(file.position(), 4);
-            } else {
-                assert!(matches!(
-                    Pin::new(&mut file).poll_flush(&mut task),
-                    Poll::Ready(Ok(()))
-                ));
+    let mut file = Arc::try_unwrap(file).unwrap();
+    let mut suffix = [0; 4];
+    assert_eq!(read_via_trait(&mut file, &mut suffix).unwrap(), 4);
+    assert_eq!(&suffix, b"cdef");
+    assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+    crate::test_complete!("test_uring_positioned_offsets_never_select_the_kernel_cursor");
+}
+
+#[test]
+fn test_uring_invalid_absolute_seek_preserves_a_completed_write_retry() {
+    init_test("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("invalid_seek_write_retry.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut task, b"XY")
+            .is_pending()
+    );
+    assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+    occupied.release_and_drain();
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_flush(cx)
+    }))
+    .unwrap();
+    assert_eq!(file.position(), 2);
+    assert!(file.trait_io.lock().write_credit.is_some());
+    let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+
+    assert_eq!(
+        file.seek(SeekFrom::Start(u64::MAX)).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(matches!(
+        Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Start(u64::MAX)),
+        Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidInput
+    ));
+    assert!(matches!(
+        Pin::new(&mut file).poll_write(&mut task, b"XY"),
+        Poll::Ready(Ok(2))
+    ));
+    assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+    assert_eq!(file.position(), 2);
+    assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
+    crate::test_complete!("test_uring_invalid_absolute_seek_preserves_a_completed_write_retry");
+}
+
+#[test]
+fn test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io() {
+    init_test("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("seek_offset_range.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    let pool = crate::runtime::BlockingPool::new(1, 1);
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let largest = u64::try_from(i64::MAX).unwrap();
+    for position in [
+        SeekFrom::Start(largest + 1),
+        SeekFrom::Start(u64::MAX),
+        SeekFrom::Current(i64::MAX),
+        SeekFrom::End(i64::MAX),
+    ] {
+        file.seek(SeekFrom::Start(2)).unwrap();
+        assert_eq!(
+            file.seek(position).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(file.position(), 2);
+        let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, position)
+        }))
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(file.position(), 2);
+    }
+
+    assert_eq!(file.seek(SeekFrom::Start(largest)).unwrap(), largest);
+    assert_eq!(
+        file.seek(SeekFrom::Current(1)).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(file.position(), largest);
+    assert_eq!(file.seek(SeekFrom::Current(-i64::MAX)).unwrap(), 0);
+    assert_eq!(
+        futures_lite::future::block_on(file.write(b"XY")).unwrap(),
+        2
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
+    let mut rest = [0; 4];
+    assert_eq!(
+        futures_lite::future::block_on(file.read(&mut rest)).unwrap(),
+        4
+    );
+    assert_eq!(&rest, b"cdef");
+    assert_eq!(
+        IoUringFile::current_fd_position(file.as_raw_fd()).unwrap(),
+        0
+    );
+    crate::test_complete!("test_uring_seek_rejects_kernel_sentinels_without_poisoning_cursor_io");
+}
+
+#[test]
+fn test_submitted_completion_wait_retries_syscall_errors() {
+    init_test("test_submitted_completion_wait_retries_syscall_errors");
+    let mut attempts = 0;
+
+    let result = wait_until_submitted_completion(|| {
+        attempts += 1;
+        match attempts {
+            1 => (Err(io::Error::from(io::ErrorKind::Interrupted)), None),
+            2 => (Err(io::Error::from(io::ErrorKind::WouldBlock)), None),
+            3 => (Err(io::Error::from_raw_os_error(libc::EIO)), None),
+            4 => (Ok(1), Some(23)),
+            _ => panic!("completion driver retried after terminal CQE"),
+        }
+    });
+
+    crate::assert_with_log!(result == 23, "terminal CQE result", 23, result);
+    crate::assert_with_log!(attempts == 4, "wait attempts", 4, attempts);
+    crate::test_complete!("test_submitted_completion_wait_retries_syscall_errors");
+}
+
+#[test]
+fn test_submitted_completion_is_observed_alongside_wait_error() {
+    init_test("test_submitted_completion_is_observed_alongside_wait_error");
+    let mut attempts = 0;
+
+    let result = wait_until_submitted_completion(|| {
+        attempts += 1;
+        (
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Some(-libc::ECANCELED),
+        )
+    });
+
+    crate::assert_with_log!(
+        result == -libc::ECANCELED,
+        "negative matching CQE is terminal",
+        -libc::ECANCELED,
+        result
+    );
+    crate::assert_with_log!(attempts == 1, "wait attempts", 1, attempts);
+    crate::test_complete!("test_submitted_completion_is_observed_alongside_wait_error");
+}
+
+#[test]
+fn test_submitted_completion_tracked_drain_survives_unrelated_cqe() {
+    init_test("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
+    let target = OpKind::Read.encode(41);
+    let state = Mutex::new(OpState::Pending {
+        user_data: target,
+        waker: None,
+    });
+    let mut script = std::collections::VecDeque::from([
+        (Err(io::Error::from_raw_os_error(libc::EIO)), Vec::new()),
+        (
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            vec![(UNKNOWN_CQE_USER_DATA, 0)],
+        ),
+        (
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            vec![(target, -libc::ECANCELED)],
+        ),
+    ]);
+    let mut wait_cycles = 0;
+    let mut completion_batches = 0;
+
+    drain_tracked_until_quiescent(
+        || state_pending_user_data(&state).is_some(),
+        || {
+            completion_batches += 1;
+            wait_until_submitted_completion(|| {
+                wait_cycles += 1;
+                let (wait_result, completions) = script
+                    .pop_front()
+                    .expect("tracked drain requested an unexpected wait cycle");
+                let completion = (!completions.is_empty()).then_some(completions);
+                (wait_result, completion)
+            })
+        },
+        |user_data, result| {
+            let _ = mark_op_complete(&state, user_data, result);
+        },
+    );
+
+    let terminal_result = match &*state.lock() {
+        OpState::Complete(result) => *result,
+        state => panic!("tracked state did not reach completion: {state:?}"),
+    };
+    crate::assert_with_log!(wait_cycles == 3, "wait cycles", 3, wait_cycles);
+    crate::assert_with_log!(
+        completion_batches == 2,
+        "completion batches",
+        2,
+        completion_batches
+    );
+    crate::assert_with_log!(
+        terminal_result == -libc::ECANCELED,
+        "matching cancellation CQE",
+        -libc::ECANCELED,
+        terminal_result
+    );
+    crate::test_complete!("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
+    init_test("test_path_to_cstring_accepts_non_utf8_unix_paths");
+    let raw = vec![b'f', b'i', b'l', b'e', b'_', 0xFD];
+    let path = std::path::PathBuf::from(OsString::from_vec(raw.clone()));
+
+    let c = path_to_cstring(&path).expect("non-utf8 unix path should be accepted");
+    crate::assert_with_log!(
+        c.as_bytes() == raw.as_slice(),
+        "raw bytes preserved",
+        raw.as_slice(),
+        c.as_bytes()
+    );
+    crate::test_complete!("test_path_to_cstring_accepts_non_utf8_unix_paths");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_path_to_cstring_rejects_nul_bytes() {
+    init_test("test_path_to_cstring_rejects_nul_bytes");
+    let path = std::path::PathBuf::from(OsString::from_vec(vec![b'b', b'a', b'd', 0, b'x']));
+
+    let err = path_to_cstring(&path).expect_err("path with nul must be rejected");
+    crate::assert_with_log!(
+        err.kind() == io::ErrorKind::InvalidInput,
+        "invalid input error",
+        io::ErrorKind::InvalidInput,
+        err.kind()
+    );
+    crate::test_complete!("test_path_to_cstring_rejects_nul_bytes");
+}
+
+#[test]
+fn test_uring_file_create_write_read() {
+    init_test("test_uring_file_create_write_read");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_test.txt");
+
+        // Create and write
+        let file = IoUringFile::create(&path).unwrap();
+        let n = file.write(b"hello io_uring").await.unwrap();
+        crate::assert_with_log!(n == 14, "bytes written", 14usize, n);
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        // Read back
+        let file = IoUringFile::open(&path).unwrap();
+        let mut buf = vec![0u8; 32];
+        let n = file.read(&mut buf).await.unwrap();
+        crate::assert_with_log!(n == 14, "bytes read", 14usize, n);
+        crate::assert_with_log!(
+            &buf[..n] == b"hello io_uring",
+            "content",
+            "hello io_uring",
+            String::from_utf8_lossy(&buf[..n])
+        );
+    });
+    crate::test_complete!("test_uring_file_create_write_read");
+}
+
+#[test]
+fn test_uring_file_drop_drains_pending_read() {
+    init_test("test_uring_file_drop_drains_pending_read");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_drop_pending_read.txt");
+    std::fs::write(&path, b"hello").unwrap();
+
+    let file = IoUringFile::open(&path).unwrap();
+
+    // Submit a read without waiting for it in user code, then rely on Drop to
+    // drain the CQE before tearing down the ring mapping.
+    let pending = file.submit_pending_read_for_test(5, 0).unwrap();
+    let buf = pending.finish_buffer();
+
+    let read_completed = buf == b"hello";
+    let read_cancelled = buf.iter().all(|byte| *byte == 0);
+    crate::assert_with_log!(
+        read_completed || read_cancelled,
+        "drop drained read to completion or cancellation",
+        "completed_or_cancelled",
+        String::from_utf8_lossy(&buf)
+    );
+    let file_contents = std::fs::read(&path).unwrap();
+    crate::assert_with_log!(
+        file_contents == b"hello",
+        "drop drained read leaves source file intact",
+        "hello",
+        String::from_utf8_lossy(&file_contents)
+    );
+    crate::test_complete!("test_uring_file_drop_drains_pending_read");
+}
+
+#[test]
+fn test_uring_file_drop_drains_pending_write() {
+    init_test("test_uring_file_drop_drains_pending_write");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_drop_pending_write.txt");
+
+    let file =
+        IoUringFile::open_with_flags(&path, libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC, 0o644)
+            .unwrap();
+    let payload = b"drop-drained-write";
+
+    let pending = file
+        .submit_pending_write_for_test(payload.to_vec(), 0)
+        .unwrap();
+    pending.drain();
+
+    let contents = std::fs::read(&path).unwrap();
+    let write_completed = contents.as_slice() == payload;
+    let write_cancelled = contents.is_empty();
+    crate::assert_with_log!(
+        write_completed || write_cancelled,
+        "drop drained write to completion or cancellation",
+        "completed_or_cancelled",
+        String::from_utf8_lossy(&contents)
+    );
+    crate::test_complete!("test_uring_file_drop_drains_pending_write");
+}
+
+#[test]
+fn test_uring_file_drop_drains_pending_sync() {
+    init_test("test_uring_file_drop_drains_pending_sync");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_drop_pending_sync.txt");
+    std::fs::write(&path, b"sync-before-drop").unwrap();
+
+    let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+    let pending = file.submit_pending_sync_for_test(false).unwrap();
+    pending.drain();
+
+    let contents = std::fs::read(&path).unwrap();
+    crate::assert_with_log!(
+        contents.as_slice() == b"sync-before-drop",
+        "drop drained sync without corrupting file",
+        "sync-before-drop",
+        String::from_utf8_lossy(&contents)
+    );
+    crate::test_complete!("test_uring_file_drop_drains_pending_sync");
+}
+
+#[test]
+fn test_uring_file_read_at_write_at() {
+    init_test("test_uring_file_read_at_write_at");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_offset_test.txt");
+
+        // Create file with content
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        // Write at offset 0
+        let n = file.write_at(b"AAAAAAAAAA", 0).await.unwrap();
+        crate::assert_with_log!(n == 10, "first write", 10usize, n);
+
+        // Write at offset 5 (overwrite middle)
+        let n = file.write_at(b"BBBBB", 5).await.unwrap();
+        crate::assert_with_log!(n == 5, "second write", 5usize, n);
+
+        file.sync_all().await.unwrap();
+
+        // Read at offset 0
+        let mut buf = vec![0u8; 10];
+        let n = file.read_at(&mut buf, 0).await.unwrap();
+        crate::assert_with_log!(n == 10, "read back", 10usize, n);
+        crate::assert_with_log!(
+            &buf[..n] == b"AAAAABBBBB",
+            "content",
+            "AAAAABBBBB",
+            String::from_utf8_lossy(&buf[..n])
+        );
+    });
+    crate::test_complete!("test_uring_file_read_at_write_at");
+}
+
+#[test]
+fn test_uring_completion_attribution_ignores_unrelated_cqe() {
+    init_test("test_uring_completion_attribution_ignores_unrelated_cqe");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_unrelated_cqe.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open(&path).unwrap();
+
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+            .unwrap();
+
+        let mut buf = [0u8; 5];
+        let n = file.read(&mut buf).await.unwrap();
+        crate::assert_with_log!(n == 5, "read length", 5usize, n);
+        crate::assert_with_log!(
+            &buf == b"hello",
+            "read ignores unrelated CQE and returns actual data",
+            "hello",
+            String::from_utf8_lossy(&buf)
+        );
+    });
+    crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe");
+}
+
+#[test]
+fn test_uring_completion_attribution_ignores_unrelated_cqe_before_write() {
+    init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_write");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_unrelated_cqe_write.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+            .unwrap();
+
+        let n = file.write(b"hello").await.unwrap();
+        crate::assert_with_log!(n == 5, "write length", 5usize, n);
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        let contents = std::fs::read(&path).unwrap();
+        crate::assert_with_log!(
+            contents.as_slice() == b"hello",
+            "write ignores unrelated CQE and persists actual data",
+            "hello",
+            String::from_utf8_lossy(&contents)
+        );
+    });
+    crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe_before_write");
+}
+
+#[test]
+fn test_uring_completion_attribution_ignores_unrelated_cqe_before_sync() {
+    init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_sync");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_unrelated_cqe_sync.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+            .unwrap();
+
+        file.sync_all().await.unwrap();
+        drop(file);
+
+        let contents = std::fs::read(&path).unwrap();
+        crate::assert_with_log!(
+            contents.as_slice() == b"hello",
+            "sync ignores unrelated CQE and preserves actual data",
+            "hello",
+            String::from_utf8_lossy(&contents)
+        );
+    });
+    crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe_before_sync");
+}
+
+#[test]
+fn test_uring_set_len_has_no_async_truncate_completion() {
+    init_test("test_uring_set_len_has_no_async_truncate_completion");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_truncate_no_pending.txt");
+    std::fs::write(&path, b"truncate-boundary").unwrap();
+
+    let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    file.set_len(8).unwrap();
+
+    crate::assert_with_log!(
+        !any_ops_pending(&file.inner),
+        "set_len uses synchronous ftruncate and leaves no io_uring state",
+        false,
+        any_ops_pending(&file.inner)
+    );
+    crate::assert_with_log!(
+        file.metadata().unwrap().len() == 8,
+        "truncated len",
+        8u64,
+        file.metadata().unwrap().len()
+    );
+    crate::test_complete!("test_uring_set_len_has_no_async_truncate_completion");
+}
+
+#[test]
+fn test_uring_sq_full_recovers_by_submitting_and_retrying() {
+    init_test("test_uring_sq_full_recovers_by_submitting_and_retrying");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_sq_full_retry.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open(&path).unwrap();
+
+        {
+            let mut ring = file.inner.ring.lock();
+            let mut next_user_data = 1u64;
+            loop {
+                let entry = opcode::Nop::new()
+                    .build()
+                    .user_data(0xFF00_0000_AA00_0000u64.wrapping_add(next_user_data));
+                // SAFETY: NOP has no external buffer dependencies.
+                let push_result = unsafe { ring.submission().push(&entry) };
+                if push_result.is_err() {
+                    break;
+                }
+                next_user_data = next_user_data.saturating_add(1);
             }
         }
-        crate::test_complete!("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
-    }
 
-    #[test]
-    fn test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush() {
-        init_test("test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush");
-        for read_observer in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("trait_relative_seek.txt");
-            std::fs::write(&path, b"abcdefghijklmnop").unwrap();
-            let mut occupied = OccupiedTraitPool::new();
-            let cx = crate::cx::Cx::for_testing()
-                .with_blocking_pool_handle(Some(occupied.pool.handle()));
-            let _current = crate::cx::Cx::set_current(Some(cx));
-            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-            let mut task = Context::from_waker(Waker::noop());
+        let mut buf = [0u8; 5];
+        let n = file.read(&mut buf).await.unwrap();
+        assert_eq!(n, 5, "read length after SQ recovery");
+        assert_eq!(&buf, b"hello", "read succeeds after SQ-full recovery");
+    });
+    crate::test_complete!("test_uring_sq_full_recovers_by_submitting_and_retrying");
+}
+
+#[test]
+fn test_uring_file_position_tracking() {
+    init_test("test_uring_file_position_tracking");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_position_test.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        // Initial position should be 0
+        crate::assert_with_log!(
+            file.position() == 0,
+            "initial position",
+            0u64,
+            file.position()
+        );
+
+        // Write updates position
+        let n = file.write(b"hello").await.unwrap();
+        crate::assert_with_log!(n == 5, "write", 5usize, n);
+        crate::assert_with_log!(
+            file.position() == 5,
+            "position after write",
+            5u64,
+            file.position()
+        );
+
+        // write_at does NOT update position
+        let n = file.write_at(b"world", 10).await.unwrap();
+        crate::assert_with_log!(n == 5, "write_at", 5usize, n);
+        crate::assert_with_log!(
+            file.position() == 5,
+            "position after write_at",
+            5u64,
+            file.position()
+        );
+
+        // Seek updates position
+        let pos = file.seek(SeekFrom::Start(0)).unwrap();
+        crate::assert_with_log!(pos == 0, "seek result", 0u64, pos);
+        crate::assert_with_log!(
+            file.position() == 0,
+            "position after seek",
+            0u64,
+            file.position()
+        );
+    });
+    crate::test_complete!("test_uring_file_position_tracking");
+}
+
+#[test]
+fn test_uring_seek_current_uses_logical_position() {
+    init_test("test_uring_seek_current_uses_logical_position");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_seek_current_position.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        let n = file.write(b"abcdef").await.unwrap();
+        crate::assert_with_log!(n == 6, "write length", 6usize, n);
+
+        let current = file.seek(SeekFrom::Current(0)).unwrap();
+        crate::assert_with_log!(current == 6, "current seek result", 6u64, current);
+        crate::assert_with_log!(
+            file.position() == 6,
+            "position after current seek",
+            6u64,
+            file.position()
+        );
+
+        let current = file.seek(SeekFrom::Current(-2)).unwrap();
+        crate::assert_with_log!(current == 4, "rewound seek result", 4u64, current);
+        crate::assert_with_log!(
+            file.position() == 4,
+            "position after rewind",
+            4u64,
+            file.position()
+        );
+
+        let mut tail = [0u8; 2];
+        let n = file.read(&mut tail).await.unwrap();
+        crate::assert_with_log!(n == 2, "tail read length", 2usize, n);
+        crate::assert_with_log!(
+            &tail == b"ef",
+            "tail read bytes",
+            "ef",
+            String::from_utf8_lossy(&tail)
+        );
+    });
+    crate::test_complete!("test_uring_seek_current_uses_logical_position");
+}
+
+#[test]
+fn test_uring_from_raw_fd_preserves_existing_cursor_position() {
+    init_test("test_uring_from_raw_fd_preserves_existing_cursor_position");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_from_raw_fd_cursor.txt");
+
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::io::Seek::seek(&mut std_file, SeekFrom::Start(2)).unwrap();
+
+        let raw_fd = std_file.into_raw_fd();
+        let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();
+
+        crate::assert_with_log!(
+            file.position() == 2,
+            "initial logical cursor preserves raw fd offset",
+            2u64,
+            file.position()
+        );
+        let current = file.seek(SeekFrom::Current(0)).unwrap();
+        crate::assert_with_log!(current == 2, "seek current", 2u64, current);
+
+        let mut buf = [0u8; 2];
+        let n = file.read(&mut buf).await.unwrap();
+        crate::assert_with_log!(n == 2, "read length", 2usize, n);
+        crate::assert_with_log!(
+            &buf == b"cd",
+            "read starts from transferred cursor",
+            "cd",
+            String::from_utf8_lossy(&buf)
+        );
+        crate::assert_with_log!(
+            file.position() == 4,
+            "position after read from transferred cursor",
+            4u64,
+            file.position()
+        );
+    });
+    crate::test_complete!("test_uring_from_raw_fd_preserves_existing_cursor_position");
+}
+
+#[test]
+fn test_uring_from_raw_fd_closes_fd_when_position_probe_fails() {
+    init_test("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
+
+    let mut fds = [0; 2];
+    let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(pipe_result, 0, "pipe creation should succeed");
+
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    let err = unsafe { IoUringFile::from_raw_fd(read_fd) }
+        .expect_err("non-seekable fds must fail position probe");
+    crate::assert_with_log!(
+        err.raw_os_error() == Some(libc::ESPIPE),
+        "pipe fd fails with ESPIPE",
+        Some(libc::ESPIPE),
+        err.raw_os_error()
+    );
+
+    // The failed constructor owned `read_fd` and closed it. Probe the pipe, not the
+    // number: closing `read_fd` again here can close an fd a concurrent test was just
+    // handed (it did on 2026-09-29, and the lib test binary died with SIGBUS right
+    // after). With no reader left, a write fails with EPIPE; Rust ignores SIGPIPE.
+    let write_result = unsafe { libc::write(write_fd, [0u8].as_ptr().cast(), 1) };
+    let write_errno = io::Error::last_os_error().raw_os_error();
+    crate::assert_with_log!(
+        write_result == -1,
+        "failed construction must still consume and close the transferred fd",
+        -1,
+        write_result
+    );
+    crate::assert_with_log!(
+        write_errno == Some(libc::EPIPE),
+        "the pipe has no reader left",
+        Some(libc::EPIPE),
+        write_errno
+    );
+
+    let write_close_result = unsafe { libc::close(write_fd) };
+    crate::assert_with_log!(
+        write_close_result == 0,
+        "write end remains open for explicit cleanup",
+        0,
+        write_close_result
+    );
+
+    crate::test_complete!("test_uring_from_raw_fd_closes_fd_when_position_probe_fails");
+}
+
+#[test]
+fn test_uring_write_uses_position_at_poll_time() {
+    init_test("test_uring_write_uses_position_at_poll_time");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_lazy_write_position.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        let first = file.write(b"abc");
+        let second = file.write(b"def");
+
+        let n = first.await.unwrap();
+        crate::assert_with_log!(n == 3, "first write length", 3usize, n);
+        crate::assert_with_log!(
+            file.position() == 3,
+            "position after first write",
+            3u64,
+            file.position()
+        );
+
+        let n = second.await.unwrap();
+        crate::assert_with_log!(n == 3, "second write length", 3usize, n);
+        crate::assert_with_log!(
+            file.position() == 6,
+            "position after second write",
+            6u64,
+            file.position()
+        );
+
+        file.sync_all().await.unwrap();
+
+        let mut buf = [0u8; 6];
+        let n = file.read_at(&mut buf, 0).await.unwrap();
+        crate::assert_with_log!(n == 6, "read back length", 6usize, n);
+        crate::assert_with_log!(
+            &buf == b"abcdef",
+            "write futures append in poll order",
+            "abcdef",
+            String::from_utf8_lossy(&buf)
+        );
+    });
+    crate::test_complete!("test_uring_write_uses_position_at_poll_time");
+}
+
+#[test]
+fn test_uring_read_uses_position_at_poll_time() {
+    init_test("test_uring_read_uses_position_at_poll_time");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_lazy_read_position.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+        file.write_at(b"abcdef", 0).await.unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+
+        let mut first_buf = [0u8; 3];
+        let mut second_buf = [0u8; 3];
+        let first = file.read(&mut first_buf);
+        let second = file.read(&mut second_buf);
+
+        let n = first.await.unwrap();
+        crate::assert_with_log!(n == 3, "first read length", 3usize, n);
+        crate::assert_with_log!(
+            &first_buf == b"abc",
+            "first read bytes",
+            "abc",
+            String::from_utf8_lossy(&first_buf)
+        );
+        crate::assert_with_log!(
+            file.position() == 3,
+            "position after first read",
+            3u64,
+            file.position()
+        );
+
+        let n = second.await.unwrap();
+        crate::assert_with_log!(n == 3, "second read length", 3usize, n);
+        crate::assert_with_log!(
+            &second_buf == b"def",
+            "second read bytes",
+            "def",
+            String::from_utf8_lossy(&second_buf)
+        );
+        crate::assert_with_log!(
+            file.position() == 6,
+            "position after second read",
+            6u64,
+            file.position()
+        );
+    });
+    crate::test_complete!("test_uring_read_uses_position_at_poll_time");
+}
+
+#[test]
+fn test_uring_file_sync_data() {
+    init_test("test_uring_file_sync_data");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_sync_test.txt");
+
+        let file = IoUringFile::create(&path).unwrap();
+        file.write(b"sync test data").await.unwrap();
+
+        // sync_data should succeed
+        file.sync_data().await.unwrap();
+
+        // sync_all should succeed
+        file.sync_all().await.unwrap();
+    });
+    crate::test_complete!("test_uring_file_sync_data");
+}
+
+#[test]
+fn test_uring_read_future_second_poll_fails_closed() {
+    init_test("test_uring_read_future_second_poll_fails_closed");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_read_repoll.txt");
+    std::fs::write(&path, b"hello").unwrap();
+
+    let file = IoUringFile::open(&path).unwrap();
+    let mut buf = [0u8; 5];
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    {
+        let mut future = file.read(&mut buf);
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(5))));
+        assert_eq!(file.position(), 5);
+
+        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "read");
+    }
+    assert_eq!(&buf, b"hello");
+    assert_eq!(file.position(), 5);
+    crate::test_complete!("test_uring_read_future_second_poll_fails_closed");
+}
+
+#[test]
+fn test_uring_write_future_second_poll_fails_closed() {
+    init_test("test_uring_write_future_second_poll_fails_closed");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_write_repoll.txt");
+
+    let file =
+        IoUringFile::open_with_flags(&path, libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC, 0o644)
+            .unwrap();
+    let mut future = file.write(b"abc");
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let first = Pin::new(&mut future).poll(&mut cx);
+    assert!(matches!(first, Poll::Ready(Ok(3))));
+    assert_eq!(file.position(), 3);
+
+    assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
+    assert_eq!(file.position(), 3);
+
+    let mut buf = [0u8; 3];
+    let n = futures_lite::future::block_on(file.read_at(&mut buf, 0)).unwrap();
+    assert_eq!(n, 3);
+    assert_eq!(&buf, b"abc");
+    crate::test_complete!("test_uring_write_future_second_poll_fails_closed");
+}
+
+#[test]
+fn test_uring_sync_future_second_poll_fails_closed() {
+    init_test("test_uring_sync_future_second_poll_fails_closed");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_sync_repoll.txt");
+
+    let file = IoUringFile::create(&path).unwrap();
+    let mut future = file.sync_all();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let first = Pin::new(&mut future).poll(&mut cx);
+    assert!(matches!(first, Poll::Ready(Ok(()))));
+
+    assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "sync");
+    crate::test_complete!("test_uring_sync_future_second_poll_fails_closed");
+}
+
+#[test]
+fn test_uring_error_terminal_still_fails_closed_on_repoll() {
+    init_test("test_uring_error_terminal_still_fails_closed_on_repoll");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("uring_error_repoll.txt");
+    std::fs::write(&path, b"hello").unwrap();
+
+    let file = IoUringFile::open(&path).unwrap();
+    let mut future = file.write(b"abc");
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let first = Pin::new(&mut future).poll(&mut cx);
+    assert!(matches!(first, Poll::Ready(Err(_))));
+    assert_eq!(file.position(), 0);
+
+    assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
+    assert_eq!(file.position(), 0);
+    crate::test_complete!("test_uring_error_terminal_still_fails_closed_on_repoll");
+}
+
+#[test]
+fn test_uring_file_set_len_truncate() {
+    init_test("test_uring_file_set_len_truncate");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_truncate_test.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        // Write 20 bytes
+        file.write(b"01234567890123456789").await.unwrap();
+        file.sync_all().await.unwrap();
+
+        // Truncate to 10
+        file.set_len(10).unwrap();
+
+        // Position should be clamped from 19 to 10
+        crate::assert_with_log!(
+            file.position() <= 10,
+            "position clamped after truncate",
+            true,
+            file.position() <= 10
+        );
+
+        // Read back and verify
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut buf = vec![0u8; 32];
+        let n = file.read(&mut buf).await.unwrap();
+        crate::assert_with_log!(n == 10, "truncated read length", 10usize, n);
+        crate::assert_with_log!(
+            &buf[..n] == b"0123456789",
+            "truncated content",
+            "0123456789",
+            String::from_utf8_lossy(&buf[..n])
+        );
+    });
+    crate::test_complete!("test_uring_file_set_len_truncate");
+}
+
+#[test]
+fn test_uring_file_set_len_extend() {
+    init_test("test_uring_file_set_len_extend");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_extend_test.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        file.write(b"hello").await.unwrap();
+        file.sync_all().await.unwrap();
+
+        // Extend to 10 bytes (zero-filled beyond 5)
+        file.set_len(10).unwrap();
+
+        let meta = file.metadata().unwrap();
+        crate::assert_with_log!(meta.len() == 10, "extended length", 10u64, meta.len());
+
+        // Read the extended region
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut buf = vec![0u8; 10];
+        let n = file.read_at(&mut buf, 0).await.unwrap();
+        crate::assert_with_log!(n == 10, "read length", 10usize, n);
+        crate::assert_with_log!(
+            &buf[..5] == b"hello",
+            "original content preserved",
+            "hello",
+            String::from_utf8_lossy(&buf[..5])
+        );
+        crate::assert_with_log!(
+            buf[5..] == [0u8; 5],
+            "extended bytes are zero",
+            true,
+            buf[5..] == [0u8; 5]
+        );
+    });
+    crate::test_complete!("test_uring_file_set_len_extend");
+}
+
+#[test]
+fn test_uring_file_metadata() {
+    init_test("test_uring_file_metadata");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_metadata_test.txt");
+
+        let file = IoUringFile::create(&path).unwrap();
+        file.write(b"metadata test").await.unwrap();
+        file.sync_all().await.unwrap();
+
+        let meta = file.metadata().unwrap();
+        crate::assert_with_log!(meta.is_file(), "is_file", true, meta.is_file());
+        crate::assert_with_log!(meta.len() == 13, "file length", 13u64, meta.len());
+    });
+    crate::test_complete!("test_uring_file_metadata");
+}
+
+#[test]
+fn test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper() {
+    init_test("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_metadata_permissions_roundtrip.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        let mut permissions = file.metadata().unwrap().permissions();
+        permissions.set_readonly(true);
+        file.set_permissions(permissions).unwrap();
+        let readonly = file.metadata().unwrap().permissions().readonly();
+        crate::assert_with_log!(
+            readonly,
+            "io_uring file permissions set readonly through fs wrapper",
+            true,
+            readonly
+        );
+
+        let mut permissions = file.metadata().unwrap().permissions();
+        permissions.set_readonly(false);
+        file.set_permissions(permissions).unwrap();
+        let readonly = file.metadata().unwrap().permissions().readonly();
+        crate::assert_with_log!(
+            !readonly,
+            "io_uring file permissions reset through fs wrapper",
+            false,
+            readonly
+        );
+    });
+    crate::test_complete!("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
+}
+
+#[test]
+fn test_uring_file_large_io() {
+    init_test("test_uring_file_large_io");
+    futures_lite::future::block_on(async {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_large_test.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+
+        // Write 64KB of data in 4KB chunks
+        let data: Vec<u8> = (0..65536u32).map(|i| (i % 256) as u8).collect();
+        let mut written = 0usize;
+        while written < data.len() {
+            let end = std::cmp::min(written + 4096, data.len());
+            let n = file
+                .write_at(&data[written..end], written as u64)
+                .await
+                .unwrap();
+            written += n;
+        }
+        file.sync_all().await.unwrap();
+
+        // Read back in one shot and verify
+        let mut buf = vec![0u8; 65536];
+        let mut read_total = 0usize;
+        while read_total < buf.len() {
+            let n = file
+                .read_at(&mut buf[read_total..], read_total as u64)
+                .await
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            read_total += n;
+        }
+        crate::assert_with_log!(read_total == 65536, "total read", 65536usize, read_total);
+        crate::assert_with_log!(buf == data, "data integrity", true, buf == data);
+    });
+    crate::test_complete!("test_uring_file_large_io");
+}
+
+#[test]
+fn test_uring_traits_queue_owned_write_and_preserve_interleaved_credit() {
+    init_test("test_uring_traits_queue_owned_write_and_preserve_interleaved_credit");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_interleaved.txt");
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file =
+        IoUringFile::open_with_flags(&path, libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC, 0o600)
+            .unwrap();
+
+    let writer_wakes = Arc::new(TraitWakeCount::default());
+    let reader_wakes = Arc::new(TraitWakeCount::default());
+    let flusher_wakes = Arc::new(TraitWakeCount::default());
+    let writer = Waker::from(Arc::clone(&writer_wakes));
+    let reader = Waker::from(Arc::clone(&reader_wakes));
+    let flusher = Waker::from(Arc::clone(&flusher_wakes));
+    let mut submitted = b"hello".to_vec();
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut Context::from_waker(&writer), &submitted)
+            .is_pending()
+    );
+    // A dropped borrowing write must leave the owned original bytes alive.
+    submitted.fill(b'x');
+    drop(submitted);
+    let mut bytes = [0; 8];
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(
+                &mut Context::from_waker(&reader),
+                &mut ReadBuf::new(&mut bytes),
+            )
+            .is_pending()
+    );
+    assert!(
+        Pin::new(&mut file)
+            .poll_flush(&mut Context::from_waker(&flusher))
+            .is_pending()
+    );
+
+    // The synchronous API cannot overtake a queued trait operation.
+    assert_eq!(
+        file.seek(SeekFrom::Start(0)).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        file.set_len(0).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        futures_lite::future::block_on(file.read_at(&mut bytes, 0))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        futures_lite::future::block_on(file.sync_data())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+
+    occupied.release_and_drain();
+    assert!(writer_wakes.0.load(Ordering::Acquire) > 0);
+    assert!(reader_wakes.0.load(Ordering::Acquire) > 0);
+    assert!(flusher_wakes.0.load(Ordering::Acquire) > 0);
+    assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 0);
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_flush(cx)
+    }))
+    .unwrap();
+
+    // The read collected the write and the flush preserved its result;
+    // its caller still gets the count without submitting the bytes again.
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        Pin::new(&mut file).poll_write(&mut task, b"hello"),
+        Poll::Ready(Ok(5))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    assert_eq!(file.position(), 5);
+
+    // Leave another successful write's credit unclaimed, then seek.
+    // Seeking starts a new write sequence even for identical bytes.
+    let mut second = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(second.pool.handle()));
+    let _second_current = crate::cx::Cx::set_current(Some(cx));
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut task, b"hello")
+            .is_pending()
+    );
+    assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+    second.release_and_drain();
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_flush(cx)
+    }))
+    .unwrap();
+    assert_eq!(file.position(), 10);
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+    }))
+    .unwrap();
+    let written = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_write(cx, b"hello")
+    }))
+    .unwrap();
+    assert_eq!(written, 5);
+    assert_eq!(std::fs::read(&path).unwrap(), b"hellohellohello");
+    crate::test_complete!("test_uring_traits_queue_owned_write_and_preserve_interleaved_credit");
+}
+
+#[test]
+fn test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder() {
+    init_test("test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_read_ahead.txt");
+    std::fs::write(&path, b"abcdefghij").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open(&path).unwrap();
+    let mut first = vec![0; 6];
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(&mut task, &mut ReadBuf::new(&mut first))
+            .is_pending()
+    );
+    drop(first);
+    occupied.release_and_drain();
+    assert_eq!(file.inner.position.load(Ordering::Relaxed), 6);
+    assert_eq!(file.position(), 0, "uncollected bytes are still unread");
+
+    let mut prefix = [0; 2];
+    assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(file.position(), 2);
+    let mut next = [0; 1];
+    assert_eq!(read_via_trait(&mut file, &mut next).unwrap(), 1);
+    assert_eq!(&next, b"c");
+    assert_eq!(file.position(), 3);
+
+    let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(0))
+    }))
+    .unwrap();
+    assert_eq!(position, 3, "seek reconciles unread read-ahead");
+    let mut remaining = [0; 7];
+    assert_eq!(read_via_trait(&mut file, &mut remaining).unwrap(), 7);
+    assert_eq!(&remaining, b"defghij");
+    crate::test_complete!(
+        "test_uring_trait_read_preserves_uncollected_cursor_and_short_buffer_remainder"
+    );
+}
+
+#[test]
+fn test_uring_positioned_write_invalidates_trait_read_ahead() {
+    init_test("test_uring_positioned_write_invalidates_trait_read_ahead");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_positioned_write.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    let mut first = [0; 6];
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(&mut task, &mut ReadBuf::new(&mut first))
+            .is_pending()
+    );
+    occupied.release_and_drain();
+    let mut prefix = [0; 2];
+    assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(
+        futures_lite::future::block_on(file.write_at(b"XY", 2)).unwrap(),
+        2
+    );
+    assert_eq!(
+        file.position(),
+        2,
+        "positioned writes retain the logical cursor"
+    );
+    let mut rest = [0; 4];
+    assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
+    assert_eq!(&rest, b"XYef", "read-ahead must not mask a file mutation");
+    crate::test_complete!("test_uring_positioned_write_invalidates_trait_read_ahead");
+}
+
+#[test]
+fn test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool() {
+    init_test("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
+    for seek in [false, true] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trait_seek_sync.txt");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx =
+            crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        if seek {
             assert!(
                 Pin::new(&mut file)
-                    .poll_seek(&mut task, SeekFrom::Current(5))
+                    .poll_seek(&mut task, SeekFrom::End(-2))
                     .is_pending()
             );
-            let mut bytes = [0; 2];
-            if read_observer {
-                assert!(
-                    Pin::new(&mut file)
-                        .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
-                        .is_pending()
-                );
-            } else {
-                assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
-            }
-            occupied.release_and_drain();
-
-            // The foreign operation collects the seek's terminal result. A
-            // read then advances the cursor beyond the seek's returned offset.
-            if read_observer {
-                assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
-                assert_eq!(&bytes, b"fg");
-            } else {
-                futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                    Pin::new(&mut file).poll_flush(cx)
-                }))
-                .unwrap();
-            }
-            let observed_position = if read_observer { 7 } else { 5 };
-            assert_eq!(file.position(), observed_position);
-            let requests = file.inner.next_user_data.load(Ordering::Relaxed);
-            assert!(matches!(
-                Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(5)),
-                Poll::Ready(Ok(5))
-            ));
-            assert_eq!(file.position(), observed_position, "relative seek was not repeated");
-            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
-
-            // Once that result is consumed, an identical new seek is real work.
-            let next = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
-            }))
-            .unwrap();
-            assert_eq!(next, observed_position + 5);
-            assert_eq!(file.position(), next);
+        } else {
+            assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
         }
-        crate::test_complete!(
-            "test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush"
-        );
-    }
-
-    /// Queue a real trait seek behind an occupied worker, then let a different
-    /// operation collect it. The seek's borrowing caller never receives its
-    /// result; the next poll must decide whether it is a retry or a new seek.
-    fn collect_trait_seek_with_flush(file: &mut IoUringFile, position: SeekFrom) -> io::Result<()> {
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut *file).poll_seek(&mut task, position).is_pending());
-        assert!(Pin::new(&mut *file).poll_flush(&mut task).is_pending());
         occupied.release_and_drain();
-        futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut *file).poll_flush(cx)
-        }))
-    }
-
-    #[test]
-    fn test_uring_resize_invalidates_collected_end_seek() {
-        init_test("test_uring_resize_invalidates_collected_end_seek");
-        for new_length in [2_u64, 14] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("resized_seek.txt");
-            std::fs::write(&path, b"abcdefghij").unwrap();
-            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-            collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
-            assert_eq!(
-                file.position(),
-                10,
-                "the original seek finished before resizing"
-            );
-
-            file.set_len(new_length).unwrap();
-            assert_eq!(file.metadata().unwrap().len(), new_length);
-            assert_eq!(file.position(), 10_u64.min(new_length));
-            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
-            }))
-            .unwrap();
-            assert_eq!(position, new_length, "the new seek must observe the new EOF");
-            assert_eq!(file.position(), new_length);
-            assert_eq!(futures_lite::future::block_on(file.write(b"!")).unwrap(), 1);
-            let mut expected = b"abcdefghij".to_vec();
-            expected.resize(usize::try_from(new_length).unwrap(), 0);
-            expected.push(b'!');
-            assert_eq!(std::fs::read(&path).unwrap(), expected);
+        if seek {
+            assert!(matches!(
+                Pin::new(&mut file).poll_seek(&mut task, SeekFrom::End(-2)),
+                Poll::Ready(Ok(4))
+            ));
+            assert_eq!(file.position(), 4);
+        } else {
+            assert!(matches!(
+                Pin::new(&mut file).poll_flush(&mut task),
+                Poll::Ready(Ok(()))
+            ));
         }
-        crate::test_complete!("test_uring_resize_invalidates_collected_end_seek");
     }
+    crate::test_complete!("test_uring_trait_seek_and_flush_are_queued_on_the_inherited_pool");
+}
 
-    #[test]
-    fn test_uring_synchronous_writes_invalidate_collected_end_seek() {
-        init_test("test_uring_synchronous_writes_invalidate_collected_end_seek");
-        for positioned in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("written_seek.txt");
-            std::fs::write(&path, b"abcdefghij").unwrap();
-            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-            collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
-            assert_eq!(file.position(), 10);
-
-            let (length, expected): (u64, &[u8]) = if positioned {
-                assert_eq!(
-                    futures_lite::future::block_on(file.write_at(b"XY", 14)).unwrap(),
-                    2
-                );
-                assert_eq!(file.position(), 10, "positioned writes keep the cursor");
-                (16, b"abcdefghij\0\0\0\0XY")
-            } else {
-                assert_eq!(futures_lite::future::block_on(file.write(b"XY")).unwrap(), 2);
-                assert_eq!(file.position(), 12);
-                (12, b"abcdefghijXY")
-            };
-            assert_eq!(std::fs::read(&path).unwrap(), expected);
-            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
-            }))
-            .unwrap();
-            assert_eq!(position, length, "the write ended the old seek's retry");
-            assert_eq!(file.position(), length);
-        }
-        crate::test_complete!("test_uring_synchronous_writes_invalidate_collected_end_seek");
-    }
-
-    #[test]
-    fn test_uring_resize_discards_a_collected_seek_failure() {
-        init_test("test_uring_resize_discards_a_collected_seek_failure");
+#[test]
+fn test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush() {
+    init_test("test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush");
+    for read_observer in [false, true] {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("resized_failed_seek.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        let error = collect_trait_seek_with_flush(&mut file, SeekFrom::End(-8)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(file.position(), 0);
-
-        file.set_len(12).unwrap();
-        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(-8))
-        }))
-        .unwrap();
-        assert_eq!(
-            position,
-            4,
-            "a new seek observes the now-valid end-relative offset"
-        );
-        assert_eq!(file.position(), 4);
-        crate::test_complete!("test_uring_resize_discards_a_collected_seek_failure");
-    }
-
-    #[test]
-    fn test_uring_failed_synchronous_changes_end_the_previous_seek_retry() {
-        init_test("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
-        for resize in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("failed_change_seek.txt");
-            std::fs::write(&path, b"abcdefghijklmnop").unwrap();
-            let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-            collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
-            assert_eq!(file.position(), 5);
-
-            let error = if resize {
-                file.set_len(u64::MAX).unwrap_err()
-            } else {
-                file.seek(SeekFrom::Current(-6)).unwrap_err()
-            };
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(file.position(), 5);
-            assert_eq!(file.metadata().unwrap().len(), 16);
-            let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-                Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
-            }))
-            .unwrap();
-            assert_eq!(position, 10, "the identical offset now requests a new seek");
-            assert_eq!(file.position(), 10);
-        }
-        crate::test_complete!("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
-    }
-
-    #[test]
-    fn test_uring_collected_seek_survives_synchronous_read_and_sync_observers() {
-        init_test("test_uring_collected_seek_survives_synchronous_read_and_sync_observers");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("observed_seek.txt");
+        let path = dir.path().join("trait_relative_seek.txt");
         std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut occupied = OccupiedTraitPool::new();
+        let cx =
+            crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let _current = crate::cx::Cx::set_current(Some(cx));
         let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
-        assert_eq!(file.position(), 5);
-        futures_lite::future::block_on(file.sync_all()).unwrap();
-        futures_lite::future::block_on(file.sync_data()).unwrap();
-        assert_eq!(file.metadata().unwrap().len(), 16);
-        let mut bytes = [0; 2];
-        assert_eq!(futures_lite::future::block_on(file.read(&mut bytes)).unwrap(), 2);
-        assert_eq!(&bytes, b"fg");
-        assert_eq!(
-            futures_lite::future::block_on(file.read_at(&mut bytes, 0)).unwrap(),
-            2
-        );
-        assert_eq!(&bytes, b"ab");
-        assert_eq!(file.position(), 7);
-
         let mut task = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut file)
+                .poll_seek(&mut task, SeekFrom::Current(5))
+                .is_pending()
+        );
+        let mut bytes = [0; 2];
+        if read_observer {
+            assert!(
+                Pin::new(&mut file)
+                    .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
+                    .is_pending()
+            );
+        } else {
+            assert!(Pin::new(&mut file).poll_flush(&mut task).is_pending());
+        }
+        occupied.release_and_drain();
+
+        // The foreign operation collects the seek's terminal result. A
+        // read then advances the cursor beyond the seek's returned offset.
+        if read_observer {
+            assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+            assert_eq!(&bytes, b"fg");
+        } else {
+            futures_lite::future::block_on(std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_flush(cx)
+            }))
+            .unwrap();
+        }
+        let observed_position = if read_observer { 7 } else { 5 };
+        assert_eq!(file.position(), observed_position);
+        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
         assert!(matches!(
             Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(5)),
             Poll::Ready(Ok(5))
         ));
         assert_eq!(
             file.position(),
-            7,
-            "the original seek was acknowledged, not repeated"
+            observed_position,
+            "relative seek was not repeated"
         );
-        crate::test_complete!(
-            "test_uring_collected_seek_survives_synchronous_read_and_sync_observers"
-        );
-    }
+        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
 
-    #[test]
-    fn test_uring_failed_relative_seek_keeps_its_original_error_after_a_read() {
-        init_test("test_uring_failed_relative_seek_keeps_its_original_error_after_a_read");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_failed_relative_seek.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open(&path).unwrap();
-        file.seek(SeekFrom::Start(2)).unwrap();
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(
-            Pin::new(&mut file)
-                .poll_seek(&mut task, SeekFrom::Current(-3))
-                .is_pending()
-        );
-        let mut bytes = [0; 2];
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
-                .is_pending()
-        );
-        occupied.release_and_drain();
-        let observed = read_via_trait(&mut file, &mut bytes).unwrap_err();
-        assert_eq!(observed.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(file.position(), 2);
-
-        // Move far enough that re-executing the old offset would now succeed.
-        assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
-        assert_eq!(&bytes, b"cd");
-        match Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(-3)) {
-            Poll::Ready(Err(original)) => {
-                assert_eq!(original.kind(), observed.kind());
-                assert_eq!(original.to_string(), observed.to_string());
-            }
-            other => panic!("original seek failure was lost or retried: {other:?}"),
-        }
-        assert_eq!(file.position(), 4);
+        // Once that result is consumed, an identical new seek is real work.
         let next = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(-3))
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
         }))
         .unwrap();
-        assert_eq!(next, 1, "a new seek after consuming the error is permitted");
-        crate::test_complete!(
-            "test_uring_failed_relative_seek_keeps_its_original_error_after_a_read"
-        );
+        assert_eq!(next, observed_position + 5);
+        assert_eq!(file.position(), next);
     }
+    crate::test_complete!(
+        "test_uring_relative_seek_is_not_replayed_after_interleaved_read_or_flush"
+    );
+}
 
-    #[test]
-    fn test_uring_shutdown_reports_and_retains_an_interleaved_write_error() {
-        init_test("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
+/// Queue a real trait seek behind an occupied worker, then let a different
+/// operation collect it. The seek's borrowing caller never receives its
+/// result; the next poll must decide whether it is a retry or a new seek.
+fn collect_trait_seek_with_flush(file: &mut IoUringFile, position: SeekFrom) -> io::Result<()> {
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut *file)
+            .poll_seek(&mut task, position)
+            .is_pending()
+    );
+    assert!(Pin::new(&mut *file).poll_flush(&mut task).is_pending());
+    occupied.release_and_drain();
+    futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut *file).poll_flush(cx)
+    }))
+}
+
+#[test]
+fn test_uring_resize_invalidates_collected_end_seek() {
+    init_test("test_uring_resize_invalidates_collected_end_seek");
+    for new_length in [2_u64, 14] {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_failed_write.txt");
-        std::fs::write(&path, b"unchanged").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::open(&path).unwrap();
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut file).poll_write(&mut task, b"wrong").is_pending());
-        assert!(Pin::new(&mut file).poll_shutdown(&mut task).is_pending());
-        occupied.release_and_drain();
-
-        let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
-            Pin::new(&mut file).poll_shutdown(cx)
-        }))
-        .unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
-        let requests = file.inner.next_user_data.load(Ordering::Relaxed);
-        match Pin::new(&mut file).poll_write(&mut task, b"wrong") {
-            Poll::Ready(Err(original)) => assert_eq!(original.raw_os_error(), Some(libc::EBADF)),
-            other => panic!("writer lost its original failure: {other:?}"),
-        }
-        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
-        assert!(
-            file.trait_io.lock().pending.is_none(),
-            "failed write was not retried"
-        );
-        assert_eq!(file.position(), 0);
-        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
-        crate::test_complete!("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
-    }
-
-    #[test]
-    fn test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive() {
-        init_test(
-            "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive",
-        );
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("trait_drop_running.txt");
-        let pool = crate::runtime::BlockingPool::new(1, 1);
-        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::create(&path).unwrap();
-        let inner = Arc::clone(&file.inner);
-        let ring_guard = inner.ring.lock();
-        let mut bytes = b"owned while running".to_vec();
-        let mut task = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut file).poll_write(&mut task, &bytes).is_pending());
-
-        // The worker takes the cursor before trying the deliberately held
-        // ring lock. Observe that claim before dropping its future; queued
-        // work is cancellable, but a running operation must retain ownership.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if inner.cursor_lock.try_lock().is_none() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "worker did not claim the operation"
-            );
-            std::thread::yield_now();
-        }
-        bytes.fill(b'x');
-        drop(bytes);
-        drop(file);
-        assert_eq!(
-            Arc::strong_count(&inner),
-            2,
-            "worker retains the file descriptor and ring"
-        );
-        drop(ring_guard);
-        let marker = pool.spawn(|| {});
-        assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
-        assert_eq!(
-            Arc::strong_count(&inner),
-            1,
-            "worker retired after its terminal CQE"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"owned while running");
-        crate::test_complete!(
-            "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive"
-        );
-    }
-
-    #[test]
-    fn test_uring_owned_cursor_io_queues_and_returns_the_original_buffers() {
-        init_test("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_cursor.txt");
-        let file = Arc::new(
-            IoUringFile::open_with_flags(
-                &path,
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
-                0o600,
-            )
-            .unwrap(),
-        );
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let bytes = b"owned bytes".to_vec();
-        let allocation = bytes.as_ptr();
-        let capacity = bytes.capacity();
-        let mut write = Box::pin(Arc::clone(&file).write_owned(bytes));
-        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        assert_eq!(file.position(), 0);
-        assert!(std::fs::read(&path).unwrap().is_empty());
-        occupied.release_and_drain();
-        let (written, bytes) = futures_lite::future::block_on(write);
-        assert_eq!(written.unwrap(), 11);
-        assert_eq!(bytes.as_ptr(), allocation);
-        assert_eq!(bytes.capacity(), capacity);
-        assert_eq!(file.position(), 11);
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-
-        file.seek(SeekFrom::Start(0)).unwrap();
-        let mut occupied_read = OccupiedTraitPool::new();
-        let read_cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied_read.pool.handle()));
-        let _read_current = crate::cx::Cx::set_current(Some(read_cx));
-        let read_bytes = vec![b'x'; 16];
-        let read_allocation = read_bytes.as_ptr();
-        let mut read = Box::pin(Arc::clone(&file).read_owned(read_bytes));
-        assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        assert_eq!(file.position(), 0);
-        occupied_read.release_and_drain();
-        let (count, read_bytes) = futures_lite::future::block_on(read);
-        assert_eq!(count.unwrap(), 11);
-        assert_eq!(read_bytes.as_ptr(), read_allocation);
-        assert_eq!(&read_bytes[..11], b"owned bytes");
-        assert_eq!(&read_bytes[11..], b"xxxxx");
-        assert_eq!(file.position(), 11);
-        crate::test_complete!("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
-    }
-
-    #[test]
-    fn test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead() {
-        init_test("test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_positioned.txt");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
+        let path = dir.path().join("resized_seek.txt");
+        std::fs::write(&path, b"abcdefghij").unwrap();
         let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
-        let mut whole = [0; 6];
-        assert!(
-            Pin::new(&mut file)
-                .poll_read(
-                    &mut Context::from_waker(Waker::noop()),
-                    &mut ReadBuf::new(&mut whole),
-                )
-                .is_pending()
+        collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
+        assert_eq!(
+            file.position(),
+            10,
+            "the original seek finished before resizing"
         );
-        occupied.release_and_drain();
-        let mut prefix = [0; 2];
-        assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
-        assert_eq!(&prefix, b"ab");
-        assert_eq!(file.position(), 2);
 
-        let file = Arc::new(file);
-        let (written, original) = futures_lite::future::block_on(
-            Arc::clone(&file).write_at_owned(b"XY".to_vec(), 2),
+        file.set_len(new_length).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), new_length);
+        assert_eq!(file.position(), 10_u64.min(new_length));
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+        }))
+        .unwrap();
+        assert_eq!(
+            position, new_length,
+            "the new seek must observe the new EOF"
         );
-        assert_eq!(written.unwrap(), 2);
-        assert_eq!(original, b"XY");
-        assert_eq!(file.position(), 2);
-        let (read, bytes) = futures_lite::future::block_on(
-            Arc::clone(&file).read_at_owned(vec![0; 2], 4),
-        );
-        assert_eq!(read.unwrap(), 2);
-        assert_eq!(bytes, b"ef");
-        assert_eq!(file.position(), 2);
-
-        let mut file = Arc::try_unwrap(file).unwrap();
-        let mut rest = [0; 4];
-        assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
-        assert_eq!(&rest, b"XYef", "the owned write shares the real trait cache");
-        crate::test_complete!("test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead");
+        assert_eq!(file.position(), new_length);
+        assert_eq!(futures_lite::future::block_on(file.write(b"!")).unwrap(), 1);
+        let mut expected = b"abcdefghij".to_vec();
+        expected.resize(usize::try_from(new_length).unwrap(), 0);
+        expected.push(b'!');
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
     }
+    crate::test_complete!("test_uring_resize_invalidates_collected_end_seek");
+}
 
-    #[test]
-    fn test_uring_owned_io_refuses_an_uncollected_trait_request() {
-        init_test("test_uring_owned_io_refuses_an_uncollected_trait_request");
+#[test]
+fn test_uring_synchronous_writes_invalidate_collected_end_seek() {
+    init_test("test_uring_synchronous_writes_invalidate_collected_end_seek");
+    for positioned in [false, true] {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_trait_pending.txt");
-        let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut file = IoUringFile::create(&path).unwrap();
-        assert!(
-            Pin::new(&mut file)
-                .poll_write(&mut Context::from_waker(Waker::noop()), b"first")
-                .is_pending()
-        );
-        let file = Arc::new(file);
-        let mut owned = Box::pin(Arc::clone(&file).write_owned(b"second".to_vec()));
-        assert!(owned.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        occupied.release_and_drain();
-        let (result, original) = futures_lite::future::block_on(owned);
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(original, b"second");
-        assert_eq!(std::fs::read(&path).unwrap(), b"first");
-        let mut file = Arc::try_unwrap(file).unwrap();
-        assert!(matches!(
-            Pin::new(&mut file).poll_write(&mut Context::from_waker(Waker::noop()), b"first"),
-            Poll::Ready(Ok(5))
-        ));
+        let path = dir.path().join("written_seek.txt");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        collect_trait_seek_with_flush(&mut file, SeekFrom::End(0)).unwrap();
+        assert_eq!(file.position(), 10);
+
+        let (length, expected): (u64, &[u8]) = if positioned {
+            assert_eq!(
+                futures_lite::future::block_on(file.write_at(b"XY", 14)).unwrap(),
+                2
+            );
+            assert_eq!(file.position(), 10, "positioned writes keep the cursor");
+            (16, b"abcdefghij\0\0\0\0XY")
+        } else {
+            assert_eq!(
+                futures_lite::future::block_on(file.write(b"XY")).unwrap(),
+                2
+            );
+            assert_eq!(file.position(), 12);
+            (12, b"abcdefghijXY")
+        };
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::End(0))
+        }))
+        .unwrap();
+        assert_eq!(position, length, "the write ended the old seek's retry");
+        assert_eq!(file.position(), length);
+    }
+    crate::test_complete!("test_uring_synchronous_writes_invalidate_collected_end_seek");
+}
+
+#[test]
+fn test_uring_resize_discards_a_collected_seek_failure() {
+    init_test("test_uring_resize_discards_a_collected_seek_failure");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resized_failed_seek.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    let error = collect_trait_seek_with_flush(&mut file, SeekFrom::End(-8)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(file.position(), 0);
+
+    file.set_len(12).unwrap();
+    let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_seek(cx, SeekFrom::End(-8))
+    }))
+    .unwrap();
+    assert_eq!(
+        position, 4,
+        "a new seek observes the now-valid end-relative offset"
+    );
+    assert_eq!(file.position(), 4);
+    crate::test_complete!("test_uring_resize_discards_a_collected_seek_failure");
+}
+
+#[test]
+fn test_uring_failed_synchronous_changes_end_the_previous_seek_retry() {
+    init_test("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
+    for resize in [false, true] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("failed_change_seek.txt");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
         assert_eq!(file.position(), 5);
-        assert_eq!(std::fs::read(&path).unwrap(), b"first");
-        crate::test_complete!("test_uring_owned_io_refuses_an_uncollected_trait_request");
-    }
 
-    #[test]
-    fn test_uring_owned_syncs_queue_on_the_inherited_pool() {
-        init_test("test_uring_owned_syncs_queue_on_the_inherited_pool");
-        for datasync in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("owned_sync.txt");
-            std::fs::write(&path, b"durable").unwrap();
-            let mut occupied = OccupiedTraitPool::new();
-            let cx = crate::cx::Cx::for_testing()
-                .with_blocking_pool_handle(Some(occupied.pool.handle()));
-            let _current = crate::cx::Cx::set_current(Some(cx));
-            let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
-            let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
-            let mut sync: Pin<Box<dyn Future<Output = io::Result<()>>>> = if datasync {
-                Box::pin(Arc::clone(&file).sync_data_owned())
-            } else {
-                Box::pin(Arc::clone(&file).sync_all_owned())
-            };
-            assert!(sync.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before);
-            occupied.release_and_drain();
-            futures_lite::future::block_on(sync).unwrap();
-            assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before + 1);
+        let error = if resize {
+            file.set_len(u64::MAX).unwrap_err()
+        } else {
+            file.seek(SeekFrom::Current(-6)).unwrap_err()
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(file.position(), 5);
+        assert_eq!(file.metadata().unwrap().len(), 16);
+        let position = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+            Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(5))
+        }))
+        .unwrap();
+        assert_eq!(position, 10, "the identical offset now requests a new seek");
+        assert_eq!(file.position(), 10);
+    }
+    crate::test_complete!("test_uring_failed_synchronous_changes_end_the_previous_seek_retry");
+}
+
+#[test]
+fn test_uring_collected_seek_survives_synchronous_read_and_sync_observers() {
+    init_test("test_uring_collected_seek_survives_synchronous_read_and_sync_observers");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("observed_seek.txt");
+    std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    collect_trait_seek_with_flush(&mut file, SeekFrom::Current(5)).unwrap();
+    assert_eq!(file.position(), 5);
+    futures_lite::future::block_on(file.sync_all()).unwrap();
+    futures_lite::future::block_on(file.sync_data()).unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 16);
+    let mut bytes = [0; 2];
+    assert_eq!(
+        futures_lite::future::block_on(file.read(&mut bytes)).unwrap(),
+        2
+    );
+    assert_eq!(&bytes, b"fg");
+    assert_eq!(
+        futures_lite::future::block_on(file.read_at(&mut bytes, 0)).unwrap(),
+        2
+    );
+    assert_eq!(&bytes, b"ab");
+    assert_eq!(file.position(), 7);
+
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(5)),
+        Poll::Ready(Ok(5))
+    ));
+    assert_eq!(
+        file.position(),
+        7,
+        "the original seek was acknowledged, not repeated"
+    );
+    crate::test_complete!("test_uring_collected_seek_survives_synchronous_read_and_sync_observers");
+}
+
+#[test]
+fn test_uring_failed_relative_seek_keeps_its_original_error_after_a_read() {
+    init_test("test_uring_failed_relative_seek_keeps_its_original_error_after_a_read");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_failed_relative_seek.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open(&path).unwrap();
+    file.seek(SeekFrom::Start(2)).unwrap();
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_seek(&mut task, SeekFrom::Current(-3))
+            .is_pending()
+    );
+    let mut bytes = [0; 2];
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(&mut task, &mut ReadBuf::new(&mut bytes))
+            .is_pending()
+    );
+    occupied.release_and_drain();
+    let observed = read_via_trait(&mut file, &mut bytes).unwrap_err();
+    assert_eq!(observed.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(file.position(), 2);
+
+    // Move far enough that re-executing the old offset would now succeed.
+    assert_eq!(read_via_trait(&mut file, &mut bytes).unwrap(), 2);
+    assert_eq!(&bytes, b"cd");
+    match Pin::new(&mut file).poll_seek(&mut task, SeekFrom::Current(-3)) {
+        Poll::Ready(Err(original)) => {
+            assert_eq!(original.kind(), observed.kind());
+            assert_eq!(original.to_string(), observed.to_string());
         }
-        crate::test_complete!("test_uring_owned_syncs_queue_on_the_inherited_pool");
+        other => panic!("original seek failure was lost or retried: {other:?}"),
     }
+    assert_eq!(file.position(), 4);
+    let next = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_seek(cx, SeekFrom::Current(-3))
+    }))
+    .unwrap();
+    assert_eq!(next, 1, "a new seek after consuming the error is permitted");
+    crate::test_complete!("test_uring_failed_relative_seek_keeps_its_original_error_after_a_read");
+}
 
-    #[test]
-    fn test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal() {
-        init_test("test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_refused.txt");
-        std::fs::write(&path, b"unchanged").unwrap();
-        let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
-        let pool = crate::runtime::BlockingPool::new(1, 1);
-        pool.shutdown();
-        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let bytes = b"rejected".to_vec();
-        let allocation = bytes.as_ptr();
-        let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
-        let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
-        assert!(result.is_err());
-        assert_eq!(bytes.as_ptr(), allocation);
-        assert_eq!(bytes, b"rejected");
-        assert!(futures_lite::future::block_on(Arc::clone(&file).sync_all_owned()).is_err());
-        assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), submitted_before);
-        assert_eq!(file.position(), 0);
-        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
-        crate::test_complete!("test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal");
+#[test]
+fn test_uring_shutdown_reports_and_retains_an_interleaved_write_error() {
+    init_test("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_failed_write.txt");
+    std::fs::write(&path, b"unchanged").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open(&path).unwrap();
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut task, b"wrong")
+            .is_pending()
+    );
+    assert!(Pin::new(&mut file).poll_shutdown(&mut task).is_pending());
+    occupied.release_and_drain();
+
+    let error = futures_lite::future::block_on(std::future::poll_fn(|cx| {
+        Pin::new(&mut file).poll_shutdown(cx)
+    }))
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    let requests = file.inner.next_user_data.load(Ordering::Relaxed);
+    match Pin::new(&mut file).poll_write(&mut task, b"wrong") {
+        Poll::Ready(Err(original)) => assert_eq!(original.raw_os_error(), Some(libc::EBADF)),
+        other => panic!("writer lost its original failure: {other:?}"),
     }
+    assert_eq!(file.inner.next_user_data.load(Ordering::Relaxed), requests);
+    assert!(
+        file.trait_io.lock().pending.is_none(),
+        "failed write was not retried"
+    );
+    assert_eq!(file.position(), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+    crate::test_complete!("test_uring_shutdown_reports_and_retains_an_interleaved_write_error");
+}
 
-    #[test]
-    fn test_uring_owned_io_returns_the_buffer_on_a_kernel_error() {
-        init_test("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_read_only.txt");
-        std::fs::write(&path, b"unchanged").unwrap();
-        let file = Arc::new(IoUringFile::open(&path).unwrap());
-        let bytes = b"rejected".to_vec();
-        let allocation = bytes.as_ptr();
-        let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
-        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
-        assert_eq!(bytes.as_ptr(), allocation);
-        assert_eq!(bytes, b"rejected");
-        assert_eq!(file.position(), 0);
-        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
-        crate::test_complete!("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
+#[test]
+fn test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive() {
+    init_test("test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("trait_drop_running.txt");
+    let pool = crate::runtime::BlockingPool::new(1, 1);
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::create(&path).unwrap();
+    let inner = Arc::clone(&file.inner);
+    let ring_guard = inner.ring.lock();
+    let mut bytes = b"owned while running".to_vec();
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut task, &bytes)
+            .is_pending()
+    );
+
+    // The worker takes the cursor before trying the deliberately held
+    // ring lock. Observe that claim before dropping its future; queued
+    // work is cancellable, but a running operation must retain ownership.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if inner.cursor_lock.try_lock().is_none() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not claim the operation"
+        );
+        std::thread::yield_now();
     }
+    bytes.fill(b'x');
+    drop(bytes);
+    drop(file);
+    assert_eq!(
+        Arc::strong_count(&inner),
+        2,
+        "worker retains the file descriptor and ring"
+    );
+    drop(ring_guard);
+    let marker = pool.spawn(|| {});
+    assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
+    assert_eq!(
+        Arc::strong_count(&inner),
+        1,
+        "worker retired after its terminal CQE"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"owned while running");
+    crate::test_complete!(
+        "test_uring_dropped_trait_file_keeps_a_running_workers_buffer_and_descriptor_alive"
+    );
+}
 
-    #[test]
-    fn test_uring_owned_write_drop_before_worker_claim_has_no_effect() {
-        init_test("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+#[test]
+fn test_uring_owned_cursor_io_queues_and_returns_the_original_buffers() {
+    init_test("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_cursor.txt");
+    let file = Arc::new(
+        IoUringFile::open_with_flags(&path, libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC, 0o600)
+            .unwrap(),
+    );
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let bytes = b"owned bytes".to_vec();
+    let allocation = bytes.as_ptr();
+    let capacity = bytes.capacity();
+    let mut write = Box::pin(Arc::clone(&file).write_owned(bytes));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(file.position(), 0);
+    assert!(std::fs::read(&path).unwrap().is_empty());
+    occupied.release_and_drain();
+    let (written, bytes) = futures_lite::future::block_on(write);
+    assert_eq!(written.unwrap(), 11);
+    assert_eq!(bytes.as_ptr(), allocation);
+    assert_eq!(bytes.capacity(), capacity);
+    assert_eq!(file.position(), 11);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut occupied_read = OccupiedTraitPool::new();
+    let read_cx =
+        crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied_read.pool.handle()));
+    let _read_current = crate::cx::Cx::set_current(Some(read_cx));
+    let read_bytes = vec![b'x'; 16];
+    let read_allocation = read_bytes.as_ptr();
+    let mut read = Box::pin(Arc::clone(&file).read_owned(read_bytes));
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(file.position(), 0);
+    occupied_read.release_and_drain();
+    let (count, read_bytes) = futures_lite::future::block_on(read);
+    assert_eq!(count.unwrap(), 11);
+    assert_eq!(read_bytes.as_ptr(), read_allocation);
+    assert_eq!(&read_bytes[..11], b"owned bytes");
+    assert_eq!(&read_bytes[11..], b"xxxxx");
+    assert_eq!(file.position(), 11);
+    crate::test_complete!("test_uring_owned_cursor_io_queues_and_returns_the_original_buffers");
+}
+
+#[test]
+fn test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead() {
+    init_test("test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_positioned.txt");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+    let mut whole = [0; 6];
+    assert!(
+        Pin::new(&mut file)
+            .poll_read(
+                &mut Context::from_waker(Waker::noop()),
+                &mut ReadBuf::new(&mut whole),
+            )
+            .is_pending()
+    );
+    occupied.release_and_drain();
+    let mut prefix = [0; 2];
+    assert_eq!(read_via_trait(&mut file, &mut prefix).unwrap(), 2);
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(file.position(), 2);
+
+    let file = Arc::new(file);
+    let (written, original) =
+        futures_lite::future::block_on(Arc::clone(&file).write_at_owned(b"XY".to_vec(), 2));
+    assert_eq!(written.unwrap(), 2);
+    assert_eq!(original, b"XY");
+    assert_eq!(file.position(), 2);
+    let (read, bytes) =
+        futures_lite::future::block_on(Arc::clone(&file).read_at_owned(vec![0; 2], 4));
+    assert_eq!(read.unwrap(), 2);
+    assert_eq!(bytes, b"ef");
+    assert_eq!(file.position(), 2);
+
+    let mut file = Arc::try_unwrap(file).unwrap();
+    let mut rest = [0; 4];
+    assert_eq!(read_via_trait(&mut file, &mut rest).unwrap(), 4);
+    assert_eq!(
+        &rest, b"XYef",
+        "the owned write shares the real trait cache"
+    );
+    crate::test_complete!(
+        "test_uring_owned_positioned_io_preserves_cursor_and_invalidates_read_ahead"
+    );
+}
+
+#[test]
+fn test_uring_owned_io_refuses_an_uncollected_trait_request() {
+    init_test("test_uring_owned_io_refuses_an_uncollected_trait_request");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_trait_pending.txt");
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut file = IoUringFile::create(&path).unwrap();
+    assert!(
+        Pin::new(&mut file)
+            .poll_write(&mut Context::from_waker(Waker::noop()), b"first")
+            .is_pending()
+    );
+    let file = Arc::new(file);
+    let mut owned = Box::pin(Arc::clone(&file).write_owned(b"second".to_vec()));
+    assert!(
+        owned
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    occupied.release_and_drain();
+    let (result, original) = futures_lite::future::block_on(owned);
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(original, b"second");
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    let mut file = Arc::try_unwrap(file).unwrap();
+    assert!(matches!(
+        Pin::new(&mut file).poll_write(&mut Context::from_waker(Waker::noop()), b"first"),
+        Poll::Ready(Ok(5))
+    ));
+    assert_eq!(file.position(), 5);
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    crate::test_complete!("test_uring_owned_io_refuses_an_uncollected_trait_request");
+}
+
+#[test]
+fn test_uring_owned_syncs_queue_on_the_inherited_pool() {
+    init_test("test_uring_owned_syncs_queue_on_the_inherited_pool");
+    for datasync in [false, true] {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_queued_drop.txt");
-        let file = Arc::new(IoUringFile::create(&path).unwrap());
+        let path = dir.path().join("owned_sync.txt");
+        std::fs::write(&path, b"durable").unwrap();
         let mut occupied = OccupiedTraitPool::new();
-        let cx = crate::cx::Cx::for_testing()
-            .with_blocking_pool_handle(Some(occupied.pool.handle()));
+        let cx =
+            crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
         let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut write = Box::pin(Arc::clone(&file).write_owned(b"cancelled".to_vec()));
-        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        drop(write);
+        let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
+        let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
+        let mut sync: Pin<Box<dyn Future<Output = io::Result<()>>>> = if datasync {
+            Box::pin(Arc::clone(&file).sync_data_owned())
+        } else {
+            Box::pin(Arc::clone(&file).sync_all_owned())
+        };
+        assert!(
+            sync.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(
+            file.inner.next_user_data.load(Ordering::Relaxed),
+            submitted_before
+        );
         occupied.release_and_drain();
-        assert_eq!(file.position(), 0);
-        assert!(std::fs::read(&path).unwrap().is_empty());
-        crate::test_complete!("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+        futures_lite::future::block_on(sync).unwrap();
+        assert_eq!(
+            file.inner.next_user_data.load(Ordering::Relaxed),
+            submitted_before + 1
+        );
     }
+    crate::test_complete!("test_uring_owned_syncs_queue_on_the_inherited_pool");
+}
 
-    #[test]
-    fn test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped() {
-        init_test("test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped");
+#[test]
+fn test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal() {
+    init_test("test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_refused.txt");
+    std::fs::write(&path, b"unchanged").unwrap();
+    let file = Arc::new(IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap());
+    let pool = crate::runtime::BlockingPool::new(1, 1);
+    pool.shutdown();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let bytes = b"rejected".to_vec();
+    let allocation = bytes.as_ptr();
+    let submitted_before = file.inner.next_user_data.load(Ordering::Relaxed);
+    let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
+    assert!(result.is_err());
+    assert_eq!(bytes.as_ptr(), allocation);
+    assert_eq!(bytes, b"rejected");
+    assert!(futures_lite::future::block_on(Arc::clone(&file).sync_all_owned()).is_err());
+    assert_eq!(
+        file.inner.next_user_data.load(Ordering::Relaxed),
+        submitted_before
+    );
+    assert_eq!(file.position(), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+    crate::test_complete!(
+        "test_uring_owned_io_recovers_buffers_without_inline_fallback_on_pool_refusal"
+    );
+}
+
+#[test]
+fn test_uring_owned_io_returns_the_buffer_on_a_kernel_error() {
+    init_test("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_read_only.txt");
+    std::fs::write(&path, b"unchanged").unwrap();
+    let file = Arc::new(IoUringFile::open(&path).unwrap());
+    let bytes = b"rejected".to_vec();
+    let allocation = bytes.as_ptr();
+    let (result, bytes) = futures_lite::future::block_on(Arc::clone(&file).write_owned(bytes));
+    assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
+    assert_eq!(bytes.as_ptr(), allocation);
+    assert_eq!(bytes, b"rejected");
+    assert_eq!(file.position(), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+    crate::test_complete!("test_uring_owned_io_returns_the_buffer_on_a_kernel_error");
+}
+
+#[test]
+fn test_uring_owned_write_drop_before_worker_claim_has_no_effect() {
+    init_test("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_queued_drop.txt");
+    let file = Arc::new(IoUringFile::create(&path).unwrap());
+    let mut occupied = OccupiedTraitPool::new();
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(occupied.pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut write = Box::pin(Arc::clone(&file).write_owned(b"cancelled".to_vec()));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    drop(write);
+    occupied.release_and_drain();
+    assert_eq!(file.position(), 0);
+    assert!(std::fs::read(&path).unwrap().is_empty());
+    crate::test_complete!("test_uring_owned_write_drop_before_worker_claim_has_no_effect");
+}
+
+#[test]
+fn test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped() {
+    init_test("test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("owned_running_drop.txt");
+    let file = Arc::new(IoUringFile::create(&path).unwrap());
+    let weak_file = Arc::downgrade(&file);
+    let inner = Arc::clone(&file.inner);
+    let ring_guard = inner.ring.lock();
+    let pool = crate::runtime::BlockingPool::new(1, 1);
+    let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+    let _current = crate::cx::Cx::set_current(Some(cx));
+    let mut write = Box::pin(Arc::clone(&file).write_owned(b"retained".to_vec()));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while inner.cursor_lock.try_lock().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker never claimed the write"
+        );
+        std::thread::yield_now();
+    }
+    drop(write);
+    drop(file);
+    assert!(
+        weak_file.upgrade().is_some(),
+        "the running worker owns the file"
+    );
+    drop(ring_guard);
+    let marker = pool.spawn(|| {});
+    assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
+    assert!(
+        weak_file.upgrade().is_none(),
+        "terminal completion retires ownership"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"retained");
+    crate::test_complete!(
+        "test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped"
+    );
+}
+
+#[test]
+fn test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread() {
+    init_test("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
+    for install_context in [false, true] {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("owned_running_drop.txt");
-        let file = Arc::new(IoUringFile::create(&path).unwrap());
-        let weak_file = Arc::downgrade(&file);
+        let path = dir.path().join("owned_no_pool.txt");
+        std::fs::write(&path, b"worker").unwrap();
+        let file = Arc::new(IoUringFile::open(&path).unwrap());
         let inner = Arc::clone(&file.inner);
         let ring_guard = inner.ring.lock();
-        let pool = crate::runtime::BlockingPool::new(1, 1);
-        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
-        let _current = crate::cx::Cx::set_current(Some(cx));
-        let mut write = Box::pin(Arc::clone(&file).write_owned(b"retained".to_vec()));
-        assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while inner.cursor_lock.try_lock().is_some() {
-            assert!(std::time::Instant::now() < deadline, "worker never claimed the write");
-            std::thread::yield_now();
-        }
-        drop(write);
-        drop(file);
-        assert!(weak_file.upgrade().is_some(), "the running worker owns the file");
+        let (polled_tx, polled_rx) = std::sync::mpsc::channel();
+        let polling = std::thread::spawn(move || {
+            let cx = install_context
+                .then(|| crate::cx::Cx::for_testing().with_blocking_pool_handle(None));
+            let _current = crate::cx::Cx::set_current(cx);
+            let mut read = Box::pin(file.read_owned(vec![0; 6]));
+            let first = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            polled_tx.send(first.is_pending()).unwrap();
+            match first {
+                Poll::Ready(result) => result,
+                Poll::Pending => futures_lite::future::block_on(read),
+            }
+        });
+        // A deliberately held ring makes terminal completion impossible.
+        // Releasing it before assertions also lets an inline regression
+        // exit, so the test fails instead of hanging the whole suite.
+        let first_poll = polled_rx.recv_timeout(std::time::Duration::from_secs(5));
         drop(ring_guard);
-        let marker = pool.spawn(|| {});
-        assert!(marker.wait_timeout(std::time::Duration::from_secs(5)));
-        assert!(weak_file.upgrade().is_none(), "terminal completion retires ownership");
-        assert_eq!(std::fs::read(&path).unwrap(), b"retained");
-        crate::test_complete!("test_uring_owned_write_keeps_the_file_alive_after_a_running_wait_is_dropped");
+        let (result, bytes) = polling.join().unwrap();
+        assert!(first_poll.unwrap(), "the first poll must yield");
+        assert_eq!(result.unwrap(), 6);
+        assert_eq!(bytes, b"worker");
     }
-
-    #[test]
-    fn test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread() {
-        init_test("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
-        for install_context in [false, true] {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("owned_no_pool.txt");
-            std::fs::write(&path, b"worker").unwrap();
-            let file = Arc::new(IoUringFile::open(&path).unwrap());
-            let inner = Arc::clone(&file.inner);
-            let ring_guard = inner.ring.lock();
-            let (polled_tx, polled_rx) = std::sync::mpsc::channel();
-            let polling = std::thread::spawn(move || {
-                let cx = install_context.then(|| {
-                    crate::cx::Cx::for_testing().with_blocking_pool_handle(None)
-                });
-                let _current = crate::cx::Cx::set_current(cx);
-                let mut read = Box::pin(file.read_owned(vec![0; 6]));
-                let first = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
-                polled_tx.send(first.is_pending()).unwrap();
-                match first {
-                    Poll::Ready(result) => result,
-                    Poll::Pending => futures_lite::future::block_on(read),
-                }
-            });
-            // A deliberately held ring makes terminal completion impossible.
-            // Releasing it before assertions also lets an inline regression
-            // exit, so the test fails instead of hanging the whole suite.
-            let first_poll = polled_rx.recv_timeout(std::time::Duration::from_secs(5));
-            drop(ring_guard);
-            let (result, bytes) = polling.join().unwrap();
-            assert!(first_poll.unwrap(), "the first poll must yield");
-            assert_eq!(result.unwrap(), 6);
-            assert_eq!(bytes, b"worker");
-        }
-        crate::test_complete!("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
-    }
+    crate::test_complete!("test_uring_owned_read_without_a_pool_never_waits_on_the_polling_thread");
+}

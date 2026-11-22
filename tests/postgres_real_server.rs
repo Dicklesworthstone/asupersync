@@ -616,7 +616,10 @@ fn pg_real_copy_from_chunks_streams_and_recovers() {
 #[test]
 fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
     let cfg = RealPgConfig::from_env();
-    if skip_if_disabled(&cfg, "pg_real_copy_out_streams_and_drains_then_reuses_connection") {
+    if skip_if_disabled(
+        &cfg,
+        "pg_real_copy_out_streams_and_drains_then_reuses_connection",
+    ) {
         return;
     }
     let log = PgTestLogger::new(
@@ -640,7 +643,10 @@ fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
             "copy_text_start",
         );
         assert_eq!(copy.response().overall_format(), Format::Text);
-        assert_eq!(copy.response().column_formats(), &[Format::Text, Format::Text]);
+        assert_eq!(
+            copy.response().column_formats(),
+            &[Format::Text, Format::Text]
+        );
         let mut text = Vec::new();
         while let Some(chunk) = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_text_chunk") {
             text.extend_from_slice(&chunk);
@@ -654,8 +660,11 @@ fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
 
         log.phase("copy_binary_export");
         let mut copy = unwrap_pg(
-            conn.copy_out(&cx, "COPY (SELECT 42::int4 AS id) TO STDOUT WITH (FORMAT binary)")
-                .await,
+            conn.copy_out(
+                &cx,
+                "COPY (SELECT 42::int4 AS id) TO STDOUT WITH (FORMAT binary)",
+            )
+            .await,
             &log,
             "copy_binary_start",
         );
@@ -672,7 +681,10 @@ fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
         expected_binary.extend_from_slice(&4i32.to_be_bytes());
         expected_binary.extend_from_slice(&42i32.to_be_bytes());
         expected_binary.extend_from_slice(&(-1i16).to_be_bytes());
-        assert_eq!(binary, expected_binary, "binary COPY bytes must remain exact");
+        assert_eq!(
+            binary, expected_binary,
+            "binary COPY bytes must remain exact"
+        );
         let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_binary_finish");
         assert_eq!(complete.affected_rows(), 1);
         assert_eq!(complete.bytes_received(), expected_binary.len() as u64);
@@ -694,7 +706,11 @@ fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
         assert_eq!(complete.affected_rows(), 10_000);
         let expected_bytes: usize = (1..=10_000).map(|row| row.to_string().len() + 1).sum();
         assert_eq!(complete.bytes_received(), expected_bytes as u64);
-        log.assert_match("copy_drained_rows", "10000", &complete.affected_rows().to_string());
+        log.assert_match(
+            "copy_drained_rows",
+            "10000",
+            &complete.affected_rows().to_string(),
+        );
 
         log.phase("copy_server_error");
         let failed_export = match conn.copy_out(&cx, "COPY (SELECT 1 / 0) TO STDOUT").await {

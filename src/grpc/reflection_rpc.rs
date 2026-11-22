@@ -76,7 +76,10 @@
 
 use super::reflection::ReflectionService;
 use super::reflection_descriptor::ReflectionDescriptorSet;
-use super::service::{MethodDescriptor, NamedService, RegisteredServerStream, ServiceDescriptor, ServiceHandler, ServiceStreamingFuture};
+use super::service::{
+    MethodDescriptor, NamedService, RegisteredServerStream, ServiceDescriptor, ServiceHandler,
+    ServiceStreamingFuture,
+};
 use super::streaming::{Extensions, Metadata, Request, Streaming};
 use super::{Code, RegisteredRequestStream, Status};
 use crate::bytes::Bytes;
@@ -214,7 +217,10 @@ impl std::fmt::Debug for ReflectionRpcService {
         f.debug_struct("ReflectionRpcService")
             .field("config", &self.shared.config)
             .field("active_streams", &self.active_streams())
-            .field("request_authorization", &self.request_authorization.is_some())
+            .field(
+                "request_authorization",
+                &self.request_authorization.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -239,7 +245,10 @@ impl ReflectionService {
         config.validate()?;
         Ok(ReflectionRpcService {
             shared: Arc::new(Shared {
-                registry: self.clone(), descriptors, config, active: AtomicUsize::new(0),
+                registry: self.clone(),
+                descriptors,
+                config,
+                active: AtomicUsize::new(0),
             }),
             request_authorization: None,
         })
@@ -298,24 +307,38 @@ impl ReflectionRpcService {
         Ok(services)
     }
 
-    fn open_request_stream<S>(&self, cx: &Cx, mut request: Request<S>) -> Result<RegisteredServerStream, Status>
-    where S: Streaming<Message = Bytes> + Send + 'static,
+    fn open_request_stream<S>(
+        &self,
+        cx: &Cx,
+        mut request: Request<S>,
+    ) -> Result<RegisteredServerStream, Status>
+    where
+        S: Streaming<Message = Bytes> + Send + 'static,
     {
         self.authorize(cx)?; // Auth precedes capacity refusal and source polling.
         self.authorize_request(
-            cx, ReflectionRpcAction::OpenStream, request.metadata(), request.extensions(),
+            cx,
+            ReflectionRpcAction::OpenStream,
+            request.metadata(),
+            request.extensions(),
         )?;
         let deadline = match cx.budget().deadline {
             Some(at) => {
-                let timer = cx.timer_driver().ok_or_else(||
-                    Status::failed_precondition("reflection deadline needs a timer driver"))?;
+                let timer = cx.timer_driver().ok_or_else(|| {
+                    Status::failed_precondition("reflection deadline needs a timer driver")
+                })?;
                 Some(Box::pin(crate::time::Sleep::with_timer_driver(at, timer)))
             }
             None => None,
         };
-        self.shared.active.try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-            active.checked_add(1).filter(|next| *next <= self.shared.config.max_streams)
-        }).map_err(|_| Status::resource_exhausted("reflection stream capacity exhausted"))?;
+        self.shared
+            .active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active
+                    .checked_add(1)
+                    .filter(|next| *next <= self.shared.config.max_streams)
+            })
+            .map_err(|_| Status::resource_exhausted("reflection stream capacity exhausted"))?;
         let slot = Slot(Arc::clone(&self.shared));
         let observer = cx.clone();
         let metadata = std::mem::take(request.metadata_mut());
@@ -326,7 +349,9 @@ impl ReflectionRpcService {
             extensions,
             rpc: self.clone(),
             cx: cx.clone(),
-            cancelled: Some(Box::pin(async move { observer.cancelled().await; })),
+            cancelled: Some(Box::pin(async move {
+                observer.cancelled().await;
+            })),
             deadline,
             slot: Some(slot),
             queries: 0,
@@ -334,10 +359,18 @@ impl ReflectionRpcService {
         }))
     }
 
-    fn answer_request(&self, cx: &Cx, metadata: &Metadata, extensions: &Extensions, bytes: &Bytes) -> Result<Bytes, Status> {
+    fn answer_request(
+        &self,
+        cx: &Cx,
+        metadata: &Metadata,
+        extensions: &Extensions,
+        bytes: &Bytes,
+    ) -> Result<Bytes, Status> {
         let services = self.authorize(cx)?;
         if bytes.len() > self.shared.config.max_request_bytes {
-            return Err(Status::resource_exhausted("reflection query byte limit exceeded"));
+            return Err(Status::resource_exhausted(
+                "reflection query byte limit exceeded",
+            ));
         }
         let request = WireRequest::decode(bytes.as_ref())
             .map_err(|_| Status::invalid_argument("invalid reflection request protobuf"))?;
@@ -355,7 +388,9 @@ impl ReflectionRpcService {
                 })
             });
         let mut response = WireResponse {
-            valid_host: request.host.clone(), original_request: Some(request), reply: Some(reply),
+            valid_host: request.host.clone(),
+            original_request: Some(request),
+            reply: Some(reply),
         };
         if response.encoded_len() > self.shared.config.max_response_bytes {
             response.reply = Some(Reply::Error(wire::ErrorReply {
@@ -363,7 +398,9 @@ impl ReflectionRpcService {
                 message: "reflection response byte limit exceeded".to_owned(),
             }));
             if response.encoded_len() > self.shared.config.max_response_bytes {
-                return Err(Status::resource_exhausted("reflection response byte limit exceeded"));
+                return Err(Status::resource_exhausted(
+                    "reflection response byte limit exceeded",
+                ));
             }
         }
         checkpoint(cx)?;
@@ -371,7 +408,10 @@ impl ReflectionRpcService {
     }
 
     fn authorize_request(
-        &self, cx: &Cx, action: ReflectionRpcAction<'_>, metadata: &Metadata,
+        &self,
+        cx: &Cx,
+        action: ReflectionRpcAction<'_>,
+        metadata: &Metadata,
         extensions: &Extensions,
     ) -> Result<(), Status> {
         if let Some(authorize) = &self.request_authorization {
@@ -387,7 +427,8 @@ impl ReflectionRpcService {
 
     #[cfg(test)]
     fn open_stream<S>(&self, cx: &Cx, source: S) -> Result<RegisteredServerStream, Status>
-    where S: Streaming<Message = Bytes> + Send + 'static,
+    where
+        S: Streaming<Message = Bytes> + Send + 'static,
     {
         self.open_request_stream(cx, Request::new(source))
     }
@@ -413,18 +454,28 @@ impl ReflectionRpcService {
         let catalog = &self.shared.descriptors;
         match request.query.as_ref() {
             Some(Query::FileByName(name)) => self.files_reply(catalog.file_by_name(name)?),
-            Some(Query::FileContainingSymbol(symbol)) => self.files_reply(catalog.file_containing_symbol(symbol)?),
+            Some(Query::FileContainingSymbol(symbol)) => {
+                self.files_reply(catalog.file_containing_symbol(symbol)?)
+            }
             Some(Query::FileContainingExtension(extension)) => self.files_reply(
-                catalog.file_containing_extension(&extension.containing_type, extension.number)?),
-            Some(Query::AllExtensionNumbers(name)) => Ok(Reply::Extensions(wire::ExtensionNumbers {
-                base_type_name: name.clone(), numbers: catalog.extension_numbers(name)?,
-            })),
+                catalog.file_containing_extension(&extension.containing_type, extension.number)?,
+            ),
+            Some(Query::AllExtensionNumbers(name)) => {
+                Ok(Reply::Extensions(wire::ExtensionNumbers {
+                    base_type_name: name.clone(),
+                    numbers: catalog.extension_numbers(name)?,
+                }))
+            }
             Some(Query::ListServices(_)) => {
                 let mut total = 0usize;
                 let mut result = Vec::new();
                 for name in services {
-                    total = total.checked_add(name.len()).filter(|total| *total <= self.shared.config.max_response_bytes)
-                        .ok_or_else(|| Status::resource_exhausted("reflection service list exceeds byte limit"))?;
+                    total = total
+                        .checked_add(name.len())
+                        .filter(|total| *total <= self.shared.config.max_response_bytes)
+                        .ok_or_else(|| {
+                            Status::resource_exhausted("reflection service list exceeds byte limit")
+                        })?;
                     result.push(wire::Service { name });
                 }
                 Ok(Reply::Services(wire::Services { services: result }))
@@ -438,10 +489,16 @@ impl ReflectionRpcService {
         // into the protobuf reply. Final framing/echo overhead is checked too.
         let mut total = 0usize;
         for file in &files {
-            total = total.checked_add(file.len()).filter(|total| *total <= self.shared.config.max_response_bytes)
-                .ok_or_else(|| Status::resource_exhausted("reflection descriptors exceed response limit"))?;
+            total = total
+                .checked_add(file.len())
+                .filter(|total| *total <= self.shared.config.max_response_bytes)
+                .ok_or_else(|| {
+                    Status::resource_exhausted("reflection descriptors exceed response limit")
+                })?;
         }
-        Ok(Reply::Files(wire::Files { files: files.iter().map(|file| file.as_ref().to_vec()).collect() }))
+        Ok(Reply::Files(wire::Files {
+            files: files.iter().map(|file| file.as_ref().to_vec()).collect(),
+        }))
     }
 }
 
@@ -451,21 +508,28 @@ impl Query {
             Self::ListServices(_) => ReflectionRpcAction::ListServices,
             Self::FileByName(name) => ReflectionRpcAction::FileByName(name),
             Self::FileContainingSymbol(symbol) => ReflectionRpcAction::FileContainingSymbol(symbol),
-            Self::FileContainingExtension(extension) => ReflectionRpcAction::FileContainingExtension {
-                containing_type: &extension.containing_type,
-                number: extension.number,
-            },
+            Self::FileContainingExtension(extension) => {
+                ReflectionRpcAction::FileContainingExtension {
+                    containing_type: &extension.containing_type,
+                    number: extension.number,
+                }
+            }
             Self::AllExtensionNumbers(name) => ReflectionRpcAction::AllExtensionNumbers(name),
         }
     }
 }
 
 fn checkpoint(cx: &Cx) -> Result<(), Status> {
-    cx.checkpoint().map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
-        Some(CancelKind::Timeout | CancelKind::Deadline) => Status::deadline_exceeded("reflection deadline exceeded"),
-        Some(CancelKind::PollQuota | CancelKind::CostBudget) => Status::resource_exhausted("reflection budget exhausted"),
-        _ => Status::cancelled("reflection cancelled"),
-    })
+    cx.checkpoint()
+        .map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
+            Some(CancelKind::Timeout | CancelKind::Deadline) => {
+                Status::deadline_exceeded("reflection deadline exceeded")
+            }
+            Some(CancelKind::PollQuota | CancelKind::CostBudget) => {
+                Status::resource_exhausted("reflection budget exhausted")
+            }
+            _ => Status::cancelled("reflection cancelled"),
+        })
 }
 
 struct Slot(Arc<Shared>);
@@ -512,18 +576,41 @@ impl ReflectionStream {
 impl Streaming for ReflectionStream {
     type Message = Bytes;
 
-    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Result<Bytes, Status>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         let this = self.get_mut();
-        if this.done { return Poll::Ready(None); }
+        if this.done {
+            return Poll::Ready(None);
+        }
         let _ambient = this.cx.clone().set_current_restricted();
-        if let Err(status) = checkpoint(&this.cx) { return this.fail(status); }
+        if let Err(status) = checkpoint(&this.cx) {
+            return this.fail(status);
+        }
         // Register then recheck so an otherwise idle request has a cancellation wake.
-        let _ = this.cancelled.as_mut().expect("live cancellation observer").as_mut().poll(task);
-        if let Err(status) = checkpoint(&this.cx) { return this.fail(status); }
-        if this.deadline.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready()) {
+        let _ = this
+            .cancelled
+            .as_mut()
+            .expect("live cancellation observer")
+            .as_mut()
+            .poll(task);
+        if let Err(status) = checkpoint(&this.cx) {
+            return this.fail(status);
+        }
+        if this
+            .deadline
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready())
+        {
             return this.fail(Status::deadline_exceeded("reflection deadline exceeded"));
         }
-        let next = this.source.as_mut().expect("live reflection input").as_mut().poll_next(task);
+        let next = this
+            .source
+            .as_mut()
+            .expect("live reflection input")
+            .as_mut()
+            .poll_next(task);
         // Input polling can publish cancellation or use the remaining deadline.
         // Recheck before classifying even EOF or an error: otherwise a terminal
         // input poll could turn an already-cancelled RPC into clean completion.
@@ -532,20 +619,32 @@ impl Streaming for ReflectionStream {
             drop(next);
             return this.fail(status);
         }
-        if this.deadline.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready()) {
+        if this
+            .deadline
+            .as_mut()
+            .is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready())
+        {
             drop(next);
             return this.fail(Status::deadline_exceeded("reflection deadline exceeded"));
         }
         match next {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => { this.finish(); Poll::Ready(None) }
+            Poll::Ready(None) => {
+                this.finish();
+                Poll::Ready(None)
+            }
             Poll::Ready(Some(Err(status))) => this.fail(status),
             Poll::Ready(Some(Ok(bytes))) => {
                 if this.queries >= this.rpc.shared.config.max_queries_per_stream {
-                    return this.fail(Status::resource_exhausted("reflection query count exceeded"));
+                    return this.fail(Status::resource_exhausted(
+                        "reflection query count exceeded",
+                    ));
                 }
                 this.queries += 1;
-                match this.rpc.answer_request(&this.cx, &this.metadata, &this.extensions, &bytes) {
+                match this
+                    .rpc
+                    .answer_request(&this.cx, &this.metadata, &this.extensions, &bytes)
+                {
                     Ok(response) => Poll::Ready(Some(Ok(response))),
                     Err(status) => this.fail(status),
                 }
@@ -562,8 +661,11 @@ impl Drop for ReflectionStream {
 }
 
 fn registered_call<'a, S>(
-    rpc: &'a ReflectionRpcService, cx: &'a Cx, path: &'a str,
-    request: Request<S>, expected: &'static str,
+    rpc: &'a ReflectionRpcService,
+    cx: &'a Cx,
+    path: &'a str,
+    request: Request<S>,
+    expected: &'static str,
 ) -> ServiceStreamingFuture<'a>
 where
     S: Streaming<Message = Bytes> + Send + 'static,
@@ -572,7 +674,9 @@ where
     // including an unpolled or refused request body.
     Box::pin(cx.with_ambient_fn(move || async move {
         checkpoint(cx)?;
-        if path != expected { return Err(Status::unimplemented("unknown reflection method")); }
+        if path != expected {
+            return Err(Status::unimplemented("unknown reflection method"));
+        }
         rpc.open_request_stream(cx, request)
     }))
 }
@@ -582,13 +686,22 @@ impl NamedService for ReflectionRpcService {
 }
 impl ServiceHandler for ReflectionRpcService {
     fn descriptor(&self) -> &ServiceDescriptor {
-        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::bidi_streaming("ServerReflectionInfo", V1_PATH)];
-        static DESC: ServiceDescriptor = ServiceDescriptor::new("ServerReflection", "grpc.reflection.v1", METHODS);
+        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::bidi_streaming(
+            "ServerReflectionInfo",
+            V1_PATH,
+        )];
+        static DESC: ServiceDescriptor =
+            ServiceDescriptor::new("ServerReflection", "grpc.reflection.v1", METHODS);
         &DESC
     }
-    fn method_names(&self) -> Vec<&str> { vec!["ServerReflectionInfo"] }
+    fn method_names(&self) -> Vec<&str> {
+        vec!["ServerReflectionInfo"]
+    }
     fn call_bidirectional_streaming<'a>(
-        &'a self, cx: &'a Cx, path: &'a str, request: Request<RegisteredRequestStream>,
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<RegisteredRequestStream>,
     ) -> ServiceStreamingFuture<'a> {
         registered_call(self, cx, path, request, V1_PATH)
     }
@@ -599,13 +712,22 @@ impl NamedService for ReflectionRpcV1AlphaService {
 }
 impl ServiceHandler for ReflectionRpcV1AlphaService {
     fn descriptor(&self) -> &ServiceDescriptor {
-        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::bidi_streaming("ServerReflectionInfo", ALPHA_PATH)];
-        static DESC: ServiceDescriptor = ServiceDescriptor::new("ServerReflection", "grpc.reflection.v1alpha", METHODS);
+        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::bidi_streaming(
+            "ServerReflectionInfo",
+            ALPHA_PATH,
+        )];
+        static DESC: ServiceDescriptor =
+            ServiceDescriptor::new("ServerReflection", "grpc.reflection.v1alpha", METHODS);
         &DESC
     }
-    fn method_names(&self) -> Vec<&str> { vec!["ServerReflectionInfo"] }
+    fn method_names(&self) -> Vec<&str> {
+        vec!["ServerReflectionInfo"]
+    }
     fn call_bidirectional_streaming<'a>(
-        &'a self, cx: &'a Cx, path: &'a str, request: Request<RegisteredRequestStream>,
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<RegisteredRequestStream>,
     ) -> ServiceStreamingFuture<'a> {
         registered_call(&self.rpc, cx, path, request, ALPHA_PATH)
     }

@@ -9,7 +9,9 @@ use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::transfer::TransferId;
 use crate::cx::Cx;
 use crate::fs::File;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, PolicyError, ProtocolError};
+use crate::net::atp::protocol::outcome::{
+    AtpError, AtpOutcome, DiskError, PolicyError, ProtocolError,
+};
 use crate::types::outcome::Outcome;
 use sha2::{Digest, Sha256};
 use std::path::Path;

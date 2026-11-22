@@ -10,10 +10,10 @@ use super::*;
 use crate::record::task::TaskWakeState;
 use crate::runtime::scheduler::invariant_monitor;
 use crate::runtime::scheduler::{InvariantCategory, SchedulerInvariant};
+use crate::sync::pl::RwLock;
 use crate::time::{TimerDriverHandle, VirtualClock};
 use crate::types::task_context::CxCancellationState;
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
-use crate::sync::pl::RwLock;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -6928,7 +6928,10 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
         None,
         Arc::downgrade(&alive),
     ));
-    state.lock().unwrap().set_spawn_gateway(Arc::clone(&gateway));
+    state
+        .lock()
+        .unwrap()
+        .set_spawn_gateway(Arc::clone(&gateway));
     let producer: crate::cx::Cx =
         crate::cx::Cx::new(region, TaskId::new_for_test(90, 0), Budget::INFINITE)
             .with_spawn_gateway(Some(Arc::clone(&gateway)))
@@ -6949,7 +6952,10 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
     assert_eq!(worker.drain_local_spawn_admissions(), 1);
     let task_id = handle.task_id();
     assert!(worker.with_task_table_ref(|table| table.task(task_id).unwrap().is_local));
-    assert!(!factory_called.get(), "admission does not invoke the factory");
+    assert!(
+        !factory_called.get(),
+        "admission does not invoke the factory"
+    );
     assert_eq!(
         validator.lock().task_state(task_id),
         Some(&crate::cancel::protocol_state_machines::TaskState::Running),
@@ -6962,11 +6968,17 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
     }
     retire_local_store(key);
     assert_eq!(std::rc::Rc::strong_count(&factory_called), 1);
-    assert_eq!(handle.try_join(), Ok(None), "record retirement still gates join");
+    assert_eq!(
+        handle.try_join(),
+        Ok(None),
+        "record retirement still gates join"
+    );
     assert_eq!(worker.drain_local_task_retirements(), 1);
     assert_eq!(
         handle.try_join(),
-        Err(JoinError::Cancelled(prior.unwrap_or_else(CancelReason::shutdown)))
+        Err(JoinError::Cancelled(
+            prior.unwrap_or_else(CancelReason::shutdown)
+        ))
     );
     assert!(worker.with_task_table_ref(|table| table.task(task_id).is_none()));
     assert!(!factory_called.get());
@@ -6987,7 +6999,10 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
         .unwrap()
         .create_task(region, Budget::INFINITE, std::future::pending::<()>())
         .expect("mint a replacement Send task after recycling");
-    assert_ne!(replacement, task_id, "canonical generations are never reused");
+    assert_ne!(
+        replacement, task_id,
+        "canonical generations are never reused"
+    );
     for id in [task_id, replacement] {
         gateway.enqueue_local_task_retirement(LocalTaskRetirement {
             task_id: id,
@@ -6996,7 +7011,9 @@ fn local_owner_retirement_before_first_poll_case(sharded: bool, prior: Option<Ca
     }
     assert_eq!(worker.drain_local_task_retirements(), 2);
     let runtime = state.lock().unwrap();
-    let replacement = runtime.task(replacement).expect("replacement must remain live");
+    let replacement = runtime
+        .task(replacement)
+        .expect("replacement must remain live");
     assert!(!replacement.is_local);
     assert!(!replacement.state.is_terminal());
     assert!(mailbox.is_empty());
@@ -12220,7 +12237,8 @@ fn repeated_checkpoint_cleanup_parks_until_a_real_wake_in_both_task_tables() {
                             cx.checkpoint_with("waiting for cleanup I/O")
                         };
                         assert_eq!(checkpoint.is_err(), cx.is_cancel_requested());
-                        *task_waker.lock().expect("lock task Waker") = Some(poll_cx.waker().clone());
+                        *task_waker.lock().expect("lock task Waker") =
+                            Some(poll_cx.waker().clone());
                         if task_wake_during_poll.swap(false, Ordering::SeqCst) {
                             poll_cx.waker().wake_by_ref();
                         }
@@ -12239,8 +12257,8 @@ fn repeated_checkpoint_cleanup_parks_until_a_real_wake_in_both_task_tables() {
                 .expect("task Cx");
             (task_id, handle, task_cx)
         };
-        let task_table = external_table
-            .then(|| Arc::new(ContendedMutex::new("task_table", TaskTable::new())));
+        let task_table =
+            external_table.then(|| Arc::new(ContendedMutex::new("task_table", TaskTable::new())));
         if let Some(task_table) = task_table.as_ref() {
             move_runtime_task_to_shard(&state, task_table, task_id);
         }

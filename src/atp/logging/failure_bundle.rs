@@ -489,26 +489,27 @@ fn capture_system_info() -> SystemInfo {
 
 fn get_os_version() -> String {
     sysinfo::System::long_os_version()
-        .or_else(sysinfo::System::os_version)
-        .or_else(sysinfo::System::kernel_version)
-        .unwrap_or_else(|| format!("{}-{}", env::consts::OS, env::consts::ARCH))
+        .or_else(|_| sysinfo::System::os_version())
+        .or_else(|_| sysinfo::System::kernel_version())
+        .unwrap_or_else(|_| format!("{}-{}", env::consts::OS, env::consts::ARCH))
 }
 
 /// Get total system memory
 fn get_total_memory() -> u64 {
-    sysinfo::System::new_all().total_memory()
+    sysinfo::System::new_all().map_or(0, |system| system.total_memory())
 }
 
 /// Get available disk space
 fn get_available_disk_space() -> u64 {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let Ok(disks) = sysinfo::Disks::new_with_refreshed_list() else {
+        return 0;
+    };
     disks
-        .list()
         .iter()
         .filter(|disk| cwd.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().components().count())
-        .or_else(|| disks.list().iter().max_by_key(|disk| disk.total_space()))
+        .or_else(|| disks.iter().max_by_key(|disk| disk.total_space()))
         .map_or(0, sysinfo::Disk::available_space)
 }
 

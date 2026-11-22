@@ -155,7 +155,10 @@ fn run_on<T: Send + 'static>(
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::new().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
     let result = runtime.block_on(runtime.handle().spawn(future));
@@ -326,7 +329,10 @@ fn checkpoint_survives_process_exit_and_reuses_the_durable_peer_receipt() {
         let terminal = sender.cancel_checkpoint(&cx, &info).await.unwrap();
         assert!(!terminal.cancelled);
         assert!(!terminal.delivery_uncertain());
-        assert_eq!(terminal.checkpoint.state, NativeCheckpointState::Acknowledged);
+        assert_eq!(
+            terminal.checkpoint.state,
+            NativeCheckpointState::Acknowledged
+        );
         assert_eq!(terminal.receipt.unwrap().transfer_id, sent.transfer_id);
         let mut foreign = info.clone();
         foreign.source_sha256[0] ^= 1;
@@ -334,7 +340,10 @@ fn checkpoint_survives_process_exit_and_reuses_the_durable_peer_receipt() {
             sender.cancel_checkpoint(&cx, &foreign).await,
             Err(NativeCheckpointError::SnapshotMismatch)
         ));
-        assert_eq!(std::fs::read(directory.join("journal.json")).unwrap(), saved_journal);
+        assert_eq!(
+            std::fs::read(directory.join("journal.json")).unwrap(),
+            saved_journal
+        );
         assert_eq!(sent.transfer_id, received.transfer_id);
         assert_eq!(received.committed_paths.len(), 1);
         assert_eq!(std::fs::read(&received.committed_paths[0]).unwrap(), data());
@@ -835,7 +844,10 @@ fn checkpoint_cancellation_survives_process_exit_and_forbids_every_retry() {
                 )
                 .await
                 .unwrap();
-            let terminal = sender.cancel_checkpoint(&cx, &prepared.checkpoint).await.unwrap();
+            let terminal = sender
+                .cancel_checkpoint(&cx, &prepared.checkpoint)
+                .await
+                .unwrap();
             assert!(terminal.cancelled);
             assert!(!terminal.delivery_uncertain());
             assert!(terminal.receipt.is_none());
@@ -861,16 +873,24 @@ fn checkpoint_cancellation_survives_process_exit_and_forbids_every_retry() {
     run(async move {
         let cx = Cx::current().unwrap();
         let sender = sender();
-        let status = sender.inspect_checkpoint_status(&cx, &directory, remote).await.unwrap();
+        let status = sender
+            .inspect_checkpoint_status(&cx, &directory, remote)
+            .await
+            .unwrap();
         assert!(status.cancelled);
         assert!(!status.delivery_uncertain());
-        assert_eq!((status.checkpoint.state, status.checkpoint.attempt),
-            (NativeCheckpointState::Prepared, 0));
+        assert_eq!(
+            (status.checkpoint.state, status.checkpoint.attempt),
+            (NativeCheckpointState::Prepared, 0)
+        );
         let journal_path = directory.join("journal.json");
         let bytes = std::fs::read(&journal_path).unwrap();
         let inode = std::fs::metadata(&journal_path).unwrap().ino();
         for _ in 0..3 {
-            let repeated = sender.cancel_checkpoint(&cx, &status.checkpoint).await.unwrap();
+            let repeated = sender
+                .cancel_checkpoint(&cx, &status.checkpoint)
+                .await
+                .unwrap();
             assert!(repeated.cancelled);
             assert_eq!(repeated.checkpoint, status.checkpoint);
             assert!(repeated.receipt.is_none());
@@ -879,16 +899,27 @@ fn checkpoint_cancellation_survives_process_exit_and_forbids_every_retry() {
         }
         assert!(matches!(
             sender.inspect_checkpoint(&cx, &directory, remote).await,
-            Err(NativeCheckpointError::Cancelled { attempt: 0, delivery_uncertain: false })
+            Err(NativeCheckpointError::Cancelled {
+                attempt: 0,
+                delivery_uncertain: false
+            })
         ));
-        for retry in [NativeCheckpointRetry::Never,
-            NativeCheckpointRetry::AcknowledgeUncertain { attempt: 0 }] {
+        for retry in [
+            NativeCheckpointRetry::Never,
+            NativeCheckpointRetry::AcknowledgeUncertain { attempt: 0 },
+        ] {
             assert!(matches!(
                 sender.send_checkpoint(&cx, &directory, remote, retry).await,
-                Err(NativeCheckpointError::Cancelled { attempt: 0, delivery_uncertain: false })
+                Err(NativeCheckpointError::Cancelled {
+                    attempt: 0,
+                    delivery_uncertain: false
+                })
             ));
         }
-        assert_eq!(std::fs::read(directory.join("payload/data.bin")).unwrap(), data());
+        assert_eq!(
+            std::fs::read(directory.join("payload/data.bin")).unwrap(),
+            data()
+        );
         assert_eq!(sender.active_transfers(), 0);
     });
     no_packet(&socket);
@@ -908,25 +939,36 @@ fn checkpoint_cancellation_fences_an_active_native_send_and_preserves_uncertaint
             config.handshake_timeout = Duration::from_secs(3600);
             let sending = client("checkpoint-sender", config, 1);
             let prepared = sending
-                .prepare_buffer(&cx, remote, NativeUploadOptions::new(fixture(), "data.bin"), &data())
+                .prepare_buffer(
+                    &cx,
+                    remote,
+                    NativeUploadOptions::new(fixture(), "data.bin"),
+                    &data(),
+                )
                 .await
                 .unwrap();
             let initial = prepared.checkpoint;
             let directory = initial.directory.clone();
             let parked = Arc::new(AtomicBool::new(false));
             let child_parked = Arc::clone(&parked);
-            let mut child = cx.spawn(move |owner| async move {
-                let mut operation = Box::pin(sending.send_checkpoint(
-                    &owner, &directory, remote, NativeCheckpointRetry::Never,
-                ));
-                poll_fn(|task| {
-                    let result = operation.as_mut().poll(task);
-                    if result.is_pending() {
-                        child_parked.store(true, Ordering::Release);
-                    }
-                    result
-                }).await
-            }).unwrap();
+            let mut child = cx
+                .spawn(move |owner| async move {
+                    let mut operation = Box::pin(sending.send_checkpoint(
+                        &owner,
+                        &directory,
+                        remote,
+                        NativeCheckpointRetry::Never,
+                    ));
+                    poll_fn(|task| {
+                        let result = operation.as_mut().poll(task);
+                        if result.is_pending() {
+                            child_parked.store(true, Ordering::Release);
+                        }
+                        result
+                    })
+                    .await
+                })
+                .unwrap();
             let witness = async {
                 let mut bytes = [0; 2048];
                 let mut saw_packet = false;
@@ -940,7 +982,8 @@ fn checkpoint_cancellation_fences_an_active_native_send_and_preserves_uncertaint
                 }
             };
             asupersync::time::timeout(cx.now(), Duration::from_secs(10), witness)
-                .await.expect("sender reached actual Pending and emitted a handshake");
+                .await
+                .expect("sender reached actual Pending and emitted a handshake");
             // An independent admission domain proves this is the checkpoint
             // OS lease, not the first client's capacity ceiling.
             let cancelling = sender();
@@ -949,23 +992,27 @@ fn checkpoint_cancellation_fences_an_active_native_send_and_preserves_uncertaint
                 Err(NativeCheckpointError::Busy)
             ));
             assert_eq!(cancelling.active_transfers(), 0);
-            child.abort_with_reason(CancelReason::user("stop active checkpoint before revocation"));
-            let joined = asupersync::time::timeout(
-                cx.now(), Duration::from_secs(10), child.join(&cx),
-            ).await.expect("actual native attempt drains after cancellation");
+            child.abort_with_reason(CancelReason::user(
+                "stop active checkpoint before revocation",
+            ));
+            let joined =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(10), child.join(&cx))
+                    .await
+                    .expect("actual native attempt drains after cancellation");
             match joined {
                 Ok(Ok(attempt)) => assert!(matches!(
                     attempt.outcome,
-                    Err(NativeCheckpointError::Native(NativeTransferError::Transport(
-                        QuicTransportError::Cancelled
-                    )))
+                    Err(NativeCheckpointError::Native(
+                        NativeTransferError::Transport(QuicTransportError::Cancelled)
+                    ))
                 )),
                 Err(JoinError::Cancelled(_)) => {}
                 other => panic!("unexpected cancelled sender terminal: {other:?}"),
             }
-            let status = cancelling.inspect_checkpoint_status(
-                &cx, &initial.directory, remote,
-            ).await.unwrap();
+            let status = cancelling
+                .inspect_checkpoint_status(&cx, &initial.directory, remote)
+                .await
+                .unwrap();
             assert!(!status.cancelled);
             assert!(status.delivery_uncertain());
             assert_eq!(status.checkpoint.attempt, 1);
@@ -973,17 +1020,32 @@ fn checkpoint_cancellation_fences_an_active_native_send_and_preserves_uncertaint
                 cancelling.cancel_checkpoint(&cx, &initial).await,
                 Err(NativeCheckpointError::StaleAttempt)
             ));
-            let terminal = cancelling.cancel_checkpoint(&cx, &status.checkpoint).await.unwrap();
+            let terminal = cancelling
+                .cancel_checkpoint(&cx, &status.checkpoint)
+                .await
+                .unwrap();
             assert!(terminal.cancelled && terminal.delivery_uncertain());
             assert!(terminal.receipt.is_none());
             let mut bytes = [0; 2048];
             while socket.recv_from(&mut bytes).is_ok() {}
             assert!(matches!(
-                cancelling.send_checkpoint(&cx, &initial.directory, remote,
-                    NativeCheckpointRetry::AcknowledgeUncertain { attempt: 1 }).await,
-                Err(NativeCheckpointError::Cancelled { attempt: 1, delivery_uncertain: true })
+                cancelling
+                    .send_checkpoint(
+                        &cx,
+                        &initial.directory,
+                        remote,
+                        NativeCheckpointRetry::AcknowledgeUncertain { attempt: 1 }
+                    )
+                    .await,
+                Err(NativeCheckpointError::Cancelled {
+                    attempt: 1,
+                    delivery_uncertain: true
+                })
             ));
-            let repeated = cancelling.cancel_checkpoint(&cx, &status.checkpoint).await.unwrap();
+            let repeated = cancelling
+                .cancel_checkpoint(&cx, &status.checkpoint)
+                .await
+                .unwrap();
             assert!(repeated.cancelled && repeated.delivery_uncertain());
             assert_eq!(repeated.checkpoint, terminal.checkpoint);
             assert_eq!(cancelling.active_transfers(), 0);
@@ -1000,8 +1062,15 @@ fn checkpoint_cancellation_refuses_foreign_snapshots_and_authority_without_rewri
         let sender = sender();
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let remote = socket.local_addr().unwrap();
-        let prepared = sender.prepare_buffer(&cx, remote,
-            NativeUploadOptions::new(fixture(), "data.bin"), b"retained").await.unwrap();
+        let prepared = sender
+            .prepare_buffer(
+                &cx,
+                remote,
+                NativeUploadOptions::new(fixture(), "data.bin"),
+                b"retained",
+            )
+            .await
+            .unwrap();
         let snapshot = prepared.checkpoint;
         let path = snapshot.directory.join("journal.json");
         let before = std::fs::read(&path).unwrap();
@@ -1016,23 +1085,38 @@ fn checkpoint_cancellation_refuses_foreign_snapshots_and_authority_without_rewri
                 _ => unreachable!(),
             }
             let error = sender.cancel_checkpoint(&cx, &wrong).await.unwrap_err();
-            assert!(matches!(error, NativeCheckpointError::SnapshotMismatch
-                | NativeCheckpointError::StaleAttempt));
+            assert!(matches!(
+                error,
+                NativeCheckpointError::SnapshotMismatch | NativeCheckpointError::StaleAttempt
+            ));
         }
-        for (label, name) in [("foreign-client", "localhost"),
-            ("checkpoint-sender", "other.example")] {
+        for (label, name) in [
+            ("foreign-client", "localhost"),
+            ("checkpoint-sender", "other.example"),
+        ] {
             let foreign = client(label, config(name, false), 1);
-            assert!(matches!(foreign.cancel_checkpoint(&cx, &snapshot).await,
-                Err(NativeCheckpointError::BindingMismatch)));
+            assert!(matches!(
+                foreign.cancel_checkpoint(&cx, &snapshot).await,
+                Err(NativeCheckpointError::BindingMismatch)
+            ));
             assert_eq!(foreign.active_transfers(), 0);
         }
         let mut other_endpoint = snapshot.clone();
-        other_endpoint.remote.set_port(if remote.port() == 1 { 2 } else { 1 });
-        assert!(matches!(sender.cancel_checkpoint(&cx, &other_endpoint).await,
-            Err(NativeCheckpointError::BindingMismatch)));
+        other_endpoint
+            .remote
+            .set_port(if remote.port() == 1 { 2 } else { 1 });
+        assert!(matches!(
+            sender.cancel_checkpoint(&cx, &other_endpoint).await,
+            Err(NativeCheckpointError::BindingMismatch)
+        ));
         assert_eq!(std::fs::read(path).unwrap(), before);
-        assert!(!sender.inspect_checkpoint_status(&cx, &snapshot.directory, remote)
-            .await.unwrap().cancelled);
+        assert!(
+            !sender
+                .inspect_checkpoint_status(&cx, &snapshot.directory, remote)
+                .await
+                .unwrap()
+                .cancelled
+        );
         assert_eq!(sender.active_transfers(), 0);
         no_packet(&socket);
     });
@@ -1047,30 +1131,63 @@ fn malformed_or_oversized_cancellation_journals_never_fall_back_to_retained_payl
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let remote = socket.local_addr().unwrap();
         for mutation in 0..5 {
-            let prepared = sender.prepare_buffer(&cx, remote,
-                NativeUploadOptions::new(fixture(), "data.bin"), b"retained").await.unwrap();
+            let prepared = sender
+                .prepare_buffer(
+                    &cx,
+                    remote,
+                    NativeUploadOptions::new(fixture(), "data.bin"),
+                    b"retained",
+                )
+                .await
+                .unwrap();
             let expected = prepared.checkpoint;
             sender.cancel_checkpoint(&cx, &expected).await.unwrap();
             let path = expected.directory.join("journal.json");
             let bytes = std::fs::read(&path).unwrap();
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let malformed = match mutation {
-                0 => { value["cancelled"] = serde_json::json!(false); serde_json::to_vec(&value).unwrap() }
-                1 => { value["version"] = serde_json::json!(1); serde_json::to_vec(&value).unwrap() }
+                0 => {
+                    value["cancelled"] = serde_json::json!(false);
+                    serde_json::to_vec(&value).unwrap()
+                }
+                1 => {
+                    value["version"] = serde_json::json!(1);
+                    serde_json::to_vec(&value).unwrap()
+                }
                 2 => bytes[..bytes.len() - 1].to_vec(),
                 3 => vec![b' '; 128 * 1024 + 1],
-                4 => { value.as_object_mut().unwrap().remove("cancelled"); serde_json::to_vec(&value).unwrap() }
+                4 => {
+                    value.as_object_mut().unwrap().remove("cancelled");
+                    serde_json::to_vec(&value).unwrap()
+                }
                 _ => unreachable!(),
             };
             std::fs::write(path, malformed).unwrap();
-            assert!(matches!(sender.inspect_checkpoint_status(&cx, &expected.directory, remote).await,
-                Err(NativeCheckpointError::Invalid(_))));
-            assert!(matches!(sender.cancel_checkpoint(&cx, &expected).await,
-                Err(NativeCheckpointError::Invalid(_))));
-            assert!(matches!(sender.send_checkpoint(&cx, &expected.directory, remote,
-                NativeCheckpointRetry::Never).await,
-                Err(NativeCheckpointError::Invalid(_))));
-            assert_eq!(std::fs::read(expected.directory.join("payload/data.bin")).unwrap(), b"retained");
+            assert!(matches!(
+                sender
+                    .inspect_checkpoint_status(&cx, &expected.directory, remote)
+                    .await,
+                Err(NativeCheckpointError::Invalid(_))
+            ));
+            assert!(matches!(
+                sender.cancel_checkpoint(&cx, &expected).await,
+                Err(NativeCheckpointError::Invalid(_))
+            ));
+            assert!(matches!(
+                sender
+                    .send_checkpoint(
+                        &cx,
+                        &expected.directory,
+                        remote,
+                        NativeCheckpointRetry::Never
+                    )
+                    .await,
+                Err(NativeCheckpointError::Invalid(_))
+            ));
+            assert_eq!(
+                std::fs::read(expected.directory.join("payload/data.bin")).unwrap(),
+                b"retained"
+            );
             assert_eq!(sender.active_transfers(), 0);
         }
         no_packet(&socket);

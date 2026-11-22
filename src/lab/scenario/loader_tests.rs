@@ -113,12 +113,18 @@ fn a_null_section_mapping_or_list_is_refused_as_in_a_single_document() {
         "lab: {seed: 7}\nparticipants: [{name: local, role: receiver}]\n",
     );
     let cases = [
-        ("network: null", "id: section\ninclude: [{path: base.yaml}]\nnetwork: null\n"),
+        (
+            "network: null",
+            "id: section\ninclude: [{path: base.yaml}]\nnetwork: null\n",
+        ),
         (
             "network: {links: null}",
             "id: nested\ninclude: [{path: base.yaml}]\nnetwork: {links: null}\n",
         ),
-        ("participants: null", "id: list\ninclude: [{path: base.yaml}]\nparticipants: null\n"),
+        (
+            "participants: null",
+            "id: list\ninclude: [{path: base.yaml}]\nparticipants: null\n",
+        ),
         ("include: null", "id: no-includes\ninclude: null\n"),
     ];
     for (index, (field, resolved)) in cases.into_iter().enumerate() {

@@ -312,10 +312,14 @@ impl RecoveryContext {
                     return Err(RecoveryError::JournalCorrupted(error.to_string()));
                 }
                 Outcome::Cancelled(_) => {
-                    return Err(RecoveryError::JournalCorrupted("resume summary cancelled".to_owned()));
+                    return Err(RecoveryError::JournalCorrupted(
+                        "resume summary cancelled".to_owned(),
+                    ));
                 }
                 Outcome::Panicked(_) => {
-                    return Err(RecoveryError::JournalCorrupted("resume summary panicked".to_owned()));
+                    return Err(RecoveryError::JournalCorrupted(
+                        "resume summary panicked".to_owned(),
+                    ));
                 }
             };
             if !summary.is_resumable() {
@@ -336,7 +340,9 @@ impl RecoveryContext {
                 }
             }
             transfer.chunk_sizes = durable;
-            transfer.chunk_states.retain(|id, _| transfer.chunk_sizes.contains_key(id));
+            transfer
+                .chunk_states
+                .retain(|id, _| transfer.chunk_sizes.contains_key(id));
             transfer.total_size = Some(total_size);
             let bitmap = transfer.into_bitmap(transfer_id.clone());
             stats.chunks_recovered += bitmap.entry_count();
@@ -478,16 +484,29 @@ impl RecoveryContext {
 
 impl TransferRecoveryState {
     fn validate_chunk_geometry(&self, id: ChunkId, size: u64) -> Result<(), RecoveryError> {
-        let invalid = || RecoveryError::JournalCorrupted(
-            "recovery chunk ranges are empty, overflowing, overlapping, or inconsistent".to_owned(),
-        );
+        let invalid = || {
+            RecoveryError::JournalCorrupted(
+                "recovery chunk ranges are empty, overflowing, overlapping, or inconsistent"
+                    .to_owned(),
+            )
+        };
         let start = id.as_u64();
-        let end = start.checked_add(size).filter(|_| size != 0).ok_or_else(invalid)?;
+        let end = start
+            .checked_add(size)
+            .filter(|_| size != 0)
+            .ok_or_else(invalid)?;
         if let Some(previous_size) = self.chunk_sizes.get(&id) {
-            return if *previous_size == size { Ok(()) } else { Err(invalid()) };
+            return if *previous_size == size {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
         }
         if let Some((previous, previous_size)) = self.chunk_sizes.range(..id).next_back()
-            && previous.as_u64().checked_add(*previous_size).is_none_or(|end| end > start)
+            && previous
+                .as_u64()
+                .checked_add(*previous_size)
+                .is_none_or(|end| end > start)
         {
             return Err(invalid());
         }
@@ -544,7 +563,9 @@ impl TransferRecoveryState {
         // two cells. Skip holes arithmetically; never enumerate missing bytes or
         // a coprime GCD grid. Output size and work are proportional to records.
         for (id, size) in self.chunk_sizes {
-            let Some(state) = self.chunk_states.get(&id).copied() else { continue; };
+            let Some(state) = self.chunk_states.get(&id).copied() else {
+                continue;
+            };
             let mut cursor = id.as_u64();
             let end = cursor + size; // Validated before insertion.
             while cursor < end {
@@ -697,9 +718,11 @@ fn recovery_bitmap_name(transfer_id: &str) -> Result<String, RecoveryError> {
     // Windows stream syntax and nonportable filename characters before joining.
     // Ordinary Unicode identifiers remain supported; this is not general
     // filesystem Unicode/alias normalization or parent-path confinement.
-    if transfer_id.is_empty() || transfer_id.chars().any(|ch| {
-        ch.is_control() || matches!(ch, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
-    }) {
+    if transfer_id.is_empty()
+        || transfer_id.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
         return Err(RecoveryError::BitmapRecovery(
             "transfer identifier is not a portable bitmap filename component".to_owned(),
         ));

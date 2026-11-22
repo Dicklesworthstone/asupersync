@@ -45,9 +45,19 @@ impl Delivery {
         let digest = self.digest.clone();
         let replica_id = ReplicaId::new(self.author.to_string());
         if self.phase == 0 {
-            PbftMessage::Prepare { view, sequence, digest, replica_id }
+            PbftMessage::Prepare {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            }
         } else {
-            PbftMessage::Commit { view, sequence, digest, replica_id }
+            PbftMessage::Commit {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            }
         }
     }
 }
@@ -55,7 +65,11 @@ impl Delivery {
 impl ReorderBuffer {
     pub(super) fn prune(&mut self, applied: SequenceNumber) {
         self.applied = self.applied.max(applied.0);
-        while self.slots.first_key_value().is_some_and(|(seq, _)| *seq <= self.applied) {
+        while self
+            .slots
+            .first_key_value()
+            .is_some_and(|(seq, _)| *seq <= self.applied)
+        {
             if let Some((_, slot)) = self.slots.pop_first() {
                 self.votes -= slot.votes.len();
             }
@@ -64,7 +78,9 @@ impl ReorderBuffer {
 
     fn check(&self, view: ViewNumber, sequence: SequenceNumber) -> Result<(), PbftIngressOutcome> {
         if view.0 != 0 {
-            return Err(PbftIngressOutcome::Rejected(super::PbftAuthError::UnsupportedPhase));
+            return Err(PbftIngressOutcome::Rejected(
+                super::PbftAuthError::UnsupportedPhase,
+            ));
         }
         if sequence.0 <= self.applied
             || sequence.0 > self.applied.saturating_add(WINDOW)
@@ -85,7 +101,11 @@ impl ReorderBuffer {
     ) -> Result<(), PbftIngressOutcome> {
         self.check(view, sequence)?;
         let slot = self.slots.entry(sequence.0).or_default();
-        if slot.digest.as_ref().is_some_and(|existing| existing != digest) {
+        if slot
+            .digest
+            .as_ref()
+            .is_some_and(|existing| existing != digest)
+        {
             return Err(PbftIngressOutcome::Equivocation(sequence));
         }
         slot.digest.get_or_insert_with(|| digest.clone());
@@ -98,9 +118,18 @@ impl ReorderBuffer {
     }
 
     /// Called only for engine-produced messages, never directly from ingress.
-    pub(super) fn observe_outbound(&mut self, message: &PbftMessage) -> Result<(), PbftIngressOutcome> {
+    pub(super) fn observe_outbound(
+        &mut self,
+        message: &PbftMessage,
+    ) -> Result<(), PbftIngressOutcome> {
         match message {
-            PbftMessage::PrePrepare { view, sequence, digest, batch, .. } => {
+            PbftMessage::PrePrepare {
+                view,
+                sequence,
+                digest,
+                batch,
+                ..
+            } => {
                 let request = if let [request] = batch.requests.as_slice() {
                     Some(MessageDigest::of(request).map_err(|_| {
                         PbftIngressOutcome::Rejected(super::PbftAuthError::Encoding)
@@ -110,34 +139,53 @@ impl ReorderBuffer {
                 };
                 self.proposal(*view, *sequence, digest, true, request)
             }
-            PbftMessage::Prepare { view, sequence, digest, .. } => {
-                self.proposal(*view, *sequence, digest, true, None)
-            }
+            PbftMessage::Prepare {
+                view,
+                sequence,
+                digest,
+                ..
+            } => self.proposal(*view, *sequence, digest, true, None),
             _ => Ok(()),
         }
     }
 
     pub(super) fn can_propose(&self, request: &MessageDigest) -> bool {
         self.local_high < self.applied.saturating_add(WINDOW)
-            || self.slots.values().any(|slot| slot.local_request.as_ref() == Some(request))
+            || self
+                .slots
+                .values()
+                .any(|slot| slot.local_request.as_ref() == Some(request))
     }
 
     /// Keep at most one digest for each (sequence, phase, authenticated author).
     /// A conflicting vote cannot replace a retained or already delivered vote.
     pub(super) fn vote(&mut self, message: &PbftMessage) -> Result<(), PbftIngressOutcome> {
         let (phase, view, sequence, digest, replica) = match message {
-            PbftMessage::Prepare { view, sequence, digest, replica_id } =>
-                (0, *view, *sequence, digest, replica_id),
-            PbftMessage::Commit { view, sequence, digest, replica_id } =>
-                (1, *view, *sequence, digest, replica_id),
+            PbftMessage::Prepare {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            } => (0, *view, *sequence, digest, replica_id),
+            PbftMessage::Commit {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            } => (1, *view, *sequence, digest, replica_id),
             _ => return Err(PbftIngressOutcome::Rejected(super::PbftAuthError::Encoding)),
         };
         self.check(view, sequence)?;
         // Authenticator already checked canonical form, membership and author.
-        let author = replica.as_str().parse::<u32>().map_err(|_| {
-            PbftIngressOutcome::Rejected(super::PbftAuthError::Author)
-        })?;
-        if let Some(old) = self.slots.get(&sequence.0).and_then(|slot| slot.votes.get(&(phase, author))) {
+        let author = replica
+            .as_str()
+            .parse::<u32>()
+            .map_err(|_| PbftIngressOutcome::Rejected(super::PbftAuthError::Author))?;
+        if let Some(old) = self
+            .slots
+            .get(&sequence.0)
+            .and_then(|slot| slot.votes.get(&(phase, author)))
+        {
             return if old.digest == *digest {
                 Ok(())
             } else {
@@ -148,7 +196,11 @@ impl ReorderBuffer {
             return Err(PbftIngressOutcome::BufferFull);
         }
         self.slots.entry(sequence.0).or_default().votes.insert(
-            (phase, author), Vote { digest: digest.clone(), delivered: false },
+            (phase, author),
+            Vote {
+                digest: digest.clone(),
+                delivered: false,
+            },
         );
         self.votes += 1;
         Ok(())
@@ -158,11 +210,15 @@ impl ReorderBuffer {
     /// call returns; cancellation or a failed send leaves this delivery ready.
     pub(super) fn next(&self) -> Option<Delivery> {
         for (sequence, slot) in &self.slots {
-            if !slot.installed { continue; }
+            if !slot.installed {
+                continue;
+            }
             for ((phase, author), vote) in &slot.votes {
                 if !vote.delivered && slot.digest.as_ref() == Some(&vote.digest) {
                     return Some(Delivery {
-                        sequence: *sequence, phase: *phase, author: *author,
+                        sequence: *sequence,
+                        phase: *phase,
+                        author: *author,
                         digest: vote.digest.clone(),
                     });
                 }
@@ -172,10 +228,14 @@ impl ReorderBuffer {
     }
 
     pub(super) fn acknowledge(&mut self, delivery: &Delivery) {
-        if let Some(vote) = self.slots.get_mut(&delivery.sequence)
+        if let Some(vote) = self
+            .slots
+            .get_mut(&delivery.sequence)
             .and_then(|slot| slot.votes.get_mut(&(delivery.phase, delivery.author)))
         {
-            if vote.digest == delivery.digest { vote.delivered = true; }
+            if vote.digest == delivery.digest {
+                vote.delivered = true;
+            }
         }
     }
 }

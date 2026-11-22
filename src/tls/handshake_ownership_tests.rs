@@ -43,9 +43,9 @@ fn context(allow_io: bool) -> Cx {
         // current() returns the erased context while preserving its effective
         // runtime capability mask. Do not reach into private Cx fields.
         let restricted = Cx::detached_cancel_context();
-        futures_lite::future::block_on(restricted.with_ambient(async {
-            Cx::current().expect("restricted ambient context")
-        }))
+        futures_lite::future::block_on(
+            restricted.with_ambient(async { Cx::current().expect("restricted ambient context") }),
+        )
     }
 }
 
@@ -96,7 +96,9 @@ impl AsyncWrite for OwnershipIo {
 
 impl Drop for OwnershipIo {
     fn drop(&mut self) {
-        self.0.drop_has_context.store(Cx::current().is_some(), Ordering::SeqCst);
+        self.0
+            .drop_has_context
+            .store(Cx::current().is_some(), Ordering::SeqCst);
         self.0.drop_allows_io.store(
             require_ambient_io("tls::ownership-test").is_ok(),
             Ordering::SeqCst,
@@ -109,8 +111,7 @@ impl Drop for OwnershipIo {
     }
 }
 
-type Wait<'a> =
-    Pin<Box<dyn Future<Output = Result<TlsStream<OwnershipIo>, TlsError>> + Send + 'a>>;
+type Wait<'a> = Pin<Box<dyn Future<Output = Result<TlsStream<OwnershipIo>, TlsError>> + Send + 'a>>;
 
 fn begin<'a>(
     client: bool,
@@ -177,9 +178,9 @@ fn first_poll_refusal_drops_before_return_without_transport_io() {
             let caller = context(true);
             let probe = Arc::new(Probe::default());
             let mut wait = begin(client, &owner, &connector, &acceptor, &probe);
-            let result = futures_lite::future::block_on(caller.with_ambient(poll_fn(|task| {
-                wait.as_mut().poll(task)
-            })));
+            let result = futures_lite::future::block_on(
+                caller.with_ambient(poll_fn(|task| wait.as_mut().poll(task))),
+            );
             let expected = if pre_cancelled {
                 io::ErrorKind::Interrupted
             } else {
@@ -203,7 +204,11 @@ fn dropping_a_parked_handshake_uses_owner_not_restricted_dropper() {
         let owner = context(true);
         let probe = Arc::new(Probe::default());
         let mut wait = begin(client, &owner, &connector, &acceptor, &probe);
-        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
         assert!(probe.parked.load(Ordering::SeqCst));
         let polls = probe.polls.load(Ordering::SeqCst);
         owner.cancel_fast(CancelKind::User);

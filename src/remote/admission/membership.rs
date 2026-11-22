@@ -9,8 +9,8 @@ use crate::cx::Cx;
 use crate::distributed::membership::owned::remote::MembershipRemoteReport;
 use crate::distributed::membership::owned::{MembershipWorkError, MembershipWorkReport};
 use crate::distributed::remote_owned::{
-    OwnedRemoteRequest, RemoteRunConfig, RemoteRunError, RemoteRunReport,
-    RemoteRunRetention, prepare_owned_timing, run_owned_request,
+    OwnedRemoteRequest, RemoteRunConfig, RemoteRunError, RemoteRunReport, RemoteRunRetention,
+    prepare_owned_timing, run_owned_request,
 };
 use crate::remote::ComputationName;
 use std::time::Duration;
@@ -114,8 +114,7 @@ impl NativeRemoteReservation {
                     // This share outlives the inner runner's transfer to its
                     // caller: that caller is still a runtime-owned body task.
                     let retention = request.retention();
-                    let result =
-                        run_owned_request(&body_cx, request, config.child, timing).await;
+                    let result = run_owned_request(&body_cx, request, config.child, timing).await;
                     // Preserve the nested cancellation/drain report through
                     // ordinary spawn's acknowledged-cancellation semantics.
                     let _ = body_cx.checkpoint();

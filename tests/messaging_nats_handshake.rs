@@ -806,7 +806,9 @@ fn nats_abandoned_inflight_ping_reconnects_before_the_next_command() {
             assert_eq!(read_nats_line(&mut reader), "SUB events.ping_drop 1");
             assert_eq!(read_nats_line(&mut reader), "PUB service.next 4");
             let mut payload = [0_u8; 6];
-            reader.read_exact(&mut payload).expect("replacement publication");
+            reader
+                .read_exact(&mut payload)
+                .expect("replacement publication");
             assert_eq!(&payload, b"next\r\n");
             assert_eq!(read_nats_line(&mut reader), "PING");
             reader
@@ -869,7 +871,10 @@ fn nats_abandoned_inflight_ping_reconnects_before_the_next_command() {
                     .payload,
                 b"alive"
             );
-            client.close(&cx).await.expect("close replacement connection");
+            client
+                .close(&cx)
+                .await
+                .expect("close replacement connection");
             done_tx.send(()).expect("publish completion witness");
         });
 
@@ -884,7 +889,10 @@ fn nats_abandoned_inflight_ping_reconnects_before_the_next_command() {
         let peer_result = server.join();
         drop(task);
         let drained = runtime.shutdown_timeout(Duration::from_secs(3));
-        assert!(published.is_ok(), "PING did not reach the peer: {published:?}");
+        assert!(
+            published.is_ok(),
+            "PING did not reach the peer: {published:?}"
+        );
         assert!(
             completed.is_ok(),
             "NATS_ABANDON_PING workers={workers}: {completed:?}"
@@ -1516,7 +1524,9 @@ fn nats_request_ignores_an_earlier_unrelated_publish_refusal() {
                 assert_eq!(fields[2], inbox);
                 let total: usize = fields.last().unwrap().parse().expect("request byte count");
                 let mut payload = vec![0_u8; total + 2];
-                reader.read_exact(&mut payload).expect("complete request witness");
+                reader
+                    .read_exact(&mut payload)
+                    .expect("complete request witness");
                 assert!(payload.ends_with(b"query\r\n"));
                 if with_headers {
                     assert!(payload.starts_with(b"NATS/1.0\r\nX-Request: allowed\r\n\r\n"));
@@ -1527,9 +1537,13 @@ fn nats_request_ignores_an_earlier_unrelated_publish_refusal() {
                 let response = format!(
                     "-ERR 'Permissions Violation for Publish to \"events.denied\"'\r\nMSG {inbox} {sid} 5\r\nreply\r\n"
                 );
-                reader.get_mut().write_all(response.as_bytes()).expect("send refusal and reply");
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .expect("send refusal and reply");
                 reader.get_mut().flush().expect("flush refusal and reply");
-                let (commands, closed) = lines_until_closed(&mut reader, true, Duration::from_secs(5));
+                let (commands, closed) =
+                    lines_until_closed(&mut reader, true, Duration::from_secs(5));
                 (commands, closed, sid)
             });
 
@@ -1540,35 +1554,59 @@ fn nats_request_ignores_an_earlier_unrelated_publish_refusal() {
             let (done_tx, done_rx) = mpsc::channel();
             let task = runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("native request owner");
-                let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
+                let mut config =
+                    NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
                 config.auto_reconnect = false;
                 config.request_timeout = Duration::from_secs(2);
-                let mut client = NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                let mut client =
+                    NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                        .await
+                        .expect("connect request-refusal client");
+                client
+                    .publish(&cx, "events.denied", b"x")
                     .await
-                    .expect("connect request-refusal client");
-                client.publish(&cx, "events.denied", b"x").await.expect("write earlier PUB");
+                    .expect("write earlier PUB");
                 let response = if with_headers {
-                    client.request_with_headers(
-                        &cx, "service.allowed", &[("X-Request", b"allowed".as_slice())], b"query",
-                    ).await
+                    client
+                        .request_with_headers(
+                            &cx,
+                            "service.allowed",
+                            &[("X-Request", b"allowed".as_slice())],
+                            b"query",
+                        )
+                        .await
                 } else {
                     client.request(&cx, "service.allowed", b"query").await
                 };
                 let ping_succeeded = response.is_ok() && client.ping(&cx).await.is_ok();
                 let close_succeeded = client.close(&cx).await.is_ok();
-                let _ = done_tx.send((response.map(|message| message.payload), ping_succeeded, close_succeeded));
+                let _ = done_tx.send((
+                    response.map(|message| message.payload),
+                    ping_succeeded,
+                    close_succeeded,
+                ));
             });
 
             let completed = done_rx.recv_timeout(Duration::from_secs(6));
             drop(task);
             let drained = runtime.shutdown_timeout(Duration::from_secs(3));
             let (commands, closed, sid) = server.join().expect("request-refusal peer joined");
-            let (response, ping_succeeded, close_succeeded) = completed.expect("request client finished");
-            assert_eq!(response.expect("unrelated PUB refusal must not replace the reply"), b"reply");
+            let (response, ping_succeeded, close_succeeded) =
+                completed.expect("request client finished");
+            assert_eq!(
+                response.expect("unrelated PUB refusal must not replace the reply"),
+                b"reply"
+            );
             assert!(ping_succeeded, "same-connection PING did not complete");
-            assert!(close_succeeded && closed, "request connection did not close");
+            assert!(
+                close_succeeded && closed,
+                "request connection did not close"
+            );
             assert_eq!(commands, vec![format!("UNSUB {sid}"), "PING".to_string()]);
-            assert!(drained, "request-refusal runtime did not drain: workers={workers} headers={with_headers}");
+            assert!(
+                drained,
+                "request-refusal runtime did not drain: workers={workers} headers={with_headers}"
+            );
         }
     }
 }
@@ -1582,11 +1620,16 @@ fn nats_request_timeout_bounds_a_backpressured_publication() {
     const PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
     for workers in [1, 2] {
         for with_headers in [false, true] {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind backpressured request peer");
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind backpressured request peer");
             // A small receive window and a payload far larger than the native
             // socket buffers make this an outbound-I/O wait, not a reply wait.
-            socket2::SockRef::from(&listener).set_recv_buffer_size(4096).expect("bound receive window");
-            let addr = listener.local_addr().expect("backpressured request address");
+            socket2::SockRef::from(&listener)
+                .set_recv_buffer_size(4096)
+                .expect("bound receive window");
+            let addr = listener
+                .local_addr()
+                .expect("backpressured request address");
             let (published_tx, published_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();
             let server = thread::spawn(move || {
@@ -1604,11 +1647,23 @@ fn nats_request_timeout_bounds_a_backpressured_publication() {
                 let fields = command.split_whitespace().collect::<Vec<_>>();
                 assert_eq!(fields[0], if with_headers { "HPUB" } else { "PUB" });
                 assert_eq!(fields[1], "service.backpressured");
-                let total: usize = fields.last().unwrap().parse().expect("publication byte count");
+                let total: usize = fields
+                    .last()
+                    .unwrap()
+                    .parse()
+                    .expect("publication byte count");
                 assert!(total >= PAYLOAD_BYTES);
                 let mut first = [0_u8; 1];
-                reader.read_exact(&mut first).expect("witness publication payload start");
-                published_tx.send(reader.get_ref().try_clone().expect("clone failure-cleanup socket"))
+                reader
+                    .read_exact(&mut first)
+                    .expect("witness publication payload start");
+                published_tx
+                    .send(
+                        reader
+                            .get_ref()
+                            .try_clone()
+                            .expect("clone failure-cleanup socket"),
+                    )
                     .expect("publish partial-frame witness");
                 // No reading, writing or disconnect is allowed until after the
                 // test has captured whether the request's own timer completed.
@@ -1623,18 +1678,25 @@ fn nats_request_timeout_bounds_a_backpressured_publication() {
             let (done_tx, done_rx) = mpsc::channel();
             let task = runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("native request owner");
-                let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
+                let mut config =
+                    NatsConfig::from_url(&format!("nats://{addr}")).expect("request URL");
                 config.auto_reconnect = false;
                 config.max_payload = PAYLOAD_BYTES + 1024;
                 config.request_timeout = Duration::from_millis(500);
-                let mut client = NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
-                    .await
-                    .expect("connect backpressured request client");
+                let mut client =
+                    NatsClient::connect_with_keepalive(&cx, config, NatsKeepalive::disabled())
+                        .await
+                        .expect("connect backpressured request client");
                 let payload = vec![b'x'; PAYLOAD_BYTES];
                 let response = if with_headers {
-                    client.request_with_headers(
-                        &cx, "service.backpressured", &[("X-Request", b"bounded".as_slice())], &payload,
-                    ).await
+                    client
+                        .request_with_headers(
+                            &cx,
+                            "service.backpressured",
+                            &[("X-Request", b"bounded".as_slice())],
+                            &payload,
+                        )
+                        .await
                 } else {
                     client.request(&cx, "service.backpressured", &payload).await
                 };
@@ -1652,8 +1714,12 @@ fn nats_request_timeout_bounds_a_backpressured_publication() {
             drop(task);
             let drained = runtime.shutdown_timeout(Duration::from_secs(3));
             let (released, total) = server.join().expect("backpressured request peer joined");
-            assert!(published.is_ok(), "request never entered the partial-write state: {published:?}");
-            let (response, owner_cancelled) = completed.expect("request timeout must finish before peer cleanup");
+            assert!(
+                published.is_ok(),
+                "request never entered the partial-write state: {published:?}"
+            );
+            let (response, owner_cancelled) =
+                completed.expect("request timeout must finish before peer cleanup");
             match response {
                 Err(NatsError::Io(error)) => {
                     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
@@ -1661,9 +1727,15 @@ fn nats_request_timeout_bounds_a_backpressured_publication() {
                 }
                 other => panic!("expected request write timeout, got {other:?}"),
             }
-            assert!(!owner_cancelled, "request deadline cancelled its enclosing owner");
+            assert!(
+                !owner_cancelled,
+                "request deadline cancelled its enclosing owner"
+            );
             assert!(released && total >= PAYLOAD_BYTES);
-            assert!(drained, "backpressured request runtime did not drain: workers={workers} headers={with_headers}");
+            assert!(
+                drained,
+                "backpressured request runtime did not drain: workers={workers} headers={with_headers}"
+            );
         }
     }
 }

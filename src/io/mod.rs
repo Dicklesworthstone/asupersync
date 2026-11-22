@@ -108,8 +108,8 @@ pub use copy_session::{
 };
 pub use duplex::{DuplexStream, duplex};
 pub use ext::{
-    AsyncReadExt, AsyncReadVectoredExt, Read, ReadBufFuture, ReadExact, ReadI8, ReadToEnd, ReadToString,
-    ReadU8, ReadVectored,
+    AsyncReadExt, AsyncReadVectoredExt, Read, ReadBufFuture, ReadExact, ReadI8, ReadToEnd,
+    ReadToString, ReadU8, ReadVectored,
 };
 pub use ext::{AsyncSeekExt, Seek};
 pub use ext::{

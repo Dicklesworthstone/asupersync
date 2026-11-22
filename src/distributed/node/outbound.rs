@@ -1,17 +1,21 @@
 //! Explicit outbound authority and bounded remote owners for a native node.
 
-use super::{Controls, NativeDistributedComponentResult, NativeDistributedNodeStopCause, StopPanics};
+use super::{
+    Controls, NativeDistributedComponentResult, NativeDistributedNodeStopCause, StopPanics,
+};
 use crate::cx::Cx;
 use crate::distributed::membership::owned::OwnedMembershipController;
-use crate::distributed::membership::owned::remote::{MembershipRemoteError, MembershipRemoteReport};
+use crate::distributed::membership::owned::remote::{
+    MembershipRemoteError, MembershipRemoteReport,
+};
 use crate::distributed::remote_owned::{RemoteRunConfig, RemoteRunError, prepare_run};
 use crate::remote::{
     ComputationName, NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeBuildError,
     NativeRemoteRuntimeConfig, NodeId, RemoteCap, RemoteComputationClientError, RemoteInput,
     RemoteRuntime,
 };
-use crate::runtime::{JoinError, RuntimeHandle, SpawnError, TaskHandle};
 use crate::runtime::spawn_mailbox::RegionCommand;
+use crate::runtime::{JoinError, RuntimeHandle, SpawnError, TaskHandle};
 use crate::types::{CancelReason, TaskId, Time};
 use parking_lot::Mutex;
 use std::cell::Cell;
@@ -79,10 +83,18 @@ impl NativeDistributedOutboundConfig {
             return Err(NativeDistributedOutboundError::Configuration);
         }
         let remote = Arc::new(NativeRemoteRuntime::with_config(
-            runtime, capability.local_node().clone(), [], transport,
+            runtime,
+            capability.local_node().clone(),
+            [],
+            transport,
         )?);
         let capability = capability.with_runtime(Arc::clone(&remote) as Arc<dyn RemoteRuntime>);
-        Ok(Self { remote, capability, max_peers, max_operations: transport.max_in_flight() })
+        Ok(Self {
+            remote,
+            capability,
+            max_peers,
+            max_operations: transport.max_in_flight(),
+        })
     }
 
     pub(super) fn bind(self, membership: OwnedMembershipController) -> Arc<Outbound> {
@@ -174,7 +186,9 @@ pub(super) struct Outbound {
 impl Outbound {
     pub(super) fn begin_close(&self, panics: &mut StopPanics) {
         self.seal();
-        panics.run(|| { let _ = self.remote.begin_drain(); });
+        panics.run(|| {
+            let _ = self.remote.begin_drain();
+        });
     }
 
     fn seal(&self) {
@@ -188,8 +202,11 @@ impl Outbound {
     pub(super) async fn close(&self, cx: Option<&Cx>) -> bool {
         // Before child admission no public client can exist and this private
         // runtime has no route or operation. There is nothing to drive then.
-        if let Some(cx) = cx { cx.with_ambient(self.remote.close(cx)).await }
-        else { self.remote.active_operations() == 0 }
+        if let Some(cx) = cx {
+            cx.with_ambient(self.remote.close(cx)).await
+        } else {
+            self.remote.active_operations() == 0
+        }
     }
 
     pub(super) fn region_retired(&self) {
@@ -207,8 +224,11 @@ impl Outbound {
     }
 
     fn check_open(&self) -> Result<(), NativeDistributedOutboundError> {
-        if self.closed.load(Ordering::Acquire) { Err(NativeDistributedOutboundError::Closed) }
-        else { Ok(()) }
+        if self.closed.load(Ordering::Acquire) {
+            Err(NativeDistributedOutboundError::Closed)
+        } else {
+            Ok(())
+        }
     }
 
     fn retained_operations(&self) -> usize {
@@ -221,7 +241,9 @@ impl Outbound {
                 // until the catalog lock is released before running that drop.
                 retired.push(Arc::clone(operation));
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         let count = operations.len();
         drop(operations);
@@ -263,10 +285,16 @@ struct Operation<R = Result<MembershipRemoteReport, NativeDistributedRemoteError
 
 impl<R> Operation<R> {
     fn reclaimable(&self, region_retired: bool) -> bool {
-        if self.stranded.load(Ordering::Acquire) { return region_retired; }
+        if self.stranded.load(Ordering::Acquire) {
+            return region_retired;
+        }
         self.observed.load(Ordering::Acquire)
             || (!self.public.load(Ordering::Acquire)
-                && self.task.lock().as_ref().is_some_and(TaskHandle::is_finished))
+                && self
+                    .task
+                    .lock()
+                    .as_ref()
+                    .is_some_and(TaskHandle::is_finished))
     }
 }
 
@@ -282,13 +310,17 @@ struct SubmissionGuard<'a, R = Result<MembershipRemoteReport, NativeDistributedR
 
 impl<R> Drop for SubmissionGuard<'_, R> {
     fn drop(&mut self) {
-        if !self.armed { return; }
+        if !self.armed {
+            return;
+        }
         self.operation.stranded.store(true, Ordering::Release);
         // Another closer may have won Controls' cause CAS without reaching its
         // outbound callback yet. Seal admission here before any cleanup action.
         self.client.shared.seal();
         let mut panics = StopPanics::new();
-        self.client.controls.stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
+        self.client
+            .controls
+            .stop(NativeDistributedNodeStopCause::OwnerDropped, &mut panics);
         panics.run(|| {
             if let Some(gateway) = self.client.principal.spawn_gateway_handle() {
                 let _ = gateway.enqueue_region_command(RegionCommand::Cancel {
@@ -312,18 +344,27 @@ struct TaskAccess<'a> {
 impl<'a> TaskAccess<'a> {
     fn new(slot: &'a Mutex<Option<TaskHandle<()>>>) -> Self {
         let task = slot.lock().take().expect("submitted owner");
-        Self { slot, task: Some(task) }
+        Self {
+            slot,
+            task: Some(task),
+        }
     }
 }
 impl Deref for TaskAccess<'_> {
     type Target = TaskHandle<()>;
-    fn deref(&self) -> &Self::Target { self.task.as_ref().expect("taken owner") }
+    fn deref(&self) -> &Self::Target {
+        self.task.as_ref().expect("taken owner")
+    }
 }
 impl DerefMut for TaskAccess<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target { self.task.as_mut().expect("taken owner") }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.task.as_mut().expect("taken owner")
+    }
 }
 impl Drop for TaskAccess<'_> {
-    fn drop(&mut self) { *self.slot.lock() = self.task.take(); }
+    fn drop(&mut self) {
+        *self.slot.lock() = self.task.take();
+    }
 }
 
 /// Cloneable access to the node's bounded, explicitly authorized outbound work.
@@ -355,24 +396,36 @@ impl NativeDistributedClient {
     pub(super) fn new(controls: Arc<Controls>, principal: Cx) -> Self {
         let shared = Arc::clone(controls.outbound.as_ref().expect("configured outbound"));
         let principal = principal.with_remote_cap(shared.capability.clone());
-        Self { controls, shared, principal }
+        Self {
+            controls,
+            shared,
+            principal,
+        }
     }
 
     /// Whether node close has permanently sealed this client and every clone.
     #[must_use]
-    pub fn is_closed(&self) -> bool { self.shared.closed.load(Ordering::Acquire) }
+    pub fn is_closed(&self) -> bool {
+        self.shared.closed.load(Ordering::Acquire)
+    }
 
     /// Current owner/result credits, including complete but unread handles.
     #[must_use]
-    pub fn retained_operations(&self) -> usize { self.shared.retained_operations() }
+    pub fn retained_operations(&self) -> usize {
+        self.shared.retained_operations()
+    }
 
     /// Active native driver sessions; owner/result credits are counted separately.
     #[must_use]
-    pub fn active_sessions(&self) -> usize { self.shared.remote.active_operations() }
+    pub fn active_sessions(&self) -> usize {
+        self.shared.remote.active_operations()
+    }
 
     /// Current validated catalog generation. Membership can veto it independently.
     #[must_use]
-    pub fn route_generation(&self) -> u64 { self.shared.remote.route_generation() }
+    pub fn route_generation(&self) -> u64 {
+        self.shared.remote.route_generation()
+    }
 
     /// Publish an explicitly provisioned route for the current Alive incarnation.
     ///
@@ -383,7 +436,9 @@ impl NativeDistributedClient {
     /// an old route. The returned generation records this publication, not a
     /// promise that later authority changes leave the route eligible.
     pub fn publish_peer(
-        &self, route: NativeRemoteRoute, incarnation: u64,
+        &self,
+        route: NativeRemoteRoute,
+        incarnation: u64,
     ) -> Result<u64, NativeDistributedOutboundError> {
         self.shared.check_open()?;
         let destination = route.destination().clone();
@@ -397,14 +452,23 @@ impl NativeDistributedClient {
         // Explicit provisioning ends any discovery owner captured from the old
         // route, even when a replacement keeps the same membership incarnation.
         candidate.insert(destination.clone(), (route, incarnation, Arc::new(())));
-        let publication = self.shared.membership.publish_native_route(&destination, incarnation, || {
-            self.shared.check_open()?;
-            self.shared.remote.replace_routes(candidate.values().map(|(route, _, _)| route.clone()))
-                .map_err(NativeDistributedOutboundError::Routes)
-        }).unwrap_or(Err(NativeDistributedOutboundError::Membership));
+        let publication = self
+            .shared
+            .membership
+            .publish_native_route(&destination, incarnation, || {
+                self.shared.check_open()?;
+                self.shared
+                    .remote
+                    .replace_routes(candidate.values().map(|(route, _, _)| route.clone()))
+                    .map_err(NativeDistributedOutboundError::Routes)
+            })
+            .unwrap_or(Err(NativeDistributedOutboundError::Membership));
         let generation = match publication {
             Ok(generation) => generation,
-            Err(error) => { drop(peers); return Err(error); }
+            Err(error) => {
+                drop(peers);
+                return Err(error);
+            }
         };
         let old = std::mem::replace(&mut *peers, candidate);
         drop(peers);
@@ -419,7 +483,10 @@ impl NativeDistributedClient {
         self.shared.check_open()?;
         let mut candidate = peers.clone();
         candidate.remove(node);
-        let generation = self.shared.remote.replace_routes(candidate.values().map(|(route, _, _)| route.clone()))?;
+        let generation = self
+            .shared
+            .remote
+            .replace_routes(candidate.values().map(|(route, _, _)| route.clone()))?;
         let old = std::mem::replace(&mut *peers, candidate);
         drop(peers);
         drop(old);
@@ -427,14 +494,21 @@ impl NativeDistributedClient {
     }
 
     fn route_frame_limit(
-        &self, node: &NodeId, incarnation: u64,
+        &self,
+        node: &NodeId,
+        incarnation: u64,
     ) -> Result<usize, NativeDistributedOutboundError> {
         self.shared.check_open()?;
         let peers = self.shared.peers.lock();
         let Some((route, current, _)) = peers.get(node) else {
             return Err(NativeDistributedOutboundError::Membership);
         };
-        if *current != incarnation || !self.shared.membership.permits_native_route(node, incarnation) {
+        if *current != incarnation
+            || !self
+                .shared
+                .membership
+                .permits_native_route(node, incarnation)
+        {
             return Err(NativeDistributedOutboundError::Membership);
         }
         Ok(route.client().config().wire_limits().max_frame_bytes())
@@ -453,8 +527,12 @@ impl NativeDistributedClient {
     /// child-region cancellation. Await node close to retire the unpublished
     /// owner and release its reserved credit.
     pub fn spawn_remote(
-        &self, node: NodeId, incarnation: u64, computation: ComputationName,
-        input: RemoteInput, mut config: RemoteRunConfig,
+        &self,
+        node: NodeId,
+        incarnation: u64,
+        computation: ComputationName,
+        input: RemoteInput,
+        mut config: RemoteRunConfig,
     ) -> Result<NativeDistributedRemoteHandle, NativeDistributedOutboundError> {
         let frame_limit = self.route_frame_limit(&node, incarnation)?;
         let input = input.into_data();
@@ -468,7 +546,9 @@ impl NativeDistributedClient {
         let (clock, deadline) = prepare_run(&self.principal, &config)?;
         let operation = self.shared.reserve()?;
         let mut admission = SubmissionGuard {
-            client: self, operation: Arc::clone(&operation), armed: true,
+            client: self,
+            operation: Arc::clone(&operation),
+            armed: true,
         };
         let shared = Arc::clone(&self.shared);
         let returned = Arc::clone(&operation);
@@ -478,11 +558,16 @@ impl NativeDistributedClient {
             let result = if shared.closed.load(Ordering::Acquire) {
                 Err(NativeDistributedRemoteError::Closed)
             } else if clock.now() >= deadline {
-                Err(NativeDistributedRemoteError::Timing(RemoteRunError::Timeout))
+                Err(NativeDistributedRemoteError::Timing(
+                    RemoteRunError::Timeout,
+                ))
             } else {
                 config.timeout = Duration::from_nanos(deadline.duration_since(clock.now()));
-                shared.membership.run_remote(&body, node, incarnation, computation, input, config)
-                    .await.map_err(NativeDistributedRemoteError::Membership)
+                shared
+                    .membership
+                    .run_remote(&body, node, incarnation, computation, input, config)
+                    .await
+                    .map_err(NativeDistributedRemoteError::Membership)
             };
             *returned.outcome.lock() = Some(result);
             let _ = body.checkpoint();
@@ -490,7 +575,11 @@ impl NativeDistributedClient {
         match submitted {
             Ok(task) => {
                 *operation.task.lock() = Some(task);
-                let handle = NativeDistributedRemoteHandle { operation, deadline, not_sync: PhantomData };
+                let handle = NativeDistributedRemoteHandle {
+                    operation,
+                    deadline,
+                    not_sync: PhantomData,
+                };
                 admission.armed = false;
                 Ok(handle)
             }
@@ -519,9 +608,8 @@ pub enum NativeDistributedRemoteError {
 }
 
 /// Actual operation result and independent local owner retirement.
-pub type NativeDistributedRemoteResult = NativeDistributedComponentResult<
-    Result<MembershipRemoteReport, NativeDistributedRemoteError>,
->;
+pub type NativeDistributedRemoteResult =
+    NativeDistributedComponentResult<Result<MembershipRemoteReport, NativeDistributedRemoteError>>;
 
 /// One bounded result owner. Drop requests cancellation; no cleanup task is born.
 #[must_use = "join or close to collect the actual remote and retirement results"]
@@ -535,25 +623,38 @@ impl fmt::Debug for NativeDistributedRemoteHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeDistributedRemoteHandle")
             .field("task_id", &self.task_id())
-            .field("finished", &self.is_finished()).finish_non_exhaustive()
+            .field("finished", &self.is_finished())
+            .finish_non_exhaustive()
     }
 }
 
 impl NativeDistributedRemoteHandle {
     /// Cancellation deadline captured before submitting the local owner task.
     #[must_use]
-    pub const fn deadline(&self) -> Time { self.deadline }
+    pub const fn deadline(&self) -> Time {
+        self.deadline
+    }
 
     /// The real local owner task, provisional until its spawn is admitted.
     #[must_use]
     pub fn task_id(&self) -> TaskId {
-        self.operation.task.lock().as_ref().expect("submitted owner").task_id()
+        self.operation
+            .task
+            .lock()
+            .as_ref()
+            .expect("submitted owner")
+            .task_id()
     }
 
     /// True only after the runtime has opened the owner retirement barrier.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.operation.task.lock().as_ref().expect("submitted owner").is_finished()
+        self.operation
+            .task
+            .lock()
+            .as_ref()
+            .expect("submitted owner")
+            .is_finished()
     }
 
     /// Request operation cancellation without erasing its eventual report.
@@ -575,14 +676,18 @@ impl NativeDistributedRemoteHandle {
     pub fn poll_join(&mut self, cx: &mut Context<'_>) -> Poll<NativeDistributedRemoteResult> {
         if self.operation.observed.load(Ordering::Acquire) {
             return Poll::Ready(NativeDistributedComponentResult {
-                outcome: None, retirement: Err(JoinError::PolledAfterCompletion),
+                outcome: None,
+                retirement: Err(JoinError::PolledAfterCompletion),
             });
         }
         let terminal = TaskAccess::new(&self.operation.task).poll_join(cx);
         terminal.map(|retirement| {
             let outcome = self.operation.outcome.lock().take();
             self.operation.observed.store(true, Ordering::Release);
-            NativeDistributedComponentResult { outcome, retirement }
+            NativeDistributedComponentResult {
+                outcome,
+                retirement,
+            }
         })
     }
 

@@ -11343,7 +11343,8 @@ mod tests {
             ])
             .expect("parse receiver transport mismatch");
             assert_eq!(
-                run_recv(recv, false).expect_err("refuse before stdin, bind, or destination create"),
+                run_recv(recv, false)
+                    .expect_err("refuse before stdin, bind, or destination create"),
                 "--rq-cdc-delta requires --transport rq"
             );
         }

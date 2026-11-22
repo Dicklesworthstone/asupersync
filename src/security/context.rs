@@ -7,6 +7,7 @@ use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::error::{AuthError, AuthErrorKind};
 use crate::security::key::AuthKey;
 use crate::security::tag::AuthenticationTag;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::Symbol;
 use hmac::{Hmac, KeyInit, Mac};
 use parking_lot::RwLock;
@@ -14,7 +15,6 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 type HmacSha256 = Hmac<Sha256>;
 

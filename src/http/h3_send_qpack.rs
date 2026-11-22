@@ -7,11 +7,10 @@ use super::super::h3_native::{
     qpack_encode_field_section_with_context,
 };
 use super::{
-    Arc, Bytes, Cx, H3ConnectionState, H3NativeError, H3QpackMode, H3Settings,
-    H3UniStreamType, NativeH3SessionError, NativeQuicConnectionError, Poll,
-    QpackEncoderInstruction, QpackInstructionStreamState, QuicConnection,
-    RequestWriterWake, StreamDirection, StreamId, StreamTableError, TaskContext,
-    VecDeque,
+    Arc, Bytes, Cx, H3ConnectionState, H3NativeError, H3QpackMode, H3Settings, H3UniStreamType,
+    NativeH3SessionError, NativeQuicConnectionError, Poll, QpackEncoderInstruction,
+    QpackInstructionStreamState, QuicConnection, RequestWriterWake, StreamDirection, StreamId,
+    StreamTableError, TaskContext, VecDeque,
 };
 
 const MAX_ENCODER_BYTES: usize = 64 * 1024;
@@ -52,13 +51,19 @@ impl PreparedQpackSection {
         fin: bool,
     ) -> Result<(), NativeH3SessionError> {
         let Some(token) = self.token else {
-            return connection.write_stream(cx, stream_id, wire, fin).map_err(Into::into);
+            return connection
+                .write_stream(cx, stream_id, wire, fin)
+                .map_err(Into::into);
         };
         // Cancellation evidence can call user sinks. Keep that checkpoint
         // outside the shared encoder lock, then use callback-free admission.
-        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        cx.checkpoint()
+            .map_err(|_| NativeQuicConnectionError::Cancelled)?;
         let mut state = self.sender.state.lock();
-        let qpack = state.qpack.as_mut().expect("prepared section owns encoder state");
+        let qpack = state
+            .qpack
+            .as_mut()
+            .expect("prepared section owns encoder state");
         qpack.validate_prepared_outbound_field_section(token)?;
         // No encoder/decoder mutation can intervene between validation and
         // exposure. A failed transport admission leaves the token unexposed.
@@ -82,14 +87,18 @@ impl Drop for PreparedQpackSection {
 impl NativeH3DynamicSend {
     #[cfg(test)]
     pub(super) fn prepared_section_count(&self) -> usize {
-        self.state.lock().qpack.as_ref()
-            .map_or(0, QpackInstructionStreamState::prepared_outbound_section_count)
+        self.state.lock().qpack.as_ref().map_or(
+            0,
+            QpackInstructionStreamState::prepared_outbound_section_count,
+        )
     }
 
     #[cfg(test)]
     pub(super) fn outstanding_section_count(&self, stream_id: StreamId) -> usize {
         self.state.lock().qpack.as_ref().map_or(0, |qpack| {
-            qpack.decoder_feedback().stream_outstanding_section_count(stream_id.0)
+            qpack
+                .decoder_feedback()
+                .stream_outstanding_section_count(stream_id.0)
         })
     }
 
@@ -102,9 +111,11 @@ impl NativeH3DynamicSend {
 
     #[cfg(test)]
     pub(super) fn active_table_capacity(&self) -> usize {
-        self.state.lock().qpack.as_ref().map_or(0, |qpack| {
-            qpack.context().dynamic_table().capacity()
-        })
+        self.state
+            .lock()
+            .qpack
+            .as_ref()
+            .map_or(0, |qpack| qpack.context().dynamic_table().capacity())
     }
 
     #[cfg(test)]
@@ -114,7 +125,11 @@ impl NativeH3DynamicSend {
 
     #[cfg(test)]
     pub(super) fn known_received_count(&self) -> u64 {
-        self.state.lock().qpack.as_ref().map_or(0, QpackInstructionStreamState::known_received_count)
+        self.state
+            .lock()
+            .qpack
+            .as_ref()
+            .map_or(0, QpackInstructionStreamState::known_received_count)
     }
 
     #[cfg(test)]
@@ -148,12 +163,15 @@ impl NativeH3DynamicSend {
             return if previous == limits {
                 Ok(())
             } else {
-                Err(H3NativeError::QpackPolicy("qpack encoder peer settings already configured"))
+                Err(H3NativeError::QpackPolicy(
+                    "qpack encoder peer settings already configured",
+                ))
             };
         }
         // An unaddressable peer allowance remains permission to use literals.
         // Never truncate it: the exact maximum determines the wire RIC modulus.
-        let Ok(peer_capacity) = usize::try_from(settings.qpack_max_table_capacity.unwrap_or(0)) else {
+        let Ok(peer_capacity) = usize::try_from(settings.qpack_max_table_capacity.unwrap_or(0))
+        else {
             state.peer_limits = Some(limits);
             return Ok(());
         };
@@ -161,7 +179,8 @@ impl NativeH3DynamicSend {
             H3QpackMode::DynamicTableAllowed,
             &H3Settings::default(),
             settings,
-        )?.with_outbound_section_limit(MAX_OUTBOUND_SECTIONS)?;
+        )?
+        .with_outbound_section_limit(MAX_OUTBOUND_SECTIONS)?;
         let active_capacity = state.capacity.min(peer_capacity);
         if active_capacity != 0 {
             qpack.apply_local_encoder_instruction(
@@ -176,7 +195,13 @@ impl NativeH3DynamicSend {
     }
 
     pub(super) fn check_live(&self) -> Result<(), H3NativeError> {
-        match self.state.lock().qpack.as_ref().and_then(QpackInstructionStreamState::first_failure) {
+        match self
+            .state
+            .lock()
+            .qpack
+            .as_ref()
+            .and_then(QpackInstructionStreamState::first_failure)
+        {
             Some(error) => Err(error.clone()),
             None => Ok(()),
         }
@@ -225,7 +250,10 @@ impl NativeH3DynamicSend {
             {
                 if let Err(error) = state.maybe_insert(name, value) {
                     if let Some(token) = token {
-                        state.qpack.as_mut().expect("peer settings configured")
+                        state
+                            .qpack
+                            .as_mut()
+                            .expect("peer settings configured")
                             .discard_prepared_outbound_field_section(token);
                     }
                     return Err(error);
@@ -299,18 +327,26 @@ impl NativeH3DynamicSend {
                 stream_id
             }
         };
-        if connection.inner().streams().stream(stream_id).is_ok_and(|stream| {
-            stream.stop_sending_error_code.is_some()
-                || stream.send_reset.is_some()
-                || stream.send_final_size.is_some()
-        }) {
+        if connection
+            .inner()
+            .streams()
+            .stream(stream_id)
+            .is_ok_and(|stream| {
+                stream.stop_sending_error_code.is_some()
+                    || stream.send_reset.is_some()
+                    || stream.send_final_size.is_some()
+            })
+        {
             return Err(NativeH3SessionError::CriticalStreamClosed {
                 stream_id,
                 stream_type: H3UniStreamType::QpackEncoder,
             });
         }
         if let Some(task_cx) = task_cx.as_deref_mut() {
-            match connection.inner_mut().poll_stream_send_closed(cx, stream_id, task_cx) {
+            match connection
+                .inner_mut()
+                .poll_stream_send_closed(cx, stream_id, task_cx)
+            {
                 Poll::Ready(Ok(())) => {
                     return Err(NativeH3SessionError::CriticalStreamClosed {
                         stream_id,
@@ -333,11 +369,19 @@ impl NativeH3DynamicSend {
             if connection.has_pending_stream_frames(stream_id) {
                 return Ok(());
             }
-            connection.inner().stream_send_credit_remaining(stream_id)
+            connection
+                .inner()
+                .stream_send_credit_remaining(stream_id)
                 .min(connection.inner().streams().connection_send_remaining())
         };
-        let wire: Vec<u8> = self.state.lock().instructions.iter()
-            .take(usize::try_from(capacity).unwrap_or(usize::MAX)).copied().collect();
+        let wire: Vec<u8> = self
+            .state
+            .lock()
+            .instructions
+            .iter()
+            .take(usize::try_from(capacity).unwrap_or(usize::MAX))
+            .copied()
+            .collect();
         if wire.is_empty() {
             return Ok(());
         }
@@ -372,9 +416,12 @@ impl EncoderState {
         let mut wire = Vec::new();
         if !self.prefix_queued {
             wire.push(0x02);
-            qpack_encode_encoder_instruction(&mut wire, &QpackEncoderInstruction::SetDynamicTableCapacity {
-                capacity: table.capacity() as u64,
-            })?;
+            qpack_encode_encoder_instruction(
+                &mut wire,
+                &QpackEncoderInstruction::SetDynamicTableCapacity {
+                    capacity: table.capacity() as u64,
+                },
+            )?;
         }
         qpack_encode_encoder_instruction(&mut wire, &instruction)?;
         if wire.len() > MAX_ENCODER_BYTES.saturating_sub(self.instructions.len()) {
@@ -397,7 +444,15 @@ impl EncoderState {
 }
 
 fn cacheable_name(name: &str) -> bool {
-    matches!(name, "accept" | "accept-encoding" | "content-type" | "content-encoding" | "cache-control" | "vary")
+    matches!(
+        name,
+        "accept"
+            | "accept-encoding"
+            | "content-type"
+            | "content-encoding"
+            | "cache-control"
+            | "vary"
+    )
 }
 
 #[cfg(test)]
@@ -408,8 +463,8 @@ mod tests {
     use crate::net::atp::protocol::quic_frames::QuicFrame;
     use crate::net::atp::protocol::varint::VarInt;
     use crate::net::quic_native::{NativeQuicConnectionConfig, PacketNumberSpace};
-    use crate::types::Budget;
     use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use crate::types::Budget;
     use std::task::{Wake, Waker};
 
     #[derive(Default)]
@@ -442,31 +497,47 @@ mod tests {
         connection.confirm_handshake(cx).unwrap();
         assert_eq!(connection.open_uni_stream(cx).unwrap(), StreamId(2));
         let sender = NativeH3DynamicSend::new(256);
-        sender.configure_peer(&H3Settings {
-            qpack_max_table_capacity: Some(4096),
-            qpack_blocked_streams: Some(0),
-            ..H3Settings::default()
-        }).unwrap();
-        let (_, section) = sender.prepare(StreamId(0), vec![QpackFieldPlan::Literal {
-            name: "accept".to_owned(),
-            value: "application/retained-encoder-instructions".to_owned(),
-        }]).unwrap();
+        sender
+            .configure_peer(&H3Settings {
+                qpack_max_table_capacity: Some(4096),
+                qpack_blocked_streams: Some(0),
+                ..H3Settings::default()
+            })
+            .unwrap();
+        let (_, section) = sender
+            .prepare(
+                StreamId(0),
+                vec![QpackFieldPlan::Literal {
+                    name: "accept".to_owned(),
+                    value: "application/retained-encoder-instructions".to_owned(),
+                }],
+            )
+            .unwrap();
         assert!(section.is_none());
         assert!(!sender.state.lock().instructions.is_empty());
         (sender, connection)
     }
 
     fn process_frame(cx: &Cx, connection: &mut QuicConnection, frame: QuicFrame) {
-        connection.inner_mut().process_frame(
-            cx, &frame, PacketNumberSpace::ApplicationData,
-        ).unwrap();
+        connection
+            .inner_mut()
+            .process_frame(cx, &frame, PacketNumberSpace::ApplicationData)
+            .unwrap();
     }
 
     fn drain_encoder(cx: &Cx, connection: &mut QuicConnection, wire: &mut Vec<u8>) {
-        for frame in connection.inner_mut().generate_stream_frames_for(
-            cx, PacketNumberSpace::ApplicationData, StreamId(6), 65_536,
-        ).unwrap() {
-            let QuicFrame::Stream { stream_id, offset, data, fin } = frame else {
+        for frame in connection
+            .inner_mut()
+            .generate_stream_frames_for(cx, PacketNumberSpace::ApplicationData, StreamId(6), 65_536)
+            .unwrap()
+        {
+            let QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } = frame
+            else {
                 panic!("encoder queue produced a non-STREAM frame");
             };
             assert_eq!(stream_id.value(), 6);
@@ -486,13 +557,21 @@ mod tests {
                 ..H3Settings::default()
             },
             &H3Settings::default(),
-        ).unwrap();
-        peer.register_stream(6, H3UniStreamType::QpackEncoder).unwrap();
+        )
+        .unwrap();
+        peer.register_stream(6, H3UniStreamType::QpackEncoder)
+            .unwrap();
         let mut instructions = 0;
         for byte in &wire[1..] {
-            instructions += peer.feed_encoder_stream_bytes(6, &[*byte]).unwrap().instructions_processed();
+            instructions += peer
+                .feed_encoder_stream_bytes(6, &[*byte])
+                .unwrap()
+                .instructions_processed();
         }
-        assert_eq!(instructions, 2, "one capacity instruction and one insertion");
+        assert_eq!(
+            instructions, 2,
+            "one capacity instruction and one insertion"
+        );
         let table = peer.received_context().dynamic_table();
         assert_eq!(table.capacity(), 256);
         assert_eq!(table.insertion_counter(), 1);
@@ -516,19 +595,34 @@ mod tests {
             assert!(sender.encoder_stream().is_none());
             assert!(connection.inner().streams().stream(StreamId(6)).is_err());
         }
-        assert_eq!(counter.0.load(Ordering::SeqCst), 0, "admission stalls must park");
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            0,
+            "admission stalls must park"
+        );
         for (bidirectional, limit) in [(true, 129), (false, 1)] {
-            process_frame(&cx, &mut connection, QuicFrame::MaxStreams {
-                bidirectional,
-                maximum_streams: VarInt::from_u64_unchecked(limit),
-            });
+            process_frame(
+                &cx,
+                &mut connection,
+                QuicFrame::MaxStreams {
+                    bidirectional,
+                    maximum_streams: VarInt::from_u64_unchecked(limit),
+                },
+            );
         }
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
-        process_frame(&cx, &mut connection, QuicFrame::MaxStreams {
-            bidirectional: false,
-            maximum_streams: VarInt::from_u64_unchecked(2),
-        });
-        assert!(counter.0.swap(0, Ordering::SeqCst) > 0, "MAX_STREAMS must wake the owner");
+        process_frame(
+            &cx,
+            &mut connection,
+            QuicFrame::MaxStreams {
+                bidirectional: false,
+                maximum_streams: VarInt::from_u64_unchecked(2),
+            },
+        );
+        assert!(
+            counter.0.swap(0, Ordering::SeqCst) > 0,
+            "MAX_STREAMS must wake the owner"
+        );
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         assert_eq!(sender.encoder_stream(), Some(StreamId(6)));
         assert_eq!(sender.queued_encoder_bytes(), 0);
@@ -544,7 +638,8 @@ mod tests {
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
         assert_eq!(connection.pending_stream_data_bytes(StreamId(6)), 0);
         assert_one_peer_insertion(&wire);
-        assert_eq!(connection.open_uni_stream(&cx).unwrap_err(),
+        assert_eq!(
+            connection.open_uni_stream(&cx).unwrap_err(),
             NativeQuicConnectionError::StreamTable(StreamTableError::StreamLimitExceeded {
                 direction: StreamDirection::Unidirectional,
                 limit: 2,
@@ -563,27 +658,47 @@ mod tests {
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         let encoder = sender.encoder_stream().unwrap();
         assert_eq!(encoder, StreamId(6));
-        connection.inner_mut().set_fresh_stream_send_limit(&cx, encoder, 0).unwrap();
+        connection
+            .inner_mut()
+            .set_fresh_stream_send_limit(&cx, encoder, 0)
+            .unwrap();
         for _ in 0..3 {
             sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         }
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
-        process_frame(&cx, &mut connection, QuicFrame::MaxStreamData {
-            stream_id: VarInt::from_u64_unchecked(encoder.0),
-            maximum_stream_data: VarInt::from_u64_unchecked(1),
-        });
+        process_frame(
+            &cx,
+            &mut connection,
+            QuicFrame::MaxStreamData {
+                stream_id: VarInt::from_u64_unchecked(encoder.0),
+                maximum_stream_data: VarInt::from_u64_unchecked(1),
+            },
+        );
         assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         assert_eq!(sender.queued_encoder_bytes(), retained.len());
         assert_eq!(connection.pending_stream_data_bytes(encoder), 0);
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
-        process_frame(&cx, &mut connection, QuicFrame::MaxData {
-            maximum_data: VarInt::from_u64_unchecked(1),
-        });
+        process_frame(
+            &cx,
+            &mut connection,
+            QuicFrame::MaxData {
+                maximum_data: VarInt::from_u64_unchecked(1),
+            },
+        );
         assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         assert_eq!(connection.pending_stream_data_bytes(encoder), 1);
-        assert_eq!(sender.state.lock().instructions.iter().copied().collect::<Vec<_>>(), retained[1..]);
+        assert_eq!(
+            sender
+                .state
+                .lock()
+                .instructions
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            retained[1..]
+        );
         for frame in [
             QuicFrame::MaxData {
                 maximum_data: VarInt::from_u64_unchecked(retained.len() as u64),
@@ -599,13 +714,20 @@ mod tests {
         for _ in 0..3 {
             sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         }
-        assert_eq!(counter.0.load(Ordering::SeqCst), 0, "queued STREAM prefix must park its successor");
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            0,
+            "queued STREAM prefix must park its successor"
+        );
         assert_eq!(connection.pending_stream_data_bytes(encoder), 1);
         assert_eq!(sender.queued_encoder_bytes(), retained.len() - 1);
         let mut wire = Vec::new();
         drain_encoder(&cx, &mut connection, &mut wire);
         assert_eq!(wire, [2]);
-        assert!(counter.0.swap(0, Ordering::SeqCst) > 0, "packet assembly must wake the queued suffix");
+        assert!(
+            counter.0.swap(0, Ordering::SeqCst) > 0,
+            "packet assembly must wake the queued suffix"
+        );
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         drain_encoder(&cx, &mut connection, &mut wire);
         assert_eq!(wire, retained);
@@ -613,12 +735,20 @@ mod tests {
         assert_one_peer_insertion(&wire);
         sender.drive(&cx, &mut connection, Some(&mut task)).unwrap();
         counter.0.store(0, Ordering::SeqCst);
-        process_frame(&cx, &mut connection, QuicFrame::StopSending {
-            stream_id: VarInt::from_u64_unchecked(encoder.0),
-            error_code: VarInt::from_u64_unchecked(0x010c),
-        });
-        assert!(counter.0.load(Ordering::SeqCst) > 0, "critical STOP must wake even an empty encoder");
-        assert_eq!(sender.drive(&cx, &mut connection, Some(&mut task)),
+        process_frame(
+            &cx,
+            &mut connection,
+            QuicFrame::StopSending {
+                stream_id: VarInt::from_u64_unchecked(encoder.0),
+                error_code: VarInt::from_u64_unchecked(0x010c),
+            },
+        );
+        assert!(
+            counter.0.load(Ordering::SeqCst) > 0,
+            "critical STOP must wake even an empty encoder"
+        );
+        assert_eq!(
+            sender.drive(&cx, &mut connection, Some(&mut task)),
             Err(NativeH3SessionError::CriticalStreamClosed {
                 stream_id: encoder,
                 stream_type: H3UniStreamType::QpackEncoder,
@@ -640,12 +770,17 @@ mod tests {
         assert!(connection.pending_stream_data_bytes(encoder) > 0);
         assert_eq!(counter.0.load(Ordering::SeqCst), 0);
         // No second drive or packet-assembly wake can repair a lost watcher.
-        process_frame(&cx, &mut connection, QuicFrame::StopSending {
-            stream_id: VarInt::from_u64_unchecked(encoder.0),
-            error_code: VarInt::from_u64_unchecked(0x010c),
-        });
+        process_frame(
+            &cx,
+            &mut connection,
+            QuicFrame::StopSending {
+                stream_id: VarInt::from_u64_unchecked(encoder.0),
+                error_code: VarInt::from_u64_unchecked(0x010c),
+            },
+        );
         assert!(counter.0.load(Ordering::SeqCst) > 0);
-        assert_eq!(sender.drive(&cx, &mut connection, Some(&mut task)),
+        assert_eq!(
+            sender.drive(&cx, &mut connection, Some(&mut task)),
             Err(NativeH3SessionError::CriticalStreamClosed {
                 stream_id: encoder,
                 stream_type: H3UniStreamType::QpackEncoder,
@@ -682,16 +817,24 @@ mod tests {
     fn checkpoint_evidence_can_reenter_encoder_before_transport_admission() {
         for cancelled in [false, true] {
             let sender = NativeH3DynamicSend::new(256);
-            sender.configure_peer(&H3Settings {
-                qpack_max_table_capacity: Some(256),
-                qpack_blocked_streams: Some(0),
-                ..H3Settings::default()
-            }).unwrap();
+            sender
+                .configure_peer(&H3Settings {
+                    qpack_max_table_capacity: Some(256),
+                    qpack_blocked_streams: Some(0),
+                    ..H3Settings::default()
+                })
+                .unwrap();
             let plan = vec![QpackFieldPlan::Literal {
                 name: "accept".to_owned(),
                 value: "application/reentrant-checkpoint".to_owned(),
             }];
-            assert!(sender.prepare(StreamId(0), plan.clone()).unwrap().1.is_none());
+            assert!(
+                sender
+                    .prepare(StreamId(0), plan.clone())
+                    .unwrap()
+                    .1
+                    .is_none()
+            );
             let mut mapping = H3ConnectionState::with_config(H3ConnectionConfig::default());
             mapping.on_remote_uni_stream_type(3, 3).unwrap();
             assert!(sender.feed_decoder(&mapping, StreamId(3), &[1]).unwrap());
@@ -715,15 +858,22 @@ mod tests {
                 Cx::for_testing()
             } else {
                 Cx::for_testing_with_budget(Budget::new().with_poll_quota(0))
-            }.with_evidence_sink(Some(evidence.clone()));
+            }
+            .with_evidence_sink(Some(evidence.clone()));
             if cancelled {
                 cx.set_cancel_requested(true);
             }
             assert_eq!(
                 section.as_mut().unwrap().write(
-                    &cx, &mut connection, stream, Bytes::from(wire), false,
+                    &cx,
+                    &mut connection,
+                    stream,
+                    Bytes::from(wire),
+                    false,
                 ),
-                Err(NativeH3SessionError::Transport(NativeQuicConnectionError::Cancelled)),
+                Err(NativeH3SessionError::Transport(
+                    NativeQuicConnectionError::Cancelled
+                )),
             );
             assert!(evidence.calls.load(Ordering::Relaxed) > 0);
             assert!(evidence.unlocked.load(Ordering::Relaxed));

@@ -4,13 +4,13 @@
 //! potentially leading to resource exhaustion or delayed cleanup. Provides
 //! early warning and debt management capabilities.
 
+use crate::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use crate::types::{CancelKind, CancelReason};
 use crate::sync::pl::Mutex;
 #[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// br-asupersync-i40ap4 — maximum bytes of cancel-reason text retained per

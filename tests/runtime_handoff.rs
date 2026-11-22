@@ -53,9 +53,16 @@ fn handoff(current_thread: bool) -> (Result<Vec<u8>, String>, Duration) {
         rt.block_on(async move {
             let mut stream = TcpStream::connect(addr).await.expect("connect");
             let mut buf = [0u8; 4];
-            let parked =
-                timeout(wall_now(), Duration::from_millis(100), stream.read(&mut buf)).await;
-            assert!(parked.is_err(), "nothing was sent yet, so the read must park");
+            let parked = timeout(
+                wall_now(),
+                Duration::from_millis(100),
+                stream.read(&mut buf),
+            )
+            .await;
+            assert!(
+                parked.is_err(),
+                "nothing was sent yet, so the read must park"
+            );
             stream
         })
     })
@@ -559,8 +566,8 @@ mod lifecycle {
                     let source = build(source_current);
                     let (mut stream, peer) = Peer::connect(&source);
                     let original = identity(&stream);
-                    let retained = source
-                        .block_on(async { Cx::current().expect("retain source context") });
+                    let retained =
+                        source.block_on(async { Cx::current().expect("retain source context") });
                     let stop = |runtime: Runtime| {
                         if explicit_shutdown {
                             assert!(runtime.shutdown_timeout(Duration::from_secs(5)));

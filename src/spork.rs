@@ -170,11 +170,10 @@ pub mod registry {
 /// usable independently for deterministic modeling and replay.
 pub mod process_group {
     pub use super::managed_process_group::{
-        ManagedGroupBroadcastReport, ManagedGroupClose, ManagedGroupError,
-        ManagedGroupEventBatch, ManagedGroupMembership, ManagedGroupRecipient,
-        ManagedGroupRecipientStatus, ManagedGroupRecvError, ManagedGroupReport,
-        ManagedProcessGroup, ManagedProcessGroupConfig, ManagedProcessGroupExit,
-        ProcessGroupClient,
+        ManagedGroupBroadcastReport, ManagedGroupClose, ManagedGroupError, ManagedGroupEventBatch,
+        ManagedGroupMembership, ManagedGroupRecipient, ManagedGroupRecipientStatus,
+        ManagedGroupRecvError, ManagedGroupReport, ManagedProcessGroup, ManagedProcessGroupConfig,
+        ManagedProcessGroupExit, ProcessGroupClient,
     };
     use crate::channel::mpsc;
     use crate::cx::Cx;
@@ -2005,4 +2004,3 @@ pub mod error {
 #[allow(clippy::no_effect_underscore_binding)]
 #[path = "spork_inline_tests.rs"]
 mod tests;
-

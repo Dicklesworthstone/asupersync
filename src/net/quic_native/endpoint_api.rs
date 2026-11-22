@@ -467,7 +467,8 @@ impl QuicConnection {
         data: Bytes,
         fin: bool,
     ) -> Result<(), NativeQuicConnectionError> {
-        self.inner.write_stream_bytes_after_checkpoint(stream, data, fin)
+        self.inner
+            .write_stream_bytes_after_checkpoint(stream, data, fin)
     }
 
     /// Whether one stream still has bytes or FIN queued for packet assembly.

@@ -35,9 +35,9 @@
 //! Every crash, restart, and rejected-during-crash event is logged
 //! to an [`EvidenceSink`].
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::pl::Mutex;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;

@@ -527,9 +527,9 @@ impl Server {
             }
         };
         let Some(cx) = Cx::current() else {
-            return Http2ProducedResponse::buffered(self.http2_dispatch_error(
-                &Status::internal("gRPC duplex requires a runtime context"),
-            ));
+            return Http2ProducedResponse::buffered(self.http2_dispatch_error(&Status::internal(
+                "gRPC duplex requires a runtime context",
+            )));
         };
         let deadline = StreamDeadline::capture(&cx, request.metadata(), &self.config);
         // Attenuate the actual scheduler-admitted child in place. Every clone

@@ -1,16 +1,26 @@
 //! Actual V3 mTLS remote work driven by authenticated local membership ownership.
 //! Logical aliases share a fixture certificate; this is not peer-incarnation proof.
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 
 use asupersync::cx::ChildRegionSpec;
 use asupersync::distributed::membership::authority::{
     MembershipControlError, MembershipControllerLimits, MembershipFloor, MembershipUpdate,
 };
 use asupersync::distributed::membership::owned::remote::MembershipRemoteError;
-use asupersync::distributed::membership::owned::work::{MembershipWorkError, MembershipWorkTrigger};
-use asupersync::distributed::membership::owned::{OwnedLeaseStatus, OwnedMembershipController, OwnedMembershipError};
+use asupersync::distributed::membership::owned::work::{
+    MembershipWorkError, MembershipWorkTrigger,
+};
+use asupersync::distributed::membership::owned::{
+    OwnedLeaseStatus, OwnedMembershipController, OwnedMembershipError,
+};
 use asupersync::distributed::membership::{MembershipEvent, MembershipKind};
-use asupersync::distributed::remote_owned::{RemoteLeaseSettlement, RemoteRunConfig, RemoteRunTrigger};
+use asupersync::distributed::remote_owned::{
+    RemoteLeaseSettlement, RemoteRunConfig, RemoteRunTrigger,
+};
 use asupersync::distributed::{HasSchema, SchemaDescriptor};
 use asupersync::observability::diagnostics::{Diagnostics, Reason};
 use asupersync::remote::{
@@ -41,7 +51,9 @@ mod swim;
 
 struct Bytes;
 impl HasSchema for Bytes {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("membership-remote-bytes.v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("membership-remote-bytes.v1")
+    }
 }
 
 #[derive(Default)]
@@ -77,32 +89,65 @@ impl Drop for Stop {
 }
 
 fn config() -> RemoteRunConfig {
-    RemoteRunConfig { timeout: Duration::from_secs(20), child: ChildRegionSpec::inherit() }
+    RemoteRunConfig {
+        timeout: Duration::from_secs(20),
+        child: ChildRegionSpec::inherit(),
+    }
 }
 
 fn decision(node: &str, incarnation: u64, sequence: u64, kind: MembershipKind) -> Vec<u8> {
     MembershipUpdate {
-        event: MembershipEvent { node: NodeId::new(node), incarnation, kind }, sequence,
-    }.authenticated_bytes(&NodeId::new("authority"), 7, &AuthKey::from_seed(42)).unwrap()
+        event: MembershipEvent {
+            node: NodeId::new(node),
+            incarnation,
+            kind,
+        },
+        sequence,
+    }
+    .authenticated_bytes(&NodeId::new("authority"), 7, &AuthKey::from_seed(42))
+    .unwrap()
 }
 
 fn apply(owner: &OwnedMembershipController, incarnation: u64, sequence: u64, kind: MembershipKind) {
-    owner.apply_authenticated(&NodeId::new("authority"), &decision("worker", incarnation, sequence, kind)).unwrap();
+    owner
+        .apply_authenticated(
+            &NodeId::new("authority"),
+            &decision("worker", incarnation, sequence, kind),
+        )
+        .unwrap();
 }
 
 fn holds_lease(diagnostics: &Diagnostics, region: RegionId, holder: TaskId) -> bool {
-    diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
-        matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
+    diagnostics
+        .explain_region_open(region)
+        .reasons
+        .iter()
+        .any(|reason| {
+            matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
             if *holder_task == holder && obligation_type == "Lease")
-    })
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Case { Success, Dead, Left, Superseded, Suspect, SwimStopped, SwimDeparture }
+enum Case {
+    Success,
+    Dead,
+    Left,
+    Superseded,
+    Suspect,
+    SwimStopped,
+    SwimDeparture,
+}
 
 fn exercise(workers: usize, case: Case) {
-    let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
-        else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread().build().unwrap()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
+    };
     let runtime_handle = runtime.handle();
     let diagnostics = runtime.diagnostics();
     let witness = Arc::new(Witness::default());
@@ -364,24 +409,32 @@ fn exercise(workers: usize, case: Case) {
 
 #[test]
 fn authenticated_membership_remote_success_preserves_exact_value_and_both_closes() {
-    for workers in [1, 2] { exercise(workers, Case::Success); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Success);
+    }
 }
 
 #[test]
 fn authenticated_membership_revocation_drains_parked_v3_work_and_preserves_sibling() {
     for workers in [1, 2] {
-        for case in [Case::Dead, Case::Left, Case::Superseded] { exercise(workers, case); }
+        for case in [Case::Dead, Case::Left, Case::Superseded] {
+            exercise(workers, case);
+        }
     }
 }
 
 #[test]
 fn swim_contact_loss_cancels_and_drains_opted_in_remote_work_without_revoking_authority() {
     for workers in [1, 2] {
-        for case in [Case::SwimStopped, Case::SwimDeparture] { exercise(workers, case); }
+        for case in [Case::SwimStopped, Case::SwimDeparture] {
+            exercise(workers, case);
+        }
     }
 }
 
 #[test]
 fn authenticated_membership_suspicion_refuses_new_remote_work_without_revoking_live_work() {
-    for workers in [1, 2] { exercise(workers, Case::Suspect); }
+    for workers in [1, 2] {
+        exercise(workers, Case::Suspect);
+    }
 }

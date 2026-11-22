@@ -137,7 +137,12 @@ impl Reactor for GateProbeReactor {
 
 fn fixture(
     backend: IoReactorBackend,
-) -> (IoDriverHandle, Arc<GateProbeReactor>, UnixStream, UnixStream) {
+) -> (
+    IoDriverHandle,
+    Arc<GateProbeReactor>,
+    UnixStream,
+    UnixStream,
+) {
     let reactor = Arc::new(GateProbeReactor::new(backend));
     let driver = IoDriverHandle::new(reactor.clone());
     assert!(reactor.driver.set(Arc::downgrade(&driver.inner)).is_ok());
@@ -209,7 +214,9 @@ fn every_explicit_deregistration_and_drop_retry_gets_its_own_guarded_wake() {
         let (driver, reactor, source, _peer) = fixture(IoReactorBackend::Injected);
         let registration = register(&driver, &source);
         let _ = reactor.take_wakes();
-        reactor.deregister_failures.store(failures, Ordering::SeqCst);
+        reactor
+            .deregister_failures
+            .store(failures, Ordering::SeqCst);
         let result = registration.deregister();
         assert_eq!(result.is_ok(), failures < 2, "failures={failures}");
         assert_eq!(
@@ -228,7 +235,9 @@ fn drop_and_its_retry_wake_inside_the_driver_gate() {
         let (driver, reactor, source, _peer) = fixture(IoReactorBackend::Injected);
         let registration = register(&driver, &source);
         let _ = reactor.take_wakes();
-        reactor.deregister_failures.store(failures, Ordering::SeqCst);
+        reactor
+            .deregister_failures
+            .store(failures, Ordering::SeqCst);
         drop(registration);
         assert_eq!(reactor.take_wakes(), vec![true; failures + 1]);
         assert!(driver.is_empty());
@@ -242,7 +251,11 @@ fn epoll_keeps_its_no_wake_interest_fast_path() {
     let mut registration = register(&driver, &source);
     assert_eq!(reactor.take_wakes(), vec![true]);
     registration.set_interest(Interest::READABLE).unwrap();
-    assert!(registration.rearm(Interest::WRITABLE, Waker::noop()).unwrap());
+    assert!(
+        registration
+            .rearm(Interest::WRITABLE, Waker::noop())
+            .unwrap()
+    );
     assert!(
         registration
             .rearm_accumulating(Interest::READABLE, Waker::noop())

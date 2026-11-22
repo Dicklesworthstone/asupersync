@@ -80,13 +80,13 @@
 
 use crate::record::task::{TaskRecord, TaskState};
 use crate::runtime::RuntimeState;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{
     CancelKind, CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId,
     Time,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for cancel-correctness oracle runtime behavior.
 #[derive(Debug, Clone)]

@@ -506,7 +506,10 @@ fn buffered_mpsc_keeps_each_senders_evidence_with_its_own_message() {
     let (tx, mut rx) = crate::channel::mpsc::channel(3);
     // Activating the lazy evidence queue must preserve earlier host entries.
     tx.try_send(0).unwrap();
-    for (value, before, after) in [(1, "one-before", "one-after"), (2, "two-before", "two-after")] {
+    for (value, before, after) in [
+        (1, "one-before", "one-after"),
+        (2, "two-before", "two-after"),
+    ] {
         let sender = tx.clone();
         run_channel_task(&mut lab, root, async move {
             let cx = Cx::current().unwrap();
@@ -535,13 +538,28 @@ fn buffered_mpsc_keeps_each_senders_evidence_with_its_own_message() {
     let first = message_time(&events, "one-received");
     let second = message_time(&events, "two-received");
     for name in ["one-before", "two-before"] {
-        assert_eq!(message_time(&events, name).causal_order(&host), CausalOrder::Concurrent);
-        assert_eq!(message_time(&events, name).causal_order(&second), CausalOrder::Before);
+        assert_eq!(
+            message_time(&events, name).causal_order(&host),
+            CausalOrder::Concurrent
+        );
+        assert_eq!(
+            message_time(&events, name).causal_order(&second),
+            CausalOrder::Before
+        );
     }
-    assert_eq!(message_time(&events, "one-before").causal_order(&first), CausalOrder::Before);
-    assert_eq!(message_time(&events, "two-before").causal_order(&first), CausalOrder::Concurrent);
+    assert_eq!(
+        message_time(&events, "one-before").causal_order(&first),
+        CausalOrder::Before
+    );
+    assert_eq!(
+        message_time(&events, "two-before").causal_order(&first),
+        CausalOrder::Concurrent
+    );
     for name in ["one-after", "two-after"] {
-        assert_eq!(message_time(&events, name).causal_order(&second), CausalOrder::Concurrent);
+        assert_eq!(
+            message_time(&events, name).causal_order(&second),
+            CausalOrder::Concurrent
+        );
     }
 }
 
@@ -599,18 +617,29 @@ fn mpsc_eviction_and_failed_send_do_not_relabel_surviving_messages() {
     let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97).max_steps(128));
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (tx, mut rx) = crate::channel::mpsc::channel(3);
-    for (value, name) in [(1, "kept-first"), (2, "evicted-middle"), (3, "kept-last"), (4, "refused-full")] {
+    for (value, name) in [
+        (1, "kept-first"),
+        (2, "evicted-middle"),
+        (3, "kept-last"),
+        (4, "refused-full"),
+    ] {
         let sender = tx.clone();
         run_channel_task(&mut lab, root, async move {
             Cx::current().unwrap().trace(name);
             if value == 4 {
-                assert_eq!(sender.try_send(value), Err(crate::channel::mpsc::SendError::Full(value)));
+                assert_eq!(
+                    sender.try_send(value),
+                    Err(crate::channel::mpsc::SendError::Full(value))
+                );
             } else {
                 sender.try_send(value).unwrap();
             }
         });
     }
-    assert_eq!(tx.send_evict_oldest_where(5, |value| *value == 2), Ok(Some(2)));
+    assert_eq!(
+        tx.send_evict_oldest_where(5, |value| *value == 2),
+        Ok(Some(2))
+    );
     run_channel_task(&mut lab, root, async move {
         let cx = Cx::current().unwrap();
         assert_eq!(rx.try_recv(), Ok(1));
@@ -625,12 +654,22 @@ fn mpsc_eviction_and_failed_send_do_not_relabel_surviving_messages() {
     let events = lab.trace().snapshot();
     let first = message_time(&events, "eviction-first-received");
     let last = message_time(&events, "eviction-last-received");
-    assert_eq!(message_time(&events, "kept-first").causal_order(&first), CausalOrder::Before);
-    assert_eq!(message_time(&events, "kept-last").causal_order(&first), CausalOrder::Concurrent);
-    assert_eq!(message_time(&events, "kept-last").causal_order(&last), CausalOrder::Before);
+    assert_eq!(
+        message_time(&events, "kept-first").causal_order(&first),
+        CausalOrder::Before
+    );
+    assert_eq!(
+        message_time(&events, "kept-last").causal_order(&first),
+        CausalOrder::Concurrent
+    );
+    assert_eq!(
+        message_time(&events, "kept-last").causal_order(&last),
+        CausalOrder::Before
+    );
     for name in ["evicted-middle", "refused-full"] {
         assert_eq!(
-            message_time(&events, name).causal_order(&message_time(&events, "replacement-received")),
+            message_time(&events, name)
+                .causal_order(&message_time(&events, "replacement-received")),
             CausalOrder::Concurrent
         );
     }
@@ -644,7 +683,10 @@ fn channel_permits_capture_the_committing_task_at_publication() {
     let mut contexts = Vec::new();
     let mut joins = Vec::new();
     for _ in 0..5 {
-        let (task, join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+        let (task, join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .unwrap();
         tasks.push(task);
         contexts.push(context(&lab, task));
         joins.push(join);
@@ -691,9 +733,18 @@ fn channel_permits_capture_the_committing_task_at_publication() {
         "broadcast-permit-received",
     ] {
         let received = message_time(&events, received);
-        assert_eq!(reserver_before.causal_order(&received), CausalOrder::Concurrent);
-        assert_eq!(message_time(&events, "committer-before").causal_order(&received), CausalOrder::Before);
-        assert_eq!(message_time(&events, "committer-after").causal_order(&received), CausalOrder::Concurrent);
+        assert_eq!(
+            reserver_before.causal_order(&received),
+            CausalOrder::Concurrent
+        );
+        assert_eq!(
+            message_time(&events, "committer-before").causal_order(&received),
+            CausalOrder::Before
+        );
+        assert_eq!(
+            message_time(&events, "committer-after").causal_order(&received),
+            CausalOrder::Concurrent
+        );
     }
     for task in tasks {
         lab.scheduler.lock().schedule(task, 0);
@@ -707,11 +758,17 @@ fn channel_permits_capture_the_committing_task_at_publication() {
 fn channel_messages_from_another_runtime_do_not_merge_colliding_task_ids() {
     let mut lab = LabRuntime::new_with_task_causality(LabConfig::new(97));
     let root = lab.state.create_root_region(Budget::INFINITE);
-    let (task, _join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+    let (task, _join) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async {})
+        .unwrap();
     let receiver = context(&lab, task);
     let mut foreign_lab = LabRuntime::new_with_task_causality(LabConfig::new(97));
     let foreign_root = foreign_lab.state.create_root_region(Budget::INFINITE);
-    let (foreign_task, _foreign_join) = foreign_lab.state.create_task(foreign_root, Budget::INFINITE, async {}).unwrap();
+    let (foreign_task, _foreign_join) = foreign_lab
+        .state
+        .create_task(foreign_root, Budget::INFINITE, async {})
+        .unwrap();
     let sender = context(&foreign_lab, foreign_task);
     assert_eq!(task, foreign_task);
     for _ in 0..10 {
@@ -751,7 +808,10 @@ fn host_publications_and_legacy_contexts_do_not_advance_message_clocks() {
             LabRuntime::with_seed(97)
         };
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let (task, _join) = lab.state.create_task(root, Budget::INFINITE, async {}).unwrap();
+        let (task, _join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .unwrap();
         let cx = context(&lab, task);
         let before = cx.logical_now();
         let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel();
@@ -800,7 +860,8 @@ fn dropping_buffered_receivers_does_not_observe_their_messages() {
     assert!(lab.is_quiescent());
     let events = lab.trace().snapshot();
     assert_eq!(
-        message_time(&events, "before-dropped-values").causal_order(&message_time(&events, "after-receiver-drop")),
+        message_time(&events, "before-dropped-values")
+            .causal_order(&message_time(&events, "after-receiver-drop")),
         CausalOrder::Concurrent
     );
 }
@@ -836,10 +897,7 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
         for observer_mode in 0..3 {
             let source = causal_context(97, "source");
             let constructor = causal_context(97, "constructor");
-            let poller = causal_context(
-                if observer_mode == 2 { 98 } else { 97 },
-                "poller",
-            );
+            let poller = causal_context(if observer_mode == 2 { 98 } else { 97 }, "poller");
             let source_before = source.logical_tick();
             let _ = constructor.logical_tick();
             let _ = poller.logical_tick();
@@ -880,8 +938,14 @@ fn moved_receive_futures_observe_only_the_actual_polling_task() {
             let constructor_after = constructor.logical_tick();
             let poller_after = poller.logical_now();
             if observer_mode == 0 {
-                assert_eq!(source_before.causal_order(&poller_after), CausalOrder::Before);
-                assert_eq!(source_after.causal_order(&poller_after), CausalOrder::Concurrent);
+                assert_eq!(
+                    source_before.causal_order(&poller_after),
+                    CausalOrder::Before
+                );
+                assert_eq!(
+                    source_after.causal_order(&poller_after),
+                    CausalOrder::Concurrent
+                );
                 assert_eq!(
                     source_before.causal_order(&constructor_after),
                     CausalOrder::Concurrent
@@ -959,8 +1023,14 @@ fn buffered_broadcast_fanout_keeps_each_publication_and_reader_independent() {
         let first = message_time(&events, &format!("broadcast-reader-{api}-value-1"));
         let second = message_time(&events, &format!("broadcast-reader-{api}-value-2"));
         for before in ["broadcast-one-before", "broadcast-two-before"] {
-            assert_eq!(message_time(&events, before).causal_order(&host), CausalOrder::Concurrent);
-            assert_eq!(message_time(&events, before).causal_order(&second), CausalOrder::Before);
+            assert_eq!(
+                message_time(&events, before).causal_order(&host),
+                CausalOrder::Concurrent
+            );
+            assert_eq!(
+                message_time(&events, before).causal_order(&second),
+                CausalOrder::Before
+            );
         }
         assert_eq!(
             message_time(&events, "broadcast-one-before").causal_order(&first),
@@ -971,7 +1041,10 @@ fn buffered_broadcast_fanout_keeps_each_publication_and_reader_independent() {
             CausalOrder::Concurrent
         );
         for after in ["broadcast-one-after", "broadcast-two-after"] {
-            assert_eq!(message_time(&events, after).causal_order(&second), CausalOrder::Concurrent);
+            assert_eq!(
+                message_time(&events, after).causal_order(&second),
+                CausalOrder::Concurrent
+            );
         }
         for other in api + 1..3 {
             assert_eq!(
@@ -1086,13 +1159,15 @@ fn broadcast_clone_effects_observe_the_retained_publication_before_eviction() {
             // ring slot with a deliberately unattributed host publication.
             let _host = Cx::set_current(None);
             assert_eq!(
-                evictor.send(
-                    &cx,
-                    CloneEffect {
-                        value: 2,
-                        action: Arc::new(Mutex::new(None)),
-                    },
-                ).ok(),
+                evictor
+                    .send(
+                        &cx,
+                        CloneEffect {
+                            value: 2,
+                            action: Arc::new(Mutex::new(None)),
+                        },
+                    )
+                    .ok(),
                 Some(1)
             );
         }
@@ -1228,7 +1303,10 @@ fn watch_latest_value_does_not_inherit_overwritten_or_skipped_publications() {
         );
         for other in api + 1..6 {
             assert_eq!(
-                observed.causal_order(&message_time(&events, &format!("watch-value-reader-{other}"))),
+                observed.causal_order(&message_time(
+                    &events,
+                    &format!("watch-value-reader-{other}")
+                )),
                 CausalOrder::Concurrent
             );
         }
@@ -1323,23 +1401,29 @@ fn watch_modify_observes_before_user_code_and_preserves_publication_on_panic() {
     run_channel_task(&mut lab, root, async move {
         let cx = Cx::current().unwrap();
         cx.trace("watch-modify-source-before");
-        assert!(sender.send(CloneEffect {
-            value: 1,
-            action: Arc::new(Mutex::new(Some(Box::new(|| {
-                Cx::current().unwrap().trace("watch-modify-clone");
-            })))),
-        }).is_ok());
+        assert!(
+            sender
+                .send(CloneEffect {
+                    value: 1,
+                    action: Arc::new(Mutex::new(Some(Box::new(|| {
+                        Cx::current().unwrap().trace("watch-modify-clone");
+                    })))),
+                })
+                .is_ok()
+        );
         cx.trace("watch-modify-source-after");
     });
     let modifier = Arc::clone(&tx);
     run_channel_task(&mut lab, root, async move {
         let cx = Cx::current().unwrap();
         cx.trace("watch-modifier-before");
-        modifier.send_modify(|value| {
-            cx.trace("watch-modify-closure");
-            assert_eq!(value.value, 1);
-            value.value = 2;
-        }).unwrap();
+        modifier
+            .send_modify(|value| {
+                cx.trace("watch-modify-closure");
+                assert_eq!(value.value, 1);
+                value.value = 2;
+            })
+            .unwrap();
         cx.trace("watch-modifier-after");
     });
     run_channel_task(&mut lab, root, async move {
@@ -1366,7 +1450,11 @@ fn watch_modify_observes_before_user_code_and_preserves_publication_on_panic() {
     let events = lab.trace().snapshot();
     let source = message_time(&events, "watch-modify-source-before");
     let modifier = message_time(&events, "watch-modifier-before");
-    for effect in ["watch-modify-clone", "watch-modify-closure", "watch-panic-closure"] {
+    for effect in [
+        "watch-modify-clone",
+        "watch-modify-closure",
+        "watch-panic-closure",
+    ] {
         let observed = message_time(&events, effect);
         assert_eq!(source.causal_order(&observed), CausalOrder::Before);
         assert_eq!(
@@ -1388,7 +1476,10 @@ fn watch_modify_observes_before_user_code_and_preserves_publication_on_panic() {
         "watch-panic-closure",
         "watch-panic-after",
     ] {
-        assert_eq!(message_time(&events, after).causal_order(&received), CausalOrder::Concurrent);
+        assert_eq!(
+            message_time(&events, after).causal_order(&received),
+            CausalOrder::Concurrent
+        );
     }
 }
 

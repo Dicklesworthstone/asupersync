@@ -899,7 +899,9 @@ async fn stream_subtree_journey(cx: Cx) {
     let (inputs, source) = mpsc::channel(1);
     inputs.try_send((7_usize, cleanup)).unwrap();
     drop(inputs);
-    let handles = Arc::new(crate::sync::pl::Mutex::new(Vec::<TaskHandle<CancelReason>>::new()));
+    let handles = Arc::new(crate::sync::pl::Mutex::new(
+        Vec::<TaskHandle<CancelReason>>::new(),
+    ));
     let retain = Arc::clone(&handles);
     let mut operation = cx
         .spawn(move |owner| async move {
@@ -920,7 +922,8 @@ async fn stream_subtree_journey(cx: Cx) {
                             })
                             .unwrap();
                         handles.lock().push(descendant);
-                        seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+                        seen.wait(|state| state.parked.load(Ordering::Acquire))
+                            .await;
                         Outcome::<_, ()>::Ok(value)
                     }
                 },
@@ -930,20 +933,34 @@ async fn stream_subtree_journey(cx: Cx) {
             .unwrap()
         })
         .unwrap();
-    seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
-    assert!(!operation.is_finished(), "a successful fold still waits for subtree cleanup");
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire))
+        .await;
+    assert!(
+        !operation.is_finished(),
+        "a successful fold still waits for subtree cleanup"
+    );
     assert!(!seen.retired.load(Ordering::Acquire));
-    assert!(sender.try_reserve().is_err(), "descendant still holds its checked credit");
+    assert!(
+        sender.try_reserve().is_err(),
+        "descendant still holds its checked credit"
+    );
     release.send(&cx, ()).unwrap();
     let report = operation.join(&cx).await.unwrap();
     assert!(matches!(report.execution.outcome, Outcome::Ok(Some(7))));
-    assert_eq!((report.execution.admitted, report.execution.completed), (1, 1));
+    assert_eq!(
+        (report.execution.admitted, report.execution.completed),
+        (1, 1)
+    );
     let close = report.close.expect("actual operation close receipt");
     assert!(close.cleanup_outcome.is_none());
     assert!(close.descendant_panic.is_none());
     assert!(seen.finished.load(Ordering::Acquire));
     assert!(seen.retired.load(Ordering::Acquire));
-    drop(sender.try_reserve().expect("subtree close returns the checked credit"));
+    drop(
+        sender
+            .try_reserve()
+            .expect("subtree close returns the checked credit"),
+    );
     assert!(handles.lock().iter().all(TaskHandle::is_finished));
     eprintln!(
         "scoped stream map: channel_inputs=1 joined_maps=1 folded=7 descendant_cleanup_pending=true retired=true credit_returned=true region={:?}",

@@ -56,11 +56,14 @@ pub(super) fn validate_request(
             // Bind it to payload lengths before either can repeat a peer's
             // invented count as independent evidence of what was sent. Count
             // each requested location, even when several have the same content.
-            let bytes = request.missing_chunks.iter().try_fold(0_u64, |bytes, chunk| {
-                bytes.checked_add(chunk.size_bytes).ok_or_else(|| {
-                    TransportError::Frame("delta ObjectRequest byte count overflows u64".into())
-                })
-            })?;
+            let bytes = request
+                .missing_chunks
+                .iter()
+                .try_fold(0_u64, |bytes, chunk| {
+                    bytes.checked_add(chunk.size_bytes).ok_or_else(|| {
+                        TransportError::Frame("delta ObjectRequest byte count overflows u64".into())
+                    })
+                })?;
             if bytes != request.missing_bytes {
                 return Err(TransportError::Frame(format!(
                     "delta ObjectRequest declares {} missing bytes but requests {bytes}",

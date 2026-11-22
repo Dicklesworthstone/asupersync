@@ -162,13 +162,18 @@ impl SecureDaemonController {
             })?
             .join("daemon.pid");
 
+        let system = System::new_all().map_err(|e| {
+            Error::new(ErrorKind::Internal)
+                .with_message(format!("Failed to initialize system info: {e}"))
+        })?;
+
         Ok(Self {
             region_id,
             capabilities,
             daemon_path,
             config_path,
             pid_file,
-            system: System::new_all(),
+            system,
         })
     }
 
@@ -532,7 +537,10 @@ impl SecureDaemonController {
                 Signal::Term => SysSignal::Term,
                 Signal::Kill => SysSignal::Kill,
             };
-            let mut system = System::new_all();
+            let mut system = System::new_all().map_err(|e| {
+                Error::new(ErrorKind::Internal)
+                    .with_message(format!("Failed to query system processes: {e}"))
+            })?;
             system.refresh_processes(ProcessesToUpdate::All, true);
             match system
                 .process(Pid::from_u32(pid))

@@ -38,6 +38,7 @@ use super::nats::{
     validate_nats_subscription_pattern,
 };
 use crate::cx::Cx;
+use crate::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
 use crate::types::Time;
@@ -45,11 +46,10 @@ use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use std::sync::Mutex;
 use crate::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Mutex;
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
@@ -2957,11 +2957,7 @@ impl JsMessage {
     /// message.ack_confirmed(&mut client, &cx).await?;
     /// assert!(message.is_ack_confirmed());
     /// ```
-    pub async fn ack_confirmed(
-        &self,
-        client: &mut NatsClient,
-        cx: &Cx,
-    ) -> Result<(), JsError> {
+    pub async fn ack_confirmed(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         let (previous_state, in_flight) = loop {
@@ -2974,7 +2970,12 @@ impl JsMessage {
             };
             if self
                 .ack_state
-                .compare_exchange(previous_state, in_flight, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(
+                    previous_state,
+                    in_flight,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
                 break (previous_state, in_flight);

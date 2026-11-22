@@ -340,9 +340,7 @@ mod ordered_tests {
         for interrupted in [0, 1] {
             let gate = Arc::new(PollGate::default());
             let owner = gate.lock();
-            let flags: Vec<_> = (0..3)
-                .map(|_| Arc::new(AtomicBool::new(false)))
-                .collect();
+            let flags: Vec<_> = (0..3).map(|_| Arc::new(AtomicBool::new(false))).collect();
             let (sent, received) = mpsc::channel();
             let mut workers = Vec::new();
             let mut witnessed = true;
@@ -445,8 +443,7 @@ mod ordered_tests {
         let mut witnessed = true;
         for index in 0..4 {
             let handle = IoDriverHandle::new(backend.clone());
-            let worker =
-                thread::spawn(move || handle.try_turn_with(Some(WATCHDOG * 2), |_, _| {}));
+            let worker = thread::spawn(move || handle.try_turn_with(Some(WATCHDOG * 2), |_, _| {}));
             expected.push(worker.thread().id());
             workers.push(worker);
             witnessed &= enrolled(&owner._shared_owner.poll_gate, index + 1);
@@ -473,8 +470,7 @@ mod ordered_tests {
             let worker_woken = Arc::clone(&woken);
             let (sent, received) = mpsc::channel();
             let worker = thread::spawn(move || {
-                let claim = worker_gate
-                    .acquire(&worker_woken, Some(Duration::from_millis(10)));
+                let claim = worker_gate.acquire(&worker_woken, Some(Duration::from_millis(10)));
                 let _ = sent.send(claim.is_none());
                 drop(claim);
             });
@@ -497,8 +493,7 @@ mod ordered_tests {
         let first_gate = Arc::clone(&gate);
         let (first_tx, first_rx) = mpsc::channel();
         let first = thread::spawn(move || {
-            let claim = first_gate
-                .acquire(&AtomicBool::new(false), Some(Duration::from_secs(1)));
+            let claim = first_gate.acquire(&AtomicBool::new(false), Some(Duration::from_secs(1)));
             let _ = first_tx.send(claim.is_none());
             drop(claim);
         });

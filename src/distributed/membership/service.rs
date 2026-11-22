@@ -28,7 +28,11 @@ impl HasSchema for MembershipResponse {
     }
 }
 
-fn apply_request(controller: &Mutex<MembershipLeaseController>, peer: &NodeId, bytes: &[u8]) -> RemoteOutcome {
+fn apply_request(
+    controller: &Mutex<MembershipLeaseController>,
+    peer: &NodeId,
+    bytes: &[u8],
+) -> RemoteOutcome {
     if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) {
         return RemoteOutcome::Failed("invalid membership statement size".to_owned());
     }
@@ -39,7 +43,9 @@ fn apply_request(controller: &Mutex<MembershipLeaseController>, peer: &NodeId, b
             return RemoteOutcome::Failed("membership controller is busy".to_owned());
         };
         if peer != state.authority() {
-            return RemoteOutcome::Failed("membership peer is not the configured authority".to_owned());
+            return RemoteOutcome::Failed(
+                "membership peer is not the configured authority".to_owned(),
+            );
         }
         state.apply_authenticated(bytes)
     };
@@ -65,7 +71,8 @@ fn apply_request(controller: &Mutex<MembershipLeaseController>, peer: &NodeId, b
 /// the latest identical statement is idempotent, older ones remain stale. Epoch
 /// and sequence floors must be independently restored after process restart.
 pub fn register_membership_service(
-    registry: &mut RemoteComputationRegistry, controller: Arc<Mutex<MembershipLeaseController>>,
+    registry: &mut RemoteComputationRegistry,
+    controller: Arc<Mutex<MembershipLeaseController>>,
 ) -> Result<(), ComputationSchemaRegistryError> {
     registry.register::<MembershipRequest, MembershipResponse, _, _>(
         MEMBERSHIP_SERVICE_COMPUTATION,
@@ -78,10 +85,18 @@ pub fn register_membership_service(
                         RemoteOutcome::Cancelled,
                     ));
                 }
-                let outcome = apply_request(&controller, invocation.peer_node(), invocation.request().input.data());
+                let outcome = apply_request(
+                    &controller,
+                    invocation.peer_node(),
+                    invocation.request().input.data(),
+                );
                 if cx.is_cancel_requested() {
                     return Ok(cx.cancel_reason().map_or_else(
-                        || RemoteOutcome::Failed("membership cancellation observed after admission".to_owned()),
+                        || {
+                            RemoteOutcome::Failed(
+                                "membership cancellation observed after admission".to_owned(),
+                            )
+                        },
                         RemoteOutcome::Cancelled,
                     ));
                 }
@@ -130,27 +145,51 @@ mod native {
     /// have drained or that the member is currently reachable. Statement signing
     /// remains a separate local authority operation; bytes may be adversarial.
     pub async fn submit_membership_update(
-        cx: &Cx, client: &RemoteComputationClient, hello: &RemotePeerHello, statement: &[u8],
+        cx: &Cx,
+        client: &RemoteComputationClient,
+        hello: &RemotePeerHello,
+        statement: &[u8],
     ) -> Result<(), MembershipDeliveryError> {
-        if cx.is_cancel_requested() { return Err(MembershipDeliveryError::Cancelled); }
+        if cx.is_cancel_requested() {
+            return Err(MembershipDeliveryError::Cancelled);
+        }
         if hello.protocol_version() != RemoteProtocolVersion::V1
             || !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&statement.len())
-        { return Err(MembershipDeliveryError::Configuration); }
+        {
+            return Err(MembershipDeliveryError::Configuration);
+        }
         let task = RemoteTaskId::next();
         let request = SpawnRequest {
-            remote_task_id: task, computation: ComputationName::new(MEMBERSHIP_SERVICE_COMPUTATION),
-            input: RemoteInput::new(statement.to_vec()), lease: client.config().attempt_timeout(),
-            idempotency_key: IdempotencyKey::from_raw(u128::from(task.raw())), budget: None,
-            origin_node: hello.peer_node().clone(), origin_region: cx.region_id(), origin_task: cx.task_id(),
+            remote_task_id: task,
+            computation: ComputationName::new(MEMBERSHIP_SERVICE_COMPUTATION),
+            input: RemoteInput::new(statement.to_vec()),
+            lease: client.config().attempt_timeout(),
+            idempotency_key: IdempotencyKey::from_raw(u128::from(task.raw())),
+            budget: None,
+            origin_node: hello.peer_node().clone(),
+            origin_region: cx.region_id(),
+            origin_task: cx.task_id(),
         };
         let wire = RemoteServiceWireRequest::from_spawn_request(hello.clone(), &request)
             .map_err(|_| MembershipDeliveryError::Configuration)?;
         drop(request);
-        let response = client.call(cx, &wire).await.map_err(MembershipDeliveryError::Client)?;
-        if cx.is_cancel_requested() { return Err(MembershipDeliveryError::Cancelled); }
+        let response = client
+            .call(cx, &wire)
+            .await
+            .map_err(MembershipDeliveryError::Client)?;
+        if cx.is_cancel_requested() {
+            return Err(MembershipDeliveryError::Cancelled);
+        }
         match response {
-            RemoteServiceWireResponse::Outcome { outcome: RemoteServiceWireOutcome::Success(reply), .. } => {
-                if reply == statement { Ok(()) } else { Err(MembershipDeliveryError::Receipt) }
+            RemoteServiceWireResponse::Outcome {
+                outcome: RemoteServiceWireOutcome::Success(reply),
+                ..
+            } => {
+                if reply == statement {
+                    Ok(())
+                } else {
+                    Err(MembershipDeliveryError::Receipt)
+                }
             }
             _ => Err(MembershipDeliveryError::Refused),
         }
@@ -189,12 +228,18 @@ pub fn register_owned_membership_service(
                 }
                 let bytes = invocation.request().input.data();
                 if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) {
-                    return Ok(RemoteOutcome::Failed("invalid membership statement size".to_owned()));
+                    return Ok(RemoteOutcome::Failed(
+                        "invalid membership statement size".to_owned(),
+                    ));
                 }
                 let result = controller.apply_authenticated(invocation.peer_node(), bytes);
                 if cx.is_cancel_requested() {
                     return Ok(cx.cancel_reason().map_or_else(
-                        || RemoteOutcome::Failed("membership cancellation observed after admission".to_owned()),
+                        || {
+                            RemoteOutcome::Failed(
+                                "membership cancellation observed after admission".to_owned(),
+                            )
+                        },
                         RemoteOutcome::Cancelled,
                     ));
                 }

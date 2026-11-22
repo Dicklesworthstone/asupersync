@@ -35,7 +35,7 @@ whole-tree rollback. Retain the streamed receipts. SIGINT/SIGTERM stop observati
 and drain an application already admitted before reporting its actual result. A \
 second signal forces termination and can prevent a final receipt."
 )]
-pub(super) struct LocalWatchArgs {
+pub struct LocalWatchArgs {
     /// First local directory to reconcile
     #[arg(value_name = "LOCAL")]
     local: PathBuf,
@@ -92,7 +92,7 @@ pub(super) struct LocalWatchArgs {
     max_state_bytes: usize,
 }
 
-pub(super) fn run(args: &LocalWatchArgs, output: &mut Output) -> Result<(), CliError> {
+pub fn run(args: &LocalWatchArgs, output: &mut Output) -> Result<(), CliError> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         native::run(args, output)
@@ -470,7 +470,7 @@ mod native {
         }
     }
 
-    pub(super) fn run(args: &LocalWatchArgs, output: &mut Output) -> Result<(), CliError> {
+    pub fn run(args: &LocalWatchArgs, output: &mut Output) -> Result<(), CliError> {
         for (label, path) in [
             ("local", Some(args.local.as_path())),
             ("remote", Some(args.remote.as_path())),

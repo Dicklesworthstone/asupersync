@@ -9,8 +9,8 @@ use super::protocol_state_machines::{
     ObligationStateMachine, RegionContext, RegionEvent, RegionStateMachine, TaskContext, TaskEvent,
     TaskState, TaskStateMachine, TransitionResult, ValidationLevel,
 };
-use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::sync::atomic::{AtomicU64, Ordering};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
 use std::time::Instant;
 
 #[cfg(test)]

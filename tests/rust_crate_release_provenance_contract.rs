@@ -637,7 +637,9 @@ fn validate_final_signoff(signoff: &Value, contract: &Value) -> Result<(), Strin
     }
     let surface = array(contract, "fixture_crate_surface")?;
     if surface.len() != 9 {
-        return Err("historical fixture surface must retain all nine original packages".to_string());
+        return Err(
+            "historical fixture surface must retain all nine original packages".to_string(),
+        );
     }
     let results = array(e2e, "per_package_results")?;
     if results.len() != surface.len() {
@@ -893,7 +895,10 @@ fn final_signoff_packet_maps_dry_run_e2e_and_child_evidence() {
     let mut duplicated_historical_order = contract.clone();
     duplicated_historical_order["fixture_crate_surface"][1]["publish_order"] = Value::from(1);
     let error = validate_final_signoff(&signoff, &duplicated_historical_order).unwrap_err();
-    assert!(error.contains("historical fixture publish_order"), "{error}");
+    assert!(
+        error.contains("historical fixture publish_order"),
+        "{error}"
+    );
 
     let mut duplicated_historical_package = contract.clone();
     duplicated_historical_package["fixture_crate_surface"][1]["package"] =

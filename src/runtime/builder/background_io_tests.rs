@@ -80,7 +80,10 @@ impl Wake for NoticeWake {
 
 fn notice_waker(panic: bool) -> (Waker, mpsc::Receiver<WakeStamp>) {
     let (sender, receiver) = mpsc::channel();
-    (Waker::from(Arc::new(NoticeWake { sender, panic })), receiver)
+    (
+        Waker::from(Arc::new(NoticeWake { sender, panic })),
+        receiver,
+    )
 }
 
 fn assert_helper_wake(stamp: WakeStamp, worker: &HeldWorker) {
@@ -148,7 +151,9 @@ fn background_io_wakes_real_socket_while_the_only_worker_is_blocked() {
     let worker = HeldWorker::enter(&runtime);
     let (io, _) = runtime_drivers(&runtime);
     let receiver = UdpSocket::bind("127.0.0.1:0").expect("receiver socket");
-    receiver.set_nonblocking(true).expect("nonblocking receiver");
+    receiver
+        .set_nonblocking(true)
+        .expect("nonblocking receiver");
     let sender = UdpSocket::bind("127.0.0.1:0").expect("sender socket");
     let (waker, wakes) = notice_waker(false);
     let registration = io
@@ -159,7 +164,9 @@ fn background_io_wakes_real_socket_while_the_only_worker_is_blocked() {
         .expect("send actual datagram");
 
     assert_helper_wake(
-        wakes.recv_timeout(WATCHDOG).expect("independent socket wake"),
+        wakes
+            .recv_timeout(WATCHDOG)
+            .expect("independent socket wake"),
         &worker,
     );
     let mut bytes = [0; 16];
@@ -183,7 +190,9 @@ fn background_io_fires_wall_clock_timer_while_the_only_worker_is_blocked() {
     let _timer = timer.register(timer.now() + Duration::from_millis(20), waker);
 
     assert_helper_wake(
-        wakes.recv_timeout(WATCHDOG).expect("independent timer wake"),
+        wakes
+            .recv_timeout(WATCHDOG)
+            .expect("independent timer wake"),
         &worker,
     );
     drop(worker);
@@ -252,9 +261,7 @@ impl Reactor for GatedReactor {
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         let mut gate = self.gate.lock();
-        if gate.armed
-            && std::thread::current().name() == Some("background-io-test-io")
-        {
+        if gate.armed && std::thread::current().name() == Some("background-io-test-io") {
             gate.armed = false;
             gate.entered = true;
             self.changed.notify_all();
@@ -307,7 +314,10 @@ fn background_io_new_earlier_timer_interrupts_an_existing_wait() {
     let fired = wakes.recv_timeout(WATCHDOG);
     // Always release the controlled wait before a failure unwinds the test.
     reactor.wake().expect("release test gate");
-    assert_helper_wake(fired.expect("earlier deadline publication woke helper"), &worker);
+    assert_helper_wake(
+        fired.expect("earlier deadline publication woke helper"),
+        &worker,
+    );
     assert!(timer.cancel(&far));
     drop(worker);
     assert!(runtime.shutdown_timeout(WATCHDOG));
@@ -323,15 +333,21 @@ fn background_io_recovers_after_a_readiness_waker_panics() {
     let worker = HeldWorker::enter(&runtime);
     let (io, timer) = runtime_drivers(&runtime);
     let receiver = UdpSocket::bind("127.0.0.1:0").expect("receiver socket");
-    receiver.set_nonblocking(true).expect("nonblocking receiver");
+    receiver
+        .set_nonblocking(true)
+        .expect("nonblocking receiver");
     let sender = UdpSocket::bind("127.0.0.1:0").expect("sender socket");
     let (waker, panics) = notice_waker(true);
     let registration = io
         .register(&receiver, Interest::READABLE, waker)
         .expect("register panicking Waker");
-    sender.send_to(b"panic", receiver.local_addr().unwrap()).unwrap();
+    sender
+        .send_to(b"panic", receiver.local_addr().unwrap())
+        .unwrap();
     assert_helper_wake(
-        panics.recv_timeout(WATCHDOG).expect("panicking callback ran"),
+        panics
+            .recv_timeout(WATCHDOG)
+            .expect("panicking callback ran"),
         &worker,
     );
     drop(registration);
@@ -339,7 +355,9 @@ fn background_io_recovers_after_a_readiness_waker_panics() {
     let (waker, recovered) = notice_waker(false);
     let _timer = timer.register(timer.now() + Duration::from_millis(1), waker);
     assert_helper_wake(
-        recovered.recv_timeout(WATCHDOG).expect("helper survived the callback"),
+        recovered
+            .recv_timeout(WATCHDOG)
+            .expect("helper survived the callback"),
         &worker,
     );
     drop(worker);
@@ -382,7 +400,10 @@ fn background_io_callback_can_drop_the_last_runtime_without_self_join() {
     dropped
         .recv_timeout(WATCHDOG)
         .expect("last owner drop returns on the helper while the worker is still held");
-    assert!(state.upgrade().is_some(), "reaper retains the blocked worker's state");
+    assert!(
+        state.upgrade().is_some(),
+        "reaper retains the blocked worker's state"
+    );
     drop(worker);
     let started = Instant::now();
     while state.upgrade().is_some() {
@@ -397,12 +418,16 @@ fn background_io_start_failure_stops_workers_despite_a_retained_start_hook_owner
     let runtime = native_builder()
         .on_thread_start(move || {
             let ambient = Runtime::current_handle().expect("worker has ambient runtime");
-            let inner = ambient.try_inner().expect("runtime is live during worker start");
+            let inner = ambient
+                .try_inner()
+                .expect("runtime is live during worker start");
             let _ = owner_tx.send(RuntimeHandle::strong(inner));
         })
         .build()
         .expect("runtime before helper startup");
-    let retained = owner_rx.recv_timeout(WATCHDOG).expect("owner retained by start hook");
+    let retained = owner_rx
+        .recv_timeout(WATCHDOG)
+        .expect("owner retained by start hook");
     let complete = Arc::clone(&runtime.inner.shutdown_completion);
     let stopped = runtime.inner.scheduler.shutdown_signal();
     let result = runtime.with_background_io_driver_start(|_| {
@@ -410,9 +435,21 @@ fn background_io_start_failure_stops_workers_despite_a_retained_start_hook_owner
     });
 
     assert!(result.is_err(), "preserve the helper spawn failure");
-    assert!(retained.try_spawn(async {}).is_err(), "failed startup closes admission");
-    assert!(stopped.load(Ordering::Acquire), "existing workers were told to stop");
-    assert!(!complete.wait_timeout(Duration::ZERO), "the external owner still exists");
+    assert!(
+        retained.try_spawn(async {}).is_err(),
+        "failed startup closes admission"
+    );
+    assert!(
+        stopped.load(Ordering::Acquire),
+        "existing workers were told to stop"
+    );
+    assert!(
+        !complete.wait_timeout(Duration::ZERO),
+        "the external owner still exists"
+    );
     drop(retained);
-    assert!(complete.wait_timeout(WATCHDOG), "teardown finishes after releasing the owner");
+    assert!(
+        complete.wait_timeout(WATCHDOG),
+        "teardown finishes after releasing the owner"
+    );
 }

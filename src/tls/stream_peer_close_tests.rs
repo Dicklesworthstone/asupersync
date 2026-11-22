@@ -25,7 +25,9 @@ fn run_pair(
     test: impl FnOnce(Stream, Stream) + Send + 'static,
 ) {
     let mut runtime = LabRuntimeTarget::create_runtime(
-        TestConfig::new().with_seed(0xC105_E001).with_max_steps(20_000),
+        TestConfig::new()
+            .with_seed(0xC105_E001)
+            .with_max_steps(20_000),
     );
     LabRuntimeTarget::block_on(&mut runtime, async move {
         let chain = CertificateChain::from_pem(CERT).unwrap().into_inner();
@@ -55,10 +57,8 @@ fn run_pair(
             ClientConnection::new(Arc::new(cc), ServerName::try_from("localhost").unwrap())
                 .unwrap(),
         );
-        let mut server = TlsStream::new_server(
-            server_io,
-            ServerConnection::new(Arc::new(sc)).unwrap(),
-        );
+        let mut server =
+            TlsStream::new_server(server_io, ServerConnection::new(Arc::new(sc)).unwrap());
         if established {
             let (c, s) = zip(
                 poll_fn(|cx| client.poll_handshake(cx)),
@@ -131,7 +131,10 @@ fn close_write(stream: &mut Stream, transport: bool) {
             Poll::Ready(Ok(()))
         ));
     } else {
-        assert!(matches!(stream.poll_shutdown_tls(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            stream.poll_shutdown_tls(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
     }
 }
 
@@ -187,7 +190,10 @@ fn received_close_revokes_bindings_before_buffered_plaintext_is_drained() {
                     assert_eq!(read(receiver, &mut first), 1);
                     assert_eq!(first, [0x5A]);
                     let state = receiver.conn.process_new_packets().unwrap();
-                    assert!(state.peer_has_closed(), "close_notify must actually be parsed");
+                    assert!(
+                        state.peer_has_closed(),
+                        "close_notify must actually be parsed"
+                    );
                     assert_eq!(state.plaintext_bytes_to_read(), message.len() - 1);
                     assert!(!receiver.read_closed, "application has not reached EOF");
                     assert_revoked(receiver);
@@ -200,7 +206,10 @@ fn received_close_revokes_bindings_before_buffered_plaintext_is_drained() {
                     assert_eq!(read(sender, &mut reply), reply.len());
                     assert_eq!(&reply, b"response");
                     close_write(receiver, transport_shutdown);
-                    assert!(!receiver.is_closed(), "unread plaintext must survive shutdown");
+                    assert!(
+                        !receiver.is_closed(),
+                        "unread plaintext must survive shutdown"
+                    );
                     drain_closed(receiver, &message[1..]);
                     assert!(receiver.is_closed());
                     drain_closed(sender, b"");
@@ -243,7 +252,10 @@ fn handshake_batch_with_finished_data_and_close_never_admits_binding() {
             let message = [0x37; 129];
             send(sender, &message);
             close_write(sender, false);
-            assert!(matches!(receiver.poll_handshake(&mut cx), Poll::Ready(Ok(()))));
+            assert!(matches!(
+                receiver.poll_handshake(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
             let state = receiver.conn.process_new_packets().unwrap();
             assert!(state.peer_has_closed());
             assert_eq!(state.plaintext_bytes_to_read(), message.len());
@@ -274,7 +286,10 @@ fn buffered_plaintext_without_processed_close_keeps_bindings_available() {
                 let state = receiver.conn.process_new_packets().unwrap();
                 assert!(!state.peer_has_closed());
                 assert_eq!(state.plaintext_bytes_to_read(), message.len() - 1);
-                assert!(!receiver.conn.wants_read(), "rustls is applying plaintext backpressure");
+                assert!(
+                    !receiver.conn.wants_read(),
+                    "rustls is applying plaintext backpressure"
+                );
                 assert_eq!(live_bindings(receiver), bindings);
                 let mut rest = [0; 256];
                 assert_eq!(read(receiver, &mut rest), rest.len());

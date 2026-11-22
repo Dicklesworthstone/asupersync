@@ -51,7 +51,10 @@ impl AsyncRead for TestStream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.polls.set(this.polls.get() + 1);
-        assert!(!std::mem::take(&mut this.panic_read), "inner read panic sentinel");
+        assert!(
+            !std::mem::take(&mut this.panic_read),
+            "inner read panic sentinel"
+        );
         if this.pending_read {
             return Poll::Pending;
         }
@@ -200,11 +203,13 @@ fn contention_registers_the_latest_waker_without_performing_io() {
     let (first, first_waker) = counting_waker();
     let (latest, latest_waker) = counting_waker();
     assert!(
-        Pin::new(&mut write).poll_write(&mut Context::from_waker(&first_waker), b"ignored")
+        Pin::new(&mut write)
+            .poll_write(&mut Context::from_waker(&first_waker), b"ignored")
             .is_pending()
     );
     assert!(
-        Pin::new(&mut write).poll_write(&mut Context::from_waker(&latest_waker), b"also ignored")
+        Pin::new(&mut write)
+            .poll_write(&mut Context::from_waker(&latest_waker), b"also ignored")
             .is_pending()
     );
     assert_eq!(guard.stream.as_ref().unwrap().polls.get(), 0);
@@ -231,7 +236,8 @@ fn dropping_a_waiting_half_unregisters_it_and_keeps_its_peer_alive() {
     let mut output = [0; 4];
     let mut buf = ReadBuf::new(&mut output);
     assert!(
-        Pin::new(&mut read).poll_read(&mut Context::from_waker(&waker), &mut buf)
+        Pin::new(&mut read)
+            .poll_read(&mut Context::from_waker(&waker), &mut buf)
             .is_pending()
     );
     assert!(buf.filled().is_empty());
@@ -303,7 +309,10 @@ struct LockCheckingWake {
 impl Wake for LockCheckingWake {
     fn wake(self: Arc<Self>) {
         let shared = self.shared.upgrade().unwrap();
-        assert!(shared.state.try_lock().is_ok(), "wake called under split lock");
+        assert!(
+            shared.state.try_lock().is_ok(),
+            "wake called under split lock"
+        );
         self.wakes.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -311,7 +320,10 @@ impl Wake for LockCheckingWake {
 impl Drop for LockCheckingWake {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.upgrade() {
-            assert!(shared.state.try_lock().is_ok(), "waker dropped under split lock");
+            assert!(
+                shared.state.try_lock().is_ok(),
+                "waker dropped under split lock"
+            );
         }
         self.drops.fetch_add(1, Ordering::SeqCst);
     }
@@ -333,7 +345,8 @@ fn replacing_and_waking_waiters_never_invokes_callbacks_under_the_lock() {
             drops: Arc::clone(&drops),
         }));
         assert!(
-            Pin::new(&mut write).poll_write(&mut Context::from_waker(&waker), b"x")
+            Pin::new(&mut write)
+                .poll_write(&mut Context::from_waker(&waker), b"x")
                 .is_pending()
         );
     }
@@ -353,7 +366,8 @@ fn panic_restores_stream_ownership_and_wakes_the_contending_half() {
             panic!("uncontended acquisition must succeed");
         };
         assert!(
-            Pin::new(&mut write).poll_write(&mut Context::from_waker(&waker), b"not committed")
+            Pin::new(&mut write)
+                .poll_write(&mut Context::from_waker(&waker), b"not committed")
                 .is_pending()
         );
         panic!("stream panic sentinel");
@@ -375,7 +389,11 @@ fn pending_underlying_read_does_not_hold_the_write_gate() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut output = [0; 4];
     let mut buf = ReadBuf::new(&mut output);
-    assert!(Pin::new(&mut read).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        Pin::new(&mut read)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
     assert!(buf.filled().is_empty());
     assert!(matches!(
         Pin::new(&mut write).poll_write(&mut cx, b"request"),

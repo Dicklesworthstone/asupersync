@@ -100,10 +100,16 @@ impl NativeStreamWindows {
         // a quarter of its initial size. That threshold is 0 for a window of 3
         // bytes or less, so such a window is never refilled and the call could
         // never receive a message.
-        if self.connection.is_some_and(|size| !(65_535..=0x7fff_ffff).contains(&size))
-            || self.stream.is_some_and(|size| !(4..=0x7fff_ffff).contains(&size))
+        if self
+            .connection
+            .is_some_and(|size| !(65_535..=0x7fff_ffff).contains(&size))
+            || self
+                .stream
+                .is_some_and(|size| !(4..=0x7fff_ffff).contains(&size))
         {
-            return Err(Status::invalid_argument("invalid native gRPC receive windows"));
+            return Err(Status::invalid_argument(
+                "invalid native gRPC receive windows",
+            ));
         }
         Ok(())
     }
@@ -155,28 +161,48 @@ impl NativeStreamConfig {
             || u32::try_from(self.max_send_message_size).is_err()
             || u32::try_from(self.max_recv_message_size).is_err()
         {
-            return Err(Status::invalid_argument("invalid native gRPC stream limits or scheme"));
+            return Err(Status::invalid_argument(
+                "invalid native gRPC stream limits or scheme",
+            ));
         }
         if self.max_send_message_size.checked_add(5).is_none() {
-            return Err(Status::invalid_argument("native send limit overflows address space"));
+            return Err(Status::invalid_argument(
+                "native send limit overflows address space",
+            ));
         }
-        self.max_recv_message_size.checked_add(5 + FRAME_BYTES)
+        self.max_recv_message_size
+            .checked_add(5 + FRAME_BYTES)
             .ok_or_else(|| Status::invalid_argument("native receive limit overflows address space"))
     }
 
-    fn frame_hooks(&self) -> Result<(
-        Option<crate::grpc::codec::FrameCompressor>,
-        Option<crate::grpc::codec::FrameDecompressor>,
-    ), Status> {
+    fn frame_hooks(
+        &self,
+    ) -> Result<
+        (
+            Option<crate::grpc::codec::FrameCompressor>,
+            Option<crate::grpc::codec::FrameDecompressor>,
+        ),
+        Status,
+    > {
         let compressor = match self.send_compression {
             CompressionEncoding::Identity => None,
-            CompressionEncoding::Gzip => Some(CompressionEncoding::Gzip.frame_compressor()
-                .ok_or_else(|| Status::unimplemented("gzip compression is not compiled in"))?),
+            CompressionEncoding::Gzip => Some(
+                CompressionEncoding::Gzip
+                    .frame_compressor()
+                    .ok_or_else(|| Status::unimplemented("gzip compression is not compiled in"))?,
+            ),
         };
         let decompressor = if self.accept_gzip {
-            Some(CompressionEncoding::Gzip.frame_decompressor()
-                .ok_or_else(|| Status::unimplemented("gzip decompression is not compiled in"))?)
-        } else { None };
+            Some(
+                CompressionEncoding::Gzip
+                    .frame_decompressor()
+                    .ok_or_else(|| {
+                        Status::unimplemented("gzip decompression is not compiled in")
+                    })?,
+            )
+        } else {
+            None
+        };
         Ok((compressor, decompressor))
     }
 }
@@ -210,7 +236,11 @@ impl NativeStreamKeepalive {
                 "native gRPC keepalive intervals must be positive",
             ));
         }
-        Ok(Self { interval, timeout, progress_aware: false })
+        Ok(Self {
+            interval,
+            timeout,
+            progress_aware: false,
+        })
     }
 
     /// Let a demand-driven owner resume after its consumer paused.
@@ -240,18 +270,24 @@ impl NativeStreamKeepalive {
 
     /// Whether outbound admission and bounded ready-input recovery govern timeouts.
     #[must_use]
-    pub const fn is_progress_aware(self) -> bool { self.progress_aware }
+    pub const fn is_progress_aware(self) -> bool {
+        self.progress_aware
+    }
 
     /// Idle duration before the next probe is admitted.
     #[must_use]
-    pub fn interval(self) -> Duration { self.interval }
+    pub fn interval(self) -> Duration {
+        self.interval
+    }
 
     /// Absolute allowance from probe admission through its matching ACK.
     ///
     /// The strict policy admits when queuing the probe; the progress-aware
     /// policy admits when the PING enters the outbound frame cursor.
     #[must_use]
-    pub fn timeout(self) -> Duration { self.timeout }
+    pub fn timeout(self) -> Duration {
+        self.timeout
+    }
 }
 
 /// Learned interval for connections created by one opted-in channel family.
@@ -263,15 +299,23 @@ pub(crate) struct KeepaliveBackoff {
 
 impl KeepaliveBackoff {
     pub(crate) fn new(interval: Duration) -> Self {
-        Self { interval: Mutex::new(interval) }
+        Self {
+            interval: Mutex::new(interval),
+        }
     }
 
     pub(crate) fn interval(&self) -> Duration {
-        *self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .interval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(super) fn back_off(&self) -> (Duration, Duration) {
-        let mut interval = self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut interval = self
+            .interval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = *interval;
         *interval = previous.saturating_mul(2);
         (previous, *interval)
@@ -298,7 +342,14 @@ impl Keepalive {
     pub(super) fn new(config: NativeStreamKeepalive, clock: TimerDriverHandle) -> Self {
         let at = clock.now() + config.interval;
         let timer = Box::pin(Sleep::with_timer_driver(at, clock.clone()));
-        Self { config, clock, at, timer, sequence: 0, state: ProbeState::Idle }
+        Self {
+            config,
+            clock,
+            at,
+            timer,
+            sequence: 0,
+            state: ProbeState::Idle,
+        }
     }
 
     fn arm(&mut self, duration: Duration) {
@@ -331,9 +382,9 @@ impl Keepalive {
                 }
                 Ok(())
             }
-            ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => {
-                Err(Status::unavailable("native gRPC keepalive acknowledgement timed out"))
-            }
+            ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => Err(Status::unavailable(
+                "native gRPC keepalive acknowledgement timed out",
+            )),
         }
     }
 
@@ -357,14 +408,16 @@ impl Keepalive {
         // A transport poll may cross the deadline after gate checked it; do
         // not discard its matching ACK or terminal frame before that pass.
         if !self.config.progress_aware
-            && !matches!(self.state, ProbeState::Idle) && self.clock.now() >= self.at
+            && !matches!(self.state, ProbeState::Idle)
+            && self.clock.now() >= self.at
         {
-            return Err(Status::unavailable("native gRPC keepalive acknowledgement timed out"));
+            return Err(Status::unavailable(
+                "native gRPC keepalive acknowledgement timed out",
+            ));
         }
         match self.state {
             ProbeState::Idle => self.arm(self.config.interval),
-            ProbeState::AwaitingAck(expected)
-                if matches!(frame, Frame::Ping(ping) if ping.ack && ping.opaque_data == expected) =>
+            ProbeState::AwaitingAck(expected) if matches!(frame, Frame::Ping(ping) if ping.ack && ping.opaque_data == expected) =>
             {
                 self.state = ProbeState::Idle;
                 self.arm(self.config.interval);
@@ -391,22 +444,37 @@ pub(crate) struct CallDeadline {
 }
 
 impl CallDeadline {
-    pub(crate) fn capture(cx: &Cx, metadata: &Metadata, configured: Option<Duration>) -> Result<Self, Status> {
+    pub(crate) fn capture(
+        cx: &Cx,
+        metadata: &Metadata,
+        configured: Option<Duration>,
+    ) -> Result<Self, Status> {
         let clock = cx.timer_driver();
         let timeout = request_timeout(metadata, configured)?;
         if (timeout.is_some() || cx.budget().deadline.is_some()) && clock.is_none() {
-            return Err(Status::failed_precondition("native gRPC deadline requires an explicit timer"));
+            return Err(Status::failed_precondition(
+                "native gRPC deadline requires an explicit timer",
+            ));
         }
         let now = clock.as_ref().map(TimerDriverHandle::now);
-        let at = earlier(cx.budget().deadline, timeout.zip(now).map(|(timeout, now)| now + timeout));
+        let at = earlier(
+            cx.budget().deadline,
+            timeout.zip(now).map(|(timeout, now)| now + timeout),
+        );
         let deadline = Self { clock, at };
         deadline.check()?;
         Ok(deadline)
     }
 
     pub(crate) fn check(&self) -> Result<(), Status> {
-        if self.at.zip(self.clock.as_ref()).is_some_and(|(at, clock)| clock.now() >= at) {
-            return Err(Status::deadline_exceeded("native gRPC deadline expired before dispatch"));
+        if self
+            .at
+            .zip(self.clock.as_ref())
+            .is_some_and(|(at, clock)| clock.now() >= at)
+        {
+            return Err(Status::deadline_exceeded(
+                "native gRPC deadline expired before dispatch",
+            ));
         }
         Ok(())
     }
@@ -580,7 +648,17 @@ where
         config: NativeStreamConfig,
         admitted: Option<CallDeadline>,
     ) -> Result<Self, Status> {
-        Self::new_request(cx, io, authority, path, request.map(Some), codec, config, admitted, true)
+        Self::new_request(
+            cx,
+            io,
+            authority,
+            path,
+            request.map(Some),
+            codec,
+            config,
+            admitted,
+            true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -596,7 +674,15 @@ where
         end_stream: bool,
     ) -> Result<Self, Status> {
         Self::new_request_with_windows(
-            cx, io, authority, path, request, codec, config, admitted, end_stream,
+            cx,
+            io,
+            authority,
+            path,
+            request,
+            codec,
+            config,
+            admitted,
+            end_stream,
             NativeStreamWindows::default(),
         )
     }
@@ -627,34 +713,55 @@ where
         };
         admitted.check()?;
         let now = admitted.clock.as_ref().map(TimerDriverHandle::now);
-        let mut headers = request_headers(authority, path, request.metadata(), &config, admitted.at.zip(now))?;
+        let mut headers = request_headers(
+            authority,
+            path,
+            request.metadata(),
+            &config,
+            admitted.at.zip(now),
+        )?;
         let mut codec = FramedCodec::with_message_size_limits(
-            codec, config.max_send_message_size, config.max_recv_message_size,
-        ).with_frame_hooks(compressor, decompressor);
+            codec,
+            config.max_send_message_size,
+            config.max_recv_message_size,
+        )
+        .with_frame_hooks(compressor, decompressor);
         let mut request_body = BytesMut::new();
         if let Some(message) = request.into_inner() {
-            codec.encode_message(&message, &mut request_body)
+            codec
+                .encode_message(&message, &mut request_body)
                 .map_err(GrpcError::into_status)?;
         }
         check_cancellation(cx)?;
         // Both connection setup and synchronous codec work consume the same
         // absolute allowance. Refresh the wire TTL before any request I/O.
         admitted.check()?;
-        let CallDeadline { clock, at: deadline } = admitted;
+        let CallDeadline {
+            clock,
+            at: deadline,
+        } = admitted;
         if let Some((at, clock)) = deadline.zip(clock.as_ref()) {
-            let header = headers.iter_mut().find(|header| header.name == "grpc-timeout")
+            let header = headers
+                .iter_mut()
+                .find(|header| header.name == "grpc-timeout")
                 .expect("an admitted deadline always emits grpc-timeout");
-            header.value = format_grpc_timeout(Duration::from_nanos(at.duration_since(clock.now())));
+            header.value =
+                format_grpc_timeout(Duration::from_nanos(at.duration_since(clock.now())));
             let used = headers.iter().try_fold(0usize, |sum, header| {
-                sum.checked_add(header.name.len())?.checked_add(header.value.len())?.checked_add(32)
+                sum.checked_add(header.name.len())?
+                    .checked_add(header.value.len())?
+                    .checked_add(32)
             });
             if used.is_none_or(|used| used > config.max_metadata_bytes) {
-                return Err(Status::resource_exhausted("outbound gRPC metadata exceeds its byte limit"));
+                return Err(Status::resource_exhausted(
+                    "outbound gRPC metadata exceeds its byte limit",
+                ));
             }
         }
         let mut settings = Settings {
-            max_header_list_size: u32::try_from(config.max_metadata_bytes)
-                .map_err(|_| Status::invalid_argument("metadata limit exceeds H2 representation"))?,
+            max_header_list_size: u32::try_from(config.max_metadata_bytes).map_err(|_| {
+                Status::invalid_argument("metadata limit exceeds H2 representation")
+            })?,
             ..Settings::client()
         };
         if let Some(size) = windows.stream {
@@ -663,35 +770,54 @@ where
         let mut connection = Connection::client(settings);
         connection.queue_initial_settings();
         if let Some(size) = windows.connection {
-            connection.set_initial_connection_recv_window(size)
-                .map_err(|error| Status::invalid_argument(format!("invalid native gRPC connection window: {error}")))?;
+            connection
+                .set_initial_connection_recv_window(size)
+                .map_err(|error| {
+                    Status::invalid_argument(format!(
+                        "invalid native gRPC connection window: {error}"
+                    ))
+                })?;
         }
-        let stream_id = connection.open_stream(headers, false)
-            .map_err(|error| Status::invalid_argument(format!("open native gRPC request: {error}")))?;
+        let stream_id = connection.open_stream(headers, false).map_err(|error| {
+            Status::invalid_argument(format!("open native gRPC request: {error}"))
+        })?;
         if !request_body.is_empty() || end_stream {
-            connection.send_data(stream_id, request_body.freeze(), end_stream)
+            connection
+                .send_data(stream_id, request_body.freeze(), end_stream)
                 .map_err(|error| Status::internal(format!("queue native gRPC request: {error}")))?;
         }
-        let timer = deadline.zip(clock.as_ref()).map(|(at, clock)| {
-            Box::pin(Sleep::with_timer_driver(at, clock.clone()))
-        });
+        let timer = deadline
+            .zip(clock.as_ref())
+            .map(|(at, clock)| Box::pin(Sleep::with_timer_driver(at, clock.clone())));
         Ok(Self {
-            io: Some(io), connection: Some(connection), frames: FrameCodec::new(), codec,
-            cx: cx.clone(), cancel_waker: None, clock, deadline, timer,
-            inbound: BytesMut::new(), outbound: BytesMut::from(CLIENT_PREFACE),
-            outbound_flushed: false, write_failure: None,
-            body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
-            body_limit, stream_id, final_status: None, ready_messages: 0,
+            io: Some(io),
+            connection: Some(connection),
+            frames: FrameCodec::new(),
+            codec,
+            cx: cx.clone(),
+            cancel_waker: None,
+            clock,
+            deadline,
+            timer,
+            inbound: BytesMut::new(),
+            outbound: BytesMut::from(CLIENT_PREFACE),
+            outbound_flushed: false,
+            write_failure: None,
+            body: BytesMut::new(),
+            response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
+            body_limit,
+            stream_id,
+            final_status: None,
+            ready_messages: 0,
             terminal_reported: false,
             unflushed_read_frames: 0,
-            keepalive: None, keepalive_backoff: None, outbound_allows_probe: false,
+            keepalive: None,
+            keepalive_backoff: None,
+            outbound_allows_probe: false,
         })
     }
 
-    pub(crate) fn with_keepalive_backoff(
-        mut self,
-        backoff: Option<Arc<KeepaliveBackoff>>,
-    ) -> Self {
+    pub(crate) fn with_keepalive_backoff(mut self, backoff: Option<Arc<KeepaliveBackoff>>) -> Self {
         self.keepalive_backoff = backoff;
         self
     }
@@ -720,7 +846,9 @@ where
     /// Dropping this borrowing wait preserves all transport progress.
     pub async fn headers(&mut self) -> Result<&Metadata, Status> {
         poll_fn(|task| self.poll_headers(task)).await?;
-        self.response.initial.as_ref()
+        self.response
+            .initial
+            .as_ref()
             .ok_or_else(|| Status::internal("native gRPC response lacks initial metadata"))
     }
 
@@ -744,26 +872,36 @@ where
 
     /// Initial metadata once received; distinct from terminal trailers.
     #[must_use]
-    pub fn initial_metadata(&self) -> Option<&Metadata> { self.response.initial.as_ref() }
+    pub fn initial_metadata(&self) -> Option<&Metadata> {
+        self.response.initial.as_ref()
+    }
 
     /// Terminal trailer metadata once received, including for non-OK calls.
     #[must_use]
-    pub fn trailers(&self) -> Option<&Metadata> { self.response.trailers.as_ref() }
+    pub fn trailers(&self) -> Option<&Metadata> {
+        self.response.trailers.as_ref()
+    }
 
     /// Exact terminal result after the stream has finished or been cancelled.
     /// `Some(OK)` is only recorded after the required terminal status is read.
     #[must_use]
-    pub fn status(&self) -> Option<&Status> { self.final_status.as_ref() }
+    pub fn status(&self) -> Option<&Status> {
+        self.final_status.as_ref()
+    }
 
     /// Current retained application DATA bytes, not allocator capacity or HPACK.
     #[must_use]
-    pub fn buffered_data_bytes(&self) -> usize { self.body.len() }
+    pub fn buffered_data_bytes(&self) -> usize {
+        self.body.len()
+    }
 
     /// Close the dedicated transport immediately. No asynchronous write occurs.
     /// A final result already observed is preserved; otherwise records CANCELLED.
     pub fn cancel(&mut self) {
         if self.final_status.is_none() {
-            self.finish(Status::cancelled("native gRPC stream cancelled by its owner"));
+            self.finish(Status::cancelled(
+                "native gRPC stream cancelled by its owner",
+            ));
         }
         // The owner ended it: later waits end with Ok(None).
         self.terminal_reported = true;
@@ -796,21 +934,34 @@ where
 
     fn gate_deadline(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         check_cancellation(&self.cx)?;
-        self.cancel_waker = Some(self.cx.refresh_cancel_waker(self.cancel_waker, task.waker()));
+        self.cancel_waker = Some(
+            self.cx
+                .refresh_cancel_waker(self.cancel_waker, task.waker()),
+        );
         check_cancellation(&self.cx)?;
         // poll_deadline: a racing cancellation is not an elapsed deadline.
-        if self.deadline.zip(self.clock.as_ref())
+        if self
+            .deadline
+            .zip(self.clock.as_ref())
             .is_some_and(|(at, clock)| clock.now() >= at)
-            || self.timer.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready())
+            || self
+                .timer
+                .as_mut()
+                .is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready())
         {
-            return Err(Status::deadline_exceeded("native gRPC stream deadline exceeded"));
+            return Err(Status::deadline_exceeded(
+                "native gRPC stream deadline exceeded",
+            ));
         }
         Ok(())
     }
 
     fn gate(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
         self.gate_deadline(task)?;
-        let expired = self.keepalive.as_mut().and_then(|keepalive| keepalive.poll(task).err());
+        let expired = self
+            .keepalive
+            .as_mut()
+            .and_then(|keepalive| keepalive.poll(task).err());
         if let Some(error) = expired {
             // The peer may already have ended the response, its trailers unread
             // while the owner consumed buffered messages. A finished call needs
@@ -819,9 +970,10 @@ where
             // and only while the body can take another frame). Progress-aware
             // probes also admit a matching ACK within this one bounded pass;
             // unrelated frames cannot restart an expired probe's allowance.
-            let recover_ack = self.keepalive.as_ref()
-                .is_some_and(|keepalive| keepalive.config.progress_aware
-                    && matches!(keepalive.state, ProbeState::AwaitingAck(_)));
+            let recover_ack = self.keepalive.as_ref().is_some_and(|keepalive| {
+                keepalive.config.progress_aware
+                    && matches!(keepalive.state, ProbeState::AwaitingAck(_))
+            });
             if !recover_ack {
                 self.keepalive = None;
             }
@@ -844,7 +996,9 @@ where
                     }
                 }
             }
-            if !self.response.ended { return Err(error); }
+            if !self.response.ended {
+                return Err(error);
+            }
             self.keepalive = None;
         }
         Ok(())
@@ -853,11 +1007,19 @@ where
     fn poll_headers(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
         if let Some(status) = &self.final_status {
-            return Poll::Ready(if status.code() == Code::Ok { Ok(()) } else { Err(status.clone()) });
+            return Poll::Ready(if status.code() == Code::Ok {
+                Ok(())
+            } else {
+                Err(status.clone())
+            });
         }
         for _ in 0..POLL_STEPS {
-            if let Err(error) = self.gate(task) { return Poll::Ready(Err(self.finish(error))); }
-            if self.response.initial.is_some() { return Poll::Ready(Ok(())); }
+            if let Err(error) = self.gate(task) {
+                return Poll::Ready(Err(self.finish(error)));
+            }
+            if self.response.initial.is_some() {
+                return Poll::Ready(Ok(()));
+            }
             match self.poll_received(task) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(self.finish(error))),
@@ -871,10 +1033,16 @@ where
     fn poll_established(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
         if let Some(status) = &self.final_status {
-            return Poll::Ready(if status.code() == Code::Ok { Ok(()) } else { Err(status.clone()) });
+            return Poll::Ready(if status.code() == Code::Ok {
+                Ok(())
+            } else {
+                Err(status.clone())
+            });
         }
         for _ in 0..POLL_STEPS {
-            if let Err(error) = self.gate(task) { return Poll::Ready(Err(self.finish(error))); }
+            if let Err(error) = self.gate(task) {
+                return Poll::Ready(Err(self.finish(error)));
+            }
             // The server has answered, so it received the request headers.
             // Setup is over: message() decodes the response, which bounds its
             // retention, and keeps flushing the rest of the request. Reading
@@ -882,7 +1050,9 @@ where
             if self.response.initial.is_some() || self.response.ended {
                 return Poll::Ready(Ok(()));
             }
-            if self.connection.as_ref()
+            if self
+                .connection
+                .as_ref()
                 .is_some_and(|connection| connection.state() != ConnectionState::Handshaking)
             {
                 // The peer's SETTINGS are in. Flow-blocked request DATA does
@@ -923,7 +1093,9 @@ where
         task: &mut Context<'_>,
     ) -> Poll<Option<Result<C::Decode, Status>>> {
         let _ambient = Cx::set_current(Some(self.cx.clone()));
-        if self.final_status.is_some() { return Poll::Ready(None); }
+        if self.final_status.is_some() {
+            return Poll::Ready(None);
+        }
         if self.ready_messages == POLL_STEPS {
             self.ready_messages = 0;
             task.waker().wake_by_ref();
@@ -934,7 +1106,10 @@ where
                 return Poll::Ready(Some(Err(self.finish(error))));
             }
             if self.response.initial.is_some() {
-                match self.codec.decode_message_with_negotiated_encoding(&mut self.body, self.response.encoding.as_deref()) {
+                match self.codec.decode_message_with_negotiated_encoding(
+                    &mut self.body,
+                    self.response.encoding.as_deref(),
+                ) {
                     Ok(Some(value)) => {
                         // User codecs can do synchronous work. Do not publish
                         // a late value after that work exhausts the deadline.
@@ -950,7 +1125,10 @@ where
             }
             if self.response.ended {
                 let status = if self.body.is_empty() {
-                    self.response.terminal.take().unwrap_or_else(|| Status::internal("missing gRPC terminal status"))
+                    self.response
+                        .terminal
+                        .take()
+                        .unwrap_or_else(|| Status::internal("missing gRPC terminal status"))
                 } else {
                     Status::internal("truncated gRPC message before stream termination")
                 };
@@ -996,13 +1174,22 @@ where
                             return Poll::Ready(Err(error));
                         }
                     }
-                    let received = self.connection.as_mut().expect("live connection")
+                    let received = self
+                        .connection
+                        .as_mut()
+                        .expect("live connection")
                         .process_frame(frame)
-                        .map_err(|error| Status::internal(format!("invalid HTTP/2 response: {error}")));
+                        .map_err(|error| {
+                            Status::internal(format!("invalid HTTP/2 response: {error}"))
+                        });
                     return Poll::Ready(received.and_then(|frame| self.observe(frame)));
                 }
                 Ok(None) => {}
-                Err(error) => return Poll::Ready(Err(Status::internal(format!("decode HTTP/2 response: {error}")))),
+                Err(error) => {
+                    return Poll::Ready(Err(Status::internal(format!(
+                        "decode HTTP/2 response: {error}"
+                    ))));
+                }
             }
             let mut bytes = [0_u8; FRAME_BYTES];
             let mut read = ReadBuf::new(&mut bytes);
@@ -1014,7 +1201,9 @@ where
                         })));
                     }
                     if self.inbound.len().saturating_add(read.filled().len()) > 2 * FRAME_BYTES {
-                        return Poll::Ready(Err(Status::resource_exhausted("native HTTP/2 input buffer bound exceeded")));
+                        return Poll::Ready(Err(Status::resource_exhausted(
+                            "native HTTP/2 input buffer bound exceeded",
+                        )));
                     }
                     self.inbound.extend_from_slice(read.filled());
                 }
@@ -1040,24 +1229,41 @@ where
                 // not split a HEADERS/CONTINUATION block. The previous encoded
                 // frame has completely left our byte cursor before this point.
                 let probe = if self.outbound_allows_probe {
-                    self.keepalive.as_mut().and_then(|keepalive| keepalive.take_probe(task))
+                    self.keepalive
+                        .as_mut()
+                        .and_then(|keepalive| keepalive.take_probe(task))
                 } else {
                     None
                 };
-                match probe.or_else(|| self.connection.as_mut().expect("live connection").next_frame()) {
+                match probe.or_else(|| {
+                    self.connection
+                        .as_mut()
+                        .expect("live connection")
+                        .next_frame()
+                }) {
                     Some(frame) => {
                         match &frame {
-                            Frame::Settings(settings) if !settings.ack => self.outbound_allows_probe = true,
-                            Frame::Headers(headers) => self.outbound_allows_probe = headers.end_headers,
-                            Frame::Continuation(continuation) => self.outbound_allows_probe = continuation.end_headers,
+                            Frame::Settings(settings) if !settings.ack => {
+                                self.outbound_allows_probe = true
+                            }
+                            Frame::Headers(headers) => {
+                                self.outbound_allows_probe = headers.end_headers
+                            }
+                            Frame::Continuation(continuation) => {
+                                self.outbound_allows_probe = continuation.end_headers
+                            }
                             _ => {}
                         }
                         if let Err(error) = frame.encode(&mut self.outbound) {
-                            return Poll::Ready(Err(Status::internal(format!("encode HTTP/2 request: {error}"))));
+                            return Poll::Ready(Err(Status::internal(format!(
+                                "encode HTTP/2 request: {error}"
+                            ))));
                         }
                     }
                     None => {
-                        return match Pin::new(self.io.as_mut().expect("live transport")).poll_flush(task) {
+                        return match Pin::new(self.io.as_mut().expect("live transport"))
+                            .poll_flush(task)
+                        {
                             Poll::Ready(Ok(())) => {
                                 self.outbound_flushed = true;
                                 Poll::Ready(Ok(()))
@@ -1068,10 +1274,18 @@ where
                     }
                 }
             }
-            match Pin::new(self.io.as_mut().expect("live transport")).poll_write(task, &self.outbound) {
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(Status::unavailable("zero progress writing HTTP/2 request"))),
+            match Pin::new(self.io.as_mut().expect("live transport"))
+                .poll_write(task, &self.outbound)
+            {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(Status::unavailable(
+                        "zero progress writing HTTP/2 request",
+                    )));
+                }
                 Poll::Ready(Ok(written)) if written > self.outbound.len() => {
-                    return Poll::Ready(Err(Status::internal("transport overreported HTTP/2 write progress")));
+                    return Poll::Ready(Err(Status::internal(
+                        "transport overreported HTTP/2 write progress",
+                    )));
                 }
                 Poll::Ready(Ok(written)) => self.outbound.advance(written),
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(self.write_failed(error))),
@@ -1084,21 +1298,34 @@ where
 
     fn observe(&mut self, frame: Option<ReceivedFrame>) -> Result<(), Status> {
         match frame {
-            Some(ReceivedFrame::Headers { stream_id, headers, end_stream }) if stream_id == self.stream_id => {
-                self.response.headers(headers, end_stream)
-            }
-            Some(ReceivedFrame::Data { stream_id, data, end_stream }) if stream_id == self.stream_id => {
+            Some(ReceivedFrame::Headers {
+                stream_id,
+                headers,
+                end_stream,
+            }) if stream_id == self.stream_id => self.response.headers(headers, end_stream),
+            Some(ReceivedFrame::Data {
+                stream_id,
+                data,
+                end_stream,
+            }) if stream_id == self.stream_id => {
                 self.response.data(end_stream)?;
                 if self.body.len().saturating_add(data.len()) > self.body_limit {
-                    return Err(Status::resource_exhausted("gRPC DATA retention bound exceeded"));
+                    return Err(Status::resource_exhausted(
+                        "gRPC DATA retention bound exceeded",
+                    ));
                 }
                 self.body.extend_from_slice(&data);
                 Ok(())
             }
-            Some(ReceivedFrame::Reset { stream_id, error_code }) if stream_id == self.stream_id => {
-                Err(Status::from_h2_rst_stream_code(error_code))
-            }
-            Some(ReceivedFrame::GoAway { last_stream_id, error_code, debug_data }) => {
+            Some(ReceivedFrame::Reset {
+                stream_id,
+                error_code,
+            }) if stream_id == self.stream_id => Err(Status::from_h2_rst_stream_code(error_code)),
+            Some(ReceivedFrame::GoAway {
+                last_stream_id,
+                error_code,
+                debug_data,
+            }) => {
                 if error_code == crate::http::h2::ErrorCode::EnhanceYourCalm
                     && debug_data.as_ref() == b"too_many_pings"
                 {
@@ -1109,10 +1336,13 @@ where
                         let (previous, next) = backoff.back_off();
                         let previous_interval_ns = previous.as_nanos().to_string();
                         let next_interval_ns = next.as_nanos().to_string();
-                        self.cx.trace_with_fields("grpc.keepalive_backoff", &[
-                            ("previous_interval_ns", &previous_interval_ns),
-                            ("next_interval_ns", &next_interval_ns),
-                        ]);
+                        self.cx.trace_with_fields(
+                            "grpc.keepalive_backoff",
+                            &[
+                                ("previous_interval_ns", &previous_interval_ns),
+                                ("next_interval_ns", &next_interval_ns),
+                            ],
+                        );
                         crate::tracing_compat::warn!(
                             previous_interval_ns = %previous_interval_ns,
                             next_interval_ns = %next_interval_ns,
@@ -1120,8 +1350,12 @@ where
                         );
                     }
                 }
-                if last_stream_id < self.stream_id || error_code != crate::http::h2::ErrorCode::NoError {
-                    Err(Status::unavailable("HTTP/2 GOAWAY refused the active gRPC stream"))
+                if last_stream_id < self.stream_id
+                    || error_code != crate::http::h2::ErrorCode::NoError
+                {
+                    Err(Status::unavailable(
+                        "HTTP/2 GOAWAY refused the active gRPC stream",
+                    ))
                 } else {
                     Ok(())
                 }
@@ -1131,7 +1365,9 @@ where
     }
 
     fn transport_status(&self, error: std::io::Error) -> Status {
-        check_cancellation(&self.cx).err().unwrap_or_else(|| io_status(error))
+        check_cancellation(&self.cx)
+            .err()
+            .unwrap_or_else(|| io_status(error))
     }
 
     // A server that ended the call and closed the connection (a draining
@@ -1158,7 +1394,9 @@ where
 
     fn finish(&mut self, status: Status) -> Status {
         self.final_status = Some(status.clone());
-        if let Some(token) = self.cancel_waker.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
         self.timer = None;
         self.keepalive = None;
         self.keepalive_backoff = None;
@@ -1174,7 +1412,9 @@ where
 
 impl<IO, C> Drop for NativeServerStream<IO, C> {
     fn drop(&mut self) {
-        if let Some(token) = self.cancel_waker.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.cancel_waker.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
@@ -1185,7 +1425,10 @@ where
 {
     type Message = C::Decode;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<C::Decode, Status>>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<C::Decode, Status>>> {
         self.get_mut().poll_message(cx)
     }
 }
@@ -1199,24 +1442,42 @@ fn earlier(first: Option<Time>, second: Option<Time>) -> Option<Time> {
 }
 
 pub(crate) fn check_cancellation(cx: &Cx) -> Result<(), Status> {
-    cx.checkpoint().map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
-        Some(CancelKind::Deadline | CancelKind::Timeout) => Status::deadline_exceeded("native gRPC caller deadline elapsed"),
-        Some(CancelKind::PollQuota | CancelKind::CostBudget) => Status::resource_exhausted("native gRPC caller budget exhausted"),
-        _ => Status::cancelled("native gRPC caller cancelled"),
-    })
+    cx.checkpoint()
+        .map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
+            Some(CancelKind::Deadline | CancelKind::Timeout) => {
+                Status::deadline_exceeded("native gRPC caller deadline elapsed")
+            }
+            Some(CancelKind::PollQuota | CancelKind::CostBudget) => {
+                Status::resource_exhausted("native gRPC caller budget exhausted")
+            }
+            _ => Status::cancelled("native gRPC caller cancelled"),
+        })
 }
 
 fn io_status(error: std::io::Error) -> Status {
-    GrpcError::transport_kind(TransportErrorKind::from_io_error_kind(error.kind()),
-        format!("native gRPC transport: {error}")).into_status()
+    GrpcError::transport_kind(
+        TransportErrorKind::from_io_error_kind(error.kind()),
+        format!("native gRPC transport: {error}"),
+    )
+    .into_status()
 }
 
-fn request_timeout(metadata: &Metadata, configured: Option<Duration>) -> Result<Option<Duration>, Status> {
+fn request_timeout(
+    metadata: &Metadata,
+    configured: Option<Duration>,
+) -> Result<Option<Duration>, Status> {
     let mut peer = None;
     for (_, value) in metadata.iter().filter(|(key, _)| *key == "grpc-timeout") {
-        if peer.is_some() { return Err(Status::invalid_argument("duplicate grpc-timeout")); }
-        let MetadataValue::Ascii(value) = value else { return Err(Status::invalid_argument("binary grpc-timeout")); };
-        peer = Some(parse_grpc_timeout(value).ok_or_else(|| Status::invalid_argument("malformed grpc-timeout"))?);
+        if peer.is_some() {
+            return Err(Status::invalid_argument("duplicate grpc-timeout"));
+        }
+        let MetadataValue::Ascii(value) = value else {
+            return Err(Status::invalid_argument("binary grpc-timeout"));
+        };
+        peer = Some(
+            parse_grpc_timeout(value)
+                .ok_or_else(|| Status::invalid_argument("malformed grpc-timeout"))?,
+        );
     }
     Ok(match (configured, peer) {
         (Some(a), Some(b)) => Some(a.min(b)),
@@ -1226,60 +1487,127 @@ fn request_timeout(metadata: &Metadata, configured: Option<Duration>) -> Result<
 }
 
 fn request_headers(
-    authority: &str, path: &str, metadata: &Metadata, config: &NativeStreamConfig,
+    authority: &str,
+    path: &str,
+    metadata: &Metadata,
+    config: &NativeStreamConfig,
     deadline: Option<(Time, Time)>,
 ) -> Result<Vec<Header>, Status> {
-    let valid_path = path.strip_prefix('/').and_then(|path| path.split_once('/'))
-        .is_some_and(|(service, method)| !service.is_empty() && !method.is_empty() && !method.contains('/'));
+    let valid_path = path
+        .strip_prefix('/')
+        .and_then(|path| path.split_once('/'))
+        .is_some_and(|(service, method)| {
+            !service.is_empty() && !method.is_empty() && !method.contains('/')
+        });
     if authority.len() > config.max_metadata_bytes || path.len() > config.max_metadata_bytes {
-        return Err(Status::resource_exhausted("outbound gRPC route exceeds metadata bound"));
+        return Err(Status::resource_exhausted(
+            "outbound gRPC route exceeds metadata bound",
+        ));
     }
-    if !valid_path || path.bytes().any(|byte| !byte.is_ascii_graphic() || matches!(byte, b'?' | b'#' | b'\\'))
-        || authority.is_empty() || authority.bytes().any(|byte| !byte.is_ascii_graphic() || matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'@'))
+    if !valid_path
+        || path
+            .bytes()
+            .any(|byte| !byte.is_ascii_graphic() || matches!(byte, b'?' | b'#' | b'\\'))
+        || authority.is_empty()
+        || authority.bytes().any(|byte| {
+            !byte.is_ascii_graphic() || matches!(byte, b'/' | b'\\' | b'?' | b'#' | b'@')
+        })
     {
-        return Err(Status::invalid_argument("invalid native gRPC authority or method path"));
+        return Err(Status::invalid_argument(
+            "invalid native gRPC authority or method path",
+        ));
     }
     let mut headers = vec![
-        Header::new(":method", "POST"), Header::new(":scheme", config.scheme),
-        Header::new(":authority", authority), Header::new(":path", path),
-        Header::new("content-type", "application/grpc"), Header::new("te", "trailers"),
+        Header::new(":method", "POST"),
+        Header::new(":scheme", config.scheme),
+        Header::new(":authority", authority),
+        Header::new(":path", path),
+        Header::new("content-type", "application/grpc"),
+        Header::new("te", "trailers"),
     ];
-    if config.send_compression == CompressionEncoding::Gzip { headers.push(Header::new("grpc-encoding", "gzip")); }
-    headers.push(Header::new("grpc-accept-encoding", if config.accept_gzip { "identity,gzip" } else { "identity" }));
-    if let Some((at, now)) = deadline {
-        headers.push(Header::new("grpc-timeout", format_grpc_timeout(Duration::from_nanos(at.duration_since(now)))));
+    if config.send_compression == CompressionEncoding::Gzip {
+        headers.push(Header::new("grpc-encoding", "gzip"));
     }
-    let mut used = headers.iter().try_fold(0usize, |sum, header| {
-        sum.checked_add(header.name.len())?.checked_add(header.value.len())?.checked_add(32)
-    }).ok_or_else(|| Status::resource_exhausted("outbound metadata size overflow"))?;
+    headers.push(Header::new(
+        "grpc-accept-encoding",
+        if config.accept_gzip {
+            "identity,gzip"
+        } else {
+            "identity"
+        },
+    ));
+    if let Some((at, now)) = deadline {
+        headers.push(Header::new(
+            "grpc-timeout",
+            format_grpc_timeout(Duration::from_nanos(at.duration_since(now))),
+        ));
+    }
+    let mut used = headers
+        .iter()
+        .try_fold(0usize, |sum, header| {
+            sum.checked_add(header.name.len())?
+                .checked_add(header.value.len())?
+                .checked_add(32)
+        })
+        .ok_or_else(|| Status::resource_exhausted("outbound metadata size overflow"))?;
     if used > config.max_metadata_bytes {
-        return Err(Status::resource_exhausted("outbound gRPC metadata exceeds its byte limit"));
+        return Err(Status::resource_exhausted(
+            "outbound gRPC metadata exceeds its byte limit",
+        ));
     }
     for (key, value) in metadata.iter() {
-        if key == "grpc-timeout" { continue; }
-        if key.starts_with(':') || matches!(key,
-            "content-type" | "content-length" | "te" | "host" | "connection" | "keep-alive"
-            | "proxy-connection" | "transfer-encoding" | "upgrade" | "grpc-status" | "grpc-message"
-            | "grpc-status-details-bin" | "grpc-encoding" | "grpc-accept-encoding")
+        if key == "grpc-timeout" {
+            continue;
+        }
+        if key.starts_with(':')
+            || matches!(
+                key,
+                "content-type"
+                    | "content-length"
+                    | "te"
+                    | "host"
+                    | "connection"
+                    | "keep-alive"
+                    | "proxy-connection"
+                    | "transfer-encoding"
+                    | "upgrade"
+                    | "grpc-status"
+                    | "grpc-message"
+                    | "grpc-status-details-bin"
+                    | "grpc-encoding"
+                    | "grpc-accept-encoding"
+            )
         {
-            return Err(Status::invalid_argument("outbound metadata overrides a transport field"));
+            return Err(Status::invalid_argument(
+                "outbound metadata overrides a transport field",
+            ));
         }
         // Account for expansion before cloning/encoding user metadata.
         let value_len = match value {
             MetadataValue::Ascii(value) => Some(value.len()),
-            MetadataValue::Binary(value) => (value.len() / 3).checked_mul(4)
-                .and_then(|len| len.checked_add(match value.len() % 3 { 0 => 0, 1 => 2, _ => 3 })),
+            MetadataValue::Binary(value) => (value.len() / 3).checked_mul(4).and_then(|len| {
+                len.checked_add(match value.len() % 3 {
+                    0 => 0,
+                    1 => 2,
+                    _ => 3,
+                })
+            }),
         };
-        used = value_len.and_then(|len| used.checked_add(len))
+        used = value_len
+            .and_then(|len| used.checked_add(len))
             .and_then(|len| len.checked_add(key.len()))
             .and_then(|len| len.checked_add(32))
             .ok_or_else(|| Status::resource_exhausted("outbound metadata size overflow"))?;
         if used > config.max_metadata_bytes {
-            return Err(Status::resource_exhausted("outbound gRPC metadata exceeds its byte limit"));
+            return Err(Status::resource_exhausted(
+                "outbound gRPC metadata exceeds its byte limit",
+            ));
         }
         let value = match value {
             MetadataValue::Ascii(value) => value.clone(),
-            MetadataValue::Binary(value) => base64::engine::general_purpose::STANDARD_NO_PAD.encode(value),
+            MetadataValue::Binary(value) => {
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(value)
+            }
         };
         headers.push(Header::new(key, value));
     }

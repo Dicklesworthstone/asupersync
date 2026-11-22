@@ -246,15 +246,17 @@ impl RequestBodyPolicy {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use compress::{StreamingCompression, StreamingCompressionConfig};
 pub use extract::{
     Accept, Authorization, ContentType, Cookie, CookieJar, Extension, Form, FromHeaderValue,
     FromRequest, FromRequestParts, Header, HeaderParseError, Json as JsonExtract, Path, Query,
     State, TypedHeader, UserAgent,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use compress::{StreamingCompression, StreamingCompressionConfig};
-#[cfg(not(target_arch = "wasm32"))]
-pub use extract::{CollectedStreamingRawBody, DecodedStreamingBody, StreamingRawBody, StreamingRawBodyCollectError};
+pub use extract::{
+    CollectedStreamingRawBody, DecodedStreamingBody, StreamingRawBody, StreamingRawBodyCollectError,
+};
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,
     AsyncCxFnHandler5, AsyncCxFnHandler6, AsyncCxFnHandler7, AsyncCxFnHandler8, FnHandler,

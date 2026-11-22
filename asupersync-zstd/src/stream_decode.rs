@@ -266,7 +266,9 @@ impl StreamDecoder {
             return Err(error);
         }
         if self.finishing {
-            return Err(DecodeError::Malformed("stream decoder is finishing or finished"));
+            return Err(DecodeError::Malformed(
+                "stream decoder is finishing or finished",
+            ));
         }
         let result = self.decode_inner(input, output);
         if let Err(error) = result {
@@ -364,9 +366,8 @@ impl StreamDecoder {
                         _ => 8,
                     };
                     let dictionary_width = [0, 1, 2, 4][usize::from(descriptor & 3)];
-                    self.stage = Stage::Header(
-                        1 + usize::from(!single) + dictionary_width + content_width,
-                    );
+                    self.stage =
+                        Stage::Header(1 + usize::from(!single) + dictionary_width + content_width);
                 }
                 Stage::Header(_) => {
                     self.frame = Some(FrameState::parse(&self.input, self.limits, self.total)?);
@@ -385,7 +386,9 @@ impl StreamDecoder {
                     let size = usize::try_from(header >> 3).map_err(|_| DecodeError::Truncated)?;
                     let frame = self.frame.as_ref().ok_or(DecodeError::BadMagic)?;
                     if size > frame.window.min(MAX_BLOCK_OUTPUT) {
-                        return Err(DecodeError::Malformed("block larger than Block_Maximum_Size"));
+                        return Err(DecodeError::Malformed(
+                            "block larger than Block_Maximum_Size",
+                        ));
                     }
                     if kind == 3 {
                         return Err(DecodeError::Malformed("reserved block type"));
@@ -406,7 +409,11 @@ impl StreamDecoder {
                         self.limits.max_output - self.total,
                     )?;
                     self.total += produced;
-                    if last && frame.content_size.is_some_and(|size| size != frame.produced) {
+                    if last
+                        && frame
+                            .content_size
+                            .is_some_and(|size| size != frame.produced)
+                    {
                         return Err(DecodeError::ContentSizeMismatch);
                     }
                     self.stage = if !last {
@@ -516,7 +523,10 @@ mod tests {
             assert_eq!(step.status, StreamStatus::NeedOutput);
             assert!(step.output_written > 0);
         }
-        assert_eq!(decoder.finish(&mut []).unwrap().status, StreamStatus::Finished);
+        assert_eq!(
+            decoder.finish(&mut []).unwrap().status,
+            StreamStatus::Finished
+        );
         Ok(plain)
     }
 
@@ -568,7 +578,10 @@ mod tests {
             assert_eq!(xxh64(&decoded, 0), digest, "{}", fields[0]);
             count += 1;
         }
-        assert_eq!(count, 264, "exercise the complete existing independent corpus");
+        assert_eq!(
+            count, 264,
+            "exercise the complete existing independent corpus"
+        );
     }
 
     #[test]
@@ -596,7 +609,10 @@ mod tests {
         }
         let expected = seed.repeat(21);
         wire.extend_from_slice(&xxh64(&expected, 0).to_le_bytes()[..4]);
-        assert_eq!(decode_all(&wire, &DecodeLimits::new(expected.len())).unwrap(), expected);
+        assert_eq!(
+            decode_all(&wire, &DecodeLimits::new(expected.len())).unwrap(),
+            expected
+        );
         for output in [1, 13, 2048] {
             assert_eq!(
                 decode_chunks(&wire, DecodeLimits::new(expected.len()), 7, output).unwrap(),
@@ -611,12 +627,21 @@ mod tests {
         let step = decoder.decode(HI, &mut []).unwrap();
         assert_eq!(step.input_read, HI.len());
         assert_eq!(step.status, StreamStatus::NeedOutput);
-        assert_eq!(decoder.decode(b"not accepted", &mut []).unwrap().input_read, 0);
+        assert_eq!(
+            decoder.decode(b"not accepted", &mut []).unwrap().input_read,
+            0
+        );
         let mut byte = [0_u8; 1];
-        assert_eq!(decoder.finish(&mut byte).unwrap().status, StreamStatus::NeedOutput);
+        assert_eq!(
+            decoder.finish(&mut byte).unwrap().status,
+            StreamStatus::NeedOutput
+        );
         assert_eq!(byte, [b'h']);
         assert!(decoder.decode(&[], &mut byte).is_err());
-        assert_eq!(decoder.finish(&mut byte).unwrap().status, StreamStatus::Finished);
+        assert_eq!(
+            decoder.finish(&mut byte).unwrap().status,
+            StreamStatus::Finished
+        );
         assert_eq!(byte, [b'i']);
         assert_eq!(decoder.finish(&mut byte).unwrap().output_written, 0);
     }
@@ -633,11 +658,16 @@ mod tests {
         assert_eq!(first.input_read, HI.len());
         assert_eq!(first.output_written, 2);
         assert_eq!(first.status, StreamStatus::FrameFinished);
-        let skipped = decoder.decode(&wire[first.input_read..], &mut output).unwrap();
+        let skipped = decoder
+            .decode(&wire[first.input_read..], &mut output)
+            .unwrap();
         assert_eq!(skipped.input_read, skip.len());
         assert_eq!(skipped.output_written, 0);
         assert_eq!(skipped.status, StreamStatus::FrameFinished);
-        assert_eq!(decode_chunks(&wire, DecodeLimits::new(4), 1, 1).unwrap(), b"hihi");
+        assert_eq!(
+            decode_chunks(&wire, DecodeLimits::new(4), 1, 1).unwrap(),
+            b"hihi"
+        );
         assert_eq!(
             decode_chunks(&wire, DecodeLimits::new(3), 1, 1),
             Err(DecodeError::OutputTooLarge)
@@ -646,7 +676,10 @@ mod tests {
             allow_skippable_frames: false,
             ..DecodeLimits::new(4)
         };
-        assert_eq!(decode_chunks(&skip, strict, 1, 1), Err(DecodeError::BadMagic));
+        assert_eq!(
+            decode_chunks(&skip, strict, 1, 1),
+            Err(DecodeError::BadMagic)
+        );
         assert_eq!(
             decode_chunks(&skip, DecodeLimits::new(0), 1, 1),
             Ok(Vec::new())
@@ -704,7 +737,9 @@ mod tests {
         assert_eq!(&output[..first.output_written], b"hi");
         assert_eq!(first.status, StreamStatus::NeedInput);
         output.fill(0xab);
-        let error = decoder.decode(&frame[first.input_read..], &mut output).unwrap_err();
+        let error = decoder
+            .decode(&frame[first.input_read..], &mut output)
+            .unwrap_err();
         assert_eq!(error, DecodeError::ChecksumMismatch);
         assert_eq!(output, [0xab; 16]);
         assert_eq!(decoder.decode(HI, &mut output).unwrap_err(), error);
@@ -717,10 +752,16 @@ mod tests {
         let limits = DecodeLimits::new(1024);
         let mut too_large = limits;
         too_large.max_window = 1;
-        assert_eq!(decode_chunks(HI, too_large, 1, 1), Err(DecodeError::WindowTooLarge));
+        assert_eq!(
+            decode_chunks(HI, too_large, 1, 1),
+            Err(DecodeError::WindowTooLarge)
+        );
         let mut mismatch = HI.to_vec();
         mismatch[5] = 3;
-        assert_eq!(decode_chunks(&mismatch, limits, 1, 1), Err(DecodeError::ContentSizeMismatch));
+        assert_eq!(
+            decode_chunks(&mismatch, limits, 1, 1),
+            Err(DecodeError::ContentSizeMismatch)
+        );
         let dictionary = [0x28, 0xb5, 0x2f, 0xfd, 0x21, 1, 2];
         assert_eq!(
             decode_chunks(&dictionary, limits, 1, 1),
@@ -752,7 +793,10 @@ mod tests {
             decode_chunks(&wire, DecodeLimits::new(1023), 1, 1),
             Err(DecodeError::OutputTooLarge)
         );
-        assert_eq!(decode_chunks(&wire, DecodeLimits::new(1024), 1, 7).unwrap(), vec![b'x'; 1024]);
+        assert_eq!(
+            decode_chunks(&wire, DecodeLimits::new(1024), 1, 7).unwrap(),
+            vec![b'x'; 1024]
+        );
         for level in [Level::Store, Level::Fast] {
             let empty = encode_all(&[], &EncodeParams::new(level));
             assert_eq!(
@@ -785,7 +829,9 @@ mod tests {
         wire.extend_from_slice(&body);
         assert_eq!(
             decode_chunks(&wire, DecodeLimits::new(2048), 7, 19),
-            Err(DecodeError::Malformed("offset beyond the available history"))
+            Err(DecodeError::Malformed(
+                "offset beyond the available history"
+            ))
         );
     }
 

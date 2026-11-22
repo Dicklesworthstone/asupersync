@@ -1,8 +1,8 @@
 //! Existing symbol-service wire, with commit-before-receipt disk ownership.
 
 use super::{
-    Admission, ServiceRequest, ServiceResponse, SYMBOL_SERVICE_COMPUTATION,
-    read_key, receipt, register_handler, split_request,
+    Admission, SYMBOL_SERVICE_COMPUTATION, ServiceRequest, ServiceResponse, read_key, receipt,
+    register_handler, split_request,
 };
 use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::ComputationSchemaRegistryError;
@@ -26,18 +26,23 @@ pub struct DurableSymbolServiceHandle(Arc<AtomicBool>);
 impl DurableSymbolServiceHandle {
     /// Whether a queued/running durable job still owns its request and store credit.
     #[must_use]
-    pub fn in_flight(&self) -> bool { self.0.load(Ordering::Acquire) }
+    pub fn in_flight(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 struct Credit(Arc<AtomicBool>);
 impl Credit {
     fn acquire(gate: &Arc<AtomicBool>) -> Option<Self> {
-        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
+        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
         Some(Self(Arc::clone(gate)))
     }
 }
 impl Drop for Credit {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 enum Request {
@@ -62,11 +67,15 @@ impl Job {
                 Request::Get(key) => self.store.get(&self.peer, *key).and_then(|batch| {
                     let source = batch.as_ref().as_ref();
                     let mut bytes = Vec::new();
-                    bytes.try_reserve_exact(source.len()).map_err(|_| SymbolStoreError::Allocation)?;
+                    bytes
+                        .try_reserve_exact(source.len())
+                        .map_err(|_| SymbolStoreError::Allocation)?;
                     bytes.extend_from_slice(source);
                     Ok(bytes)
                 }),
-                Request::Put(bytes) => self.store.put(&self.peer, bytes)
+                Request::Put(bytes) => self
+                    .store
+                    .put(&self.peer, bytes)
                     .map(|batch| receipt(self.store.replica_id(), &batch, cx.now())),
             };
             match result {
@@ -87,22 +96,33 @@ fn cancelled(cx: &Cx) -> RemoteOutcome {
 }
 
 async fn dispatch(
-    cx: &Cx, store: Arc<DurableSymbolReplicaStore>, gate: Arc<AtomicBool>,
-    peer: &NodeId, input: &[u8],
+    cx: &Cx,
+    store: Arc<DurableSymbolReplicaStore>,
+    gate: Arc<AtomicBool>,
+    peer: &NodeId,
+    input: &[u8],
 ) -> RemoteOutcome {
-    if cx.checkpoint().is_err() { return cancelled(cx); }
+    if cx.checkpoint().is_err() {
+        return cancelled(cx);
+    }
     if cx.blocking_pool_handle().is_none() {
-        return RemoteOutcome::Failed("durable symbol service requires a context blocking pool".to_owned());
+        return RemoteOutcome::Failed(
+            "durable symbol service requires a context blocking pool".to_owned(),
+        );
     }
     let Some(credit) = Credit::acquire(&gate) else {
         return RemoteOutcome::Failed("durable symbol service is busy".to_owned());
     };
     let parsed = split_request(input, store.replica_id()).and_then(|(get, body)| {
-        if get { return read_key(body).map(Request::Get); }
+        if get {
+            return read_key(body).map(Request::Get);
+        }
         // The enclosing authenticated service frame already bounds input;
         // the journal enforces its independent batch limits.
         let mut bytes = Zeroizing::new(Vec::new());
-        bytes.try_reserve_exact(body.len()).map_err(|_| SymbolStoreError::Allocation)?;
+        bytes
+            .try_reserve_exact(body.len())
+            .map_err(|_| SymbolStoreError::Allocation)?;
         bytes.extend_from_slice(body);
         Ok(Request::Put(bytes))
     });
@@ -110,10 +130,17 @@ async fn dispatch(
         Ok(request) => request,
         Err(error) => return RemoteOutcome::Failed(error.to_string()),
     };
-    let job = Job { store, peer: peer.clone(), request, _credit: credit };
+    let job = Job {
+        store,
+        peer: peer.clone(),
+        request,
+        _credit: credit,
+    };
     let mut task = match cx.spawn_blocking_drained(move |worker| job.execute(&worker)) {
         Ok(task) => task,
-        Err(_) => return RemoteOutcome::Failed("durable symbol worker admission refused".to_owned()),
+        Err(_) => {
+            return RemoteOutcome::Failed("durable symbol worker admission refused".to_owned());
+        }
     };
     // The runtime owner survives handler cancellation until the pool retires
     // its captures. A late invocation cancellation cannot discard an already
@@ -123,7 +150,9 @@ async fn dispatch(
             // An enclosing ordinary task must acknowledge a late cancellation
             // before publishing this completed worker's typed result. The
             // observation cannot replace a transaction that already finished.
-            if cx.is_cancel_requested() { let _ = cx.checkpoint(); }
+            if cx.is_cancel_requested() {
+                let _ = cx.checkpoint();
+            }
             outcome
         }
         Err(_) => cancelled(cx),
@@ -176,15 +205,26 @@ pub fn register_durable_symbol_service(
 /// Cancellation cannot undo a synchronous journal commit that already started;
 /// a cancelled or lost response is not evidence of rollback.
 pub fn register_durable_symbol_service_with_admission(
-    registry: &mut RemoteComputationRegistry, store: Arc<DurableSymbolReplicaStore>,
-    admission: &RemoteServiceAdmission, child: ChildRegionSpec, wait_timeout: Option<Duration>,
+    registry: &mut RemoteComputationRegistry,
+    store: Arc<DurableSymbolReplicaStore>,
+    admission: &RemoteServiceAdmission,
+    child: ChildRegionSpec,
+    wait_timeout: Option<Duration>,
 ) -> Result<DurableSymbolServiceHandle, ComputationSchemaRegistryError> {
-    register_durable_symbol_service_inner(registry, store,
-        Some(Admission { limiter: admission, child, wait_timeout }))
+    register_durable_symbol_service_inner(
+        registry,
+        store,
+        Some(Admission {
+            limiter: admission,
+            child,
+            wait_timeout,
+        }),
+    )
 }
 
 fn register_durable_symbol_service_inner(
-    registry: &mut RemoteComputationRegistry, store: Arc<DurableSymbolReplicaStore>,
+    registry: &mut RemoteComputationRegistry,
+    store: Arc<DurableSymbolReplicaStore>,
     admission: Option<Admission<'_>>,
 ) -> Result<DurableSymbolServiceHandle, ComputationSchemaRegistryError> {
     let handle = DurableSymbolServiceHandle(Arc::new(AtomicBool::new(false)));
@@ -197,8 +237,14 @@ fn register_durable_symbol_service_inner(
             let store = Arc::clone(&store);
             let gate = Arc::clone(&gate);
             async move {
-                Ok(dispatch(&cx, store, gate, invocation.peer_node(),
-                    invocation.request().input.data()).await)
+                Ok(dispatch(
+                    &cx,
+                    store,
+                    gate,
+                    invocation.peer_node(),
+                    invocation.request().input.data(),
+                )
+                .await)
             }
         },
     )?;

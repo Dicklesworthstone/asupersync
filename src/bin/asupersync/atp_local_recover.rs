@@ -23,7 +23,7 @@ use std::path::PathBuf;
         persistent local-sync history is not rewound. This is not whole-tree rollback or \
         unattended crash replay. Retain both the original receipt and the recovery receipt."
 )]
-pub(super) struct RecoverArgs {
+pub struct RecoverArgs {
     /// Saved JSON application receipt, recovery source, or output_error with context.receipt
     #[arg(value_name = "RECEIPT")]
     receipt: PathBuf,
@@ -50,13 +50,14 @@ pub(super) struct RecoverArgs {
 }
 
 fn parse_receipt_bound(value: &str) -> Result<usize, String> {
-    value.parse::<usize>()
+    value
+        .parse::<usize>()
         .ok()
         .filter(|bound| (1..=64 * 1024 * 1024).contains(bound))
         .ok_or_else(|| "receipt byte bound must be in 1..=67108864".to_owned())
 }
 
-pub(super) fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
+pub fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         native::run(args, output)
@@ -74,11 +75,11 @@ pub(super) fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliErro
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 mod native {
-    use super::{CliError, ExitCode, Output, RecoverArgs};
     use super::super::atp_local_mirror::native::{
-        CONTENT_PROFILE, current_cx, native_error, require_shutdown, run_owned,
-        validate_path, write_receipt,
+        CONTENT_PROFILE, current_cx, native_error, require_shutdown, run_owned, validate_path,
+        write_receipt,
     };
+    use super::{CliError, ExitCode, Output, RecoverArgs};
     use asupersync::atp::sync::native::{
         NativeDirectoryRecoveryReceipt, NativeDirectoryRecoveryReport,
         NativeDirectoryRecoverySource, NativeDirectoryRecoverySourceAction,
@@ -171,8 +172,11 @@ mod native {
         fn human_format(&self) -> String {
             let mut text = format!(
                 "Local recovery {}\n  Original operation: {}\n  Review ID: {}\n  Local: {}\n  Remote: {}\n  Recovery directory: {}\n",
-                self.mode, self.source_plan_id, self.review_id,
-                self.local_root.display(), self.remote_root.display(),
+                self.mode,
+                self.source_plan_id,
+                self.review_id,
+                self.local_root.display(),
+                self.remote_root.display(),
                 self.recovery_directory.display(),
             );
             for entry in &self.entries {
@@ -181,8 +185,12 @@ mod native {
                 } else {
                     "restore absent destination"
                 };
-                let _ = writeln!(text, "  {}: {} ({effect})",
-                    entry.destination_root.display(), entry.path);
+                let _ = writeln!(
+                    text,
+                    "  {}: {} ({effect})",
+                    entry.destination_root.display(),
+                    entry.path
+                );
                 let _ = writeln!(text, "    Retained: {}", entry.quarantine_path.display());
                 let _ = writeln!(text, "    Captured original: {:?}", entry.quarantined);
                 let _ = writeln!(text, "    Captured destination: {:?}", entry.current);
@@ -190,18 +198,26 @@ mod native {
             if let Some(result) = &self.result {
                 let _ = writeln!(text, "  Complete and verified: {}", result.complete);
                 for action in &result.actions {
-                    let _ = writeln!(text, "  {}: {} (durable: {})",
-                        action.path, action.state, action.durable);
+                    let _ = writeln!(
+                        text,
+                        "  {}: {} (durable: {})",
+                        action.path, action.state, action.durable
+                    );
                     if action.state == "exchanged" {
-                        let _ = writeln!(text, "    Displaced current file retained at: {}",
-                            action.quarantine_path.display());
+                        let _ = writeln!(
+                            text,
+                            "    Displaced current file retained at: {}",
+                            action.quarantine_path.display()
+                        );
                     }
                 }
                 if let Some(error) = &result.failure {
                     let _ = writeln!(text, "  Failure: {error}");
                 }
             } else if self.mode == "plan" {
-                text.push_str("  Preview only. Review captured contents before --apply REVIEW_ID.\n");
+                text.push_str(
+                    "  Preview only. Review captured contents before --apply REVIEW_ID.\n",
+                );
             }
             if let Some(error) = &self.application_error {
                 let _ = writeln!(text, "  Application was not confirmed: {error}");
@@ -214,7 +230,7 @@ mod native {
         }
     }
 
-    pub(super) fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
+    pub fn run(args: &RecoverArgs, output: &mut Output) -> Result<(), CliError> {
         validate_path("receipt", &args.receipt)?;
         validate_path("local", &args.local)?;
         validate_path("remote", &args.remote)?;
@@ -227,49 +243,91 @@ mod native {
                 result.complete && !result.dry_run && result.failure.is_none()
             })
         {
-            let detail = report.application_error.as_deref()
-                .or_else(|| report.result.as_ref().and_then(|result| result.failure.as_deref()))
+            let detail = report
+                .application_error
+                .as_deref()
+                .or_else(|| {
+                    report
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.failure.as_deref())
+                })
                 .unwrap_or("The recovery did not return a complete verified restoration receipt");
-            return Err(CliError::new("atp_local_recover_incomplete", "Local recovery did not complete")
-                .detail(detail)
-                .context("source_plan_id", &report.source_plan_id)
-                .context("review_id", &report.review_id)
-                .exit_code(ExitCode::USER_ERROR));
+            return Err(CliError::new(
+                "atp_local_recover_incomplete",
+                "Local recovery did not complete",
+            )
+            .detail(detail)
+            .context("source_plan_id", &report.source_plan_id)
+            .context("review_id", &report.review_id)
+            .exit_code(ExitCode::USER_ERROR));
         }
         require_shutdown(quiescent, stopped)
     }
 
     async fn prepare_and_apply(args: &RecoverArgs) -> Result<RecoveryOutput, CliError> {
         let cx = current_cx()?;
-        let bytes = cx.scoped_fs().read_regular_bounded(args.receipt.clone(), args.max_receipt_bytes)
-            .await.map_err(|error| CliError::new(
-                "atp_local_recover_receipt", "Cannot read the complete bounded recovery receipt",
-            ).detail(error.to_string()).exit_code(ExitCode::USER_ERROR))?;
+        let bytes = cx
+            .scoped_fs()
+            .read_regular_bounded(args.receipt.clone(), args.max_receipt_bytes)
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "atp_local_recover_receipt",
+                    "Cannot read the complete bounded recovery receipt",
+                )
+                .detail(error.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+            })?;
         // Parsing runs in the same owned blocking facility as filesystem work;
         // cancellation drains its buffer and worker before the CLI returns.
-        let source = cx.scoped_fs().run_io(move |child| {
-            let source = decode_receipt(&bytes)?;
-            child.checkpoint()
-                .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))?;
-            Ok(source)
-        }).await.map_err(|error| CliError::new(
-            "atp_local_recover_receipt", "Invalid saved recovery receipt",
-        ).detail(error.to_string()).exit_code(ExitCode::USER_ERROR))?;
+        let source = cx
+            .scoped_fs()
+            .run_io(move |child| {
+                let source = decode_receipt(&bytes)?;
+                child
+                    .checkpoint()
+                    .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))?;
+                Ok(source)
+            })
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "atp_local_recover_receipt",
+                    "Invalid saved recovery receipt",
+                )
+                .detail(error.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+            })?;
         let prepared = prepare_native_directory_recovery_from_source(
-            &cx, &source, &args.local, &args.remote, args.limits.native(),
-        ).await.map_err(|error| native_error("recovery_prepare", error))?;
+            &cx,
+            &source,
+            &args.local,
+            &args.remote,
+            args.limits.native(),
+        )
+        .await
+        .map_err(|error| native_error("recovery_prepare", error))?;
         let recovery_directory = prepared.recovery_directory().to_path_buf();
-        let entries: Vec<_> = prepared.preview().iter().map(|entry| EntryOutput {
-            path: entry.path.as_str().to_owned(),
-            destination_root: entry.destination_root.clone(),
-            quarantine_path: recovery_directory.join(entry.quarantined.path.as_str()),
-            quarantined: entry.quarantined.clone(),
-            current: entry.current.clone(),
-        }).collect();
+        let entries: Vec<_> = prepared
+            .preview()
+            .iter()
+            .map(|entry| EntryOutput {
+                path: entry.path.as_str().to_owned(),
+                destination_root: entry.destination_root.clone(),
+                quarantine_path: recovery_directory.join(entry.quarantined.path.as_str()),
+                quarantined: entry.quarantined.clone(),
+                current: entry.current.clone(),
+            })
+            .collect();
         let mut report = RecoveryOutput {
             schema_version: 1,
             command: "atp.local-recover",
-            mode: if args.apply.is_some() { "apply" } else { "plan" },
+            mode: if args.apply.is_some() {
+                "apply"
+            } else {
+                "plan"
+            },
             content_profile: CONTENT_PROFILE,
             receipt: args.receipt.clone(),
             source_plan_id: prepared.source_plan_id().to_owned(),
@@ -322,7 +380,11 @@ mod native {
         _error_envelope: (),
         #[serde(default, rename = "dry_run", deserialize_with = "reject_mixed_shape")]
         _source_dry_run: (),
-        #[serde(default, rename = "staging_directory", deserialize_with = "reject_mixed_shape")]
+        #[serde(
+            default,
+            rename = "staging_directory",
+            deserialize_with = "reject_mixed_shape"
+        )]
         _source_staging: (),
         #[serde(default, rename = "actions", deserialize_with = "reject_mixed_shape")]
         _source_actions: (),
@@ -366,8 +428,12 @@ mod native {
                     formatter.write_str("a JSON object")
                 }
 
-                fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                    T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(JsonObject)
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                        .map(JsonObject)
                 }
             }
 
@@ -415,7 +481,9 @@ mod native {
     }
 
     fn reject_mixed_shape<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
-        Err(serde::de::Error::custom("mixed receipt shapes or nested error envelopes are not supported"))
+        Err(serde::de::Error::custom(
+            "mixed receipt shapes or nested error envelopes are not supported",
+        ))
     }
 
     fn invalid_receipt(detail: impl Into<String>) -> io::Error {
@@ -432,40 +500,60 @@ mod native {
         let kind: ReceiptKind = decode_json(bytes)?;
         if kind.error {
             if kind.operation() || kind.source() {
-                return Err(invalid_receipt("an error envelope cannot also be an application receipt or recovery source"));
+                return Err(invalid_receipt(
+                    "an error envelope cannot also be an application receipt or recovery source",
+                ));
             }
             let envelope: RecordedOutputError = decode_json(bytes)?;
             if envelope.error_type != "output_error" {
-                return Err(invalid_receipt("only output_error can contain an application receipt"));
+                return Err(invalid_receipt(
+                    "only output_error can contain an application receipt",
+                ));
             }
             return source_from_operation(envelope.context.0.receipt.0);
         }
         if kind.operation() {
             if kind.source() {
-                return Err(invalid_receipt("an application receipt cannot also be a standalone recovery source"));
+                return Err(invalid_receipt(
+                    "an application receipt cannot also be a standalone recovery source",
+                ));
             }
             return source_from_operation(decode_json(bytes)?);
         }
         decode_json(bytes)
     }
 
-    fn source_from_operation(operation: RecordedOperation) -> io::Result<NativeDirectoryRecoverySource> {
+    fn source_from_operation(
+        operation: RecordedOperation,
+    ) -> io::Result<NativeDirectoryRecoverySource> {
         if operation.schema_version != 1
-            || !matches!(operation.command.as_str(), "atp.local-mirror" | "atp.local-sync")
+            || !matches!(
+                operation.command.as_str(),
+                "atp.local-mirror" | "atp.local-sync"
+            )
             || operation.mode != "apply"
             || operation.content_profile != CONTENT_PROFILE
         {
-            return Err(invalid_receipt("unsupported receipt version, command, mode or content profile"));
+            return Err(invalid_receipt(
+                "unsupported receipt version, command, mode or content profile",
+            ));
         }
-        let result = operation.result
-            .ok_or_else(|| invalid_receipt("receipt has no observed application result"))?.0;
+        let result = operation
+            .result
+            .ok_or_else(|| invalid_receipt("receipt has no observed application result"))?
+            .0;
         let source = NativeDirectoryRecoverySource::new(
-            operation.plan_id, result.dry_run, result.staging_directory, result.actions,
+            operation.plan_id,
+            result.dry_run,
+            result.staging_directory,
+            result.actions,
         );
         if let Some(recorded) = result.recovery_source
             && recorded.0 != source
         {
-            return Err(invalid_receipt("nested recovery source disagrees with the application receipt"));
+            return Err(invalid_receipt(
+                "nested recovery source disagrees with the application receipt",
+            ));
         }
         // Native preparation is the shared validator for every shape. No saved
         // root path, digest, completion claim or permission flag is authority.
@@ -527,28 +615,60 @@ mod native {
         }
 
         fn wrap_error(report: &str) -> String {
-            ["{\"type\":\"output_error\",\"context\":{\"receipt\":", report, "}}"].concat()
+            [
+                "{\"type\":\"output_error\",\"context\":{\"receipt\":",
+                report,
+                "}}",
+            ]
+            .concat()
         }
 
         fn prepend_field(document: &str, key: &str, value: &str) -> String {
-            ["{\"", key, "\":", value, ",", document.strip_prefix('{').unwrap()].concat()
+            [
+                "{\"",
+                key,
+                "\":",
+                value,
+                ",",
+                document.strip_prefix('{').unwrap(),
+            ]
+            .concat()
         }
 
         fn assert_source(source: &NativeDirectoryRecoverySource) {
             let plan = "a".repeat(64);
             let job = PathBuf::from(format!("/retained/asupersync-sync-{plan}"));
-            assert_eq!(source.plan_id, plan, "use the execution plan, never the saved review ID");
+            assert_eq!(
+                source.plan_id, plan,
+                "use the execution plan, never the saved review ID"
+            );
             assert!(!source.dry_run);
             assert_eq!(source.staging_directory.as_ref(), Some(&job));
-            assert_eq!(source.actions.len(), 2, "keep nonquarantined actions in position");
+            assert_eq!(
+                source.actions.len(),
+                2,
+                "keep nonquarantined actions in position"
+            );
             assert_eq!(source.actions[0].path.as_str(), "untouched");
             assert_eq!(source.actions[0].action, BidirectionalSyncAction::Keep);
-            assert_eq!(source.actions[0].state, NativeDirectoryActionState::Unchanged);
+            assert_eq!(
+                source.actions[0].state,
+                NativeDirectoryActionState::Unchanged
+            );
             assert!(source.actions[0].quarantine_path.is_none());
             assert_eq!(source.actions[1].path.as_str(), "nested/file.txt");
-            assert_eq!(source.actions[1].action, BidirectionalSyncAction::CopyLocalToRemote);
-            assert_eq!(source.actions[1].state, NativeDirectoryActionState::Published);
-            assert_eq!(source.actions[1].quarantine_path.as_ref(), Some(&job.join("previous-00000001")));
+            assert_eq!(
+                source.actions[1].action,
+                BidirectionalSyncAction::CopyLocalToRemote
+            );
+            assert_eq!(
+                source.actions[1].state,
+                NativeDirectoryActionState::Published
+            );
+            assert_eq!(
+                source.actions[1].quarantine_path.as_ref(),
+                Some(&job.join("previous-00000001"))
+            );
         }
 
         fn assert_invalid(bytes: &[u8], case: &str) {
@@ -570,7 +690,12 @@ mod native {
         fn receipt_completion_claims_and_saved_roots_do_not_supply_recovery_authority() {
             let mut report = operation_document("atp.local-mirror");
             let original = decode_receipt(text(&report).as_bytes()).unwrap();
-            for field in ["source_root", "destination_root", "local_root", "remote_root"] {
+            for field in [
+                "source_root",
+                "destination_root",
+                "local_root",
+                "remote_root",
+            ] {
                 report[field] = json!("/untrusted/serialized/path");
             }
             report["review_id"] = json!("c".repeat(64));
@@ -595,13 +720,22 @@ mod native {
                 report[field] = value;
                 assert_invalid(text(&report).as_bytes(), field);
             }
-            for field in ["schema_version", "command", "mode", "content_profile", "result"] {
+            for field in [
+                "schema_version",
+                "command",
+                "mode",
+                "content_profile",
+                "result",
+            ] {
                 let mut report = operation_document("atp.local-sync");
                 report.as_object_mut().unwrap().remove(field);
                 assert_invalid(text(&report).as_bytes(), field);
                 let mut source = source_document();
                 source[field] = Value::Null;
-                assert_invalid(text(&source).as_bytes(), "recognized null header cannot be ignored");
+                assert_invalid(
+                    text(&source).as_bytes(),
+                    "recognized null header cannot be ignored",
+                );
             }
         }
 
@@ -618,8 +752,14 @@ mod native {
                 assert_invalid(text(&report).as_bytes(), field);
             }
             let mut report = operation_document("atp.local-mirror");
-            report["result"]["recovery_source"]["actions"].as_array_mut().unwrap().reverse();
-            assert_invalid(text(&report).as_bytes(), "action order is part of the association");
+            report["result"]["recovery_source"]["actions"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+            assert_invalid(
+                text(&report).as_bytes(),
+                "action order is part of the association",
+            );
         }
 
         #[test]
@@ -630,7 +770,10 @@ mod native {
                 operation[field] = source[field].clone();
             }
             assert_invalid(text(&operation).as_bytes(), "mixed operation and source");
-            assert_invalid(wrap_error(&text(&operation)).as_bytes(), "mixed payload inside error");
+            assert_invalid(
+                wrap_error(&text(&operation)).as_bytes(),
+                "mixed payload inside error",
+            );
             let report = operation_document("atp.local-mirror");
             for mut mixed in [source, report.clone()] {
                 mixed["type"] = json!("output_error");
@@ -644,9 +787,18 @@ mod native {
             let report = text(&operation_document("atp.local-sync"));
             let envelope = wrap_error(&report);
             assert_invalid(wrap_error(&envelope).as_bytes(), "nested error");
-            assert_invalid(wrap_error(&text(&source_document())).as_bytes(), "source is not a full application report");
-            assert_invalid(prepend_field(&report, "type", "\"output_error\"").as_bytes(), "error marker in report");
-            assert_invalid(wrap_error(&prepend_field(&report, "type", "null")).as_bytes(), "null nested error marker");
+            assert_invalid(
+                wrap_error(&text(&source_document())).as_bytes(),
+                "source is not a full application report",
+            );
+            assert_invalid(
+                prepend_field(&report, "type", "\"output_error\"").as_bytes(),
+                "error marker in report",
+            );
+            assert_invalid(
+                wrap_error(&prepend_field(&report, "type", "null")).as_bytes(),
+                "null nested error marker",
+            );
             for malformed in [
                 "{\"type\":\"output_error\"}",
                 "{\"type\":\"output_error\",\"context\":{}}",
@@ -655,31 +807,55 @@ mod native {
             ] {
                 assert_invalid(malformed.as_bytes(), "incomplete error envelope");
             }
-            assert_invalid(envelope.replacen("output_error", "unrelated_error", 1).as_bytes(), "unrelated error type");
+            assert_invalid(
+                envelope
+                    .replacen("output_error", "unrelated_error", 1)
+                    .as_bytes(),
+                "unrelated error type",
+            );
         }
 
         #[test]
         fn positional_sequences_cannot_replace_json_wrapper_objects() {
             let report = operation_document("atp.local-sync");
             let positional = json!([
-                1, "atp.local-sync", "apply", CONTENT_PROFILE,
-                report["plan_id"].clone(), report["result"].clone()
+                1,
+                "atp.local-sync",
+                "apply",
+                CONTENT_PROFILE,
+                report["plan_id"].clone(),
+                report["result"].clone()
             ]);
             assert_invalid(text(&positional).as_bytes(), "positional top-level report");
-            assert_invalid(wrap_error(&text(&positional)).as_bytes(), "positional context receipt");
-            assert_invalid(text(&json!({
-                "type": "output_error", "context": [report.clone()]
-            })).as_bytes(), "positional error context");
+            assert_invalid(
+                wrap_error(&text(&positional)).as_bytes(),
+                "positional context receipt",
+            );
+            assert_invalid(
+                text(&json!({
+                    "type": "output_error", "context": [report.clone()]
+                }))
+                .as_bytes(),
+                "positional error context",
+            );
             let mut positional_result = report;
             let source = source_document();
             positional_result["result"] = json!([
-                false, source["staging_directory"].clone(), source["actions"].clone(), null
+                false,
+                source["staging_directory"].clone(),
+                source["actions"].clone(),
+                null
             ]);
-            assert_invalid(text(&positional_result).as_bytes(), "positional application result");
+            assert_invalid(
+                text(&positional_result).as_bytes(),
+                "positional application result",
+            );
             let mut mirror = operation_document("atp.local-mirror");
             mirror["result"]["recovery_source"] = json!([
-                source["plan_id"].clone(), false,
-                source["staging_directory"].clone(), source["actions"].clone()
+                source["plan_id"].clone(),
+                false,
+                source["staging_directory"].clone(),
+                source["actions"].clone()
             ]);
             assert_invalid(text(&mirror).as_bytes(), "positional embedded source");
         }
@@ -700,9 +876,13 @@ mod native {
                 assert_invalid(duplicate.as_bytes(), "duplicate known field");
             }
             let duplicate_receipt = [
-                "{\"type\":\"output_error\",\"context\":{\"receipt\":", &report,
-                ",\"receipt\":", &report, "}}",
-            ].concat();
+                "{\"type\":\"output_error\",\"context\":{\"receipt\":",
+                &report,
+                ",\"receipt\":",
+                &report,
+                "}}",
+            ]
+            .concat();
             assert_invalid(duplicate_receipt.as_bytes(), "duplicate context.receipt");
         }
 
@@ -714,12 +894,17 @@ mod native {
             let nested = report.replacen(&source, &duplicate_source, 1);
             assert_ne!(nested, report, "plant the duplicate inside recovery_source");
             let action = report.replacen(
-                "\"state\":\"published\"", "\"state\":\"published\",\"state\":\"staged\"", 1,
+                "\"state\":\"published\"",
+                "\"state\":\"published\",\"state\":\"staged\"",
+                1,
             );
             assert_ne!(action, report, "plant the duplicate in an action");
             for malformed in [nested, action] {
                 assert_invalid(malformed.as_bytes(), "duplicate inside application receipt");
-                assert_invalid(wrap_error(&malformed).as_bytes(), "duplicate inside error receipt");
+                assert_invalid(
+                    wrap_error(&malformed).as_bytes(),
+                    "duplicate inside error receipt",
+                );
             }
         }
 
@@ -745,7 +930,10 @@ mod native {
             for malformed in ["null", "[]", "\"not an object\"", "{}", "{"] {
                 assert_invalid(malformed.as_bytes(), "invalid document");
             }
-            assert_invalid(format!("{source}{source}").as_bytes(), "concatenated documents");
+            assert_invalid(
+                format!("{source}{source}").as_bytes(),
+                "concatenated documents",
+            );
             let mut invalid_utf8 = source.into_bytes();
             invalid_utf8.push(0xff);
             assert_invalid(&invalid_utf8, "invalid UTF-8");
@@ -758,9 +946,15 @@ mod native {
             let decoded = decode_receipt(text(&source).as_bytes()).unwrap();
             assert_eq!(decoded.actions[1].path.as_str(), "../escape");
             let bytes = serde_json::to_vec(&decoded).unwrap();
-            assert!(NativeDirectoryRecoverySource::from_json_slice(
-                &bytes, 16_777_216, NativeDirectoryLimits::default(),
-            ).is_err(), "native preparation's shared association validator must refuse traversal");
+            assert!(
+                NativeDirectoryRecoverySource::from_json_slice(
+                    &bytes,
+                    16_777_216,
+                    NativeDirectoryLimits::default(),
+                )
+                .is_err(),
+                "native preparation's shared association validator must refuse traversal"
+            );
         }
     }
 }

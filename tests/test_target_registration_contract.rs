@@ -64,9 +64,18 @@ fn planted_root() -> PathBuf {
         ("plain.rs", "// no crate cfg\n"),
         ("default_only.rs", "#![cfg(feature = \"base\")]\n"),
         ("planted.rs", "#![cfg(feature = \"tls\")]\n"),
-        ("under.rs", "#![cfg(all(feature = \"tls\", feature = \"extra\"))]\n"),
-        ("complete.rs", "#![cfg(all(feature = \"tls\", feature = \"extra\"))]\n"),
-        ("either.rs", "#![cfg(any(feature = \"tls\", feature = \"extra\"))]\n"),
+        (
+            "under.rs",
+            "#![cfg(all(feature = \"tls\", feature = \"extra\"))]\n",
+        ),
+        (
+            "complete.rs",
+            "#![cfg(all(feature = \"tls\", feature = \"extra\"))]\n",
+        ),
+        (
+            "either.rs",
+            "#![cfg(any(feature = \"tls\", feature = \"extra\"))]\n",
+        ),
     ] {
         std::fs::write(root.join("tests").join(name), source).expect("write planted test file");
     }

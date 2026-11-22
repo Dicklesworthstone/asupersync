@@ -58,7 +58,10 @@ impl OwnedMembershipController {
         if self.shared.state.lock().policy.observation(node).is_none() {
             return Err(MembershipControlError::UnknownMember.into());
         }
-        Ok(OwnedMembershipObserver { controller: self.clone(), node: node.clone() })
+        Ok(OwnedMembershipObserver {
+            controller: self.clone(),
+            node: node.clone(),
+        })
     }
 }
 
@@ -73,9 +76,15 @@ impl OwnedMembershipObserver {
     #[must_use]
     pub fn snapshot(&self) -> OwnedMembershipObservation {
         let state = self.controller.shared.state.lock();
-        let (stamp, last_alive_transition) = state.policy.observation(&self.node)
+        let (stamp, last_alive_transition) = state
+            .policy
+            .observation(&self.node)
             .expect("an observed provisioned member cannot be removed");
-        OwnedMembershipObservation { stamp, last_alive_transition, closed: state.closed }
+        OwnedMembershipObservation {
+            stamp,
+            last_alive_transition,
+            closed: state.closed,
+        }
     }
 
     /// Wait for a changed snapshot or terminal controller closure.
@@ -84,10 +93,14 @@ impl OwnedMembershipObserver {
     /// race. Dropping this future unregisters its waiter and leaves membership
     /// unchanged. The calling task supplies cancellation and deadlines.
     pub async fn changed(&self, after: OwnedMembershipObservation) -> OwnedMembershipObservation {
-        self.controller.shared.changed.wait_until(|| {
-            let current = self.snapshot();
-            current.closed || current != after
-        }).await;
+        self.controller
+            .shared
+            .changed
+            .wait_until(|| {
+                let current = self.snapshot();
+                current.closed || current != after
+            })
+            .await;
         self.snapshot()
     }
 }

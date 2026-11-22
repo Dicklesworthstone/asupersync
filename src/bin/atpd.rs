@@ -22,6 +22,7 @@ use asupersync::atp::supervision::{AtpdChildRole, AtpdRegionId};
 use asupersync::net::atp::protocol::PeerId;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::{IdentityKeyStore, KeyStoreError};
+use asupersync::sync::atomic::{AtomicBool, Ordering};
 use asupersync::types::Time;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,6 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use asupersync::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1231,7 +1231,9 @@ fn process_is_running(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        let mut system = sysinfo::System::new_all();
+        let Ok(mut system) = sysinfo::System::new_all() else {
+            return false;
+        };
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         system.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
@@ -1265,7 +1267,9 @@ fn read_pid_file(path: &Path) -> Result<u32> {
 /// only after this check (asupersync-fas2rq).
 fn pid_is_atpd(pid: u32) -> bool {
     let target = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Ok(mut system) = sysinfo::System::new() else {
+        return false;
+    };
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[target]),
         true,
@@ -1372,7 +1376,9 @@ fn directory_stats(path: &Path) -> Result<DirectoryStats> {
     Ok(stats)
 }
 
-fn install_signal_listener(shutdown: Arc<ListenerShutdown>) -> Result<mpsc::Receiver<DaemonSignal>> {
+fn install_signal_listener(
+    shutdown: Arc<ListenerShutdown>,
+) -> Result<mpsc::Receiver<DaemonSignal>> {
     let (sender, receiver) = mpsc::channel();
 
     #[cfg(unix)]

@@ -4,10 +4,10 @@
 //! signals throughout an application. Uses our sync primitives (Notify) to
 //! coordinate without external dependencies.
 
+use crate::sync::atomic::{AtomicBool, Ordering};
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, Ordering};
 
 use super::{SignalKind, signal};
 use crate::sync::Notify;

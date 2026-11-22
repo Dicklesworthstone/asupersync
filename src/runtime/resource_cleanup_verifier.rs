@@ -48,11 +48,11 @@
 
 use crate::types::{RegionId, TaskId};
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::pl::RwLock;
 #[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// Errors that can occur during resource cleanup verification.

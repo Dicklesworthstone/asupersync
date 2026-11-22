@@ -91,7 +91,10 @@ fn mysql_prepared_streaming_drop_and_cancel_retain_kill_ownership() {
     let _serial = SERIAL.lock().unwrap();
     for workers in [0, 2] {
         for cancel in [false, true] {
-            for operation in [Operation::PreparedStreamHeader, Operation::PreparedStreamRows] {
+            for operation in [
+                Operation::PreparedStreamHeader,
+                Operation::PreparedStreamRows,
+            ] {
                 cancellation_case(workers, cancel, operation, KillPeer::Replies);
             }
         }

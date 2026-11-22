@@ -177,7 +177,9 @@ pub enum TypedRemoteError {
         actual: TypedRemoteStage,
     },
     /// An input or output schema differs before application decoding begins.
-    #[error("typed remote {stage} schema mismatch: expected {expected:016x}, received {actual:016x}")]
+    #[error(
+        "typed remote {stage} schema mismatch: expected {expected:016x}, received {actual:016x}"
+    )]
     Schema {
         /// Schema that disagrees, independent of the envelope direction.
         stage: TypedRemoteStage,
@@ -375,8 +377,16 @@ fn decode_value<T: DeserializeOwned>(
         });
     }
     for (schema_stage, expected, actual) in [
-        (TypedRemoteStage::Request, signature.input, envelope.input_schema),
-        (TypedRemoteStage::Response, signature.output, envelope.output_schema),
+        (
+            TypedRemoteStage::Request,
+            signature.input,
+            envelope.input_schema,
+        ),
+        (
+            TypedRemoteStage::Response,
+            signature.output,
+            envelope.output_schema,
+        ),
     ] {
         if expected != actual {
             return Err(TypedRemoteError::Schema {
@@ -486,17 +496,18 @@ impl RemoteComputationRegistry {
                         return Ok(RemoteOutcome::Cancelled(reason));
                     }
                     match handler(cx, input).await {
-                        TypedRemoteOutcome::Success(value) => encode_value(
-                            signature,
-                            TypedRemoteStage::Response,
-                            &value,
-                            limits,
-                        )
-                        .map(RemoteOutcome::Success)
-                        .map_err(codec_dispatch_error),
+                        TypedRemoteOutcome::Success(value) => {
+                            encode_value(signature, TypedRemoteStage::Response, &value, limits)
+                                .map(RemoteOutcome::Success)
+                                .map_err(codec_dispatch_error)
+                        }
                         TypedRemoteOutcome::Failed(message) => Ok(RemoteOutcome::Failed(message)),
-                        TypedRemoteOutcome::Cancelled(reason) => Ok(RemoteOutcome::Cancelled(reason)),
-                        TypedRemoteOutcome::Panicked(message) => Ok(RemoteOutcome::Panicked(message)),
+                        TypedRemoteOutcome::Cancelled(reason) => {
+                            Ok(RemoteOutcome::Cancelled(reason))
+                        }
+                        TypedRemoteOutcome::Panicked(message) => {
+                            Ok(RemoteOutcome::Panicked(message))
+                        }
                     }
                 }
             },
@@ -604,12 +615,8 @@ impl<C: TypedRemoteComputation> PreparedTypedRemoteCall<C> {
         reservation: NativeRemoteReservation,
         lease: Duration,
     ) -> Result<TypedRemoteHandle<C>, TypedRemoteError> {
-        let handle = reservation.commit(
-            cx,
-            &ComputationName::new(C::NAME),
-            self.input.data(),
-            lease,
-        )?;
+        let handle =
+            reservation.commit(cx, &ComputationName::new(C::NAME), self.input.data(), lease)?;
         Ok(TypedRemoteHandle {
             inner: Handle::Admitted(handle),
             signature: self.signature,
@@ -708,7 +715,10 @@ impl<C: TypedRemoteComputation> TypedRemoteHandle<C> {
     }
 
     /// Waits for a result while preserving cancellation of only this observation.
-    pub async fn join(&mut self, cx: &Cx) -> Outcome<TypedRemoteOutcome<C::Output>, TypedRemoteError> {
+    pub async fn join(
+        &mut self,
+        cx: &Cx,
+    ) -> Outcome<TypedRemoteOutcome<C::Output>, TypedRemoteError> {
         let result = match &mut self.inner {
             Handle::Plain(handle) => handle.join(cx).await,
             #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -724,7 +734,9 @@ impl<C: TypedRemoteComputation> TypedRemoteHandle<C> {
             #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
             Handle::Admitted(handle) => handle.try_join(),
         }?;
-        result.map(|outcome| self.decode_outcome(outcome)).transpose()
+        result
+            .map(|outcome| self.decode_outcome(outcome))
+            .transpose()
     }
 
     /// Requests cancellation through the underlying handle's existing authority.
@@ -746,7 +758,10 @@ impl<C: TypedRemoteComputation> TypedRemoteHandle<C> {
     }
 
     /// Cancels and collects the terminal result without interrupting the drain.
-    pub async fn close(&mut self, cx: &Cx) -> Outcome<TypedRemoteOutcome<C::Output>, TypedRemoteError> {
+    pub async fn close(
+        &mut self,
+        cx: &Cx,
+    ) -> Outcome<TypedRemoteOutcome<C::Output>, TypedRemoteError> {
         let result = match &mut self.inner {
             Handle::Plain(handle) => handle.close(cx).await,
             #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]

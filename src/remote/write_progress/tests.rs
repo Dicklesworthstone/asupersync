@@ -59,7 +59,11 @@ impl AsyncWrite for ControlledIo {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.flushable { Poll::Ready(Ok(())) } else { Poll::Pending }
+        if self.flushable {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -71,13 +75,21 @@ impl AsyncWrite for ControlledIo {
 struct Wakes(AtomicUsize);
 
 impl Wake for Wakes {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
-    fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn fixture(
     timeout: Option<Duration>,
-) -> (RemoteWriteProgress<ControlledIo>, Arc<VirtualClock>, TimerDriverHandle) {
+) -> (
+    RemoteWriteProgress<ControlledIo>,
+    Arc<VirtualClock>,
+    TimerDriverHandle,
+) {
     let clock = Arc::new(VirtualClock::new());
     let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
     let io = RemoteWriteProgress::new(ControlledIo::default(), timeout, Some(driver.clone()));
@@ -85,8 +97,11 @@ fn fixture(
 }
 
 fn timed_out<T: std::fmt::Debug>(result: Poll<io::Result<T>>) {
-    assert!(matches!(result, Poll::Ready(Err(ref error))
-        if error.kind() == io::ErrorKind::TimedOut), "{result:?}");
+    assert!(
+        matches!(result, Poll::Ready(Err(ref error))
+        if error.kind() == io::ErrorKind::TimedOut),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -95,14 +110,24 @@ fn stalled_write_wakes_at_its_deadline_and_incoming_bytes_do_not_renew_it() {
     let wakes = Arc::new(Wakes::default());
     let waker = Waker::from(Arc::clone(&wakes));
     let mut task = Context::from_waker(&waker);
-    assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+    assert!(
+        Pin::new(&mut io)
+            .poll_write(&mut task, b"reply")
+            .is_pending()
+    );
     assert_eq!(driver.pending_count(), 1);
     clock.advance_to(Time::from_millis(900));
     let mut byte = [0; 1];
-    assert!(matches!(Pin::new(&mut io).poll_read(&mut task, &mut ReadBuf::new(&mut byte)),
-        Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut io).poll_read(&mut task, &mut ReadBuf::new(&mut byte)),
+        Poll::Ready(Ok(()))
+    ));
     assert_eq!(byte, [7]);
-    assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+    assert!(
+        Pin::new(&mut io)
+            .poll_write(&mut task, b"reply")
+            .is_pending()
+    );
     assert_eq!(driver.pending_count(), 1);
     clock.advance_to(Time::from_secs(1));
     assert_eq!(driver.process_timers(), 1);
@@ -112,7 +137,10 @@ fn stalled_write_wakes_at_its_deadline_and_incoming_bytes_do_not_renew_it() {
     io.inner.writable = true;
     timed_out(Pin::new(&mut io).poll_write(&mut task, b"late"));
     timed_out(Pin::new(&mut io).poll_read(&mut task, &mut ReadBuf::new(&mut byte)));
-    assert_eq!(io.inner.writes, polls, "timed-out transport cannot be reused");
+    assert_eq!(
+        io.inner.writes, polls,
+        "timed-out transport cannot be reused"
+    );
     assert_eq!(driver.pending_count(), 0);
 }
 
@@ -122,17 +150,30 @@ fn nonempty_vectored_progress_renews_the_budget_but_zero_writes_do_not() {
     let mut task = Context::from_waker(Waker::noop());
     let bufs = [IoSlice::new(b"bytes")];
     assert!(io.is_write_vectored());
-    assert!(Pin::new(&mut io).poll_write_vectored(&mut task, &bufs).is_pending());
+    assert!(
+        Pin::new(&mut io)
+            .poll_write_vectored(&mut task, &bufs)
+            .is_pending()
+    );
     clock.advance_to(Time::from_millis(900));
     io.inner.writable = true;
-    assert!(matches!(Pin::new(&mut io).poll_write_vectored(&mut task, &bufs),
-        Poll::Ready(Ok(5))));
+    assert!(matches!(
+        Pin::new(&mut io).poll_write_vectored(&mut task, &bufs),
+        Poll::Ready(Ok(5))
+    ));
     assert_eq!(driver.pending_count(), 0);
     io.inner.writable = false;
-    assert!(Pin::new(&mut io).poll_write_vectored(&mut task, &bufs).is_pending());
+    assert!(
+        Pin::new(&mut io)
+            .poll_write_vectored(&mut task, &bufs)
+            .is_pending()
+    );
     clock.advance_to(Time::from_millis(1500));
     io.inner.zero_write = true;
-    assert!(matches!(Pin::new(&mut io).poll_write(&mut task, b"x"), Poll::Ready(Ok(0))));
+    assert!(matches!(
+        Pin::new(&mut io).poll_write(&mut task, b"x"),
+        Poll::Ready(Ok(0))
+    ));
     clock.advance_to(Time::from_millis(1900));
     timed_out(Pin::new(&mut io).poll_write_vectored(&mut task, &bufs));
 }
@@ -144,7 +185,10 @@ fn flush_shutdown_and_drop_share_and_retire_the_pending_write_budget() {
     assert!(Pin::new(&mut io).poll_flush(&mut task).is_pending());
     clock.advance_to(Time::from_millis(900));
     io.inner.flushable = true;
-    assert!(matches!(Pin::new(&mut io).poll_flush(&mut task), Poll::Ready(Ok(()))));
+    assert!(matches!(
+        Pin::new(&mut io).poll_flush(&mut task),
+        Poll::Ready(Ok(()))
+    ));
     assert_eq!(driver.pending_count(), 0);
     io.inner.flushable = false;
     assert!(Pin::new(&mut io).poll_shutdown(&mut task).is_pending());
@@ -153,10 +197,18 @@ fn flush_shutdown_and_drop_share_and_retire_the_pending_write_budget() {
     assert_eq!(driver.pending_count(), 0);
 
     let (mut parked, _, driver) = fixture(Some(Duration::from_secs(1)));
-    assert!(Pin::new(&mut parked).poll_write(&mut task, b"x").is_pending());
+    assert!(
+        Pin::new(&mut parked)
+            .poll_write(&mut task, b"x")
+            .is_pending()
+    );
     assert_eq!(driver.pending_count(), 1);
     drop(parked);
-    assert_eq!(driver.pending_count(), 0, "dropping connection retires its timer");
+    assert_eq!(
+        driver.pending_count(),
+        0,
+        "dropping connection retires its timer"
+    );
 }
 
 #[test]
@@ -165,7 +217,9 @@ fn disabled_and_zero_write_budgets_preserve_their_explicit_policies() {
     let defaults = RemoteComputationServiceConfig::new();
     assert_eq!(defaults.write_progress_timeout(), None);
     assert_eq!(
-        defaults.with_write_progress_timeout(Some(Duration::ZERO)).write_progress_timeout(),
+        defaults
+            .with_write_progress_timeout(Some(Duration::ZERO))
+            .write_progress_timeout(),
         Some(Duration::ZERO),
     );
     let (mut io, clock, driver) = fixture(None);
@@ -177,7 +231,10 @@ fn disabled_and_zero_write_budgets_preserve_their_explicit_policies() {
 
     let (mut zero, _, driver) = fixture(Some(Duration::ZERO));
     zero.inner.writable = true;
-    assert!(matches!(Pin::new(&mut zero).poll_write(&mut task, b"x"), Poll::Ready(Ok(1))));
+    assert!(matches!(
+        Pin::new(&mut zero).poll_write(&mut task, b"x"),
+        Poll::Ready(Ok(1))
+    ));
     zero.inner.writable = false;
     timed_out(Pin::new(&mut zero).poll_write(&mut task, b"x"));
     assert_eq!(driver.pending_count(), 0);
@@ -203,7 +260,9 @@ fn driverless_write_budget_stays_on_wall_time_across_foreign_pollers() {
 
     let timeout = Duration::from_secs(3600);
     let mut io = RemoteWriteProgress::new(ControlledIo::default(), Some(timeout), None);
-    let fast_clock = Arc::new(VirtualClock::starting_at(raw_wall_now() + timeout + timeout));
+    let fast_clock = Arc::new(VirtualClock::starting_at(
+        raw_wall_now() + timeout + timeout,
+    ));
     let fast_timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&fast_clock));
     let slow_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
     let mut task = Context::from_waker(Waker::noop());
@@ -221,17 +280,28 @@ fn driverless_write_budget_stays_on_wall_time_across_foreign_pollers() {
         );
         let _current = Cx::set_current(Some(ambient));
         let before = raw_wall_now();
-        assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+        assert!(
+            Pin::new(&mut io)
+                .poll_write(&mut task, b"reply")
+                .is_pending()
+        );
         let after = raw_wall_now();
         let deadline = io.timer.as_ref().unwrap().deadline();
         if let Some(expected) = registered_deadline {
-            assert_eq!(deadline, expected, "changing pollers cannot renew a stalled write");
+            assert_eq!(
+                deadline, expected,
+                "changing pollers cannot renew a stalled write"
+            );
         } else {
             assert!(deadline >= before + timeout);
             assert!(deadline <= after + timeout);
             registered_deadline = Some(deadline);
         }
-        assert_eq!(timer.pending_count(), 0, "the poller's clock owns no write timer");
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "the poller's clock owns no write timer"
+        );
         fast_clock.advance_to(fast_timer.now() + Duration::from_secs(1));
         assert_eq!(fast_timer.process_timers(), 0);
         assert!(Pin::new(&mut io).poll_flush(&mut task).is_pending());
@@ -250,9 +320,9 @@ fn explicit_write_clock_ignores_a_foreign_driver_and_retires_on_drop() {
     use crate::types::{Budget, RegionId, TaskId};
 
     let (mut io, clock, driver) = fixture(Some(Duration::from_secs(1)));
-    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
-        VirtualClock::starting_at(Time::from_secs(3600)),
-    ));
+    let foreign_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::starting_at(
+        Time::from_secs(3600),
+    )));
     let ambient = Cx::new_with_drivers(
         RegionId::new_for_test(30, 1),
         TaskId::new_for_test(31, 1),
@@ -265,13 +335,21 @@ fn explicit_write_clock_ignores_a_foreign_driver_and_retires_on_drop() {
     );
     let _current = Cx::set_current(Some(ambient));
     let mut task = Context::from_waker(Waker::noop());
-    assert!(Pin::new(&mut io).poll_write(&mut task, b"reply").is_pending());
+    assert!(
+        Pin::new(&mut io)
+            .poll_write(&mut task, b"reply")
+            .is_pending()
+    );
     assert_eq!(driver.pending_count(), 1);
     assert_eq!(foreign_timer.pending_count(), 0);
     clock.advance_to(Time::from_millis(999));
     assert!(Pin::new(&mut io).poll_shutdown(&mut task).is_pending());
     drop(io);
-    assert_eq!(driver.pending_count(), 0, "dropping the transport retires its own timer");
+    assert_eq!(
+        driver.pending_count(),
+        0,
+        "dropping the transport retires its own timer"
+    );
     assert_eq!(foreign_timer.pending_count(), 0);
 }
 
@@ -283,15 +361,15 @@ mod native {
     use crate::remote::{
         ComputationName, IdempotencyKey, NodeId, RemoteComputationClient,
         RemoteComputationClientConfig, RemoteComputationRegistry, RemoteComputationService,
-        RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteInput,
-        RemoteOutcome, RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteServiceWireLimits,
+        RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteInput, RemoteOutcome,
+        RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteServiceWireLimits,
         RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
         RemoteTaskId, SpawnRequest, remote_service_framed, write_remote_service_frame,
     };
     use crate::runtime::RuntimeBuilder;
     use crate::tls::{
-        Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth,
-        PrivateKey, RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
+        Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
+        RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
     };
 
     const OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -306,7 +384,9 @@ mod native {
 
     struct ForceClose(RemoteComputationServiceHandle);
     impl Drop for ForceClose {
-        fn drop(&mut self) { self.0.force_close(); }
+        fn drop(&mut self) {
+            self.0.force_close();
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -314,37 +394,53 @@ mod native {
         let runtime = if workers == 1 {
             RuntimeBuilder::current_thread().build().unwrap()
         } else {
-            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
         };
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
             let factories = Arc::new(AtomicUsize::new(0));
             let seen = Arc::clone(&factories);
             let mut registry = RemoteComputationRegistry::new();
-            registry.register::<Bytes, Bytes, _, _>("large", move |_, _| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                async { Ok(RemoteOutcome::Success(vec![7; OUTPUT_BYTES])) }
-            }).unwrap();
+            registry
+                .register::<Bytes, Bytes, _, _>("large", move |_, _| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(RemoteOutcome::Success(vec![7; OUTPUT_BYTES])) }
+                })
+                .unwrap();
 
-            let cert = Certificate::from_pem(
-                include_bytes!("../../../tests/fixtures/tls/server.crt"),
-            ).unwrap().remove(0);
-            let chain = CertificateChain::from_pem(
-                include_bytes!("../../../tests/fixtures/tls/server.crt"),
-            ).unwrap();
-            let key = PrivateKey::from_pem(
-                include_bytes!("../../../tests/fixtures/tls/server.key"),
-            ).unwrap();
+            let cert =
+                Certificate::from_pem(include_bytes!("../../../tests/fixtures/tls/server.crt"))
+                    .unwrap()
+                    .remove(0);
+            let chain = CertificateChain::from_pem(include_bytes!(
+                "../../../tests/fixtures/tls/server.crt"
+            ))
+            .unwrap();
+            let key =
+                PrivateKey::from_pem(include_bytes!("../../../tests/fixtures/tls/server.key"))
+                    .unwrap();
             let mut roots = RootCertStore::empty();
             roots.add(&cert).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
-                .client_auth(ClientAuth::Required(roots)).build().unwrap();
+                .client_auth(ClientAuth::Required(roots))
+                .build()
+                .unwrap();
             let mut pins = CertificatePinSet::new();
             pins.add(CertificatePin::compute_spki_sha256(&cert).unwrap());
-            let connector = TlsConnectorBuilder::new().add_root_certificate(&cert)
-                .identity(chain, key).with_certificate_pins(pins.clone()).build().unwrap();
-            let mut policy = RemotePeerAdmissionPolicy::new(version, registry.schema_registry().clone());
-            policy.grant_tls_peer(NodeId::new("origin"), pins, ["large"]).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificate(&cert)
+                .identity(chain, key)
+                .with_certificate_pins(pins.clone())
+                .build()
+                .unwrap();
+            let mut policy =
+                RemotePeerAdmissionPolicy::new(version, registry.schema_registry().clone());
+            policy
+                .grant_tls_peer(NodeId::new("origin"), pins, ["large"])
+                .unwrap();
             let hello = policy.hello_for(NodeId::new("origin"));
             let limits = RemoteServiceWireLimits::new(FRAME_BYTES);
             let config = RemoteComputationServiceConfig::new()
@@ -352,65 +448,101 @@ mod native {
                 .with_max_connections(Some(2))
                 .with_write_progress_timeout(Some(Duration::from_secs(1)))
                 .with_drain_timeout(Duration::from_secs(3));
-            let service = RemoteComputationService::bind(
-                "127.0.0.1:0", acceptor, policy, registry, config,
-            ).await.unwrap();
+            let service =
+                RemoteComputationService::bind("127.0.0.1:0", acceptor, policy, registry, config)
+                    .await
+                    .unwrap();
             let address = service.local_addr().unwrap();
             let operator = service.handle();
             let _stop = ForceClose(operator.clone());
-            let mut serving = cx.spawn(move |server| async move { service.run(&server).await }).unwrap();
+            let mut serving = cx
+                .spawn(move |server| async move { service.run(&server).await })
+                .unwrap();
 
             // The listener is already bound. Limit the real peer receive buffer
             // so an 8 MiB result cannot fit in TCP while this peer never reads it.
-            let socket = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
-            socket2::SockRef::from(&socket).set_recv_buffer_size(4096).unwrap();
+            let socket =
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+            socket2::SockRef::from(&socket)
+                .set_recv_buffer_size(4096)
+                .unwrap();
             let socket = TcpStream::from_std(socket).unwrap();
             let stream = crate::time::timeout(
-                cx.now(), Duration::from_secs(3), connector.connect("localhost", socket),
-            ).await.expect("mTLS handshake deadline").unwrap();
+                cx.now(),
+                Duration::from_secs(3),
+                connector.connect("localhost", socket),
+            )
+            .await
+            .expect("mTLS handshake deadline")
+            .unwrap();
             let mut stalled = remote_service_framed(stream, limits).unwrap();
-            let request = RemoteServiceWireRequest::from_spawn_request(hello, &SpawnRequest {
-                remote_task_id: RemoteTaskId::next(),
-                computation: ComputationName::new("large"),
-                input: RemoteInput::new(b"exact retry".to_vec()),
-                lease: Duration::from_secs(30),
-                idempotency_key: IdempotencyKey::from_raw(901),
-                budget: None,
-                origin_node: NodeId::new("origin"),
-                origin_region: cx.region_id(),
-                origin_task: cx.task_id(),
-            }).unwrap();
-            write_remote_service_frame(&cx, &mut stalled, &request, FRAME_BYTES).await.unwrap();
+            let request = RemoteServiceWireRequest::from_spawn_request(
+                hello,
+                &SpawnRequest {
+                    remote_task_id: RemoteTaskId::next(),
+                    computation: ComputationName::new("large"),
+                    input: RemoteInput::new(b"exact retry".to_vec()),
+                    lease: Duration::from_secs(30),
+                    idempotency_key: IdempotencyKey::from_raw(901),
+                    budget: None,
+                    origin_node: NodeId::new("origin"),
+                    origin_region: cx.region_id(),
+                    origin_task: cx.task_id(),
+                },
+            )
+            .unwrap();
+            write_remote_service_frame(&cx, &mut stalled, &request, FRAME_BYTES)
+                .await
+                .unwrap();
 
             crate::time::timeout(cx.now(), Duration::from_secs(10), async {
                 while factories.load(Ordering::SeqCst) == 0 || operator.active_connections() != 0 {
                     crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
                 }
-            }).await.expect("non-reading peer must lose its slot to the write deadline");
+            })
+            .await
+            .expect("non-reading peer must lose its slot to the write deadline");
             assert_eq!(factories.load(Ordering::SeqCst), 1);
 
             // Keep the original non-reading TLS peer alive. A new connection
             // must replay the already committed result, not execute it again.
             let client = RemoteComputationClient::new(
-                address, "localhost", connector,
-                RemoteComputationClientConfig::new().with_wire_limits(limits)
-                    .with_max_attempts(1).with_attempt_timeout(Duration::from_secs(20)),
-            ).unwrap();
+                address,
+                "localhost",
+                connector,
+                RemoteComputationClientConfig::new()
+                    .with_wire_limits(limits)
+                    .with_max_attempts(1)
+                    .with_attempt_timeout(Duration::from_secs(20)),
+            )
+            .unwrap();
             let response = client.call(&cx, &request).await.unwrap();
             assert!(matches!(response, RemoteServiceWireResponse::Outcome {
                 outcome: RemoteServiceWireOutcome::Success(ref bytes), ..
             } if bytes.len() == OUTPUT_BYTES && bytes.iter().all(|byte| *byte == 7)));
-            assert_eq!(factories.load(Ordering::SeqCst), 1, "terminal write failure cannot rerun a commit");
+            assert_eq!(
+                factories.load(Ordering::SeqCst),
+                1,
+                "terminal write failure cannot rerun a commit"
+            );
             drop(stalled);
             let _ = operator.begin_drain();
-            let report = crate::time::timeout(
-                cx.now(), Duration::from_secs(3), serving.join(&cx),
-            ).await.expect("listener drain deadline").expect("listener task").expect("listener result");
+            let report = crate::time::timeout(cx.now(), Duration::from_secs(3), serving.join(&cx))
+                .await
+                .expect("listener drain deadline")
+                .expect("listener task")
+                .expect("listener result");
             assert_eq!(report.failed_connections, 1);
             assert_eq!(report.completed_connections, 1);
             assert_eq!(report.interrupted_connections, 0);
             assert_eq!(report.panicked_connections, 0);
-            assert!(report.first_connection_failure.as_deref().unwrap().contains("no write progress"));
+            assert!(
+                report
+                    .first_connection_failure
+                    .as_deref()
+                    .unwrap()
+                    .contains("no write progress")
+            );
             assert_eq!(operator.active_connections(), 0);
             assert!(!cx.is_cancel_requested());
         });

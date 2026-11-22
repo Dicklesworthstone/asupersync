@@ -9,9 +9,7 @@ use asupersync::Cx;
 use asupersync::observability::async_export::{
     AsyncExportOutcome, AsyncMultiExporter, MetricsExportBatch, OtlpSnapshotExporter,
 };
-use asupersync::observability::otel::{
-    InMemoryExporter, MetricsSnapshot, OtlpHttpConfigBuilder,
-};
+use asupersync::observability::otel::{InMemoryExporter, MetricsSnapshot, OtlpHttpConfigBuilder};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use std::future::Future;
 use std::io::{Read, Write};
@@ -53,14 +51,21 @@ fn request(listener: &TcpListener) -> (TcpStream, Vec<u8>) {
         match listener.accept() {
             Ok((stream, _)) => break stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(start.elapsed() < Duration::from_secs(5), "client must connect");
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "client must connect"
+                );
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(error) => panic!("collector accept failed: {error}"),
         }
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
@@ -191,7 +196,10 @@ fn collector_partial_rejection_is_reported_but_does_not_suppress_later_destinati
                 panic!("collector rejection must not be reported as success");
             };
             assert!(error.to_string().contains("partial_success"));
-            assert!(matches!(report.outcomes()[1], AsyncExportOutcome::Succeeded));
+            assert!(matches!(
+                report.outcomes()[1],
+                AsyncExportOutcome::Succeeded
+            ));
             assert_eq!(memory.snapshots().len(), 1);
             assert!(report.into_result().is_err());
             assert!(!peer.join().unwrap().is_empty());
@@ -201,7 +209,10 @@ fn collector_partial_rejection_is_reported_but_does_not_suppress_later_destinati
 
 fn ready<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
-    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("preflight must finish before network I/O"),
     }
@@ -211,36 +222,44 @@ fn ready<F: Future>(future: F) -> F::Output {
 fn cancelled_direct_export_does_not_open_a_collector_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let exporter = exporter(format!("http://{}/v1/metrics", listener.local_addr().unwrap()));
+    let exporter = exporter(format!(
+        "http://{}/v1/metrics",
+        listener.local_addr().unwrap()
+    ));
     let cx = Cx::for_testing();
     cx.cancel_with(asupersync::types::CancelKind::User, None);
     let snapshot = snapshot();
-    assert!(ready(exporter.export(
-        &cx,
-        MetricsExportBatch::new(&snapshot, 1000, 2000).unwrap(),
-    ))
-    .is_err());
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        ready(exporter.export(&cx, MetricsExportBatch::new(&snapshot, 1000, 2000).unwrap(),))
+            .is_err()
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
 fn invalid_and_empty_snapshots_finish_before_network_io() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let exporter = exporter(format!("http://{}/v1/metrics", listener.local_addr().unwrap()));
+    let exporter = exporter(format!(
+        "http://{}/v1/metrics",
+        listener.local_addr().unwrap()
+    ));
     let cx = Cx::for_testing();
     let mut invalid = MetricsSnapshot::new();
     invalid.add_counter("overflow", Vec::new(), u64::MAX);
-    assert!(ready(exporter.export(
-        &cx,
-        MetricsExportBatch::new(&invalid, 1000, 2000).unwrap(),
-    ))
-    .is_err());
+    assert!(
+        ready(exporter.export(&cx, MetricsExportBatch::new(&invalid, 1000, 2000).unwrap(),))
+            .is_err()
+    );
     let empty = MetricsSnapshot::new();
-    assert!(ready(exporter.export(
-        &cx,
-        MetricsExportBatch::new(&empty, 1000, 2000).unwrap(),
-    ))
-    .is_ok());
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        ready(exporter.export(&cx, MetricsExportBatch::new(&empty, 1000, 2000).unwrap(),)).is_ok()
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

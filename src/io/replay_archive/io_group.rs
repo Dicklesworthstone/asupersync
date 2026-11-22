@@ -1,6 +1,9 @@
 //! Separate authenticated profile for multi-stream I/O observation groups.
 
-use super::{EncryptedReplayArchive, ReplayArchiveBinding, ReplayArchiveError, ReplayArchiveKey, ReplayArchiveSealer};
+use super::{
+    EncryptedReplayArchive, ReplayArchiveBinding, ReplayArchiveError, ReplayArchiveKey,
+    ReplayArchiveSealer,
+};
 use crate::io::replay_group::{IoGroupDecodeLimits, IoGroupTapeError, RecordedIoGroup};
 
 // Profile identity is authenticated with the same fixed V1 envelope header.
@@ -48,7 +51,13 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         limits: IoGroupDecodeLimits,
     ) -> Result<RecordedIoGroup, IoGroupArchiveError> {
-        let plaintext = self.open_payload(bytes, expected, IO_GROUP, max_encrypted_bytes, limits.max_encoded_bytes)?;
+        let plaintext = self.open_payload(
+            bytes,
+            expected,
+            IO_GROUP,
+            max_encrypted_bytes,
+            limits.max_encoded_bytes,
+        )?;
         Ok(RecordedIoGroup::from_canonical_bytes(&plaintext, limits)?)
     }
 }

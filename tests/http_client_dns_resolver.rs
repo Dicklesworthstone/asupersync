@@ -98,8 +98,8 @@ fn http_client_custom_dns_resolver_resolves_and_caches() {
         .expect("build runtime");
 
     // 1. Start HTTP server that closes every connection with Connection: close
-    let http_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("bind http listener");
+    let http_listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind http listener");
     let http_addr = http_listener.local_addr().expect("http local addr");
     let http_port = http_addr.port();
     let http_stop = Arc::new(AtomicBool::new(false));
@@ -138,8 +138,8 @@ fn http_client_custom_dns_resolver_resolves_and_caches() {
     });
 
     // 2. Start local UDP nameserver answering MADE_UP_NAME with 127.0.0.1
-    let udp_socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .expect("bind udp nameserver");
+    let udp_socket =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind udp nameserver");
     let udp_addr = udp_socket.local_addr().expect("udp local addr");
     let udp_stop = Arc::new(AtomicBool::new(false));
     let udp_stop_clone = Arc::clone(&udp_stop);
@@ -155,7 +155,9 @@ fn http_client_custom_dns_resolver_resolves_and_caches() {
             match udp_socket.recv_from(&mut buf) {
                 Ok((n, peer)) => {
                     query_counter.fetch_add(1, Ordering::Relaxed);
-                    if let Some(resp) = build_dns_response(&buf[..n], MADE_UP_NAME, Ipv4Addr::LOCALHOST) {
+                    if let Some(resp) =
+                        build_dns_response(&buf[..n], MADE_UP_NAME, Ipv4Addr::LOCALHOST)
+                    {
                         let _ = udp_socket.send_to(&resp, peer);
                     }
                 }
@@ -182,9 +184,7 @@ fn http_client_custom_dns_resolver_resolves_and_caches() {
     let resolver = Resolver::with_config(resolver_config);
 
     // 4. Build client with dns_resolver
-    let client = HttpClient::builder()
-        .dns_resolver(resolver.clone())
-        .build();
+    let client = HttpClient::builder().dns_resolver(resolver.clone()).build();
 
     let cx = Cx::for_testing();
     let url = format!("http://{MADE_UP_NAME}:{http_port}/test");

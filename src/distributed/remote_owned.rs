@@ -10,8 +10,8 @@ use crate::cx::{ChildRegionError, ChildRegionSpec, Cx};
 use crate::error::Error;
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::remote::{
-    ComputationName, NodeId, RemoteError, RemoteHandle, RemoteInput, RemoteOutcome,
-    RemoteTaskId, spawn_remote,
+    ComputationName, NodeId, RemoteError, RemoteHandle, RemoteInput, RemoteOutcome, RemoteTaskId,
+    spawn_remote,
 };
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
@@ -289,7 +289,10 @@ impl fmt::Debug for RemoteRunReply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteRunReply")
             .field("remote_task_id", &self.remote_task_id)
-            .field("remote_success", &matches!(self.outcome, Outcome::Ok(RemoteOutcome::Success(_))))
+            .field(
+                "remote_success",
+                &matches!(self.outcome, Outcome::Ok(RemoteOutcome::Success(_))),
+            )
             .field("cancelled", &self.cancellation.is_some())
             .field("settlement", &self.settlement)
             .finish_non_exhaustive()
@@ -345,7 +348,10 @@ impl RemoteRunReport {
             })
             && self.close.as_ref().is_ok_and(|close| {
                 matches!(close.outcome, Outcome::Ok(()))
-                    && close.cleanup_outcome.as_ref().is_none_or(|value| matches!(value, Outcome::Ok(())))
+                    && close
+                        .cleanup_outcome
+                        .as_ref()
+                        .is_none_or(|value| matches!(value, Outcome::Ok(())))
             })
     }
 }
@@ -356,18 +362,31 @@ struct CheckedLease(Option<ObligationToken>);
 impl CheckedLease {
     fn settle(mut self, success: bool) -> RemoteLeaseSettlement {
         let token = self.0.take().expect("unsettled checked lease");
-        let accepted = if success { token.commit() } else { token.abort(ObligationAbortReason::Cancel) };
-        if !accepted { RemoteLeaseSettlement::Lost }
-        else if success { RemoteLeaseSettlement::Committed }
-        else { RemoteLeaseSettlement::Aborted }
+        let accepted = if success {
+            token.commit()
+        } else {
+            token.abort(ObligationAbortReason::Cancel)
+        };
+        if !accepted {
+            RemoteLeaseSettlement::Lost
+        } else if success {
+            RemoteLeaseSettlement::Committed
+        } else {
+            RemoteLeaseSettlement::Aborted
+        }
     }
 }
 impl Drop for CheckedLease {
     fn drop(&mut self) {
-        if let Some(token) = self.0.take() { token.abort(ObligationAbortReason::Cancel); }
+        if let Some(token) = self.0.take() {
+            token.abort(ObligationAbortReason::Cancel);
+        }
     }
 }
-struct Exchange<H> { remote: H, lease: CheckedLease }
+struct Exchange<H> {
+    remote: H,
+    lease: CheckedLease,
+}
 
 /// Private retention shared by the owner, proxy and optional result handle.
 /// Native admission uses it for domain identity and buffer credit; the legacy
@@ -382,22 +401,30 @@ struct RetainedRemoteResult<T> {
     _retention: Option<RemoteRunRetention>,
 }
 impl<T> RetainedRemoteResult<T> {
-    fn into_inner(self) -> T { self.value }
+    fn into_inner(self) -> T {
+        self.value
+    }
 }
 
 /// A private adapter over the existing terminal and cancellation protocols.
 pub(crate) trait OwnedRemoteExchange: Send + 'static {
     fn remote_task_id(&self) -> RemoteTaskId;
-    fn join(&mut self, cx: &Cx) -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
+    fn join(&mut self, cx: &Cx)
+    -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
     fn try_join(&mut self) -> Result<Option<RemoteOutcome>, RemoteError>;
-    fn close(&mut self, cx: &Cx) -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
+    fn close(
+        &mut self,
+        cx: &Cx,
+    ) -> impl Future<Output = Outcome<RemoteOutcome, RemoteError>> + Send;
 }
 
 pub(crate) trait OwnedRemoteRequest: Send + 'static {
     type Exchange: OwnedRemoteExchange;
     fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError>;
     fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError>;
-    fn retention(&self) -> Option<RemoteRunRetention> { None }
+    fn retention(&self) -> Option<RemoteRunRetention> {
+        None
+    }
 }
 
 struct CapabilityRequest {
@@ -410,14 +437,18 @@ impl OwnedRemoteRequest for CapabilityRequest {
     fn validate_context(&self, cx: &Cx) -> Result<(), RemoteRunTaskError> {
         if cx.remote().is_none_or(|cap| cap.runtime().is_none()) {
             Err(RemoteRunTaskError::NoRemoteRuntime)
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
     fn dispatch(self, cx: &Cx) -> Result<Self::Exchange, RemoteRunTaskError> {
         Ok(spawn_remote(cx, self.node, self.computation, self.input)?)
     }
 }
 impl OwnedRemoteExchange for RemoteHandle {
-    fn remote_task_id(&self) -> RemoteTaskId { RemoteHandle::remote_task_id(self) }
+    fn remote_task_id(&self) -> RemoteTaskId {
+        RemoteHandle::remote_task_id(self)
+    }
     async fn join(&mut self, cx: &Cx) -> Outcome<RemoteOutcome, RemoteError> {
         RemoteHandle::join(self, cx).await
     }
@@ -453,15 +484,27 @@ impl<F: Future> Future for AdmittedProxy<F> {
 }
 
 async fn execute<R: OwnedRemoteRequest>(
-    cx: Cx, request: R, clock: TimerDriverHandle, deadline: Time,
+    cx: Cx,
+    request: R,
+    clock: TimerDriverHandle,
+    deadline: Time,
 ) -> Result<RemoteRunReply, RemoteRunTaskError> {
-    if cx.checkpoint().is_err() || clock.now() >= deadline { return Err(RemoteRunTaskError::NotStarted); }
+    if cx.checkpoint().is_err() || clock.now() >= deadline {
+        return Err(RemoteRunTaskError::NotStarted);
+    }
     request.validate_context(&cx)?;
-    let lease = CheckedLease(Some(cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id())?
-        .ok_or(RemoteRunTaskError::NoObligationRuntime)?));
+    let lease = CheckedLease(Some(
+        cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id())?
+            .ok_or(RemoteRunTaskError::NoObligationRuntime)?,
+    ));
     // Runtime admission can invoke a notifier. Recheck before its side effects.
-    if cx.checkpoint().is_err() || clock.now() >= deadline { return Err(RemoteRunTaskError::NotStarted); }
-    let mut exchange = Exchange { remote: request.dispatch(&cx)?, lease };
+    if cx.checkpoint().is_err() || clock.now() >= deadline {
+        return Err(RemoteRunTaskError::NotStarted);
+    }
+    let mut exchange = Exchange {
+        remote: request.dispatch(&cx)?,
+        lease,
+    };
     let remote_task_id = exchange.remote.remote_task_id();
     let mut outcome = exchange.remote.join(&cx).await;
     if matches!(outcome, Outcome::Err(RemoteError::Cancelled(_))) {
@@ -476,23 +519,37 @@ async fn execute<R: OwnedRemoteRequest>(
         }
     }
     let cancellation = cx.is_cancel_requested().then(|| {
-        cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)
+        cx.cancel_reason()
+            .unwrap_or_else(CancelReason::parent_cancelled)
     });
     // Freeze outcome before destroying the proxy. Settlement cannot precede its
     // unregister/cancel callbacks, including their panic boundary.
     drop(exchange.remote);
-    let success = cancellation.is_none() && matches!(outcome, Outcome::Ok(RemoteOutcome::Success(_)));
+    let success =
+        cancellation.is_none() && matches!(outcome, Outcome::Ok(RemoteOutcome::Success(_)));
     let settlement = exchange.lease.settle(success);
     // Preserve a typed cleanup report through ordinary Cx spawn's acknowledged-
     // cancellation policy. Outer combinators retain their own cancellation rules.
     let _ = cx.checkpoint();
-    Ok(RemoteRunReply { remote_task_id, outcome, cancellation, settlement })
+    Ok(RemoteRunReply {
+        remote_task_id,
+        outcome,
+        cancellation,
+        settlement,
+    })
 }
 
 fn stopped(cx: &Cx, clock: &TimerDriverHandle, deadline: Time) -> Option<RemoteRunTrigger> {
     if cx.is_cancel_requested() {
-        Some(RemoteRunTrigger::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)))
-    } else if clock.now() >= deadline { Some(RemoteRunTrigger::Deadline) } else { None }
+        Some(RemoteRunTrigger::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled),
+        ))
+    } else if clock.now() >= deadline {
+        Some(RemoteRunTrigger::Deadline)
+    } else {
+        None
+    }
 }
 
 /// Execute one named remote invocation through its existing capability/runtime,
@@ -519,7 +576,10 @@ fn stopped(cx: &Cx, clock: &TimerDriverHandle, deadline: Time) -> Option<RemoteR
 /// Remote business failures/panics remain in the exact protocol outcome; local
 /// panics and close failures remain separate. No retry or wire change is added.
 pub async fn run_remote(
-    cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
+    cx: &Cx,
+    node: NodeId,
+    computation: ComputationName,
+    input: RemoteInput,
     config: RemoteRunConfig,
 ) -> Result<RemoteRunReport, RemoteRunError> {
     run_admitted(cx, node, computation, input, config, None).await
@@ -558,11 +618,22 @@ pub fn spawn_remote_owned(
     config: RemoteRunConfig,
 ) -> Result<RemoteRunHandle, RemoteRunHandleError> {
     let timing = prepare_run(cx, &config)?;
-    Ok(spawn_owned_request(cx, CapabilityRequest { node, computation, input }, config.child, timing)?)
+    Ok(spawn_owned_request(
+        cx,
+        CapabilityRequest {
+            node,
+            computation,
+            input,
+        },
+        config.child,
+        timing,
+    )?)
 }
 
 pub(crate) fn spawn_owned_request<R: OwnedRemoteRequest>(
-    cx: &Cx, request: R, child: ChildRegionSpec,
+    cx: &Cx,
+    request: R,
+    child: ChildRegionSpec,
     timing: (TimerDriverHandle, Time),
 ) -> Result<RemoteRunHandle, SpawnError> {
     let (clock, deadline) = timing;
@@ -576,9 +647,16 @@ pub(crate) fn spawn_owned_request<R: OwnedRemoteRequest>(
         };
         // Preserve terminal bookkeeping through acknowledged cancellation.
         let _ = owner.checkpoint();
-        RetainedRemoteResult { value: result, _retention: owner_retention }
+        RetainedRemoteResult {
+            value: result,
+            _retention: owner_retention,
+        }
     })?;
-    Ok(RemoteRunHandle { task, deadline, retention })
+    Ok(RemoteRunHandle {
+        task,
+        deadline,
+        retention,
+    })
 }
 
 pub(crate) fn prepare_run(
@@ -599,9 +677,12 @@ pub(crate) fn prepare_run(
 /// A native reservation is the route authority; attaching its private runtime
 /// to a legacy remote capability would bypass the native admission domain.
 pub(crate) fn prepare_owned_timing(
-    cx: &Cx, config: &RemoteRunConfig,
+    cx: &Cx,
+    config: &RemoteRunConfig,
 ) -> Result<(TimerDriverHandle, Time), RemoteRunError> {
-    if cx.is_cancel_requested() { return Err(RemoteRunError::Cancelled); }
+    if cx.is_cancel_requested() {
+        return Err(RemoteRunError::Cancelled);
+    }
     let clock = cx.timer_driver().ok_or(RemoteRunError::NoTimer)?;
     let now = clock.now();
     let deadline = now + config.timeout;
@@ -612,16 +693,33 @@ pub(crate) fn prepare_owned_timing(
 }
 
 async fn run_admitted(
-    cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
-    config: RemoteRunConfig, admission: Option<admission::Permit>,
+    cx: &Cx,
+    node: NodeId,
+    computation: ComputationName,
+    input: RemoteInput,
+    config: RemoteRunConfig,
+    admission: Option<admission::Permit>,
 ) -> Result<RemoteRunReport, RemoteRunError> {
     let timing = prepare_run(cx, &config)?;
-    run_prepared(cx, CapabilityRequest { node, computation, input }, config.child, timing, admission).await
+    run_prepared(
+        cx,
+        CapabilityRequest {
+            node,
+            computation,
+            input,
+        },
+        config.child,
+        timing,
+        admission,
+    )
+    .await
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub(crate) async fn run_owned_request<R: OwnedRemoteRequest>(
-    cx: &Cx, request: R, child: ChildRegionSpec,
+    cx: &Cx,
+    request: R,
+    child: ChildRegionSpec,
     timing: (TimerDriverHandle, Time),
 ) -> Result<RemoteRunReport, RemoteRunError> {
     run_prepared(cx, request, child, timing, None).await
@@ -656,26 +754,38 @@ async fn run_prepared<R: OwnedRemoteRequest>(
                 trigger = Some(RemoteRunTrigger::Finished);
             }
         }
-    } else { result = Some(Err(RemoteRunTaskError::NotStarted)); }
+    } else {
+        result = Some(Err(RemoteRunTaskError::NotStarted));
+    }
     if trigger.is_none() {
         let mut cancelled = std::pin::pin!(cx.cancelled());
         let mut timer = std::pin::pin!(Sleep::with_timer_driver(deadline, clock.clone()));
-        trigger = Some(poll_fn(|task| {
-            if cancelled.as_mut().poll(task).is_ready() {
-                return Poll::Ready(RemoteRunTrigger::Cancelled(
-                    cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)));
-            }
-            // This operation belongs to the explicit Cx. Cancellation of an
-            // unrelated ambient polling task must not look like elapsed time.
-            if clock.now() >= deadline || timer.as_mut().poll_deadline(task).is_ready() {
-                return Poll::Ready(RemoteRunTrigger::Deadline);
-            }
-            if let Poll::Ready(value) = handle.as_mut().expect("admitted proxy").poll_join(task) {
-                result = Some(value.map_err(RemoteRunTaskError::Join).and_then(|value| value.into_inner()));
-                return Poll::Ready(RemoteRunTrigger::Finished);
-            }
-            Poll::Pending
-        }).await);
+        trigger = Some(
+            poll_fn(|task| {
+                if cancelled.as_mut().poll(task).is_ready() {
+                    return Poll::Ready(RemoteRunTrigger::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(CancelReason::parent_cancelled),
+                    ));
+                }
+                // This operation belongs to the explicit Cx. Cancellation of an
+                // unrelated ambient polling task must not look like elapsed time.
+                if clock.now() >= deadline || timer.as_mut().poll_deadline(task).is_ready() {
+                    return Poll::Ready(RemoteRunTrigger::Deadline);
+                }
+                if let Poll::Ready(value) = handle.as_mut().expect("admitted proxy").poll_join(task)
+                {
+                    result = Some(
+                        value
+                            .map_err(RemoteRunTaskError::Join)
+                            .and_then(|value| value.into_inner()),
+                    );
+                    return Poll::Ready(RemoteRunTrigger::Finished);
+                }
+                Poll::Pending
+            })
+            .await,
+        );
     }
     let mut trigger = trigger.expect("selected stop cause");
     let cancel_error = match &trigger {
@@ -683,9 +793,14 @@ async fn run_prepared<R: OwnedRemoteRequest>(
         RemoteRunTrigger::Deadline => child.cancel(CancelReason::timeout()).err(),
         RemoteRunTrigger::Cancelled(reason) => child.cancel(reason.clone()).err(),
     };
-    let close = child.close_with_outcome().await.map(|receipt| RemoteRunClose {
-        region_id, outcome: receipt.outcome, cleanup_outcome: receipt.cleanup_outcome,
-    });
+    let close = child
+        .close_with_outcome()
+        .await
+        .map(|receipt| RemoteRunClose {
+            region_id,
+            outcome: receipt.outcome,
+            cleanup_outcome: receipt.cleanup_outcome,
+        });
     if result.is_none() {
         // Closed means the proxy is terminal, but its join result becomes
         // visible only when the scheduler opens its retirement barrier, after
@@ -700,9 +815,16 @@ async fn run_prepared<R: OwnedRemoteRequest>(
     // A result already collected must not bypass a caller deadline/cancellation
     // that became visible while local descendants/finalizers were draining.
     if matches!(trigger, RemoteRunTrigger::Finished) {
-        if let Some(stop) = stopped(cx, &clock, deadline) { trigger = stop; }
+        if let Some(stop) = stopped(cx, &clock, deadline) {
+            trigger = stop;
+        }
     }
-    let report = RemoteRunReport { trigger, task: result.expect("terminal classification"), close, cancel_error };
+    let report = RemoteRunReport {
+        trigger,
+        task: result.expect("terminal classification"),
+        close,
+        cancel_error,
+    };
     drop(retention);
     drop(admission);
     Ok(report)
@@ -711,9 +833,8 @@ async fn run_prepared<R: OwnedRemoteRequest>(
 mod admission;
 pub use admission::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemoteExecutorError, RemotePeerLimits, RemoteServiceAdmission,
-    RemoteQueueLimits, RemoteQueueUsage, RemoteReservation, RemoteReserveError,
-    RemotePriority, RemotePriorityPolicy,
+    RemoteExecutorError, RemotePeerLimits, RemotePriority, RemotePriorityPolicy, RemoteQueueLimits,
+    RemoteQueueUsage, RemoteReservation, RemoteReserveError, RemoteServiceAdmission,
 };
 
 #[cfg(test)]

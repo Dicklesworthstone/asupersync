@@ -86,7 +86,9 @@ impl Reactor for FailingReactor {
 
 #[test]
 fn a_poll_error_is_not_a_follower_and_releases_the_election() {
-    let reactor = Arc::new(FailingReactor { polls: AtomicUsize::new(0) });
+    let reactor = Arc::new(FailingReactor {
+        polls: AtomicUsize::new(0),
+    });
     let io = IoDriverHandle::new(reactor.clone());
     let mut state = RuntimeState::new();
     state.set_io_driver(io.clone());
@@ -110,17 +112,34 @@ fn error_retries_are_bounded_and_do_not_discard_shared_deadlines() {
     let near = Time::from_nanos(10_000_007);
     let far = Time::from_nanos(20_000_000);
     assert_eq!(poll_error_retry_nanos(None, now), IO_POLL_ERROR_RETRY_NANOS);
-    assert_eq!(poll_error_retry_nanos(Some(now), now), IO_POLL_ERROR_RETRY_NANOS);
-    assert_eq!(poll_error_retry_nanos(Some(Time::ZERO), now), IO_POLL_ERROR_RETRY_NANOS);
+    assert_eq!(
+        poll_error_retry_nanos(Some(now), now),
+        IO_POLL_ERROR_RETRY_NANOS
+    );
+    assert_eq!(
+        poll_error_retry_nanos(Some(Time::ZERO), now),
+        IO_POLL_ERROR_RETRY_NANOS
+    );
     assert_eq!(poll_error_retry_nanos(Some(near), now), 7);
-    assert_eq!(poll_error_retry_nanos(Some(far), now), IO_POLL_ERROR_RETRY_NANOS);
-    assert_eq!(select_backoff_deadline(IoPhaseOutcome::PollError, Some(near), None, Some(far)), Some(near));
-    assert_eq!(select_backoff_deadline(IoPhaseOutcome::Follower, Some(near), None, Some(far)), None);
+    assert_eq!(
+        poll_error_retry_nanos(Some(far), now),
+        IO_POLL_ERROR_RETRY_NANOS
+    );
+    assert_eq!(
+        select_backoff_deadline(IoPhaseOutcome::PollError, Some(near), None, Some(far)),
+        Some(near)
+    );
+    assert_eq!(
+        select_backoff_deadline(IoPhaseOutcome::Follower, Some(near), None, Some(far)),
+        None
+    );
 }
 
 #[test]
 fn persistent_errors_return_to_the_poll_loop_through_a_timed_park() {
-    let reactor = Arc::new(FailingReactor { polls: AtomicUsize::new(0) });
+    let reactor = Arc::new(FailingReactor {
+        polls: AtomicUsize::new(0),
+    });
     let io = IoDriverHandle::new(reactor.clone());
     let mut state = RuntimeState::new();
     state.set_io_driver(io);
@@ -133,7 +152,10 @@ fn persistent_errors_return_to_the_poll_loop_through_a_timed_park() {
     let worker_thread = thread::spawn(move || {
         worker.run_loop_until(&mut || reactor.polls.load(Ordering::Relaxed) >= 2, false);
         let metrics = &worker.preemption_metrics;
-        let _ = done_tx.send((metrics.backoff_timeout_parks_total, metrics.follower_indefinite_parks));
+        let _ = done_tx.send((
+            metrics.backoff_timeout_parks_total,
+            metrics.follower_indefinite_parks,
+        ));
     });
     let result = done_rx.recv_timeout(WATCHDOG);
     shutdown.store(true, Ordering::Release);
@@ -150,8 +172,8 @@ fn persistent_errors_return_to_the_poll_loop_through_a_timed_park() {
 #[test]
 fn an_empty_quick_turn_reenters_election_without_losing_idle_return() {
     use crate::runtime::spawn_mailbox::SpawnMailbox;
-    use crate::types::CancelReason;
     use crate::time::VirtualClock;
+    use crate::types::CancelReason;
 
     struct DrainedMailboxReactor {
         mailbox: Arc<SpawnMailbox>,
@@ -182,7 +204,10 @@ fn an_empty_quick_turn_reenters_election_without_losing_idle_return() {
                 // after the leader selected ZERO but before its poll returns.
                 assert_eq!(timeout, Some(Duration::ZERO));
                 let mut commands = Vec::new();
-                assert_eq!(self.mailbox.dequeue_handle_cancels_into(40, &mut commands), 8);
+                assert_eq!(
+                    self.mailbox.dequeue_handle_cancels_into(40, &mut commands),
+                    8
+                );
                 assert!(self.mailbox.is_empty());
                 if let Some(clock) = &self.clock_to_advance {
                     // Make a real timer due after next_task's timer pass.
@@ -216,9 +241,8 @@ fn an_empty_quick_turn_reenters_election_without_losing_idle_return() {
         let mut state = RuntimeState::new();
         state.set_io_driver(io);
         state.set_timer_driver(timers.clone());
-        let _timer = timer_becomes_due.then(|| {
-            timers.register(Time::from_secs(1), Waker::noop().clone())
-        });
+        let _timer =
+            timer_becomes_due.then(|| timers.register(Time::from_secs(1), Waker::noop().clone()));
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         scheduler.attach_spawn_mailbox(mailbox.clone());
@@ -261,8 +285,11 @@ fn an_empty_quick_turn_reenters_election_without_losing_idle_return() {
         };
         assert_eq!(timeouts, expected);
         assert_eq!(indefinite_parks, 0);
-        assert_eq!(timeout_parks, u64::from(timer_becomes_due),
-            "quick-miss re-election must retain the due-deadline kernel backoff");
+        assert_eq!(
+            timeout_parks,
+            u64::from(timer_becomes_due),
+            "quick-miss re-election must retain the due-deadline kernel backoff"
+        );
         assert_eq!(timers.pending_count(), 0);
     }
 }
@@ -297,11 +324,16 @@ mod native {
                 Ok(1) => Poll::Ready(byte[0]),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if let Some(registration) = &this.registration {
-                        assert!(this.io.update_waker(registration.token(), cx.waker().clone()));
+                        assert!(
+                            this.io
+                                .update_waker(registration.token(), cx.waker().clone())
+                        );
                     } else {
-                        this.registration = Some(this.io.register(
-                            &this.stream, Interest::READABLE, cx.waker().clone(),
-                        ).expect("register a genuinely WouldBlock socket"));
+                        this.registration = Some(
+                            this.io
+                                .register(&this.stream, Interest::READABLE, cx.waker().clone())
+                                .expect("register a genuinely WouldBlock socket"),
+                        );
                     }
                     Poll::Pending
                 }
@@ -319,7 +351,12 @@ mod native {
     }
 
     impl Reactor for GatedReactor {
-        fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            source: &dyn Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
             self.inner.register(source, token, interest)
         }
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
@@ -425,36 +462,54 @@ mod native {
         state.set_timer_driver(timers.clone());
         let root = state.create_root_region(Budget::INFINITE);
         let a_io = io.clone();
-        let (a_task, _a_join) = state.create_task(root, Budget::INFINITE, async move {
-            if !busy_leader {
-                assert_eq!(ReadByte { registration: None, stream: a_socket, io: a_io }.await, 0xa1);
-            }
-            let _ = started_tx.send(thread::current().id());
-            let released = release_task_rx.recv_timeout(BLOCKER_WATCHDOG);
-            left_task.store(true, Ordering::Release);
-            assert!(released.is_ok(), "blocked task needed watchdog rescue");
-        }).expect("create leader's task");
+        let (a_task, _a_join) = state
+            .create_task(root, Budget::INFINITE, async move {
+                if !busy_leader {
+                    assert_eq!(
+                        ReadByte {
+                            registration: None,
+                            stream: a_socket,
+                            io: a_io
+                        }
+                        .await,
+                        0xa1
+                    );
+                }
+                let _ = started_tx.send(thread::current().id());
+                let released = release_task_rx.recv_timeout(BLOCKER_WATCHDOG);
+                left_task.store(true, Ordering::Release);
+                assert!(released.is_ok(), "blocked task needed watchdog rescue");
+            })
+            .expect("create leader's task");
         let b_io = io.clone();
         let b_timers = timers.clone();
-        let (b_task, _b_join) = state.create_task(root, Budget::INFINITE, async move {
-            let value = if timer_peer {
-                let deadline = Time::from_secs(1);
-                let mut timer = None;
-                poll_fn(move |cx| {
-                    if b_timers.now() >= deadline {
-                        Poll::Ready(0xb2)
-                    } else {
-                        if timer.is_none() {
-                            timer = Some(b_timers.register(deadline, cx.waker().clone()));
+        let (b_task, _b_join) = state
+            .create_task(root, Budget::INFINITE, async move {
+                let value = if timer_peer {
+                    let deadline = Time::from_secs(1);
+                    let mut timer = None;
+                    poll_fn(move |cx| {
+                        if b_timers.now() >= deadline {
+                            Poll::Ready(0xb2)
+                        } else {
+                            if timer.is_none() {
+                                timer = Some(b_timers.register(deadline, cx.waker().clone()));
+                            }
+                            Poll::Pending
                         }
-                        Poll::Pending
+                    })
+                    .await
+                } else {
+                    ReadByte {
+                        registration: None,
+                        stream: b_socket,
+                        io: b_io,
                     }
-                }).await
-            } else {
-                ReadByte { registration: None, stream: b_socket, io: b_io }.await
-            };
-            let _ = progress_tx.send((value, thread::current().id()));
-        }).expect("create peer's task");
+                    .await
+                };
+                let _ = progress_tx.send((value, thread::current().id()));
+            })
+            .expect("create peer's task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
         scheduler
@@ -469,10 +524,19 @@ mod native {
             leader.execute(a_task);
         }
         follower.execute(b_task);
-        assert_eq!(io.waker_count(), usize::from(!busy_leader) + usize::from(!timer_peer));
+        assert_eq!(
+            io.waker_count(),
+            usize::from(!busy_leader) + usize::from(!timer_peer)
+        );
         assert_eq!(timers.pending_count(), usize::from(timer_peer));
         let mut drained = Events::with_capacity(16);
-        assert_eq!(reactor.inner.poll(&mut drained, Some(Duration::ZERO)).expect("drain registration wakes"), 0);
+        assert_eq!(
+            reactor
+                .inner
+                .poll(&mut drained, Some(Duration::ZERO))
+                .expect("drain registration wakes"),
+            0
+        );
         leader.parker.park_timeout(Duration::ZERO);
         follower.parker.park_timeout(Duration::ZERO);
         let follower_parker = follower.parker.clone();
@@ -494,11 +558,18 @@ mod native {
             }
             leader.run_loop();
         }));
-        let (first_turn, leader_id) = entered_rx.recv_timeout(watchdog).expect("leader owns poll gate");
+        let (first_turn, leader_id) = entered_rx
+            .recv_timeout(watchdog)
+            .expect("leader owns poll gate");
         assert_eq!(first_turn, 0);
         assert!(io.is_polling());
-        running.threads.push(thread::spawn(move || follower.run_loop()));
-        assert!(waiter_is_committed(&follower_parker), "follower is parked before the leader leaves I/O");
+        running
+            .threads
+            .push(thread::spawn(move || follower.run_loop()));
+        assert!(
+            waiter_is_committed(&follower_parker),
+            "follower is parked before the leader leaves I/O"
+        );
         assert!(!follower_parker.notification_pending_for_test());
         if standby_nanos != 0 {
             assert_eq!(
@@ -532,11 +603,18 @@ mod native {
         let still_blocked = !left_blocking_poll.load(Ordering::Acquire);
         let joined = running.stop();
         assert!(joined, "workers shut down without panic");
-        assert!(second_turn.is_ok(), "parked follower did not re-enter reactor election");
-        let (value, executing_peer) = progress.expect("peer progressed without releasing the leader's task");
+        assert!(
+            second_turn.is_ok(),
+            "parked follower did not re-enter reactor election"
+        );
+        let (value, executing_peer) =
+            progress.expect("peer progressed without releasing the leader's task");
         assert_eq!(value, 0xb2);
         assert_ne!(executing_peer, leader_id);
-        assert!(still_blocked, "progress happened only after the blocking task returned");
+        assert!(
+            still_blocked,
+            "progress happened only after the blocking task returned"
+        );
         assert_eq!(timers.pending_count(), 0);
         assert_eq!(io.waker_count(), 0);
     }
@@ -607,8 +685,12 @@ mod native {
         let timers = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
         let (mut leader_writer, leader_socket) = UnixStream::pair().expect("leader socket");
         let (mut probe_writer, probe_socket) = UnixStream::pair().expect("probe socket");
-        leader_socket.set_nonblocking(true).expect("nonblocking leader");
-        probe_socket.set_nonblocking(true).expect("nonblocking probe");
+        leader_socket
+            .set_nonblocking(true)
+            .expect("nonblocking leader");
+        probe_socket
+            .set_nonblocking(true)
+            .expect("nonblocking probe");
         let (leader_started_tx, leader_started_rx) = mpsc::channel();
         let (local_started_tx, local_started_rx) = mpsc::channel();
         let (release_leader_tx, release_leader_rx) = mpsc::channel();
@@ -622,28 +704,43 @@ mod native {
         state.set_timer_driver(timers);
         let root = state.create_root_region(Budget::INFINITE);
         let leader_io = io.clone();
-        let (leader_task, _leader_join) = state.create_task(root, Budget::INFINITE, async move {
-            assert_eq!(ReadByte {
-                registration: None, stream: leader_socket, io: leader_io,
-            }.await, 0xa1);
-            let _ = leader_started_tx.send(thread::current().id());
-            let released = release_leader_rx.recv_timeout(BLOCKER_WATCHDOG);
-            leader_finished.fetch_add(1, Ordering::Release);
-            assert!(released.is_ok(), "leader task needed watchdog rescue");
-        }).expect("create original leader task");
-        let (local_task, _local_join) = state.create_task(root, Budget::INFINITE, async move {
-            let _ = local_started_tx.send(thread::current().id());
-            let released = release_local_rx.recv_timeout(BLOCKER_WATCHDOG);
-            local_finished.fetch_add(1, Ordering::Release);
-            assert!(released.is_ok(), "owner-local task needed watchdog rescue");
-        }).expect("create owner-local queue task");
+        let (leader_task, _leader_join) = state
+            .create_task(root, Budget::INFINITE, async move {
+                assert_eq!(
+                    ReadByte {
+                        registration: None,
+                        stream: leader_socket,
+                        io: leader_io,
+                    }
+                    .await,
+                    0xa1
+                );
+                let _ = leader_started_tx.send(thread::current().id());
+                let released = release_leader_rx.recv_timeout(BLOCKER_WATCHDOG);
+                leader_finished.fetch_add(1, Ordering::Release);
+                assert!(released.is_ok(), "leader task needed watchdog rescue");
+            })
+            .expect("create original leader task");
+        let (local_task, _local_join) = state
+            .create_task(root, Budget::INFINITE, async move {
+                let _ = local_started_tx.send(thread::current().id());
+                let released = release_local_rx.recv_timeout(BLOCKER_WATCHDOG);
+                local_finished.fetch_add(1, Ordering::Release);
+                assert!(released.is_ok(), "owner-local task needed watchdog rescue");
+            })
+            .expect("create owner-local queue task");
         let probe_io = io.clone();
-        let (probe_task, _probe_join) = state.create_task(root, Budget::INFINITE, async move {
-            let value = ReadByte {
-                registration: None, stream: probe_socket, io: probe_io,
-            }.await;
-            let _ = progress_tx.send((value, thread::current().id()));
-        }).expect("create socket probe task");
+        let (probe_task, _probe_join) = state
+            .create_task(root, Budget::INFINITE, async move {
+                let value = ReadByte {
+                    registration: None,
+                    stream: probe_socket,
+                    io: probe_io,
+                }
+                .await;
+                let _ = progress_tx.send((value, thread::current().id()));
+            })
+            .expect("create socket probe task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
         let mut scheduler = ThreeLaneScheduler::new(3, &state);
         scheduler
@@ -658,8 +755,13 @@ mod native {
         successor.execute(probe_task);
         assert_eq!(io.waker_count(), 2);
         let mut drained = Events::with_capacity(16);
-        assert_eq!(reactor.inner.poll(&mut drained, Some(Duration::ZERO))
-            .expect("drain setup wake permits"), 0);
+        assert_eq!(
+            reactor
+                .inner
+                .poll(&mut drained, Some(Duration::ZERO))
+                .expect("drain setup wake permits"),
+            0
+        );
         for worker in [&leader, &follower, &successor] {
             worker.parker.park_timeout(Duration::ZERO);
         }
@@ -673,27 +775,50 @@ mod native {
         let mut running = RunningWorkers {
             shutdown: leader.shutdown.clone(),
             io: io.clone(),
-            parkers: vec![leader.parker.clone(), follower_parker.clone(), successor_parker.clone()],
-            releases: vec![first_tx.clone(), second_tx.clone(), release_leader_tx,
-                release_local_tx, continue_follower_tx.clone()],
+            parkers: vec![
+                leader.parker.clone(),
+                follower_parker.clone(),
+                successor_parker.clone(),
+            ],
+            releases: vec![
+                first_tx.clone(),
+                second_tx.clone(),
+                release_leader_tx,
+                release_local_tx,
+                continue_follower_tx.clone(),
+            ],
             threads: Vec::new(),
         };
-        running.threads.push(thread::spawn(move || leader.run_loop()));
-        let (turn, leader_id) = entered_rx.recv_timeout(watchdog).expect("original leader owns reactor");
+        running
+            .threads
+            .push(thread::spawn(move || leader.run_loop()));
+        let (turn, leader_id) = entered_rx
+            .recv_timeout(watchdog)
+            .expect("original leader owns reactor");
         assert_eq!(turn, 0);
         running.threads.push(thread::spawn(move || {
             let mut paused = false;
-            follower.run_loop_until(&mut || {
-                if !paused && pause.load(Ordering::Acquire) {
-                    paused = true;
-                    let _ = follower_returned_tx.send(thread::current().id());
-                    assert!(continue_follower_rx.recv_timeout(BLOCKER_WATCHDOG).is_ok(),
-                        "controller must release the promoted follower");
-                }
-                false
-            }, false);
+            follower.run_loop_until(
+                &mut || {
+                    if !paused && pause.load(Ordering::Acquire) {
+                        paused = true;
+                        let _ = follower_returned_tx.send(thread::current().id());
+                        assert!(
+                            continue_follower_rx.recv_timeout(BLOCKER_WATCHDOG).is_ok(),
+                            "controller must release the promoted follower"
+                        );
+                    }
+                    false
+                },
+                false,
+            );
         }));
-        let follower_id = running.threads.last().expect("follower thread").thread().id();
+        let follower_id = running
+            .threads
+            .last()
+            .expect("follower thread")
+            .thread()
+            .id();
         if standby_nanos != 0 {
             // The first follower to park claims the standby role: make that
             // worker 1, so worker 2 parks as a plain follower.
@@ -707,8 +832,15 @@ mod native {
                 "worker 1 stands by while the leader polls"
             );
         }
-        running.threads.push(thread::spawn(move || successor.run_loop()));
-        let successor_id = running.threads.last().expect("successor thread").thread().id();
+        running
+            .threads
+            .push(thread::spawn(move || successor.run_loop()));
+        let successor_id = running
+            .threads
+            .last()
+            .expect("successor thread")
+            .thread()
+            .id();
         assert!(waiter_is_committed(&follower_parker));
         assert!(waiter_is_committed(&successor_parker));
         assert!(!follower_parker.notification_pending_for_test());
@@ -717,29 +849,50 @@ mod native {
         // predicate call can therefore only occur after follower promotion.
         pause_follower.store(true, Ordering::Release);
         coordinator.next_wake.store(1, Ordering::Relaxed);
-        leader_writer.write_all(&[0xa1]).expect("wake original leader's task");
+        leader_writer
+            .write_all(&[0xa1])
+            .expect("wake original leader's task");
         first_tx.send(()).expect("release first reactor gate");
         assert_eq!(leader_started_rx.recv_timeout(watchdog), Ok(leader_id));
         assert_eq!(follower_returned_rx.recv_timeout(watchdog), Ok(follower_id));
-        assert!(!io.is_polling(), "promoted follower has not reached election");
+        assert!(
+            !io.is_polling(),
+            "promoted follower has not reached election"
+        );
         assert!(successor_parker.wait_committed_for_test());
         assert!(!successor_parker.notification_pending_for_test());
         // Route the task through the real non-stealable queue. This is a
         // controlled queue-placement fixture, not a spawn_local API test.
         // Match its targeted Parker + reactor wake, with no global wake that
         // could conceal the missing responsibility transfer to worker 2.
-        state.lock().unwrap().task(local_task).expect("live local task").wake_state.notify();
+        state
+            .lock()
+            .unwrap()
+            .task(local_task)
+            .expect("live local task")
+            .wake_state
+            .notify();
         follower_queue.lock().push_back(local_task);
         follower_parker.unpark();
-        io.wake().expect("owner-local wake reaches the reactor only");
-        continue_follower_tx.send(()).expect("allow owner-local dispatch");
+        io.wake()
+            .expect("owner-local wake reaches the reactor only");
+        continue_follower_tx
+            .send(())
+            .expect("allow owner-local dispatch");
         assert_eq!(local_started_rx.recv_timeout(watchdog), Ok(follower_id));
         let next_poll = entered_rx.recv_timeout(watchdog);
         let progress = if let Ok((turn, worker_id)) = next_poll {
             assert_eq!(turn, 1);
-            assert_eq!(worker_id, successor_id, "third worker must take the passed-on reactor");
-            probe_writer.write_all(&[0xc3]).expect("make third socket readable");
-            second_tx.send(()).expect("release successor's reactor turn");
+            assert_eq!(
+                worker_id, successor_id,
+                "third worker must take the passed-on reactor"
+            );
+            probe_writer
+                .write_all(&[0xc3])
+                .expect("make third socket readable");
+            second_tx
+                .send(())
+                .expect("release successor's reactor turn");
             progress_rx.recv_timeout(watchdog)
         } else {
             Err(mpsc::RecvTimeoutError::Timeout)
@@ -747,9 +900,15 @@ mod native {
         let blockers_still_running = completed_blockers.load(Ordering::Acquire) == 0;
         let joined = running.stop();
         assert!(joined, "all workers shut down without panic");
-        assert!(next_poll.is_ok(), "promoted follower dropped reactor responsibility at dispatch");
+        assert!(
+            next_poll.is_ok(),
+            "promoted follower dropped reactor responsibility at dispatch"
+        );
         assert_eq!(progress, Ok((0xc3, successor_id)));
-        assert!(blockers_still_running, "socket progress waited for a blocking task to return");
+        assert!(
+            blockers_still_running,
+            "socket progress waited for a blocking task to return"
+        );
         assert_eq!(io.waker_count(), 0);
     }
 

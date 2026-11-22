@@ -1,13 +1,15 @@
 //! Explicit progressive decoding with pool admission held through validation.
 
 use super::{
-    ClientError, ClientRequestBuilder, HttpClient, Method, ParsedUrl,
-    PooledClientIncomingBody, PooledClientStreamingResponse, PooledStreamDeadline,
-    PooledStreamOwner, cancellation_reported_as_cancelled, check_cx, has_header,
+    ClientError, ClientRequestBuilder, HttpClient, Method, ParsedUrl, PooledClientIncomingBody,
+    PooledClientStreamingResponse, PooledStreamDeadline, PooledStreamOwner,
+    cancellation_reported_as_cancelled, check_cx, has_header,
 };
 use crate::Cx;
 use crate::bytes::BytesCursor;
-use crate::http::body::{Body, ContentDecodeError, ContentDecodeLimits, ContentDecodedBody, Frame, SizeHint};
+use crate::http::body::{
+    Body, ContentDecodeError, ContentDecodeLimits, ContentDecodedBody, Frame, SizeHint,
+};
 use crate::http::decode::{ContentDecodePlan, ContentDecoder, declared_empty, invalidated_field};
 use crate::http::h1::codec::HttpError;
 use crate::http::h1::stream::ResponseHead;
@@ -21,7 +23,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 const STREAM_CODINGS: &str = if cfg!(feature = "compression") {
-    if cfg!(feature = "zstd") { "gzip, deflate, br, zstd" } else { "gzip, deflate, br" }
+    if cfg!(feature = "zstd") {
+        "gzip, deflate, br, zstd"
+    } else {
+        "gzip, deflate, br"
+    }
 } else if cfg!(feature = "zstd") {
     "zstd"
 } else {
@@ -106,7 +112,10 @@ impl Body for RetainedEncodedBody {
     type Data = BytesCursor;
     type Error = ClientError;
 
-    fn poll_frame(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Result<Frame<BytesCursor>, ClientError>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<BytesCursor>, ClientError>>> {
         let this = self.get_mut();
         let Some(pooled) = this.body.as_mut() else {
             return Poll::Ready(None);
@@ -120,28 +129,36 @@ impl Body for RetainedEncodedBody {
             (this.metadata_remaining, &result)
         {
             let Some(bytes) = metadata_size(
-                trailers.iter().map(|(name, value)| (name.as_str().len(), value.as_bytes().len())),
+                trailers
+                    .iter()
+                    .map(|(name, value)| (name.as_str().len(), value.as_bytes().len())),
                 remaining,
-            )
-            else {
+            ) else {
                 // Check original fields before the decoder removes encoded-body
                 // metadata, and close before any pool waiter can reuse the socket.
                 drop(this.body.take());
-                return Poll::Ready(Some(Err(ClientError::HttpError(HttpError::HeadersTooLarge))));
+                return Poll::Ready(Some(Err(ClientError::HttpError(
+                    HttpError::HeadersTooLarge,
+                ))));
             };
             this.metadata_remaining = Some(remaining - bytes);
         }
         match result {
             Poll::Ready(Some(Err(error))) => {
                 let error = cancellation_reported_as_cancelled::<()>(
-                    &this.cx, Err(ClientError::from(error)),
-                ).expect_err("an input error remains an error");
+                    &this.cx,
+                    Err(ClientError::from(error)),
+                )
+                .expect_err("an input error remains an error");
                 drop(this.body.take());
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(frame) => {
                 if frame.is_none()
-                    || this.body.as_ref().and_then(|pooled| pooled.body.as_ref())
+                    || this
+                        .body
+                        .as_ref()
+                        .and_then(|pooled| pooled.body.as_ref())
                         .is_some_and(Body::is_end_stream)
                 {
                     this.park_completed();
@@ -157,7 +174,9 @@ impl Body for RetainedEncodedBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.body.as_ref().map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
+        self.body
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
     }
 }
 
@@ -185,7 +204,10 @@ impl Body for DecodedClientIncomingBody {
     type Data = BytesCursor;
     type Error = ContentDecodeError<ClientError>;
 
-    fn poll_frame(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Option<Result<Frame<BytesCursor>, Self::Error>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<BytesCursor>, Self::Error>>> {
         let this = self.get_mut();
         if this.decoder.is_none() {
             return Poll::Ready(None);
@@ -210,7 +232,9 @@ impl Body for DecodedClientIncomingBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.decoder.as_ref().map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
+        self.decoder
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
     }
 }
 
@@ -223,7 +247,11 @@ fn decode_response(
 ) -> Result<DecodedClientStreamingResponse, ClientError> {
     let metadata_remaining = if let Some(limit) = metadata_limit {
         let bytes = metadata_size(
-            response.head.headers.iter().map(|(name, value)| (name.len(), value.len())),
+            response
+                .head
+                .headers
+                .iter()
+                .map(|(name, value)| (name.len(), value.len())),
             limit,
         )
         .ok_or(ClientError::HttpError(HttpError::HeadersTooLarge))?;
@@ -232,20 +260,29 @@ fn decode_response(
         None
     };
     let map_error = |error| ClientError::HttpError(HttpError::Io(error));
-    let decoder = ContentDecoder::for_response(method, response.head.status, &response.head.headers)
-        .map_err(map_error)?;
-    let transformed = decoder.as_ref().is_some_and(|decoder| !decoder.is_identity());
-    let empty = declared_empty(&response.head.headers) && response.body.size_hint().exact() == Some(0);
+    let decoder =
+        ContentDecoder::for_response(method, response.head.status, &response.head.headers)
+            .map_err(map_error)?;
+    let transformed = decoder
+        .as_ref()
+        .is_some_and(|decoder| !decoder.is_identity());
+    let empty =
+        declared_empty(&response.head.headers) && response.body.size_hint().exact() == Some(0);
     let decoder = match decoder {
         Some(decoder) if !empty => decoder,
         _ => ContentDecoder::from_fields(std::iter::empty()).map_err(map_error)?,
     };
     let plan = ContentDecodePlan::new(decoder, limits).map_err(map_error)?;
-    if response.body.size_hint().lower() > u64::try_from(limits.max_encoded_bytes()).unwrap_or(u64::MAX) {
+    if response.body.size_hint().lower()
+        > u64::try_from(limits.max_encoded_bytes()).unwrap_or(u64::MAX)
+    {
         return Err(ClientError::HttpError(HttpError::BodyTooLarge));
     }
     if transformed {
-        response.head.headers.retain(|(name, _)| !invalidated_field(name));
+        response
+            .head
+            .headers
+            .retain(|(name, _)| !invalidated_field(name));
     }
     // The request-level owner was created before pool wait/redirects and is
     // retained intact. The raw body's duplicate timer/registration can retire.
@@ -271,7 +308,10 @@ fn decode_response(
 fn metadata_size(fields: impl Iterator<Item = (usize, usize)>, limit: usize) -> Option<usize> {
     let mut bytes = 0usize;
     for (name, value) in fields {
-        let total = bytes.checked_add(name)?.checked_add(value)?.checked_add(4)?;
+        let total = bytes
+            .checked_add(name)?
+            .checked_add(value)?
+            .checked_add(4)?;
         if total > limit {
             return None;
         }
@@ -290,7 +330,8 @@ async fn drive_head<T>(
             return Poll::Ready(Err(error));
         }
         future.as_mut().poll(task)
-    }).await
+    })
+    .await
 }
 
 impl HttpClient {
@@ -324,7 +365,8 @@ impl HttpClient {
         body: Vec<u8>,
         limits: ContentDecodeLimits,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
-        self.request_streaming_decoded_timeout(cx, method, url, headers, body, limits, None, None).await
+        self.request_streaming_decoded_timeout(cx, method, url, headers, body, limits, None, None)
+            .await
     }
 
     /// Protocol adapters can bound the combined original response headers and
@@ -341,8 +383,16 @@ impl HttpClient {
         metadata_limit: usize,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
         self.request_streaming_decoded_timeout(
-            cx, method, url, headers, body, limits, None, Some(metadata_limit),
-        ).await
+            cx,
+            method,
+            url,
+            headers,
+            body,
+            limits,
+            None,
+            Some(metadata_limit),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -363,9 +413,13 @@ impl HttpClient {
         let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
         let parsed = ParsedUrl::parse(url)?;
         self.advertise_stream_decoding(&mut headers);
-        let (method, response) = drive_head(&mut owner,
-            self.execute_with_redirects_pooled_streaming_method(cx, method, parsed, headers, body, &deadline),
-        ).await?;
+        let (method, response) = drive_head(
+            &mut owner,
+            self.execute_with_redirects_pooled_streaming_method(
+                cx, method, parsed, headers, body, &deadline,
+            ),
+        )
+        .await?;
         decode_response(response, owner, &method, limits, metadata_limit)
     }
 
@@ -388,7 +442,8 @@ impl HttpClient {
         B: Body,
         B::Error: fmt::Display,
     {
-        self.request_with_body_decoded_timeout(cx, method, url, headers, body, limits, None).await
+        self.request_with_body_decoded_timeout(cx, method, url, headers, body, limits, None)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -411,9 +466,11 @@ impl HttpClient {
         let deadline = PooledStreamDeadline::capture(cx, effective);
         let mut owner = PooledStreamOwner::new(cx.clone(), &deadline);
         self.advertise_stream_decoding(&mut headers);
-        let response = drive_head(&mut owner,
+        let response = drive_head(
+            &mut owner,
             self.request_with_body_timeout(cx, method.clone(), url, headers, body, timeout),
-        ).await?;
+        )
+        .await?;
         decode_response(response, owner, &method, limits, None)
     }
 
@@ -454,9 +511,18 @@ impl ClientRequestBuilder<'_> {
         cx: &Cx,
         limits: ContentDecodeLimits,
     ) -> Result<DecodedClientStreamingResponse, ClientError> {
-        self.client.request_streaming_decoded_timeout(
-            cx, self.method, &self.url, self.headers, self.body, limits, self.timeout, None,
-        ).await
+        self.client
+            .request_streaming_decoded_timeout(
+                cx,
+                self.method,
+                &self.url,
+                self.headers,
+                self.body,
+                limits,
+                self.timeout,
+                None,
+            )
+            .await
     }
 
     /// Stream a one-shot request body and decode the response on demand.
@@ -477,9 +543,17 @@ impl ClientRequestBuilder<'_> {
                 "a streaming request cannot also contain a buffered body",
             )));
         }
-        self.client.request_with_body_decoded_timeout(
-            cx, self.method, &self.url, self.headers, body, limits, self.timeout,
-        ).await
+        self.client
+            .request_with_body_decoded_timeout(
+                cx,
+                self.method,
+                &self.url,
+                self.headers,
+                body,
+                limits,
+                self.timeout,
+            )
+            .await
     }
 }
 
@@ -509,7 +583,9 @@ mod tests {
     // intentional: this lifetime boundary must work even without codec features.
     #[test]
     fn decoded_body_keeps_tightest_original_deadline_after_wire_eof() {
-        for (budget_at, client_timeout, call_timeout) in [(110, 30, 20), (130, 10, 20), (130, 20, 10)] {
+        for (budget_at, client_timeout, call_timeout) in
+            [(110, 30, 20), (130, 10, 20), (130, 20, 10)]
+        {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -518,14 +594,21 @@ mod tests {
                 let mut socket = loop {
                     match listener.accept() {
                         Ok((socket, _)) => break socket,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < until => {
+                        Err(error)
+                            if error.kind() == io::ErrorKind::WouldBlock
+                                && Instant::now() < until =>
+                        {
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         other => panic!("bounded decoded-client accept failed: {other:?}"),
                     }
                 };
-                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut head = Vec::new();
                 while !head.ends_with(b"\r\n\r\n") {
                     assert!(head.len() < 16 * 1024);
@@ -533,51 +616,88 @@ mod tests {
                     socket.read_exact(&mut byte).unwrap();
                     head.push(byte[0]);
                 }
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcdefgh").unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcdefgh")
+                    .unwrap();
                 let mut byte = [0];
                 match socket.read(&mut byte) {
                     Ok(0) => {}
-                    Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted) => {}
-                    other => panic!("expired decoded body must close its reserved socket: {other:?}"),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                        ) => {}
+                    other => {
+                        panic!("expired decoded body must close its reserved socket: {other:?}")
+                    }
                 }
             });
             let runtime = RuntimeBuilder::current_thread()
                 .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
-                .build().unwrap();
+                .build()
+                .unwrap();
             let driver = runtime.request_cx_with_budget(Budget::INFINITE);
             let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100)));
             let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
             let owner = Cx::new_with_drivers(
-                RegionId::new_for_test(0, 1), TaskId::new_for_test(301, 0),
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(301, 0),
                 Budget::INFINITE.with_deadline(Time::from_nanos(budget_at)),
-                None, None, None, Some(timer.clone()), None,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
             );
             let foreign_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(1_000_000)));
             let foreign_timer = TimerDriverHandle::with_virtual_clock(foreign_clock);
             let foreign = Cx::new_with_drivers(
-                RegionId::new_for_test(0, 1), TaskId::new_for_test(302, 0),
-                Budget::INFINITE, None, None, None, Some(foreign_timer.clone()), None,
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(302, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(foreign_timer.clone()),
+                None,
             );
             let client = HttpClient::builder()
-                .request_timeout(Duration::from_nanos(client_timeout)).build();
+                .request_timeout(Duration::from_nanos(client_timeout))
+                .build();
             runtime.block_on_with_cx(driver, async {
-                let mut response = client.get(&url)
+                let mut response = client
+                    .get(&url)
                     .timeout(Duration::from_nanos(call_timeout))
-                    .send_streaming_decoded(&owner,
-                        ContentDecodeLimits::new(8, 8).with_chunk_size(NonZeroUsize::new(1).unwrap()),
-                    ).await.unwrap();
+                    .send_streaming_decoded(
+                        &owner,
+                        ContentDecodeLimits::new(8, 8)
+                            .with_chunk_size(NonZeroUsize::new(1).unwrap()),
+                    )
+                    .await
+                    .unwrap();
                 let mut provisional = Vec::new();
                 loop {
                     let frame = poll_fn(|task| Pin::new(&mut response.body).poll_frame(task)).await;
-                    let Some(Ok(Frame::Data(data))) = frame else { panic!("expected provisional data: {frame:?}"); };
+                    let Some(Ok(Frame::Data(data))) = frame else {
+                        panic!("expected provisional data: {frame:?}");
+                    };
                     provisional.extend_from_slice(data.chunk());
-                    if response.body.completed.lock().is_some() { break; }
+                    if response.body.completed.lock().is_some() {
+                        break;
+                    }
                 }
                 assert!(b"abcdefgh".starts_with(&provisional));
-                assert!(!response.body.is_end_stream(), "decoded terminal verdict is still outstanding");
+                assert!(
+                    !response.body.is_end_stream(),
+                    "decoded terminal verdict is still outstanding"
+                );
                 assert_eq!(client.pool_stats().idle_connections, 0);
                 assert_eq!(client.pool_stats().total_connections, 1);
-                assert_eq!(timer.pending_count(), 1, "only the outer original deadline remains");
+                assert_eq!(
+                    timer.pending_count(),
+                    1,
+                    "only the outer original deadline remains"
+                );
                 let _ambient = Cx::set_current(Some(foreign));
                 assert_eq!(foreign_timer.process_timers(), 0);
                 clock.advance(9);
@@ -589,9 +709,16 @@ mod tests {
                 clock.advance(1);
                 assert_eq!(timer.process_timers(), 1);
                 assert!(wakes.0.load(Ordering::SeqCst) > 0);
-                assert!(matches!(Pin::new(&mut response.body).poll_frame(&mut task),
-                    Poll::Ready(Some(Err(ContentDecodeError::Body(ClientError::DeadlineExceeded))))));
-                assert!(matches!(Pin::new(&mut response.body).poll_frame(&mut task), Poll::Ready(None)));
+                assert!(matches!(
+                    Pin::new(&mut response.body).poll_frame(&mut task),
+                    Poll::Ready(Some(Err(ContentDecodeError::Body(
+                        ClientError::DeadlineExceeded
+                    ))))
+                ));
+                assert!(matches!(
+                    Pin::new(&mut response.body).poll_frame(&mut task),
+                    Poll::Ready(None)
+                ));
                 assert_eq!(client.pool_stats().total_connections, 0);
                 assert!(owner.inner.read().cancel_waker_registrations.is_empty());
                 assert_eq!(timer.pending_count(), 0);

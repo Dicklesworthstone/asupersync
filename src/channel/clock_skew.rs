@@ -36,9 +36,9 @@
 //! // skewed.now() returns base_clock.now() + 50ms
 //! ```
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::pl::Mutex;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use crate::evidence_sink::EvidenceSink;
 use crate::lab::chaos::ChaosRng;

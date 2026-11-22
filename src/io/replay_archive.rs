@@ -23,10 +23,10 @@
 //! opening. Header identities and payload length are public. Original tapes,
 //! caller copies, files and swap remain outside these zeroizing byte owners.
 
-use super::replay_session::{RecordedSession, SessionDecodeLimits, SessionTapeError};
 use super::replay_session::ordered::{
     OrderedRecordedSession, OrderedSessionDecodeLimits, OrderedSessionTapeError,
 };
+use super::replay_session::{RecordedSession, SessionDecodeLimits, SessionTapeError};
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
 use std::fmt;
@@ -55,7 +55,8 @@ pub struct ReplayArchiveBinding {
 
 impl fmt::Debug for ReplayArchiveBinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplayArchiveBinding").finish_non_exhaustive()
+        f.debug_struct("ReplayArchiveBinding")
+            .finish_non_exhaustive()
     }
 }
 
@@ -112,7 +113,9 @@ impl ReplayArchiveKey {
     /// Copies retained by that boundary are not erased by this owner.
     #[must_use]
     pub fn new(bytes: [u8; 32]) -> Self {
-        Self { bytes: Zeroizing::new(bytes) }
+        Self {
+            bytes: Zeroizing::new(bytes),
+        }
     }
 
     /// Consume this key into one non-cloneable, non-wrapping nonce namespace.
@@ -122,7 +125,11 @@ impl ReplayArchiveKey {
     /// a fresh key per sealer or an independently durable namespace allocator.
     #[must_use]
     pub fn into_sealer(self, unique_nonce_prefix: [u8; 16]) -> ReplayArchiveSealer {
-        ReplayArchiveSealer { key: self, prefix: unique_nonce_prefix, next: Some(0) }
+        ReplayArchiveSealer {
+            key: self,
+            prefix: unique_nonce_prefix,
+            next: Some(0),
+        }
     }
 
     /// Authenticate and decrypt, then run every existing session/component limit.
@@ -139,7 +146,13 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         limits: SessionDecodeLimits,
     ) -> Result<RecordedSession, ReplayArchiveError> {
-        let plaintext = self.open_payload(bytes, expected, SESSION, max_encrypted_bytes, limits.max_encoded_bytes)?;
+        let plaintext = self.open_payload(
+            bytes,
+            expected,
+            SESSION,
+            max_encrypted_bytes,
+            limits.max_encoded_bytes,
+        )?;
         Ok(RecordedSession::from_canonical_bytes(&plaintext, limits)?)
     }
 
@@ -156,8 +169,16 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         limits: OrderedSessionDecodeLimits,
     ) -> Result<OrderedRecordedSession, ReplayArchiveError> {
-        let plaintext = self.open_payload(bytes, expected, ORDERED, max_encrypted_bytes, limits.max_encoded_bytes)?;
-        Ok(OrderedRecordedSession::from_canonical_bytes(&plaintext, limits)?)
+        let plaintext = self.open_payload(
+            bytes,
+            expected,
+            ORDERED,
+            max_encrypted_bytes,
+            limits.max_encoded_bytes,
+        )?;
+        Ok(OrderedRecordedSession::from_canonical_bytes(
+            &plaintext, limits,
+        )?)
     }
 
     /// Authenticate and REQUIRE poll-aware V2 data. A validly encrypted V1 tape
@@ -170,8 +191,16 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         limits: OrderedSessionDecodeLimits,
     ) -> Result<OrderedRecordedSession, ReplayArchiveError> {
-        let plaintext = self.open_payload(bytes, expected, ORDERED, max_encrypted_bytes, limits.max_encoded_bytes)?;
-        Ok(OrderedRecordedSession::from_poll_aware_bytes(&plaintext, limits)?)
+        let plaintext = self.open_payload(
+            bytes,
+            expected,
+            ORDERED,
+            max_encrypted_bytes,
+            limits.max_encoded_bytes,
+        )?;
+        Ok(OrderedRecordedSession::from_poll_aware_bytes(
+            &plaintext, limits,
+        )?)
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
@@ -187,17 +216,27 @@ impl ReplayArchiveKey {
         max_encrypted_bytes: usize,
         max_plaintext_bytes: usize,
     ) -> Result<Zeroizing<Vec<u8>>, ReplayArchiveError> {
-        if bytes.len() > max_encrypted_bytes { return Err(ReplayArchiveError::EncodedLimit); }
-        if bytes.len() < OVERHEAD { return Err(ReplayArchiveError::Length); }
-        if &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes()
-            || bytes[12] != profile || bytes[13..16] != [0; 3]
+        if bytes.len() > max_encrypted_bytes {
+            return Err(ReplayArchiveError::EncodedLimit);
+        }
+        if bytes.len() < OVERHEAD {
+            return Err(ReplayArchiveError::Length);
+        }
+        if &bytes[..8] != MAGIC
+            || bytes[8..12] != VERSION.to_le_bytes()
+            || bytes[12] != profile
+            || bytes[13..16] != [0; 3]
         {
             return Err(ReplayArchiveError::Format);
         }
         let declared = u64::from_le_bytes(bytes[16..24].try_into().expect("fixed length field"));
         let length = usize::try_from(declared).map_err(|_| ReplayArchiveError::Length)?;
-        if length.checked_add(OVERHEAD) != Some(bytes.len()) { return Err(ReplayArchiveError::Length); }
-        if length > max_plaintext_bytes { return Err(ReplayArchiveError::PlaintextLimit); }
+        if length.checked_add(OVERHEAD) != Some(bytes.len()) {
+            return Err(ReplayArchiveError::Length);
+        }
+        if length > max_plaintext_bytes {
+            return Err(ReplayArchiveError::PlaintextLimit);
+        }
         // Identities are public. Fail early without allocating; changing either
         // the stored identity or expected identity can never bypass the AEAD.
         if bytes[48..80] != expected.source || bytes[80..HEADER] != expected.capture {
@@ -207,11 +246,18 @@ impl ReplayArchiveKey {
         let nonce = XNonce::try_from(&bytes[24..48]).expect("fixed 24-byte nonce field");
         let tag = Tag::try_from(&bytes[end..]).expect("fixed 16-byte authentication tag");
         let mut plaintext = Zeroizing::new(Vec::new());
-        plaintext.try_reserve_exact(length).map_err(|_| ReplayArchiveError::Allocation)?;
+        plaintext
+            .try_reserve_exact(length)
+            .map_err(|_| ReplayArchiveError::Allocation)?;
         plaintext.extend_from_slice(&bytes[HEADER..end]);
-        self.cipher().decrypt_inout_detached(
-            &nonce, &bytes[..HEADER], plaintext.as_mut_slice().into(), &tag,
-        ).map_err(|_| ReplayArchiveError::Authentication)?;
+        self.cipher()
+            .decrypt_inout_detached(
+                &nonce,
+                &bytes[..HEADER],
+                plaintext.as_mut_slice().into(),
+                &tag,
+            )
+            .map_err(|_| ReplayArchiveError::Authentication)?;
         Ok(plaintext)
     }
 }
@@ -227,7 +273,8 @@ pub struct ReplayArchiveSealer {
 impl fmt::Debug for ReplayArchiveSealer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReplayArchiveSealer")
-            .field("exhausted", &self.next.is_none()).finish_non_exhaustive()
+            .field("exhausted", &self.next.is_none())
+            .finish_non_exhaustive()
     }
 }
 
@@ -265,8 +312,12 @@ impl ReplayArchiveSealer {
     }
 
     fn plaintext_limit(&self, max_encrypted_bytes: usize) -> Result<usize, ReplayArchiveError> {
-        if self.next.is_none() { return Err(ReplayArchiveError::NonceExhausted); }
-        max_encrypted_bytes.checked_sub(OVERHEAD).ok_or(ReplayArchiveError::EncodedLimit)
+        if self.next.is_none() {
+            return Err(ReplayArchiveError::NonceExhausted);
+        }
+        max_encrypted_bytes
+            .checked_sub(OVERHEAD)
+            .ok_or(ReplayArchiveError::EncodedLimit)
     }
 
     fn take_nonce(&mut self) -> Result<[u8; 24], ReplayArchiveError> {
@@ -286,11 +337,18 @@ impl ReplayArchiveSealer {
         max_encrypted_bytes: usize,
     ) -> Result<EncryptedReplayArchive, ReplayArchiveError> {
         let limit = self.plaintext_limit(max_encrypted_bytes)?;
-        if plaintext.len() > limit { return Err(ReplayArchiveError::EncodedLimit); }
-        let size = plaintext.len().checked_add(OVERHEAD).ok_or(ReplayArchiveError::Length)?;
+        if plaintext.len() > limit {
+            return Err(ReplayArchiveError::EncodedLimit);
+        }
+        let size = plaintext
+            .len()
+            .checked_add(OVERHEAD)
+            .ok_or(ReplayArchiveError::Length)?;
         let length = u64::try_from(plaintext.len()).map_err(|_| ReplayArchiveError::Length)?;
         let mut out = EncryptedReplayArchive(Zeroizing::new(Vec::new()));
-        out.0.try_reserve_exact(size).map_err(|_| ReplayArchiveError::Allocation)?;
+        out.0
+            .try_reserve_exact(size)
+            .map_err(|_| ReplayArchiveError::Allocation)?;
         let nonce_bytes = self.take_nonce()?;
         out.0.extend_from_slice(MAGIC);
         out.0.extend_from_slice(&VERSION.to_le_bytes());
@@ -303,7 +361,10 @@ impl ReplayArchiveSealer {
         out.0.extend_from_slice(plaintext);
         let nonce = XNonce::try_from(nonce_bytes.as_slice()).expect("fixed 24-byte nonce");
         let (header, payload) = out.0.split_at_mut(HEADER);
-        let tag = self.key.cipher().encrypt_inout_detached(&nonce, header, payload.into())
+        let tag = self
+            .key
+            .cipher()
+            .encrypt_inout_detached(&nonce, header, payload.into())
             .map_err(|_| ReplayArchiveError::Encryption)?;
         out.0.extend_from_slice(&tag);
         debug_assert_eq!(out.0.len(), size);
@@ -321,12 +382,15 @@ pub struct EncryptedReplayArchive(Zeroizing<Vec<u8>>);
 impl fmt::Debug for EncryptedReplayArchive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EncryptedReplayArchive")
-            .field("encrypted_bytes", &self.0.len()).finish_non_exhaustive()
+            .field("encrypted_bytes", &self.0.len())
+            .finish_non_exhaustive()
     }
 }
 
 impl AsRef<[u8]> for EncryptedReplayArchive {
-    fn as_ref(&self) -> &[u8] { &self.0 }
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 #[cfg(test)]

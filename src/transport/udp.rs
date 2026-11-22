@@ -202,13 +202,15 @@ impl SymbolSink for UdpSymbolSink {
         }
         // The address is already numeric, so the hot path bypasses DNS while
         // preserving the ordinary send_to capability gate.
-        if let Err(error) = crate::cx::io_gate::require_ambient_io("transport::UdpSymbolSink::send") {
+        if let Err(error) = crate::cx::io_gate::require_ambient_io("transport::UdpSymbolSink::send")
+        {
             return Poll::Ready(Err(error.into()));
         }
         if cancelled() {
             return Poll::Ready(Err(SinkError::Cancelled));
         }
-        let encoded = match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch()) {
+        let encoded = match encode_symbol_batch(std::slice::from_ref(&symbol), this.limits.batch())
+        {
             Ok(encoded) => encoded,
             Err(error) => {
                 return Poll::Ready(Err(SinkError::SendFailed {
@@ -375,7 +377,9 @@ impl SymbolStream for UdpSymbolStream {
             return Poll::Ready(None);
         }
         this.ended = true;
-        if let Err(error) = crate::cx::io_gate::require_ambient_io("transport::UdpSymbolStream::receive") {
+        if let Err(error) =
+            crate::cx::io_gate::require_ambient_io("transport::UdpSymbolStream::receive")
+        {
             return Poll::Ready(Some(Err(error.into())));
         }
         for _ in 0..DATAGRAMS_PER_POLL {
@@ -394,7 +398,8 @@ impl SymbolStream for UdpSymbolStream {
                     {
                         this.stats.datagrams_received =
                             this.stats.datagrams_received.saturating_add(1);
-                        this.stats.rejected_oversize = this.stats.rejected_oversize.saturating_add(1);
+                        this.stats.rejected_oversize =
+                            this.stats.rejected_oversize.saturating_add(1);
                         continue;
                     }
                     if error.kind() == io::ErrorKind::Interrupted {
@@ -437,11 +442,7 @@ impl SymbolStream for UdpSymbolStream {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.ended {
-            (0, Some(0))
-        } else {
-            (0, None)
-        }
+        if self.ended { (0, Some(0)) } else { (0, None) }
     }
 
     fn is_exhausted(&self) -> bool {

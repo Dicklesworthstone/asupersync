@@ -44,10 +44,7 @@ fn buffered_reads_reuse_the_chunk_allocation_until_consumed() {
 
 #[test]
 fn read_and_buffered_interfaces_share_one_cursor() {
-    let mut reader = StreamReader::new(stream::iter([
-        Ok(b"abcde".to_vec()),
-        Ok(b"fgh".to_vec()),
-    ]));
+    let mut reader = StreamReader::new(stream::iter([Ok(b"abcde".to_vec()), Ok(b"fgh".to_vec())]));
     Pin::new(&mut reader).consume(usize::MAX); // No read-ahead, nothing to consume.
     assert_eq!(buffered(&mut reader), b"abcde");
     Pin::new(&mut reader).consume(0);
@@ -68,7 +65,10 @@ fn read_and_buffered_interfaces_share_one_cursor() {
 fn switching_to_buffered_reads_preserves_a_deferred_error() {
     let mut reader = StreamReader::new(stream::iter([
         Ok(b"prefix".to_vec()),
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "deferred sentinel")),
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "deferred sentinel",
+        )),
         Ok(b"tail".to_vec()),
     ]));
     let mut output = [0; 32];
@@ -76,8 +76,7 @@ fn switching_to_buffered_reads_preserves_a_deferred_error() {
     assert_eq!(&output[..6], b"prefix");
     // A zero-length ordinary read must not consume the deferred error either.
     assert_eq!(read_once(&mut reader, &mut []), 0);
-    let error = Pin::new(&mut reader)
-        .poll_fill_buf(&mut Context::from_waker(Waker::noop()));
+    let error = Pin::new(&mut reader).poll_fill_buf(&mut Context::from_waker(Waker::noop()));
     assert!(matches!(error, Poll::Ready(Err(ref error))
         if error.kind() == io::ErrorKind::BrokenPipe
             && error.to_string() == "deferred sentinel"));
@@ -91,8 +90,7 @@ fn buffered_errors_do_not_hide_following_data() {
         Err(io::Error::new(io::ErrorKind::Interrupted, "retry")),
         Ok(b"data".to_vec()),
     ]));
-    let error = Pin::new(&mut reader)
-        .poll_fill_buf(&mut Context::from_waker(Waker::noop()));
+    let error = Pin::new(&mut reader).poll_fill_buf(&mut Context::from_waker(Waker::noop()));
     assert!(matches!(error, Poll::Ready(Err(error))
         if error.kind() == io::ErrorKind::Interrupted));
     let mut output = [0; 8];
@@ -151,7 +149,11 @@ fn empty_chunks_yield_with_a_wake_instead_of_false_eof() {
     assert_eq!(buffered(&mut reader), b"data");
     assert_eq!(reader.get_ref().polls, 66);
     assert_eq!(buffered(&mut reader), b"data");
-    assert_eq!(reader.get_ref().polls, 66, "buffered data polled the producer");
+    assert_eq!(
+        reader.get_ref().polls,
+        66,
+        "buffered data polled the producer"
+    );
 }
 
 struct PendingThenData(u8);
@@ -178,9 +180,11 @@ impl Stream for PendingThenData {
 #[test]
 fn pending_is_not_eof_and_real_eof_is_fused_across_interfaces() {
     let mut reader = StreamReader::new(PendingThenData(0));
-    assert!(Pin::new(&mut reader)
-        .poll_fill_buf(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+    assert!(
+        Pin::new(&mut reader)
+            .poll_fill_buf(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
     assert_eq!(buffered(&mut reader), b"data");
     Pin::new(&mut reader).consume(4);
     for _ in 0..3 {
@@ -263,8 +267,10 @@ fn copy_buf_retains_every_unwritten_suffix_across_drop_or_error() {
                 waiter.wake();
             }
             let mut copy = copy_buf(&mut reader, &mut writer);
-            assert!(matches!(Pin::new(&mut copy).poll(&mut cx), Poll::Ready(Ok(count))
-                if count == (expected.len() - prefix) as u64));
+            assert!(
+                matches!(Pin::new(&mut copy).poll(&mut cx), Poll::Ready(Ok(count))
+                if count == (expected.len() - prefix) as u64)
+            );
             assert_eq!(writer.output, expected, "fail={fail}, prefix={prefix}");
         }
     }

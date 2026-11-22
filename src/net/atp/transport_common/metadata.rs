@@ -26,11 +26,11 @@
 //! fallback. Fields the receiver cannot apply (for example `uid`/`gid` without
 //! privilege) are reported as skipped, never fatal.
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -1063,7 +1063,9 @@ impl StagedFileSync {
         crate::runtime::spawn_blocking_io(move || self.sync_sync())
             .await
             .map_err(|error| {
-                StreamingError::new(format!("{display}: sync staged file before commit: {error}"))
+                StreamingError::new(format!(
+                    "{display}: sync staged file before commit: {error}"
+                ))
             })
     }
 

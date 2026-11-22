@@ -68,23 +68,23 @@ mod split;
 #[cfg(test)]
 mod masking_conformance_tests;
 
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use client::Http2ClientWebSocket;
+#[cfg(not(target_arch = "wasm32"))]
+pub use client::WebSocketHttpProxy;
 pub use client::{
     Message, SlowConsumerPolicy, WebSocket, WebSocketConfig, WebSocketConnectOptions,
     WebSocketConnectOptionsError, WsConnectError,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use client::WebSocketHttpProxy;
-#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
-pub use client::Http2ClientWebSocket;
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 pub use frame::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 pub use handshake::{
     AcceptResponse, ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake,
     WsUrl, compute_accept_key,
 };
-pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
 #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
 pub use server::{Http2WebSocket, Http2WebSocketCompletion};
+pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
 pub use split::{
     CloseSentWebSocketWrite, OpenWebSocketWrite, ReuniteError as WsReuniteError,
     TypedWebSocketWrite, WebSocketRead, WebSocketWrite, WebSocketWriteCloseSent,

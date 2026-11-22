@@ -829,7 +829,11 @@ mod executing_scope {
         let identities = (*identities.lock().unwrap()).map(Option::unwrap);
         let owner_identity = (owner.task_id(), cx.region_id());
         assert_ne!(identities[0].0, identities[1].0);
-        assert!(identities.iter().all(|identity| identity.1 == cx.region_id()));
+        assert!(
+            identities
+                .iter()
+                .all(|identity| identity.1 == cx.region_id())
+        );
 
         let failure_at = Instant::now();
         drop(held_trigger);
@@ -915,7 +919,10 @@ mod executing_scope {
         if !matches!(mode, "error" | "echo_cancel") {
             assert!(matches!(
                 report.errors.as_slice(),
-                [(1, MapReduceExecutionError::Map("public map triggering error"))]
+                [(
+                    1,
+                    MapReduceExecutionError::Map("public map triggering error")
+                )]
             ));
         }
         await_actual_completions(snapshot, &identities).await;
@@ -950,7 +957,9 @@ mod executing_scope {
                     let parent: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
                         let cx = Cx::current().expect("actual native map coordinator");
                         let snapshot: TraceSnapshot = Box::new(move || {
-                            trace_runtime.trace_snapshot().expect("runtime remains live")
+                            trace_runtime
+                                .trace_snapshot()
+                                .expect("runtime remains live")
                         });
                         for mode in [
                             "error",
@@ -960,7 +969,8 @@ mod executing_scope {
                             "caller_cancel",
                             "cleanup_panic",
                         ] {
-                            let report = map_failure_attribution_journey(&cx, &snapshot, mode).await;
+                            let report =
+                                map_failure_attribution_journey(&cx, &snapshot, mode).await;
                             eprintln!(
                                 "ASUPERSYNC_EXECUTING_MAP_ATTRIBUTION {}",
                                 serde_json::json!({"sharded":sharded,"journey":report})
@@ -987,7 +997,9 @@ mod executing_scope {
             let result = completion
                 .recv_timeout(Duration::from_secs(45))
                 .expect("native map attribution exceeded the whole-run bound");
-            worker.join().expect("map attribution supervisor terminated");
+            worker
+                .join()
+                .expect("map attribution supervisor terminated");
             if let Err(payload) = result {
                 std::panic::resume_unwind(payload);
             }

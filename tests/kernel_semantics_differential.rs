@@ -112,18 +112,22 @@ fn run_native(workers: Option<usize>, scenario: &Scenario) -> Observation {
             live = runtime.diagnostics().find_leaked_obligations();
         }
         let confirmed = runtime.diagnostics().find_confirmed_obligation_leaks();
-        let obligations =
-            (live.is_empty() && confirmed.is_empty()).then_some(()).ok_or_else(|| {
-                format!("live reservations {live:?}; confirmed leaks {confirmed:?}")
-            });
+        let obligations = (live.is_empty() && confirmed.is_empty())
+            .then_some(())
+            .ok_or_else(|| format!("live reservations {live:?}; confirmed leaks {confirmed:?}"));
         let quiescent = runtime.shutdown_timeout(Duration::from_secs(10));
         let _ = done_tx.send((observation, quiescent, obligations));
     });
     match done_rx.recv_timeout(NATIVE_HANG_LIMIT) {
         Ok((observation, quiescent, obligations)) => {
-            assert!(quiescent, "{name}: native runtime must reach quiescence and shut down");
+            assert!(
+                quiescent,
+                "{name}: native runtime must reach quiescence and shut down"
+            );
             if let Err(detail) = obligations {
-                panic!("{name}: native run ({workers:?} workers) left obligations behind: {detail}");
+                panic!(
+                    "{name}: native run ({workers:?} workers) left obligations behind: {detail}"
+                );
             }
             observation
         }
@@ -222,7 +226,10 @@ fn check(scenario: &Scenario) {
     for key in scenario.schedule_dependent {
         for (runtime, observation) in &runs {
             if let Some(value) = observation.get(key) {
-                let class = runtime.split(" #").next().and_then(|class| class.split(" seed").next());
+                let class = runtime
+                    .split(" #")
+                    .next()
+                    .and_then(|class| class.split(" seed").next());
                 *varied
                     .entry(*key)
                     .or_default()
@@ -304,7 +311,10 @@ fn counters() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
 }
 
 fn flags() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
-    (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)))
+    (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 fn nonzero(value: usize) -> NonZeroUsize {
@@ -350,7 +360,10 @@ fn race_winner_drains_parked_loser(cx: Cx) -> ScenarioFuture {
         let result = cx.scope().race(&cx, winner, loser).await;
         observe([
             ("race", outcome(&result)),
-            ("loser_drained_before_return", done.load(Ordering::SeqCst).to_string()),
+            (
+                "loser_drained_before_return",
+                done.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -364,7 +377,10 @@ fn race_panicking_winner_still_drains_loser(cx: Cx) -> ScenarioFuture {
             .spawn(move |_cx| async move {
                 wait_for(&gate).await;
                 // Panics on purpose: the gate is always set here.
-                assert!(!gate.load(Ordering::SeqCst), "differential: race winner panics");
+                assert!(
+                    !gate.load(Ordering::SeqCst),
+                    "differential: race winner panics"
+                );
                 1u32
             })
             .expect("spawn winner");
@@ -375,7 +391,10 @@ fn race_panicking_winner_still_drains_loser(cx: Cx) -> ScenarioFuture {
         let result = cx.scope().race(&cx, winner, loser).await;
         observe([
             ("race", outcome(&result)),
-            ("loser_drained_before_return", done.load(Ordering::SeqCst).to_string()),
+            (
+                "loser_drained_before_return",
+                done.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -563,7 +582,10 @@ fn quorum_two_of_three_drains_the_straggler(cx: Cx) -> ScenarioFuture {
         let result = cx.scope().quorum(&cx, 2, branches).await;
         observe([
             ("quorum", format!("{result:?}")),
-            ("straggler_drained_before_return", done.load(Ordering::SeqCst).to_string()),
+            (
+                "straggler_drained_before_return",
+                done.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -573,7 +595,11 @@ fn quorum_two_of_three_drains_the_straggler(cx: Cx) -> ScenarioFuture {
 fn hedge_backup_wins_and_drains_the_primary(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let (started, done) = flags();
-        let (s, d, gate) = (Arc::clone(&started), Arc::clone(&done), Arc::clone(&started));
+        let (s, d, gate) = (
+            Arc::clone(&started),
+            Arc::clone(&done),
+            Arc::clone(&started),
+        );
         let result = cx
             .hedge_drained_with(
                 Duration::ZERO,
@@ -586,7 +612,10 @@ fn hedge_backup_wins_and_drains_the_primary(cx: Cx) -> ScenarioFuture {
             .await;
         observe([
             ("hedge", outcome(&result)),
-            ("primary_drained_before_return", done.load(Ordering::SeqCst).to_string()),
+            (
+                "primary_drained_before_return",
+                done.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -595,7 +624,11 @@ fn hedge_backup_wins_and_drains_the_primary(cx: Cx) -> ScenarioFuture {
 fn hedge_panicking_backup_still_drains_the_primary(cx: Cx) -> ScenarioFuture {
     Box::pin(async move {
         let (started, done) = flags();
-        let (s, d, gate) = (Arc::clone(&started), Arc::clone(&done), Arc::clone(&started));
+        let (s, d, gate) = (
+            Arc::clone(&started),
+            Arc::clone(&done),
+            Arc::clone(&started),
+        );
         let result = cx
             .hedge_drained_with(
                 Duration::ZERO,
@@ -603,14 +636,20 @@ fn hedge_panicking_backup_still_drains_the_primary(cx: Cx) -> ScenarioFuture {
                 move |_cx| async move {
                     wait_for(&gate).await;
                     // Panics on purpose: the gate is always set here.
-                    assert!(!gate.load(Ordering::SeqCst), "differential: hedge backup panics");
+                    assert!(
+                        !gate.load(Ordering::SeqCst),
+                        "differential: hedge backup panics"
+                    );
                     2u32
                 },
             )
             .await;
         observe([
             ("hedge", outcome(&result)),
-            ("primary_drained_before_return", done.load(Ordering::SeqCst).to_string()),
+            (
+                "primary_drained_before_return",
+                done.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -685,7 +724,10 @@ fn pipeline_error_in_the_second_stage(cx: Cx) -> ScenarioFuture {
                 PipelineExecutionConfig::new(nonzero(2), nonzero(4)),
                 0..6u32,
             )
-            .then(nonzero(2), |_cx, item: u32| async move { Outcome::Ok(item * 2) })
+            .then(
+                nonzero(2),
+                |_cx, item: u32| async move { Outcome::Ok(item * 2) },
+            )
             .then(nonzero(2), |_cx, item: u32| async move {
                 if item == 6 {
                     Outcome::Err(format!("stage 1 rejects {item}"))
@@ -698,7 +740,10 @@ fn pipeline_error_in_the_second_stage(cx: Cx) -> ScenarioFuture {
         let kind = outcome_kind(&report.outcome);
         observe([
             ("initiating_error", format!("{:?}", report.error())),
-            ("outcome_is_err_or_cancelled", (kind == "err" || kind == "cancelled").to_string()),
+            (
+                "outcome_is_err_or_cancelled",
+                (kind == "err" || kind == "cancelled").to_string(),
+            ),
             ("outcome_kind", kind),
             ("admitted", report.summary.admitted.to_string()),
             ("consumed", report.summary.consumed.to_string()),
@@ -713,7 +758,10 @@ fn scope_join_reports_both_outcomes(cx: Cx) -> ScenarioFuture {
             .spawn(|_cx| async {
                 yield_now().await;
                 // Panics on purpose; black_box keeps the value opaque.
-                assert!(!std::hint::black_box(true), "differential: joined task panics");
+                assert!(
+                    !std::hint::black_box(true),
+                    "differential: joined task panics"
+                );
                 2u32
             })
             .expect("spawn panicking");
@@ -747,7 +795,10 @@ fn region_close_releases_a_permit_held_inside_it(cx: Cx) -> ScenarioFuture {
         observe([
             ("capacity_held_before_close", capacity_held.to_string()),
             ("close", format!("{closed:?}")),
-            ("capacity_restored_after_close", capacity_restored.to_string()),
+            (
+                "capacity_restored_after_close",
+                capacity_restored.to_string(),
+            ),
         ])
     })
 }
@@ -782,8 +833,14 @@ fn region_close_waits_for_pending_cleanup(cx: Cx) -> ScenarioFuture {
         let closed = child.close().await;
         observe([
             ("close", format!("{closed:?}")),
-            ("cleanup_ran_before_close_returned", cleaned.load(Ordering::SeqCst).to_string()),
-            ("capacity_restored_after_close", tx.try_reserve().is_ok().to_string()),
+            (
+                "cleanup_ran_before_close_returned",
+                cleaned.load(Ordering::SeqCst).to_string(),
+            ),
+            (
+                "capacity_restored_after_close",
+                tx.try_reserve().is_ok().to_string(),
+            ),
         ])
     })
 }
@@ -828,7 +885,10 @@ fn abort_task_parked_on_mutex(cx: Cx) -> ScenarioFuture {
         let mut handle = cx
             .spawn(move |task_cx| async move {
                 s.store(true, Ordering::SeqCst);
-                m.lock(&task_cx).await.map(|_| ()).map_err(|error| format!("{error:?}"))
+                m.lock(&task_cx)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn waiter");
         wait_for(&started).await;
@@ -837,7 +897,10 @@ fn abort_task_parked_on_mutex(cx: Cx) -> ScenarioFuture {
         let joined = handle.join(&cx).await;
         drop(guard);
         let relocked = mutex.lock(&cx).await.is_ok();
-        observe([("join", outcome(&joined)), ("relock_after_abort", relocked.to_string())])
+        observe([
+            ("join", outcome(&joined)),
+            ("relock_after_abort", relocked.to_string()),
+        ])
     })
 }
 
@@ -850,7 +913,9 @@ fn abort_task_parked_on_mpsc_recv(cx: Cx) -> ScenarioFuture {
             .spawn(move |task_cx| async move {
                 let mut rx = rx;
                 s.store(true, Ordering::SeqCst);
-                rx.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+                rx.recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn receiver");
         wait_for(&started).await;
@@ -886,7 +951,10 @@ fn abort_task_parked_on_semaphore(cx: Cx) -> ScenarioFuture {
         drop(held);
         observe([
             ("join", outcome(&joined)),
-            ("permits_after_abort", semaphore.available_permits().to_string()),
+            (
+                "permits_after_abort",
+                semaphore.available_permits().to_string(),
+            ),
         ])
     })
 }
@@ -902,7 +970,9 @@ fn mpsc_per_sender_order_under_contention(cx: Cx) -> ScenarioFuture {
             senders.push(
                 cx.spawn(move |task_cx| async move {
                     for sequence in 0..5u32 {
-                        tx.send(&task_cx, (sender, sequence)).await.expect("receiver alive");
+                        tx.send(&task_cx, (sender, sequence))
+                            .await
+                            .expect("receiver alive");
                         yield_now().await;
                     }
                 })
@@ -937,7 +1007,11 @@ fn mutex_excludes_across_yields(cx: Cx) -> ScenarioFuture {
         let overlapped = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
         for _ in 0..4 {
-            let (m, h, o) = (Arc::clone(&mutex), Arc::clone(&holders), Arc::clone(&overlapped));
+            let (m, h, o) = (
+                Arc::clone(&mutex),
+                Arc::clone(&holders),
+                Arc::clone(&overlapped),
+            );
             handles.push(
                 cx.spawn(move |task_cx| async move {
                     for _ in 0..10 {
@@ -961,7 +1035,10 @@ fn mutex_excludes_across_yields(cx: Cx) -> ScenarioFuture {
         let total = *mutex.lock(&cx).await.expect("final lock");
         observe([
             ("total", total.to_string()),
-            ("holders_overlapped", overlapped.load(Ordering::SeqCst).to_string()),
+            (
+                "holders_overlapped",
+                overlapped.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -975,7 +1052,11 @@ fn rwlock_excludes_writers_from_readers(cx: Cx) -> ScenarioFuture {
         let violated = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
         for index in 0..6u32 {
-            let (l, w, v) = (Arc::clone(&lock), Arc::clone(&writing), Arc::clone(&violated));
+            let (l, w, v) = (
+                Arc::clone(&lock),
+                Arc::clone(&writing),
+                Arc::clone(&violated),
+            );
             handles.push(
                 cx.spawn(move |task_cx| async move {
                     for _ in 0..5 {
@@ -1003,7 +1084,10 @@ fn rwlock_excludes_writers_from_readers(cx: Cx) -> ScenarioFuture {
         let total = *lock.read(&cx).await.expect("final read");
         observe([
             ("writes", total.to_string()),
-            ("reader_saw_writer", violated.load(Ordering::SeqCst).to_string()),
+            (
+                "reader_saw_writer",
+                violated.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -1070,7 +1154,10 @@ fn broadcast_subscribers_drain_then_see_closed(cx: Cx) -> ScenarioFuture {
         for handle in &mut handles {
             outcomes.push(handle.join(&cx).await.expect("subscriber finishes"));
         }
-        observe([("first", outcomes[0].clone()), ("second", outcomes[1].clone())])
+        observe([
+            ("first", outcomes[0].clone()),
+            ("second", outcomes[1].clone()),
+        ])
     })
 }
 
@@ -1135,9 +1222,15 @@ fn notify_one_releases_exactly_one_waiter(cx: Cx) -> ScenarioFuture {
         let stored = !notify.notify_one();
         notify.notified().await;
         observe([
-            ("first_notify_woke_a_waiter", first_woke_a_waiter.to_string()),
+            (
+                "first_notify_woke_a_waiter",
+                first_woke_a_waiter.to_string(),
+            ),
             ("woken_after_first_notify", after_first.to_string()),
-            ("woken_after_second_notify", woken.load(Ordering::SeqCst).to_string()),
+            (
+                "woken_after_second_notify",
+                woken.load(Ordering::SeqCst).to_string(),
+            ),
             ("notify_without_waiter_is_stored", stored.to_string()),
         ])
     })
@@ -1165,7 +1258,10 @@ fn barrier_releases_all_with_one_leader(cx: Cx) -> ScenarioFuture {
                 leaders += usize::from(is_leader);
             }
         }
-        observe([("released", released.to_string()), ("leaders", leaders.to_string())])
+        observe([
+            ("released", released.to_string()),
+            ("leaders", leaders.to_string()),
+        ])
     })
 }
 
@@ -1180,7 +1276,10 @@ fn join_set_cancel_all_reports_every_member(cx: Cx) -> ScenarioFuture {
             set.spawn(&cx, move |task_cx| async move {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.fetch_add(1, Ordering::SeqCst);
-                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+                never
+                    .recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn member");
         }
@@ -1227,8 +1326,14 @@ fn scope_timeout_drains_the_timed_out_operation(cx: Cx) -> ScenarioFuture {
         };
         let expected = shape == "timed_out" || (shape == "completed:ok(0)" && started);
         observe([
-            ("completed_ok_after_start_or_timed_out", expected.to_string()),
-            ("started_implies_cleaned_up", (!started || done.load(Ordering::SeqCst)).to_string()),
+            (
+                "completed_ok_after_start_or_timed_out",
+                expected.to_string(),
+            ),
+            (
+                "started_implies_cleaned_up",
+                (!started || done.load(Ordering::SeqCst)).to_string(),
+            ),
             ("result", shape),
             ("operation_started", started.to_string()),
         ])
@@ -1245,7 +1350,9 @@ fn abort_reason_reaches_the_task(cx: Cx) -> ScenarioFuture {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.store(true, Ordering::SeqCst);
                 let _ = never.recv(&task_cx).await;
-                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+                task_cx
+                    .cancel_reason()
+                    .map(|reason| format!("{:?}", reason.kind))
             })
             .expect("spawn");
         wait_for(&started).await;
@@ -1272,7 +1379,9 @@ fn child_region_cancel_reason_reaches_its_task(cx: Cx) -> ScenarioFuture {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.store(true, Ordering::SeqCst);
                 let _ = never.recv(&task_cx).await;
-                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+                task_cx
+                    .cancel_reason()
+                    .map(|reason| format!("{:?}", reason.kind))
             })
             .expect("spawn inside the child region");
         wait_for(&started).await;
@@ -1312,7 +1421,10 @@ fn nested_region_close_drains_the_grandchild(cx: Cx) -> ScenarioFuture {
         drop(grandchild);
         observe([
             ("close", format!("{closed:?}")),
-            ("grandchild_task_drained_before_close_returned", drained.to_string()),
+            (
+                "grandchild_task_drained_before_close_returned",
+                drained.to_string(),
+            ),
         ])
     })
 }
@@ -1388,8 +1500,14 @@ fn scope_timeout_with_a_real_deadline(cx: Cx) -> ScenarioFuture {
         };
         let expected = shape == "timed_out" || (shape == "completed:ok(0)" && started);
         observe([
-            ("completed_ok_after_start_or_timed_out", expected.to_string()),
-            ("started_implies_cleaned_up", (!started || done.load(Ordering::SeqCst)).to_string()),
+            (
+                "completed_ok_after_start_or_timed_out",
+                expected.to_string(),
+            ),
+            (
+                "started_implies_cleaned_up",
+                (!started || done.load(Ordering::SeqCst)).to_string(),
+            ),
             ("result", shape),
         ])
     })
@@ -1410,10 +1528,15 @@ fn region_deadline_cancels_a_parked_task(cx: Cx) -> ScenarioFuture {
             .cx()
             .spawn(|task_cx| async move {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
-                let received = never.recv(&task_cx).await.map_err(|error| format!("{error:?}"));
+                let received = never
+                    .recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"));
                 (
                     format!("{received:?}"),
-                    task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind)),
+                    task_cx
+                        .cancel_reason()
+                        .map(|reason| format!("{:?}", reason.kind)),
                 )
             })
             .expect("spawn inside the child region");
@@ -1440,7 +1563,9 @@ fn region_deadline_stops_a_checkpointing_task(cx: Cx) -> ScenarioFuture {
             .spawn(|task_cx| async move {
                 for round in 0..400u32 {
                     if task_cx.checkpoint().is_err() {
-                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        let reason = task_cx
+                            .cancel_reason()
+                            .map(|reason| format!("{:?}", reason.kind));
                         return (Some(round > 0), reason);
                     }
                     sleep(task_cx.now(), Duration::from_millis(5)).await;
@@ -1470,7 +1595,9 @@ fn region_poll_quota_stops_a_busy_task(cx: Cx) -> ScenarioFuture {
             .spawn(|task_cx| async move {
                 for round in 0..1_000u32 {
                     if task_cx.checkpoint().is_err() {
-                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        let reason = task_cx
+                            .cancel_reason()
+                            .map(|reason| format!("{:?}", reason.kind));
                         return (Some(round), reason);
                     }
                     yield_now().await;
@@ -1646,7 +1773,10 @@ fn aborted_mutex_waiter_hands_the_lock_to_the_next(cx: Cx) -> ScenarioFuture {
         let spawn_waiter = |value: u32| {
             let lock = Arc::clone(&mutex);
             cx.spawn(move |task_cx| async move {
-                let mut held = lock.lock(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                let mut held = lock
+                    .lock(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
                 *held = value;
                 Ok::<u32, String>(value)
             })
@@ -1725,7 +1855,10 @@ fn abort_releases_a_held_send_permit(cx: Cx) -> ScenarioFuture {
                     .map_err(|error| format!("{error:?}"))?;
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.store(true, Ordering::SeqCst);
-                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+                never
+                    .recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn");
         wait_for(&started).await;
@@ -1753,7 +1886,9 @@ fn message_racing_a_receive_timeout_is_delivered_once(cx: Cx) -> ScenarioFuture 
         let mut sender = cx
             .spawn(move |task_cx| async move {
                 sleep(start, Duration::from_millis(10)).await;
-                tx.send(&task_cx, 9).await.map_err(|error| format!("{error:?}"))
+                tx.send(&task_cx, 9)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn sender");
         let timed = timeout(start, Duration::from_millis(10), rx.recv(&cx)).await;
@@ -1805,7 +1940,10 @@ fn bracket_release_runs_when_the_use_is_aborted(cx: Cx) -> ScenarioFuture {
         let joined = handle.join(&cx).await;
         observe([
             ("join", outcome(&joined)),
-            ("released_before_join_returned", released.load(Ordering::SeqCst).to_string()),
+            (
+                "released_before_join_returned",
+                released.load(Ordering::SeqCst).to_string(),
+            ),
         ])
     })
 }
@@ -1850,7 +1988,10 @@ fn spawn_into_a_closed_region_is_refused(cx: Cx) -> ScenarioFuture {
             Err(other) => format!("refused:{other:?}"),
             Ok(mut handle) => format!("admitted:{}", outcome(&handle.join(&cx).await)),
         };
-        observe([("close", format!("{closed:?}")), ("spawn_after_close", late)])
+        observe([
+            ("close", format!("{closed:?}")),
+            ("spawn_after_close", late),
+        ])
     })
 }
 
@@ -1877,7 +2018,10 @@ fn join_set_join_next_yields_every_member_once(cx: Cx) -> ScenarioFuture {
         members.sort();
         observe([
             ("members", members.join(",")),
-            ("empty_afterwards", set.try_join_next().is_none().to_string()),
+            (
+                "empty_afterwards",
+                set.try_join_next().is_none().to_string(),
+            ),
         ])
     })
 }
@@ -1890,7 +2034,10 @@ fn panic_while_holding_a_mutex_poisons_it(cx: Cx) -> ScenarioFuture {
         let lock = Arc::clone(&mutex);
         let mut handle = cx
             .spawn(move |task_cx| async move {
-                let held = lock.lock(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                let held = lock
+                    .lock(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
                 // Panics on purpose: the value is still 0 here.
                 assert!(*held != 0, "differential: panic while holding the lock");
                 Ok::<u32, String>(*held)
@@ -2029,7 +2176,10 @@ fn aborting_a_spawner_leaves_its_child_running(cx: Cx) -> ScenarioFuture {
                     })
                     .expect("spawn child");
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
-                never.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+                never
+                    .recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn spawner");
         wait_for(&child_started).await;
@@ -2061,7 +2211,9 @@ fn oneshot_send_after_the_receiver_was_aborted_returns_the_value(cx: Cx) -> Scen
             .spawn(move |task_cx| async move {
                 let mut rx = rx;
                 s.store(true, Ordering::SeqCst);
-                rx.recv(&task_cx).await.map_err(|error| format!("{error:?}"))
+                rx.recv(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))
             })
             .expect("spawn receiver");
         wait_for(&started).await;
@@ -2069,7 +2221,10 @@ fn oneshot_send_after_the_receiver_was_aborted_returns_the_value(cx: Cx) -> Scen
         receiver.abort();
         let joined = receiver.join(&cx).await;
         let sent = tx.send(&cx, 5).map_err(|error| format!("{error:?}"));
-        observe([("receiver", outcome(&joined)), ("send", format!("{sent:?}"))])
+        observe([
+            ("receiver", outcome(&joined)),
+            ("send", format!("{sent:?}")),
+        ])
     })
 }
 
@@ -2084,7 +2239,9 @@ fn a_weaker_abort_does_not_weaken_the_reason(cx: Cx) -> ScenarioFuture {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.store(true, Ordering::SeqCst);
                 let _ = never.recv(&task_cx).await;
-                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+                task_cx
+                    .cancel_reason()
+                    .map(|reason| format!("{:?}", reason.kind))
             })
             .expect("spawn");
         wait_for(&started).await;
@@ -2121,7 +2278,9 @@ fn nested_region_deadline_is_the_tighter_one(cx: Cx) -> ScenarioFuture {
                 for _ in 0..400u32 {
                     if task_cx.checkpoint().is_err() {
                         let early = task_cx.now().duration_since(start) < 5_000_000_000;
-                        let reason = task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind));
+                        let reason = task_cx
+                            .cancel_reason()
+                            .map(|reason| format!("{:?}", reason.kind));
                         return (reason, early);
                     }
                     sleep(task_cx.now(), Duration::from_millis(5)).await;
@@ -2161,7 +2320,9 @@ fn cancelling_a_region_reaches_its_grandchild_task(cx: Cx) -> ScenarioFuture {
                 let (_hold, mut never) = mpsc::channel::<u32>(1);
                 s.store(true, Ordering::SeqCst);
                 let _ = never.recv(&task_cx).await;
-                task_cx.cancel_reason().map(|reason| format!("{:?}", reason.kind))
+                task_cx
+                    .cancel_reason()
+                    .map(|reason| format!("{:?}", reason.kind))
             })
             .expect("spawn inside the inner region");
         wait_for(&started).await;
@@ -2222,11 +2383,10 @@ fn scope_timeout_inside_a_tighter_region_deadline(cx: Cx) -> ScenarioFuture {
                     .timeout(&task_cx, Duration::from_secs(10), |op_cx| async move {
                         for _ in 0..400u32 {
                             if op_cx.checkpoint().is_err() {
-                                return Err(op_cx
-                                    .cancel_reason()
-                                    .map_or_else(|| "cancelled".to_string(), |reason| {
-                                        format!("{:?}", reason.kind)
-                                    }));
+                                return Err(op_cx.cancel_reason().map_or_else(
+                                    || "cancelled".to_string(),
+                                    |reason| format!("{:?}", reason.kind),
+                                ));
                             }
                             sleep(op_cx.now(), Duration::from_millis(5)).await;
                         }
@@ -2242,7 +2402,9 @@ fn scope_timeout_inside_a_tighter_region_deadline(cx: Cx) -> ScenarioFuture {
                     Ok(TimedResult::Completed(Outcome::Err(reason))) => {
                         format!("completed:err:{reason}")
                     }
-                    Ok(TimedResult::Completed(other)) => format!("completed:{}", outcome_kind(other)),
+                    Ok(TimedResult::Completed(other)) => {
+                        format!("completed:{}", outcome_kind(other))
+                    }
                     Ok(TimedResult::TimedOut(_)) => "timed_out".to_string(),
                     Err(error) => format!("spawn_error:{error:?}"),
                 }
@@ -2264,7 +2426,10 @@ fn aborted_rwlock_writer_admits_the_queued_reader(cx: Cx) -> ScenarioFuture {
         let l = Arc::clone(&lock);
         let mut writer = cx
             .spawn(move |task_cx| async move {
-                let mut guard = l.write(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                let mut guard = l
+                    .write(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
                 *guard = 9;
                 Ok::<(), String>(())
             })
@@ -2278,7 +2443,10 @@ fn aborted_rwlock_writer_admits_the_queued_reader(cx: Cx) -> ScenarioFuture {
         let mut reader = cx
             .spawn(move |task_cx| async move {
                 q.store(true, Ordering::SeqCst);
-                let guard = l.read(&task_cx).await.map_err(|error| format!("{error:?}"))?;
+                let guard = l
+                    .read(&task_cx)
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
                 Ok::<u32, String>(*guard)
             })
             .expect("spawn reader");
@@ -2466,7 +2634,10 @@ fn aborted_barrier_waiter_is_withdrawn(cx: Cx) -> ScenarioFuture {
         observe([
             ("first_join", outcome(&first_joined)),
             ("arrived_after_abort", arrived_after_abort.to_string()),
-            ("tripped_without_replacement", tripped_without_replacement.to_string()),
+            (
+                "tripped_without_replacement",
+                tripped_without_replacement.to_string(),
+            ),
             ("leaders", leaders.to_string()),
         ])
     })
@@ -2520,7 +2691,9 @@ fn lab_time_does_not_advance_past_a_pending_spawn() {
         let (spawned_at, first_polled_at) = LabRuntimeTarget::block_on(&mut runtime, async move {
             let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
             let spawned_at = cx.now();
-            let mut child = cx.spawn(|task_cx| async move { task_cx.now() }).expect("spawn");
+            let mut child = cx
+                .spawn(|task_cx| async move { task_cx.now() })
+                .expect("spawn");
             sleep(cx.now(), Duration::from_millis(50)).await;
             let first_polled_at = child.join(&cx).await.expect("child finishes");
             (spawned_at, first_polled_at)
@@ -2566,7 +2739,11 @@ macro_rules! differential {
 }
 
 differential!(differential_spawn_join, spawn_join, []);
-differential!(differential_race_parked_loser, race_winner_drains_parked_loser, []);
+differential!(
+    differential_race_parked_loser,
+    race_winner_drains_parked_loser,
+    []
+);
 differential!(
     differential_race_panicking_winner,
     race_panicking_winner_still_drains_loser,
@@ -2617,7 +2794,11 @@ fn panicking_winners_drain_their_losers_on_the_block_on_root() {
         }
     }
 }
-differential!(differential_quorum, quorum_two_of_three_drains_the_straggler, []);
+differential!(
+    differential_quorum,
+    quorum_two_of_three_drains_the_straggler,
+    []
+);
 differential!(
     differential_dropped_scope_timeout,
     dropped_scope_timeout_stops_its_operation,
@@ -2648,13 +2829,21 @@ differential!(
     pipeline_error_in_the_second_stage,
     ["admitted", "consumed", "outcome_kind"]
 );
-differential!(differential_first_ok, first_ok_stops_at_the_first_success, []);
+differential!(
+    differential_first_ok,
+    first_ok_stops_at_the_first_success,
+    []
+);
 differential!(
     differential_map_reduce_error,
     map_reduce_stops_at_a_failing_item,
     ["admitted", "completed"]
 );
-differential!(differential_scope_join, scope_join_reports_both_outcomes, []);
+differential!(
+    differential_scope_join,
+    scope_join_reports_both_outcomes,
+    []
+);
 differential!(
     differential_region_close_permit,
     region_close_releases_a_permit_held_inside_it,
@@ -2670,14 +2859,26 @@ differential!(
     abort_right_after_spawn_cancels,
     ["body_ran"]
 );
-differential!(differential_abort_mutex_waiter, abort_task_parked_on_mutex, []);
+differential!(
+    differential_abort_mutex_waiter,
+    abort_task_parked_on_mutex,
+    []
+);
 differential!(
     differential_mpsc_per_sender_order,
     mpsc_per_sender_order_under_contention,
     []
 );
-differential!(differential_mutex_exclusion, mutex_excludes_across_yields, []);
-differential!(differential_rwlock_exclusion, rwlock_excludes_writers_from_readers, []);
+differential!(
+    differential_mutex_exclusion,
+    mutex_excludes_across_yields,
+    []
+);
+differential!(
+    differential_rwlock_exclusion,
+    rwlock_excludes_writers_from_readers,
+    []
+);
 differential!(
     differential_oneshot_close,
     oneshot_sender_and_permit_drop_close_the_receiver,
@@ -2688,9 +2889,21 @@ differential!(
     broadcast_subscribers_drain_then_see_closed,
     []
 );
-differential!(differential_watch_changed, watch_changed_wakes_then_closes, []);
-differential!(differential_notify_one, notify_one_releases_exactly_one_waiter, []);
-differential!(differential_barrier, barrier_releases_all_with_one_leader, []);
+differential!(
+    differential_watch_changed,
+    watch_changed_wakes_then_closes,
+    []
+);
+differential!(
+    differential_notify_one,
+    notify_one_releases_exactly_one_waiter,
+    []
+);
+differential!(
+    differential_barrier,
+    barrier_releases_all_with_one_leader,
+    []
+);
 differential!(
     differential_join_set_cancel_all,
     join_set_cancel_all_reports_every_member,
@@ -2712,7 +2925,11 @@ differential!(
     nested_region_close_drains_the_grandchild,
     []
 );
-differential!(differential_spawn_blocking, spawn_blocking_returns_its_value, []);
+differential!(
+    differential_spawn_blocking,
+    spawn_blocking_returns_its_value,
+    []
+);
 differential!(differential_sleeps_never_early, sleeps_never_end_early, []);
 differential!(
     differential_region_deadline_checkpointing,
@@ -2775,8 +2992,16 @@ differential!(
     scope_timeout_with_a_real_deadline,
     ["result"]
 );
-differential!(differential_abort_mpsc_receiver, abort_task_parked_on_mpsc_recv, []);
-differential!(differential_abort_semaphore_waiter, abort_task_parked_on_semaphore, []);
+differential!(
+    differential_abort_mpsc_receiver,
+    abort_task_parked_on_mpsc_recv,
+    []
+);
+differential!(
+    differential_abort_semaphore_waiter,
+    abort_task_parked_on_semaphore,
+    []
+);
 differential!(
     differential_aborted_sender_handoff,
     aborted_parked_sender_hands_the_slot_to_the_next,
@@ -2792,7 +3017,11 @@ differential!(
     aborted_semaphore_waiter_hands_the_permit_to_the_next,
     []
 );
-differential!(differential_abort_held_permit, abort_releases_a_held_send_permit, []);
+differential!(
+    differential_abort_held_permit,
+    abort_releases_a_held_send_permit,
+    []
+);
 differential!(
     differential_receive_timeout_race,
     message_racing_a_receive_timeout_is_delivered_once,

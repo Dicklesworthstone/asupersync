@@ -136,14 +136,18 @@ where
     /// Initial response metadata, kept separately from trailers.
     #[must_use]
     pub fn initial_metadata(&self) -> Option<&Metadata> {
-        self.call.as_ref().and_then(NativeDuplexStream::initial_metadata)
+        self.call
+            .as_ref()
+            .and_then(NativeDuplexStream::initial_metadata)
             .or(self.initial.as_ref())
     }
 
     /// Trailing metadata after the peer has supplied it.
     #[must_use]
     pub fn trailers(&self) -> Option<&Metadata> {
-        self.call.as_ref().and_then(NativeDuplexStream::trailers)
+        self.call
+            .as_ref()
+            .and_then(NativeDuplexStream::trailers)
             .or(self.trailers.as_ref())
     }
 
@@ -188,7 +192,11 @@ where
         // A bounded channel's producer can fail while one encoded request is
         // blocked on zero peer credit. That failure is control traffic: never
         // wait for request_ready() before observing it or registering its wake.
-        if let Some(status) = self.request_control.as_ref().and_then(|control| control.poll_failure(task)) {
+        if let Some(status) = self
+            .request_control
+            .as_ref()
+            .and_then(|control| control.poll_failure(task))
+        {
             return Poll::Ready(Some(Err(self.finish(status))));
         }
         loop {
@@ -211,8 +219,12 @@ where
             let network_pending = match incoming {
                 Poll::Ready(Err(status)) => return Poll::Ready(Some(Err(self.finish(status)))),
                 Poll::Ready(Ok(None)) => {
-                    let status = self.call.as_ref().and_then(NativeDuplexStream::status)
-                        .cloned().unwrap_or_else(|| Status::internal("missing gRPC terminal status"));
+                    let status = self
+                        .call
+                        .as_ref()
+                        .and_then(NativeDuplexStream::status)
+                        .cloned()
+                        .unwrap_or_else(|| Status::internal("missing gRPC terminal status"));
                     let success = status.code() == Code::Ok;
                     let status = self.finish(status);
                     return Poll::Ready(if success { None } else { Some(Err(status)) });
@@ -227,8 +239,12 @@ where
             // or observe a peer half-close. Never use a stale pre-poll snapshot.
             let call = self.call.as_mut().expect("live native bidirectional call");
             if !self.requests_closed && call.request_ready() {
-                let produced = self.source.as_mut().expect("open request source")
-                    .as_mut().poll_next(task);
+                let produced = self
+                    .source
+                    .as_mut()
+                    .expect("open request source")
+                    .as_mut()
+                    .poll_next(task);
                 match produced {
                     // A RequestFlushed event can precede installation of a
                     // read wakeup. Poll the network again before parking on a
@@ -287,9 +303,10 @@ where
 {
     type Message = C::Decode;
 
-    fn poll_next(self: Pin<&mut Self>, task: &mut Context<'_>)
-        -> Poll<Option<Result<Self::Message, Status>>>
-    {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Message, Status>>> {
         self.get_mut().poll_message(task)
     }
 }

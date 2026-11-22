@@ -243,13 +243,29 @@ enum Command {
 
 pub fn run() -> io::Result<()> {
     match Cli::parse().command {
-        Command::ServeJournaled { config, catalog, revocations, options, journals } => {
-            shared_resume::journal::serve(settings::load(&config)?, options, journals, catalog, revocations)
-        }
-        Command::InitReceiverCatalog { path, max_keys, max_total_journal_bytes } => {
+        Command::ServeJournaled {
+            config,
+            catalog,
+            revocations,
+            options,
+            journals,
+        } => shared_resume::journal::serve(
+            settings::load(&config)?,
+            options,
+            journals,
+            catalog,
+            revocations,
+        ),
+        Command::InitReceiverCatalog {
+            path,
+            max_keys,
+            max_total_journal_bytes,
+        } => {
             journal_catalog::Catalog::initialize(&path, max_keys, max_total_journal_bytes)?;
-            emit(json!({"schema_version": 1, "event": "receiver_catalog_initialized",
-                "maximum_keys": max_keys, "maximum_total_journal_bytes": max_total_journal_bytes}))
+            emit(
+                json!({"schema_version": 1, "event": "receiver_catalog_initialized",
+                "maximum_keys": max_keys, "maximum_total_journal_bytes": max_total_journal_bytes}),
+            )
         }
         Command::ReceiveJournaled {
             config,

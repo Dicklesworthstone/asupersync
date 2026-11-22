@@ -14,18 +14,18 @@ use super::streaming::{EntryDigest, StreamingError, flat_merkle_root_v2_from_dig
 use crate::net::atp::protocol::frames::Frame;
 
 /// Handshake extension offering the v2 graph transcript.
-pub(crate) const MERKLE_V2_OFFER_EXTENSION: u16 = 0x0104;
+pub const MERKLE_V2_OFFER_EXTENSION: u16 = 0x0104;
 /// Handshake-ack extension accepting the v2 graph transcript.
-pub(crate) const MERKLE_V2_ACCEPT_EXTENSION: u16 = 0x0105;
+pub const MERKLE_V2_ACCEPT_EXTENSION: u16 = 0x0105;
 /// Object-manifest or successful-proof extension containing the v2 root.
-pub(crate) const MERKLE_V2_ROOT_EXTENSION: u16 = 0x0106;
+pub const MERKLE_V2_ROOT_EXTENSION: u16 = 0x0106;
 
 // Extension record version followed by the graph transcript version.
 const V2_RECORD: [u8; 2] = [1, 2];
 
 /// A negotiated commitment could not be interpreted or verified.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum MerkleNegotiationError {
+pub enum MerkleNegotiationError {
     #[error("malformed or unsupported Merkle v2 acceptance")]
     MalformedAccept,
     #[error("negotiated Merkle v2 commitment is missing")]
@@ -41,7 +41,7 @@ pub(crate) enum MerkleNegotiationError {
 }
 
 /// Offer v2 without changing the handshake's JSON or protocol identity.
-pub(crate) fn offer_v2(hello: &mut Frame) {
+pub fn offer_v2(hello: &mut Frame) {
     hello
         .header
         .extensions
@@ -52,7 +52,7 @@ pub(crate) fn offer_v2(hello: &mut Frame) {
 ///
 /// Unknown offers are ignored so a future peer can still negotiate v1. Once
 /// this returns true, absent or malformed commitment records are errors.
-pub(crate) fn accept_v2(hello: &Frame, ack: &mut Frame) -> bool {
+pub fn accept_v2(hello: &Frame, ack: &mut Frame) -> bool {
     let supported = hello
         .header
         .extensions
@@ -70,7 +70,7 @@ pub(crate) fn accept_v2(hello: &Frame, ack: &mut Frame) -> bool {
 ///
 /// A present but malformed reply fails closed instead of letting the sender
 /// and receiver disagree about whether the manifest needs a v2 commitment.
-pub(crate) fn accepted_v2(ack: &Frame) -> Result<bool, MerkleNegotiationError> {
+pub fn accepted_v2(ack: &Frame) -> Result<bool, MerkleNegotiationError> {
     match ack.header.extensions.get(&MERKLE_V2_ACCEPT_EXTENSION) {
         None => Ok(false),
         Some(bytes) if bytes.as_slice() == V2_RECORD => Ok(true),
@@ -79,10 +79,7 @@ pub(crate) fn accepted_v2(ack: &Frame) -> Result<bool, MerkleNegotiationError> {
 }
 
 /// Attach a v2 root to an object manifest or a verified successful proof.
-pub(crate) fn attach_root_v2(
-    manifest: &mut Frame,
-    root: &str,
-) -> Result<(), MerkleNegotiationError> {
+pub fn attach_root_v2(manifest: &mut Frame, root: &str) -> Result<(), MerkleNegotiationError> {
     let mut record = vec![0; V2_RECORD.len() + 32];
     record[..V2_RECORD.len()].copy_from_slice(&V2_RECORD);
     hex::decode_to_slice(root, &mut record[V2_RECORD.len()..])
@@ -95,7 +92,7 @@ pub(crate) fn attach_root_v2(
 }
 
 /// Require exactly one well-formed commitment after v2 was negotiated.
-pub(crate) fn expected_root_v2(
+pub fn expected_root_v2(
     manifest: &Frame,
     negotiated: bool,
 ) -> Result<Option<String>, MerkleNegotiationError> {
@@ -107,8 +104,7 @@ pub(crate) fn expected_root_v2(
         (false, Some(_)) => Err(MerkleNegotiationError::UnexpectedCommitment),
         (true, None) => Err(MerkleNegotiationError::MissingCommitment),
         (true, Some(record))
-            if record.len() == V2_RECORD.len() + 32
-                && record[..V2_RECORD.len()] == V2_RECORD =>
+            if record.len() == V2_RECORD.len() + 32 && record[..V2_RECORD.len()] == V2_RECORD =>
         {
             Ok(Some(hex_encode(&record[V2_RECORD.len()..])))
         }
@@ -118,7 +114,7 @@ pub(crate) fn expected_root_v2(
 
 /// Verify the received content before publication or an already-in-sync reply.
 /// Legacy sessions do not compute or require a v2 transcript.
-pub(crate) fn verify_root_v2(
+pub fn verify_root_v2(
     entries: &[EntryDigest],
     expected: Option<&str>,
 ) -> Result<(), MerkleNegotiationError> {
@@ -160,11 +156,14 @@ mod tests {
     #[test]
     fn merkle_and_codec_extension_ids_are_disjoint() {
         let mut seen = std::collections::BTreeSet::new();
-        for id in super::super::codec::ASSIGNED_EXTENSION_IDS.into_iter().chain([
-            MERKLE_V2_OFFER_EXTENSION,
-            MERKLE_V2_ACCEPT_EXTENSION,
-            MERKLE_V2_ROOT_EXTENSION,
-        ]) {
+        for id in super::super::codec::ASSIGNED_EXTENSION_IDS
+            .into_iter()
+            .chain([
+                MERKLE_V2_OFFER_EXTENSION,
+                MERKLE_V2_ACCEPT_EXTENSION,
+                MERKLE_V2_ROOT_EXTENSION,
+            ])
+        {
             assert!(seen.insert(id), "duplicate ATP extension id: {id}");
         }
     }

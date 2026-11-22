@@ -11,6 +11,7 @@
 //! Load balancers can be paired with a [`Discover`] instance
 //! to dynamically add and remove backends as the topology changes.
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::fmt;
@@ -18,7 +19,6 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::Service;

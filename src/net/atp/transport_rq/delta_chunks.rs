@@ -6,21 +6,20 @@
 //! existing fixed-size peers retain their wire contract.
 
 use super::{
-    AsyncReadExt, AsyncWriteExt, BTreeMap, BTreeSet, CasChunkRef, CompletionDigestIndex,
-    ContentId, Cx, DeltaChunkWire, DeltaObjectRequest, DeltaWireMode,
-    Digest, EntryDecoder, EntryDigest, Frame, FrameTransport, FrameType, Path, PathBuf,
-    PersistentChunkManifest, ProtocolVersion, RQ_DELTA_MAX_MANIFEST_CHUNKS,
-    ReceiveReceipt, ReceiveReport, RqConfig, RqDeltaSessionContext, RqError,
-    RqReceiveOptions, RqSourceEntry, SecurityContext, SendReport, Sha256, SocketAddr,
+    AsyncReadExt, AsyncWriteExt, BTreeMap, BTreeSet, CasChunkRef, CompletionDigestIndex, ContentId,
+    Cx, DeltaChunkWire, DeltaObjectRequest, DeltaWireMode, Digest, EntryDecoder, EntryDigest,
+    Frame, FrameTransport, FrameType, Path, PathBuf, PersistentChunkManifest, ProtocolVersion,
+    RQ_DELTA_MAX_MANIFEST_CHUNKS, ReceiveReceipt, ReceiveReport, RqConfig, RqDeltaSessionContext,
+    RqError, RqReceiveOptions, RqSourceEntry, SecurityContext, SendReport, Sha256, SocketAddr,
     TransferManifest, UdpSendAccelerationReport, create_receive_staging_guard, entry_object_id,
-    flat_merkle_root_from_digests, json_frame, parse_json,
-    recv_delta_control_frame, reject_destination_symlink_prefix, reject_existing_symlink,
-    rq_decode_delta_root, rq_delta_manifest_entry, rq_plan_delta_chunks, safe_base_for_root_name,
+    flat_merkle_root_from_digests, json_frame, parse_json, recv_delta_control_frame,
+    reject_destination_symlink_prefix, reject_existing_symlink, rq_decode_delta_root,
+    rq_delta_manifest_entry, rq_plan_delta_chunks, safe_base_for_root_name,
     send_delta_control_frame, sign_rq_delta_control, validate_rq_delta_source_unchanged,
     verify_and_commit_with_options, verify_rq_delta_control, write_entry_staging_range,
 };
-use serde::{Deserialize, Serialize};
 use crate::net::atp::transport_common::delta::cdc;
+use serde::{Deserialize, Serialize};
 
 /// Old frame codecs preserve/ignore unknown extensions; no Hello JSON or wire
 /// version changes. The offer itself is authenticated, not merely a hint that
@@ -45,9 +44,13 @@ pub(super) fn advertise_cdc(
     context: &SecurityContext,
     hello: &super::Hello,
 ) -> Result<(), RqError> {
-    let tag = context.derive_context(CDC_HELLO_KEY)
+    let tag = context
+        .derive_context(CDC_HELLO_KEY)
         .sign_symbol_tag(&super::rq_delta_hello_auth_symbol(hello)?);
-    frame.header.extensions.insert(CDC_HELLO_EXTENSION, tag.as_bytes().to_vec());
+    frame
+        .header
+        .extensions
+        .insert(CDC_HELLO_EXTENSION, tag.as_bytes().to_vec());
     Ok(())
 }
 
@@ -59,11 +62,15 @@ pub(super) fn cdc_offered(
     let Some(bytes) = frame.header.extensions.get(&CDC_HELLO_EXTENSION) else {
         return Ok(false);
     };
-    let tag = bytes.as_slice().try_into().map_err(|_| {
-        RqError::Authentication("malformed RQ CDC offer".to_string())
-    })?;
+    let tag = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| RqError::Authentication("malformed RQ CDC offer".to_string()))?;
     super::verify_rq_delta_auth_tag(
-        context, CDC_HELLO_KEY, super::rq_delta_hello_auth_symbol(hello)?, tag,
+        context,
+        CDC_HELLO_KEY,
+        super::rq_delta_hello_auth_symbol(hello)?,
+        tag,
         "RQ CDC offer",
     )?;
     Ok(true)
@@ -75,9 +82,13 @@ pub(super) fn acknowledge_cdc(
     hello: &super::Hello,
     ack: &super::HelloAck,
 ) -> Result<(), RqError> {
-    let tag = context.derive_context(CDC_ACK_KEY)
+    let tag = context
+        .derive_context(CDC_ACK_KEY)
         .sign_symbol_tag(&super::rq_delta_ack_auth_symbol(hello, ack)?);
-    frame.header.extensions.insert(CDC_ACK_EXTENSION, tag.as_bytes().to_vec());
+    frame
+        .header
+        .extensions
+        .insert(CDC_ACK_EXTENSION, tag.as_bytes().to_vec());
     Ok(())
 }
 
@@ -90,11 +101,15 @@ pub(super) fn cdc_acknowledged(
     let Some(bytes) = frame.header.extensions.get(&CDC_ACK_EXTENSION) else {
         return Ok(false);
     };
-    let tag = bytes.as_slice().try_into().map_err(|_| {
-        RqError::Authentication("malformed RQ CDC acknowledgement".to_string())
-    })?;
+    let tag = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| RqError::Authentication("malformed RQ CDC acknowledgement".to_string()))?;
     super::verify_rq_delta_auth_tag(
-        context, CDC_ACK_KEY, super::rq_delta_ack_auth_symbol(hello, ack)?, tag,
+        context,
+        CDC_ACK_KEY,
+        super::rq_delta_ack_auth_symbol(hello, ack)?,
+        tag,
         "RQ CDC acknowledgement",
     )?;
     Ok(true)
@@ -107,11 +122,18 @@ pub(super) fn cdc_size_supported(size: u64) -> bool {
 }
 
 pub(super) fn is_cdc(manifest: &TransferManifest) -> bool {
-    manifest.delta_manifest.as_ref().is_some_and(|delta| delta.schema == cdc::MANIFEST_SCHEMA)
+    manifest
+        .delta_manifest
+        .as_ref()
+        .is_some_and(|delta| delta.schema == cdc::MANIFEST_SCHEMA)
 }
 
 fn selector(manifest: &TransferManifest) -> &'static str {
-    if is_cdc(manifest) { CDC_SELECTOR } else { SELECTOR }
+    if is_cdc(manifest) {
+        CDC_SELECTOR
+    } else {
+        SELECTOR
+    }
 }
 
 pub(super) async fn select_cdc_manifest(
@@ -119,29 +141,44 @@ pub(super) async fn select_cdc_manifest(
     manifest: &mut TransferManifest,
     entries: &[RqSourceEntry],
 ) -> Result<(), RqError> {
-    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
-        RqError::Control("RQ CDC requires one regular file".to_string())
-    })?;
+    let entry = rq_delta_manifest_entry(manifest)
+        .ok_or_else(|| RqError::Control("RQ CDC requires one regular file".to_string()))?;
     let [source] = entries else {
-        return Err(RqError::Control("RQ CDC source must contain one file".to_string()));
+        return Err(RqError::Control(
+            "RQ CDC source must contain one file".to_string(),
+        ));
     };
     if !cdc_size_supported(entry.size) {
         return Ok(());
     }
     let delta = super::build_rq_delta_manifest_with_layout(
-        cx, &manifest.merkle_root_hex, &source.abs_path, entry.index,
-        &entry.rel_path, entry.size, &entry.sha256_hex, cdc::MAX_CHUNK_BYTES, true,
+        cx,
+        &manifest.merkle_root_hex,
+        &source.abs_path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        cdc::MAX_CHUNK_BYTES,
+        true,
     )
     .await?;
     let mut candidate = manifest.clone();
     candidate.delta_manifest = Some(delta);
     match json_frame(FrameType::ObjectManifest, &candidate) {
-        Ok(frame) if frame.payload().len() <= usize::try_from(super::MAX_FRAME_SIZE)
-            .unwrap_or(usize::MAX).saturating_sub(super::RQ_DELTA_ENVELOPE_WIRE_BUDGET) => {
+        Ok(frame)
+            if frame.payload().len()
+                <= usize::try_from(super::MAX_FRAME_SIZE)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(super::RQ_DELTA_ENVELOPE_WIRE_BUDGET) =>
+        {
             *manifest = candidate;
         }
         Ok(_) | Err(RqError::Frame(_)) => {
-            cx.trace_with_fields("atp_rq.cdc_manifest_fallback", &[("reason", "envelope_budget")]);
+            cx.trace_with_fields(
+                "atp_rq.cdc_manifest_fallback",
+                &[("reason", "envelope_budget")],
+            );
         }
         Err(error) => return Err(error),
     }
@@ -151,16 +188,28 @@ pub(super) async fn select_cdc_manifest(
 /// Use one bounded reader for the sender, no-op revalidation and old-file
 /// reuse. No file-sized byte store is created on either side.
 pub(super) enum ChunkReader {
-    Fixed { file: crate::fs::File, buffer: Vec<u8> },
-    Cdc { reader: cdc::ChunkReader<crate::fs::File>, chunk: Vec<u8> },
+    Fixed {
+        file: crate::fs::File,
+        buffer: Vec<u8>,
+    },
+    Cdc {
+        reader: cdc::ChunkReader<crate::fs::File>,
+        chunk: Vec<u8>,
+    },
 }
 
 impl ChunkReader {
     pub(super) fn new(file: crate::fs::File, chunk_size: usize, content_defined: bool) -> Self {
         if content_defined {
-            Self::Cdc { reader: cdc::ChunkReader::new(file), chunk: Vec::new() }
+            Self::Cdc {
+                reader: cdc::ChunkReader::new(file),
+                chunk: Vec::new(),
+            }
         } else {
-            Self::Fixed { file, buffer: vec![0; chunk_size] }
+            Self::Fixed {
+                file,
+                buffer: vec![0; chunk_size],
+            }
         }
     }
 
@@ -175,8 +224,8 @@ impl ChunkReader {
                 Ok(Some(chunk.as_slice()))
             }
             Self::Fixed { file, buffer } => {
-                let read = crate::net::atp::transport_common::delta::read_full_chunk(file, buffer)
-                    .await?;
+                let read =
+                    crate::net::atp::transport_common::delta::read_full_chunk(file, buffer).await?;
                 Ok((read != 0).then(|| &buffer[..read]))
             }
         }
@@ -198,7 +247,10 @@ pub(super) fn advertise(
         0,
         &selector(manifest),
     )?;
-    frame.header.extensions.insert(OFFER_EXTENSION, tag.to_vec());
+    frame
+        .header
+        .extensions
+        .insert(OFFER_EXTENSION, tag.to_vec());
     Ok(())
 }
 
@@ -251,10 +303,15 @@ pub(super) fn validate_request(
         || request.missing_bytes >= delta.total_size_bytes
         || request.stale_chunks > RQ_DELTA_MAX_MANIFEST_CHUNKS
     {
-        return Err(RqError::Control("malformed RQ changed-chunk request".to_string()));
+        return Err(RqError::Control(
+            "malformed RQ changed-chunk request".to_string(),
+        ));
     }
     rq_decode_delta_root(
-        request.receiver_merkle_root_hex.as_deref().expect("checked receiver root"),
+        request
+            .receiver_merkle_root_hex
+            .as_deref()
+            .expect("checked receiver root"),
         "RQ delta receiver root",
     )?;
     let mut last_index = None;
@@ -270,9 +327,9 @@ pub(super) fn validate_request(
             ));
         }
         last_index = Some(chunk.index);
-        missing_bytes = missing_bytes.checked_add(chunk.size_bytes).ok_or_else(|| {
-            RqError::Control("changed-chunk byte count overflow".to_string())
-        })?;
+        missing_bytes = missing_bytes
+            .checked_add(chunk.size_bytes)
+            .ok_or_else(|| RqError::Control("changed-chunk byte count overflow".to_string()))?;
     }
     let missing_count = u64::try_from(request.missing_chunks.len())
         .map_err(|_| RqError::Control("changed-chunk count overflow".to_string()))?;
@@ -303,9 +360,8 @@ pub(super) async fn plan(
     let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
         RqError::Control("cannot plan changed chunks without a manifest".to_string())
     })?;
-    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
-        RqError::Control("changed chunks require one regular file".to_string())
-    })?;
+    let entry = rq_delta_manifest_entry(manifest)
+        .ok_or_else(|| RqError::Control("changed chunks require one regular file".to_string()))?;
     let baseline = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     reject_existing_symlink(dest_dir).await?;
     reject_destination_symlink_prefix(&baseline, &baseline).await?;
@@ -324,8 +380,7 @@ pub(super) async fn plan(
         || metadata.len() == 0
         || metadata.len() > config.max_transfer_bytes
         || (content_defined && !cdc_size_supported(metadata.len()))
-        || (!content_defined
-            && metadata.len().div_ceil(chunk_size) > RQ_DELTA_MAX_MANIFEST_CHUNKS)
+        || (!content_defined && metadata.len().div_ceil(chunk_size) > RQ_DELTA_MAX_MANIFEST_CHUNKS)
     {
         return Ok(None);
     }
@@ -344,7 +399,8 @@ pub(super) async fn plan(
         };
         let size_bytes = u64::try_from(bytes.len())
             .map_err(|_| RqError::Control("baseline chunk size overflow".to_string()))?;
-        let end = offset.checked_add(size_bytes)
+        let end = offset
+            .checked_add(size_bytes)
             .ok_or_else(|| RqError::Control("baseline size overflow".to_string()))?;
         if end > metadata.len()
             || u64::try_from(receiver_chunks.len()).unwrap_or(u64::MAX)
@@ -358,7 +414,9 @@ pub(super) async fn plan(
         let content_id_hex = content_id.to_hex();
         let index = u32::try_from(receiver_chunks.len())
             .map_err(|_| RqError::Control("baseline chunk count overflow".to_string()))?;
-        reusable.entry(content_id_hex.clone()).or_insert((offset, size_bytes));
+        reusable
+            .entry(content_id_hex.clone())
+            .or_insert((offset, size_bytes));
         planner_chunks.push(CasChunkRef {
             index,
             byte_offset: offset,
@@ -402,7 +460,11 @@ pub(super) async fn plan(
         missing_chunks: diff.missing_chunks,
     };
     validate_request(manifest, &request, 0, &[], false)?;
-    Ok(Some(ReceivePlan { request, baseline, reusable }))
+    Ok(Some(ReceivePlan {
+        request,
+        baseline,
+        reusable,
+    }))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -412,10 +474,16 @@ struct Complete {
     chunks_sent: u64,
 }
 
-fn data_frame(chunk: &DeltaChunkWire, relative_offset: u64, bytes: &[u8]) -> Result<Frame, RqError> {
+fn data_frame(
+    chunk: &DeltaChunkWire,
+    relative_offset: u64,
+    bytes: &[u8],
+) -> Result<Frame, RqError> {
     let mut payload = Vec::with_capacity(DATA_HEADER_BYTES + bytes.len());
     payload.extend_from_slice(&chunk.index.to_be_bytes());
-    let offset = chunk.entry_offset.checked_add(relative_offset)
+    let offset = chunk
+        .entry_offset
+        .checked_add(relative_offset)
         .ok_or_else(|| RqError::Control("changed-chunk offset overflow".to_string()))?;
     payload.extend_from_slice(&offset.to_be_bytes());
     payload.extend_from_slice(bytes);
@@ -430,14 +498,23 @@ fn checked_data<'a>(
 ) -> Result<&'a [u8], RqError> {
     let payload = frame.payload();
     if frame.frame_type() != FrameType::ObjectData || payload.len() < DATA_HEADER_BYTES {
-        return Err(RqError::Frame("expected one complete changed-chunk ObjectData frame".to_string()));
+        return Err(RqError::Frame(
+            "expected one complete changed-chunk ObjectData frame".to_string(),
+        ));
     }
     let index = u32::from_be_bytes(payload[..4].try_into().expect("chunk index width"));
-    let offset = u64::from_be_bytes(payload[4..DATA_HEADER_BYTES].try_into().expect("chunk offset width"));
+    let offset = u64::from_be_bytes(
+        payload[4..DATA_HEADER_BYTES]
+            .try_into()
+            .expect("chunk offset width"),
+    );
     let bytes = &payload[DATA_HEADER_BYTES..];
-    let remaining = chunk.size_bytes.checked_sub(relative_offset).ok_or_else(|| {
-        RqError::Frame("changed-chunk data exceeds the requested chunk".to_string())
-    })?;
+    let remaining = chunk
+        .size_bytes
+        .checked_sub(relative_offset)
+        .ok_or_else(|| {
+            RqError::Frame("changed-chunk data exceeds the requested chunk".to_string())
+        })?;
     let expected_len = remaining.min(DATA_FRAGMENT_BYTES as u64);
     if index != chunk.index
         || chunk.entry_offset.checked_add(relative_offset) != Some(offset)
@@ -455,7 +532,9 @@ fn verify_chunk_bytes(chunk: &DeltaChunkWire, bytes: &[u8], label: &str) -> Resu
     if u64::try_from(bytes.len()).ok() != Some(chunk.size_bytes)
         || ContentId::from_bytes(bytes).to_hex() != chunk.content_id_hex
     {
-        return Err(RqError::Integrity(format!("{label} differs from its committed chunk")));
+        return Err(RqError::Integrity(format!(
+            "{label} differs from its committed chunk"
+        )));
     }
     Ok(())
 }
@@ -476,27 +555,39 @@ where
     // request. Source bytes (including unrequested ones) must still match it.
     validate_rq_delta_source_unchanged(cx, manifest, entries, config).await?;
     let [source] = entries else {
-        return Err(RqError::Control("changed chunks lost their single source".to_string()));
+        return Err(RqError::Control(
+            "changed chunks lost their single source".to_string(),
+        ));
     };
     let mut file = crate::fs::File::open(&source.abs_path).await?;
-    let delta = manifest.delta_manifest.as_ref().expect("validated delta manifest");
+    let delta = manifest
+        .delta_manifest
+        .as_ref()
+        .expect("validated delta manifest");
     let mut buffer = vec![0u8; delta.chunk_size];
     for chunk in &request.missing_chunks {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let len = usize::try_from(chunk.size_bytes)
             .map_err(|_| RqError::Control("changed-chunk size overflow".to_string()))?;
-        file.seek(std::io::SeekFrom::Start(chunk.entry_offset)).await?;
+        file.seek(std::io::SeekFrom::Start(chunk.entry_offset))
+            .await?;
         let bytes = &mut buffer[..len];
         file.read_exact(bytes).await?;
         verify_chunk_bytes(chunk, bytes, "RQ source before sending")?;
         for (part, bytes) in bytes.chunks(DATA_FRAGMENT_BYTES).enumerate() {
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-            let relative_offset = u64::try_from(part * DATA_FRAGMENT_BYTES)
-                .map_err(|_| RqError::Control("changed-chunk fragment offset overflow".to_string()))?;
+            let relative_offset = u64::try_from(part * DATA_FRAGMENT_BYTES).map_err(|_| {
+                RqError::Control("changed-chunk fragment offset overflow".to_string())
+            })?;
             let frame = data_frame(chunk, relative_offset, bytes)?;
             send_delta_control_frame(
-                cx, control, &frame, config.delta_control_timeout, "send authenticated changed chunk",
-            ).await?;
+                cx,
+                control,
+                &frame,
+                config.delta_control_timeout,
+                "send authenticated changed chunk",
+            )
+            .await?;
         }
     }
     validate_rq_delta_source_unchanged(cx, manifest, entries, config).await?;
@@ -505,14 +596,25 @@ where
         chunks_sent: u64::try_from(request.missing_chunks.len()).unwrap_or(u64::MAX),
     };
     send_delta_control_frame(
-        cx, control, &json_frame(FrameType::ObjectComplete, &complete)?,
-        config.delta_control_timeout, "send changed-chunk completion",
-    ).await?;
+        cx,
+        control,
+        &json_frame(FrameType::ObjectComplete, &complete)?,
+        config.delta_control_timeout,
+        "send changed-chunk completion",
+    )
+    .await?;
     let frame = recv_delta_control_frame(
-        cx, control, config.delta_control_timeout, "receive changed-chunk proof",
-    ).await?;
+        cx,
+        control,
+        config.delta_control_timeout,
+        "receive changed-chunk proof",
+    )
+    .await?;
     if frame.frame_type() != FrameType::Proof {
-        return Err(RqError::Unexpected { got: frame.frame_type(), expected: "authenticated Proof" });
+        return Err(RqError::Unexpected {
+            got: frame.frame_type(),
+            expected: "authenticated Proof",
+        });
     }
     let receipt: ReceiveReceipt = parse_json(&frame)?;
     if !receipt.committed
@@ -525,13 +627,18 @@ where
         || receipt.reason.is_some()
         || !receipt.committed_paths.is_empty()
     {
-        return Err(RqError::Integrity("receiver did not verify the changed-chunk transfer".to_string()));
+        return Err(RqError::Integrity(
+            "receiver did not verify the changed-chunk transfer".to_string(),
+        ));
     }
     send_delta_control_frame(
-        cx, control,
+        cx,
+        control,
         &Frame::empty(FrameType::Close).map_err(|error| RqError::Frame(error.to_string()))?,
-        config.delta_control_timeout, "close changed-chunk transfer",
-    ).await?;
+        config.delta_control_timeout,
+        "close changed-chunk transfer",
+    )
+    .await?;
     Ok(SendReport {
         transfer_id: manifest.transfer_id.clone(),
         bytes_sent: request.missing_bytes,
@@ -545,10 +652,12 @@ where
     })
 }
 
-fn staging_decoder(manifest: &TransferManifest, staging_dir: &Path) -> Result<EntryDecoder, RqError> {
-    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
-        RqError::Control("changed chunks require one staging entry".to_string())
-    })?;
+fn staging_decoder(
+    manifest: &TransferManifest,
+    staging_dir: &Path,
+) -> Result<EntryDecoder, RqError> {
+    let entry = rq_delta_manifest_entry(manifest)
+        .ok_or_else(|| RqError::Control("changed chunks require one staging entry".to_string()))?;
     Ok(EntryDecoder {
         index: entry.index,
         object_id: entry_object_id(&manifest.transfer_id, entry.index),
@@ -585,8 +694,16 @@ async fn copy_reused(
 ) -> Result<(), RqError> {
     reject_destination_symlink_prefix(&plan.baseline, &plan.baseline).await?;
     let mut file = crate::fs::File::open(&plan.baseline).await?;
-    let delta = manifest.delta_manifest.as_ref().expect("validated delta manifest");
-    let missing: BTreeSet<u32> = plan.request.missing_chunks.iter().map(|chunk| chunk.index).collect();
+    let delta = manifest
+        .delta_manifest
+        .as_ref()
+        .expect("validated delta manifest");
+    let missing: BTreeSet<u32> = plan
+        .request
+        .missing_chunks
+        .iter()
+        .map(|chunk| chunk.index)
+        .collect();
     let mut buffer = vec![0u8; delta.chunk_size];
     for chunk in &delta.chunks {
         if missing.contains(&chunk.index) {
@@ -599,14 +716,18 @@ async fn copy_reused(
         let len = usize::try_from(chunk.size_bytes)
             .map_err(|_| RqError::Control("reused chunk size overflow".to_string()))?;
         if size != chunk.size_bytes {
-            return Err(RqError::Integrity("reused chunk length mismatch".to_string()));
+            return Err(RqError::Integrity(
+                "reused chunk length mismatch".to_string(),
+            ));
         }
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let bytes = &mut buffer[..len];
         file.read_exact(bytes).await?;
         verify_chunk_bytes(chunk, bytes, "RQ baseline after delta planning")?;
         write_entry_staging_range(decoder, chunk.entry_offset, bytes).await?;
-        decoder.bytes_written = decoder.bytes_written.checked_add(chunk.size_bytes)
+        decoder.bytes_written = decoder
+            .bytes_written
+            .checked_add(chunk.size_bytes)
             .ok_or_else(|| RqError::Control("reconstructed byte count overflow".to_string()))?;
     }
     Ok(())
@@ -630,7 +751,10 @@ where
     let staging_dir = guard.dir().to_path_buf();
     let mut decoder = staging_decoder(manifest, &staging_dir)?;
     let result = async {
-        let delta = manifest.delta_manifest.as_ref().expect("validated delta manifest");
+        let delta = manifest
+            .delta_manifest
+            .as_ref()
+            .expect("validated delta manifest");
         let mut buffer = vec![0u8; delta.chunk_size];
         for chunk in &plan.request.missing_chunks {
             let len = usize::try_from(chunk.size_bytes)
@@ -639,8 +763,12 @@ where
             while filled < len {
                 cx.checkpoint().map_err(|_| RqError::Cancelled)?;
                 let frame = recv_delta_control_frame(
-                    cx, control, config.delta_control_timeout, "receive authenticated changed chunk",
-                ).await?;
+                    cx,
+                    control,
+                    config.delta_control_timeout,
+                    "receive authenticated changed chunk",
+                )
+                .await?;
                 let bytes = checked_data(&frame, chunk, filled as u64)?;
                 buffer[filled..filled + bytes.len()].copy_from_slice(bytes);
                 filled += bytes.len();
@@ -648,13 +776,21 @@ where
             let bytes = &buffer[..len];
             verify_chunk_bytes(chunk, bytes, "received RQ changed chunk")?;
             write_entry_staging_range(&mut decoder, chunk.entry_offset, bytes).await?;
-            decoder.bytes_written = decoder.bytes_written.checked_add(chunk.size_bytes)
-                .ok_or_else(|| RqError::Control("received changed-chunk byte count overflow".to_string()))?;
+            decoder.bytes_written = decoder
+                .bytes_written
+                .checked_add(chunk.size_bytes)
+                .ok_or_else(|| {
+                    RqError::Control("received changed-chunk byte count overflow".to_string())
+                })?;
         }
         drop(buffer);
         let frame = recv_delta_control_frame(
-            cx, control, config.delta_control_timeout, "receive changed-chunk completion",
-        ).await?;
+            cx,
+            control,
+            config.delta_control_timeout,
+            "receive changed-chunk completion",
+        )
+        .await?;
         if frame.frame_type() != FrameType::ObjectComplete {
             return Err(RqError::Unexpected {
                 got: frame.frame_type(),
@@ -663,9 +799,12 @@ where
         }
         let complete: Complete = parse_json(&frame)?;
         if complete.bytes_sent != plan.request.missing_bytes
-            || complete.chunks_sent != u64::try_from(plan.request.missing_chunks.len()).unwrap_or(u64::MAX)
+            || complete.chunks_sent
+                != u64::try_from(plan.request.missing_chunks.len()).unwrap_or(u64::MAX)
         {
-            return Err(RqError::Integrity("changed-chunk completion count mismatch".to_string()));
+            return Err(RqError::Integrity(
+                "changed-chunk completion count mismatch".to_string(),
+            ));
         }
         // The baseline is re-read only after the remote subset is complete.
         // Every reused range is checked again, so a concurrent edit cannot
@@ -673,17 +812,26 @@ where
         copy_reused(cx, manifest, &plan, &mut decoder).await?;
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         if decoder.bytes_written != decoder.size {
-            return Err(RqError::Integrity("changed chunks did not reconstruct the whole object".to_string()));
+            return Err(RqError::Integrity(
+                "changed chunks did not reconstruct the whole object".to_string(),
+            ));
         }
         decoder.complete = true;
         let mut receipt = verify_and_commit_with_options(
-            manifest, std::slice::from_mut(&mut decoder), dest_dir, 0, 0,
-            &BTreeMap::new(), &CompletionDigestIndex::default(), options,
-        ).await?;
+            manifest,
+            std::slice::from_mut(&mut decoder),
+            dest_dir,
+            0,
+            0,
+            &BTreeMap::new(),
+            &CompletionDigestIndex::default(),
+            options,
+        )
+        .await?;
         if !receipt.committed || !receipt.sha_ok || !receipt.merkle_ok {
-            return Err(RqError::Integrity(
-                receipt.reason.unwrap_or_else(|| "changed-chunk reconstruction failed verification".to_string()),
-            ));
+            return Err(RqError::Integrity(receipt.reason.unwrap_or_else(|| {
+                "changed-chunk reconstruction failed verification".to_string()
+            })));
         }
         let committed_paths = receipt.committed_paths.iter().map(PathBuf::from).collect();
         // Report actual transmitted object bytes, not bytes reused locally.
@@ -691,9 +839,13 @@ where
         receipt.bytes_received = plan.request.missing_bytes;
         receipt.committed_paths.clear();
         send_delta_control_frame(
-            cx, control, &json_frame(FrameType::Proof, &receipt)?,
-            config.delta_control_timeout, "send verified changed-chunk proof",
-        ).await?;
+            cx,
+            control,
+            &json_frame(FrameType::Proof, &receipt)?,
+            config.delta_control_timeout,
+            "send verified changed-chunk proof",
+        )
+        .await?;
         super::drain_sender_close_after_proof(cx, control, "changed-chunks").await;
         Ok(ReceiveReport {
             transfer_id: manifest.transfer_id.clone(),
@@ -705,7 +857,8 @@ where
             committed_paths,
             peer,
         })
-    }.await;
+    }
+    .await;
     // Closing handles first preserves cleanup on Windows too. The armed guard
     // is the cancellation backstop until cooperative cleanup succeeds.
     drop(decoder);

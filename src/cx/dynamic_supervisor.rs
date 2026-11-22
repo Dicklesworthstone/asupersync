@@ -30,17 +30,18 @@ use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError};
 use crate::supervision::{
     BackoffStrategy, BudgetRefusal, ChildName, ManagedSupervisor, ManagedSupervisorHandle,
-    ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict, UnstartedManagedSupervisor,
+    ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict,
+    UnstartedManagedSupervisor,
 };
 use crate::types::{CancelReason, RegionId};
 use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
-use std::pin::Pin;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, OnceLock};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 /// One automatic-restart window shared by an entire dynamic supervision root.
@@ -58,7 +59,11 @@ impl SharedRestartConfig {
     /// Permit at most `max_restarts` batch reservations in the sliding window.
     #[must_use]
     pub fn new(max_restarts: u32, window: std::time::Duration) -> Self {
-        Self { max_restarts, window, backoff: BackoffStrategy::None }
+        Self {
+            max_restarts,
+            window,
+            backoff: BackoffStrategy::None,
+        }
     }
 
     /// Add shared backoff; the longer of shared and per-tree delay is used.
@@ -107,7 +112,8 @@ impl SharedRestartDomain {
         Self {
             state: Mutex::new(SharedRestartState {
                 tracker: RestartTracker::from_restart_config(
-                    RestartConfig::new(config.max_restarts, config.window).with_backoff(config.backoff),
+                    RestartConfig::new(config.max_restarts, config.window)
+                        .with_backoff(config.backoff),
                 ),
                 pending: 0,
                 admitted: 0,
@@ -126,7 +132,10 @@ impl SharedRestartDomain {
         let state = self.state.lock();
         SharedRestartStatus {
             admitted: state.admitted,
-            recent: state.tracker.recent_count(now).saturating_add(state.pending),
+            recent: state
+                .tracker
+                .recent_count(now)
+                .saturating_add(state.pending),
             refusal: state.refusal.clone(),
         }
     }
@@ -149,7 +158,11 @@ impl SharedRestartDomain {
         let candidate = waker.clone();
         let retired = {
             let mut state = self.state.lock();
-            if state.waiter.as_ref().is_none_or(|old| !old.will_wake(&candidate)) {
+            if state
+                .waiter
+                .as_ref()
+                .is_none_or(|old| !old.will_wake(&candidate))
+            {
                 state.waiter.replace(candidate)
             } else {
                 Some(candidate)
@@ -175,14 +188,19 @@ impl SharedRestartDomain {
         let (verdict, wake) = loop {
             let mut state = self.state.lock();
             if let Some(refusal) = &state.refusal {
-                return RestartVerdict::Denied { refusal: refusal.clone() };
+                return RestartVerdict::Denied {
+                    refusal: refusal.clone(),
+                };
             }
             // A delayed clock sample can retain too much history.
             // Newly accepted slots stay pending until stamped AFTER admission,
             // so a preempted caller cannot backdate its reservation and cause
             // another controller to prune it immediately. Clock callbacks run
             // outside the lock; pending slots cannot expire in that interval.
-            let recent = state.tracker.recent_count(evaluated_at).saturating_add(state.pending);
+            let recent = state
+                .tracker
+                .recent_count(evaluated_at)
+                .saturating_add(state.pending);
             let policy = state.tracker.history().config();
             if sampled_revision.is_some_and(|revision| revision != state.revision)
                 || (recent >= policy.max_restarts as usize && sampled_revision.is_none())
@@ -252,9 +270,11 @@ impl SharedRestartDomain {
             return Ok(false);
         }
         let root = self.root.get().ok_or(SpawnError::RuntimeUnavailable)?;
-        root.spawn_gateway_handle().ok_or(SpawnError::RuntimeUnavailable)?
+        root.spawn_gateway_handle()
+            .ok_or(SpawnError::RuntimeUnavailable)?
             .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Cancel {
-                region_id: root.region_id(), reason,
+                region_id: root.region_id(),
+                reason,
             })?;
         Ok(true)
     }
@@ -274,7 +294,10 @@ impl DynamicSupervisorConfig {
     /// Use an explicit child ceiling and inherit the caller's region envelope.
     #[must_use]
     pub const fn new(max_children: usize) -> Self {
-        Self { max_children, region: ChildRegionSpec::inherit() }
+        Self {
+            max_children,
+            region: ChildRegionSpec::inherit(),
+        }
     }
 }
 
@@ -290,16 +313,24 @@ pub struct DynamicChildId {
 impl DynamicChildId {
     /// Dynamic owner's region, including its arena generation.
     #[must_use]
-    pub const fn owner_region(&self) -> RegionId { self.owner }
+    pub const fn owner_region(&self) -> RegionId {
+        self.owner
+    }
     /// Region enclosing this admitted controller and all its descendants.
     #[must_use]
-    pub const fn region_id(&self) -> RegionId { self.region }
+    pub const fn region_id(&self) -> RegionId {
+        self.region
+    }
     /// Monotone admission sequence within this owner (not a worker restart count).
     #[must_use]
-    pub const fn generation(&self) -> u64 { self.generation }
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Name reserved until this exact child is quiescent and reaped.
     #[must_use]
-    pub fn name(&self) -> &str { self.name.as_str() }
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
 }
 
 /// A child's control-plane state, not an application-readiness assertion.
@@ -335,7 +366,10 @@ pub struct DynamicRegionOutcome {
 
 impl DynamicRegionOutcome {
     fn from_close(value: RegionCloseOutcome) -> Self {
-        Self { outcome: value.outcome, cleanup_outcome: value.cleanup_outcome }
+        Self {
+            outcome: value.outcome,
+            cleanup_outcome: value.cleanup_outcome,
+        }
     }
 }
 
@@ -419,10 +453,13 @@ pub enum DynamicSupervisorError {
 }
 
 impl From<ChildRegionError> for DynamicSupervisorError {
-    fn from(error: ChildRegionError) -> Self { Self::Region(Arc::new(error)) }
+    fn from(error: ChildRegionError) -> Self {
+        Self::Region(Arc::new(error))
+    }
 }
 
-type CloseFuture = Pin<Box<dyn Future<Output = Result<RegionCloseOutcome, ChildRegionError>> + Send>>;
+type CloseFuture =
+    Pin<Box<dyn Future<Output = Result<RegionCloseOutcome, ChildRegionError>> + Send>>;
 
 struct Child<E> {
     id: DynamicChildId,
@@ -439,21 +476,35 @@ struct Child<E> {
 impl<E> Child<E> {
     fn stop(&mut self) {
         self.stop_requested = true;
-        if let Some(handle) = &self.handle { handle.abort(); }
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
     }
 
     fn reusable(&self) -> bool {
-        let Some(Ok(close)) = &self.closed else { return false; };
-        if close.cleanup_outcome.as_ref().is_some_and(|outcome| !outcome.is_ok()) {
+        let Some(Ok(close)) = &self.closed else {
+            return false;
+        };
+        if close
+            .cleanup_outcome
+            .as_ref()
+            .is_some_and(|outcome| !outcome.is_ok())
+        {
             return false;
         }
         match &self.joined {
             Some(Ok(report)) => {
                 (report.region.is_none() || report.region_outcome.is_some())
-                    && report.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok())
+                    && report
+                        .cleanup_outcome
+                        .as_ref()
+                        .is_none_or(|outcome| outcome.is_ok())
                     && report.children.iter().all(|child| {
                         child.region_outcome.is_some()
-                            && child.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok())
+                            && child
+                                .cleanup_outcome
+                                .as_ref()
+                                .is_none_or(|outcome| outcome.is_ok())
                     })
             }
             // A before-first-poll cancellation may have no managed report.
@@ -494,9 +545,17 @@ impl<E> Child<E> {
                 self.closing = Some(Box::pin(region.close_with_outcome()));
             }
             let result = std::task::ready!(
-                self.closing.as_mut().expect("retained close future").as_mut().poll(cx)
+                self.closing
+                    .as_mut()
+                    .expect("retained close future")
+                    .as_mut()
+                    .poll(cx)
             );
-            self.closed = Some(result.map(DynamicRegionOutcome::from_close).map_err(Arc::new));
+            self.closed = Some(
+                result
+                    .map(DynamicRegionOutcome::from_close)
+                    .map_err(Arc::new),
+            );
             drop(self.closing.take());
         }
         Poll::Ready(())
@@ -507,7 +566,9 @@ impl<E> Child<E> {
             id: self.id,
             stop_requested: self.stop_requested,
             supervisor: self.joined.expect("joined before completion publication"),
-            close: self.closed.expect("close attempted before completion publication"),
+            close: self
+                .closed
+                .expect("close attempted before completion publication"),
         }
     }
 }
@@ -556,7 +617,8 @@ impl<E> fmt::Debug for DynamicSupervisor<E> {
 impl Cx {
     /// Open a region-owned dynamic supervision collection without starting workers.
     pub async fn open_dynamic_supervisor<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig,
+        &self,
+        config: DynamicSupervisorConfig,
     ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
         self.open_dynamic_supervisor_with_domain(config, None).await
     }
@@ -577,20 +639,26 @@ impl Cx {
     /// region is not cancelled. Inspect `shared_restart_status`, each child report,
     /// and shutdown closure; a signal alone never proves cleanup completed.
     pub async fn open_dynamic_supervisor_with_shared_restarts<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig, restarts: SharedRestartConfig,
+        &self,
+        config: DynamicSupervisorConfig,
+        restarts: SharedRestartConfig,
     ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
         self.open_dynamic_supervisor_with_domain(
-            config, Some(Arc::new(SharedRestartDomain::new(restarts))),
-        ).await
+            config,
+            Some(Arc::new(SharedRestartDomain::new(restarts))),
+        )
+        .await
     }
 
     pub(crate) async fn open_dynamic_supervisor_with_domain<E: Send + 'static>(
-        &self, config: DynamicSupervisorConfig,
+        &self,
+        config: DynamicSupervisorConfig,
         shared_restarts: Option<Arc<SharedRestartDomain>>,
     ) -> Result<DynamicSupervisor<E>, DynamicSupervisorError> {
         if self.checkpoint().is_err() {
             return Err(DynamicSupervisorError::Cancelled(
-                self.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
+                self.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
         }
         let root = self.open_child_region(config.region).await?;
@@ -601,9 +669,15 @@ impl Cx {
             debug_assert!(attached.is_ok());
         }
         Ok(DynamicSupervisor {
-            owner: self.clone(), region: root.region_id(), root: Some(root),
-            max_children: config.max_children, generation: 0, sealed: false, cancel_waker: None,
-            children: BTreeMap::new(), shared_restarts,
+            owner: self.clone(),
+            region: root.region_id(),
+            root: Some(root),
+            max_children: config.max_children,
+            generation: 0,
+            sealed: false,
+            cancel_waker: None,
+            children: BTreeMap::new(),
+            shared_restarts,
         })
     }
 }
@@ -611,19 +685,29 @@ impl Cx {
 impl<E> DynamicSupervisor<E> {
     /// Root region that owns every admitted controller and its tree.
     #[must_use]
-    pub const fn region_id(&self) -> RegionId { self.region }
+    pub const fn region_id(&self) -> RegionId {
+        self.region
+    }
     /// Reserved names, including completed-but-unreaped children.
     #[must_use]
-    pub fn len(&self) -> usize { self.children.len() }
+    pub fn len(&self) -> usize {
+        self.children.len()
+    }
     /// Whether there are no reserved names.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.children.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
     /// Configured reservation ceiling.
     #[must_use]
-    pub const fn capacity(&self) -> usize { self.max_children }
+    pub const fn capacity(&self) -> usize {
+        self.max_children
+    }
     /// Whether admission has been sealed (via explicit shutdown, owner cancellation, or shared restart limits).
     #[must_use]
-    pub const fn is_closing(&self) -> bool { self.sealed }
+    pub const fn is_closing(&self) -> bool {
+        self.sealed
+    }
     /// Shared accounting remains available after names have been reaped.
     #[must_use]
     pub fn shared_restart_status(&self) -> Option<SharedRestartStatus> {
@@ -631,26 +715,36 @@ impl<E> DynamicSupervisor<E> {
     }
 
     pub(super) fn shared_restart_refused(&self) -> bool {
-        self.shared_restarts.as_ref().is_some_and(|domain| domain.is_refused())
+        self.shared_restarts
+            .as_ref()
+            .is_some_and(|domain| domain.is_refused())
     }
     /// Snapshot of reserved names in stable lexical order; never consumes results.
     #[must_use]
     pub fn children(&self) -> Vec<DynamicChildInfo> {
-        self.children.values().map(|child| DynamicChildInfo {
-            id: child.id.clone(), state: child.state(),
-        }).collect()
+        self.children
+            .values()
+            .map(|child| DynamicChildInfo {
+                id: child.id.clone(),
+                state: child.state(),
+            })
+            .collect()
     }
 
     fn child(&self, id: &DynamicChildId) -> Result<&Child<E>, DynamicSupervisorError> {
-        self.children.get(id.name.as_str()).filter(|child| &child.id == id)
+        self.children
+            .get(id.name.as_str())
+            .filter(|child| &child.id == id)
             .ok_or(DynamicSupervisorError::StaleChild)
     }
 
     /// Inspect a retained controller result, including one quarantined by cleanup.
     /// Does not poll the controller or consume the result.
     pub fn child_result(
-        &self, id: &DynamicChildId,
-    ) -> Result<Option<&Result<ManagedSupervisorReport<E>, JoinError>>, DynamicSupervisorError> {
+        &self,
+        id: &DynamicChildId,
+    ) -> Result<Option<&Result<ManagedSupervisorReport<E>, JoinError>>, DynamicSupervisorError>
+    {
         Ok(self.child(id)?.joined.as_ref())
     }
 
@@ -663,26 +757,45 @@ impl<E> DynamicSupervisor<E> {
                     return;
                 }
             }
-            self.cancel_waker = Some(self.owner.refresh_cancel_waker(self.cancel_waker, cx.waker()));
-            if self.owner.checkpoint().is_err() { self.begin_shutdown(); }
+            self.cancel_waker = Some(
+                self.owner
+                    .refresh_cancel_waker(self.cancel_waker, cx.waker()),
+            );
+            if self.owner.checkpoint().is_err() {
+                self.begin_shutdown();
+            }
         }
     }
 
     fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
-        if let Some(refusal) = self.shared_restarts.as_ref().and_then(|domain| domain.refusal()) {
+        if let Some(refusal) = self
+            .shared_restarts
+            .as_ref()
+            .and_then(|domain| domain.refusal())
+        {
             self.begin_shutdown();
             return Err(DynamicSupervisorError::SharedRestartLimit(refusal));
         }
-        if self.sealed { return Err(DynamicSupervisorError::Closing); }
+        if self.sealed {
+            return Err(DynamicSupervisorError::Closing);
+        }
         if self.owner.checkpoint().is_err() {
             self.begin_shutdown();
             return Err(DynamicSupervisorError::Cancelled(
-                self.owner.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
+                self.owner
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
         }
-        if name.is_empty() || name.len() > 255 { return Err(DynamicSupervisorError::InvalidName); }
-        if self.children.contains_key(name.as_str()) { return Err(DynamicSupervisorError::DuplicateName); }
-        if self.children.len() >= self.max_children { return Err(DynamicSupervisorError::Capacity); }
+        if name.is_empty() || name.len() > 255 {
+            return Err(DynamicSupervisorError::InvalidName);
+        }
+        if self.children.contains_key(name.as_str()) {
+            return Err(DynamicSupervisorError::DuplicateName);
+        }
+        if self.children.len() >= self.max_children {
+            return Err(DynamicSupervisorError::Capacity);
+        }
         Ok(())
     }
 
@@ -690,7 +803,10 @@ impl<E> DynamicSupervisor<E> {
     /// Call `wait_child` or `terminate_child` to observe actual quiescence.
     pub fn request_stop(&mut self, id: &DynamicChildId) -> Result<(), DynamicSupervisorError> {
         self.child(id)?;
-        self.children.get_mut(id.name.as_str()).expect("validated child").stop();
+        self.children
+            .get_mut(id.name.as_str())
+            .expect("validated child")
+            .stop();
         Ok(())
     }
 
@@ -698,7 +814,9 @@ impl<E> DynamicSupervisor<E> {
     /// This is idempotent and remains in effect if a subsequent wait is dropped.
     pub fn begin_shutdown(&mut self) {
         self.sealed = true;
-        for child in self.children.values_mut() { child.stop(); }
+        for child in self.children.values_mut() {
+            child.stop();
+        }
     }
 }
 
@@ -710,7 +828,9 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// No existing topology or restart tracker is mutated. A reused name receives
     /// a new owner-local generation AND a new generational region identity.
     pub fn start_child(
-        &mut self, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
+        &mut self,
+        name: impl Into<ChildName>,
+        supervisor: ManagedSupervisor<E>,
     ) -> impl Future<Output = Result<DynamicChildId, DynamicSupervisorError>> {
         let supervisor = UnstartedManagedSupervisor::new(supervisor);
         async move { self.start_child_guarded(name.into(), supervisor).await }
@@ -722,18 +842,27 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         mut supervisor: UnstartedManagedSupervisor<E>,
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
         self.check_admission(&name)?;
-        let generation = self.generation.checked_add(1)
+        let generation = self
+            .generation
+            .checked_add(1)
             .ok_or(DynamicSupervisorError::GenerationExhausted)?;
         self.generation = generation;
-        let region = self.root.as_ref().expect("open dynamic root").cx()
-            .open_child_region(ChildRegionSpec::inherit()).await?;
+        let region = self
+            .root
+            .as_ref()
+            .expect("open dynamic root")
+            .cx()
+            .open_child_region(ChildRegionSpec::inherit())
+            .await?;
         // An admission can finish after cancellation was published. Refuse to
         // submit user code, but still account for and close the admitted region.
         if self.owner.checkpoint().is_err() {
             self.begin_shutdown();
             region.close_with_outcome().await?;
             return Err(DynamicSupervisorError::Cancelled(
-                self.owner.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
+                self.owner
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
         }
         if let Some(domain) = &self.shared_restarts {
@@ -754,16 +883,33 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
                 return Err(DynamicSupervisorError::Spawn(error));
             }
         };
-        let id = DynamicChildId { owner: self.region, region: region.region_id(), generation, name: name.clone() };
+        let id = DynamicChildId {
+            owner: self.region,
+            region: region.region_id(),
+            generation,
+            name: name.clone(),
+        };
         // No await after submission and before retaining ownership/publication.
-        self.children.insert(name, Child {
-            id: id.clone(), handle: Some(handle), region: Some(region), joined: None,
-            closing: None, closed: None, stop_requested: false, unclean_reported: false,
-        });
+        self.children.insert(
+            name,
+            Child {
+                id: id.clone(),
+                handle: Some(handle),
+                region: Some(region),
+                joined: None,
+                closing: None,
+                closed: None,
+                stop_requested: false,
+                unclean_reported: false,
+            },
+        );
         Ok(id)
     }
 
-    fn reap(&mut self, id: &DynamicChildId) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
+    fn reap(
+        &mut self,
+        id: &DynamicChildId,
+    ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
         let child = self.child(id)?;
         let failure = if let Some(Err(error)) = &child.closed {
             Some(DynamicSupervisorError::Region(Arc::clone(error)))
@@ -784,7 +930,11 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
                 .unclean_reported = true;
             return Err(error);
         }
-        Ok(self.children.remove(id.name.as_str()).expect("validated terminal child").into_completion())
+        Ok(self
+            .children
+            .remove(id.name.as_str())
+            .expect("validated terminal child")
+            .into_completion())
     }
 
     /// Join and close one exact child, then release its name and capacity.
@@ -795,20 +945,26 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// Repeating it resumes the stored close. Cleanup failure quarantines the
     /// reservation; inspect `child_result` and shut down the owner for its report.
     pub async fn wait_child(
-        &mut self, id: &DynamicChildId,
+        &mut self,
+        id: &DynamicChildId,
     ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
         self.child(id)?;
         poll_fn(|cx| {
             self.observe_cancellation(cx);
-            self.children.get_mut(id.name.as_str()).expect("retained child").poll_terminal(cx)
-        }).await;
+            self.children
+                .get_mut(id.name.as_str())
+                .expect("retained child")
+                .poll_terminal(cx)
+        })
+        .await;
         self.reap(id)
     }
 
     /// Request cancellation, then await actual controller AND region termination.
     /// Dropping this future leaves the stop request and in-progress drain intact.
     pub async fn terminate_child(
-        &mut self, id: &DynamicChildId,
+        &mut self,
+        id: &DynamicChildId,
     ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
         self.request_stop(id)?;
         self.wait_child(id).await
@@ -827,7 +983,8 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// state; it does not undo stop requests or discard completed reports.
     /// The temporary owner-side work is bounded by the admitted child ceiling.
     pub async fn terminate_children(
-        &mut self, ids: &[DynamicChildId],
+        &mut self,
+        ids: &[DynamicChildId],
     ) -> Result<Vec<DynamicChildResult<E>>, DynamicSupervisorError> {
         let mut unique = std::collections::BTreeSet::new();
         for id in ids {
@@ -837,17 +994,30 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             }
         }
         for id in ids {
-            self.children.get_mut(id.name.as_str()).expect("validated group member").stop();
+            self.children
+                .get_mut(id.name.as_str())
+                .expect("validated group member")
+                .stop();
         }
         poll_fn(|cx| {
             self.observe_cancellation(cx);
             let mut all_ready = true;
             for id in ids {
-                let child = self.children.get_mut(id.name.as_str()).expect("retained group member");
-                if child.poll_terminal(cx).is_pending() { all_ready = false; }
+                let child = self
+                    .children
+                    .get_mut(id.name.as_str())
+                    .expect("retained group member");
+                if child.poll_terminal(cx).is_pending() {
+                    all_ready = false;
+                }
             }
-            if all_ready { Poll::Ready(()) } else { Poll::Pending }
-        }).await;
+            if all_ready {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
         Ok(ids.iter().map(|id| self.reap(id)).collect())
     }
 
@@ -865,13 +1035,24 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             self.observe_cancellation(cx);
             let mut waiting = false;
             for child in self.children.values_mut() {
-                if child.unclean_reported { continue; }
+                if child.unclean_reported {
+                    continue;
+                }
                 waiting = true;
-                if child.poll_terminal(cx).is_ready() { return Poll::Ready(Some(child.id.clone())); }
+                if child.poll_terminal(cx).is_ready() {
+                    return Poll::Ready(Some(child.id.clone()));
+                }
             }
-            if waiting { Poll::Pending } else { Poll::Ready(None) }
-        }).await;
-        let Some(id) = id else { return Ok(None); };
+            if waiting {
+                Poll::Pending
+            } else {
+                Poll::Ready(None)
+            }
+        })
+        .await;
+        let Some(id) = id else {
+            return Ok(None);
+        };
         self.reap(&id).map(Some)
     }
 
@@ -887,21 +1068,41 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             for child in self.children.values_mut() {
                 // Never short-circuit on Pending: another boundary's finalizer
                 // may be the event this one needs in order to finish closing.
-                if child.poll_terminal(cx).is_pending() { all_ready = false; }
+                if child.poll_terminal(cx).is_pending() {
+                    all_ready = false;
+                }
             }
-            if all_ready { Poll::Ready(()) } else { Poll::Pending }
-        }).await;
+            if all_ready {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
         let root = self.root.take().expect("owned dynamic root");
-        let close = root.close_with_outcome().await.map(DynamicRegionOutcome::from_close).map_err(Arc::new);
-        let children = std::mem::take(&mut self.children).into_values().map(Child::into_completion).collect();
-        DynamicSupervisorReport { region: self.region, children, close }
+        let close = root
+            .close_with_outcome()
+            .await
+            .map(DynamicRegionOutcome::from_close)
+            .map_err(Arc::new);
+        let children = std::mem::take(&mut self.children)
+            .into_values()
+            .map(Child::into_completion)
+            .collect();
+        DynamicSupervisorReport {
+            region: self.region,
+            children,
+            close,
+        }
     }
 }
 
 impl<E> Drop for DynamicSupervisor<E> {
     fn drop(&mut self) {
         self.begin_shutdown();
-        if let Some(token) = self.cancel_waker.take() { self.owner.clear_cancel_waker(token); }
+        if let Some(token) = self.cancel_waker.take() {
+            self.owner.clear_cancel_waker(token);
+        }
         // Child handles and the root's Drop request close. Neither can claim
         // completion; only the runtime's parent-region barrier supplies that.
     }

@@ -195,7 +195,9 @@ impl<R> StreamChunkReader<R> {
         }
         let index = u32::try_from(self.next_index)
             .map_err(|_| self.refuse("stream chunk index overflow"))?;
-        let end = self.offset.checked_add(self.filled as u64)
+        let end = self
+            .offset
+            .checked_add(self.filled as u64)
             .ok_or_else(|| self.refuse("stream chunk offset overflow"))?;
         let boundary = ChunkBoundary {
             index,

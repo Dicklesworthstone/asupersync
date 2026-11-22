@@ -35,12 +35,12 @@
 #![allow(dead_code)]
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadError, BulkheadPolicy};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::types::Time;
 use crate::util::DetRng;
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 // ============================================================================

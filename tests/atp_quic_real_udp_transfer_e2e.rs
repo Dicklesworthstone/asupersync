@@ -16,9 +16,9 @@
 #![cfg(all(feature = "tls", feature = "test-internals"))]
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read as _, Seek as _};
 #[cfg(unix)]
 use std::io::Write as _;
+use std::io::{ErrorKind, Read as _, Seek as _};
 use std::net::{SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -951,7 +951,10 @@ fn authenticated_delta_refusal_preserves_full_and_noop_transfer_paths() {
     );
     let sent = sent.expect("unchanged destination selects authenticated no-op");
     let received = received.expect("bound no-op proof commits");
-    assert_eq!(sent.bytes_sent, 0, "the public path really negotiated delta");
+    assert_eq!(
+        sent.bytes_sent, 0,
+        "the public path really negotiated delta"
+    );
     assert_eq!(received.bytes_received, 0);
     assert!(sent.receipt.committed && received.committed);
     assert_no_staging_residue(&destination);
@@ -1048,7 +1051,9 @@ fn refusing_receiver_does_not_wait_for_a_streaming_sender() {
     // refuses, it grants no more credit, and the sender sits credit-blocked,
     // sending keep-alive pings.
     let mut noise = DeterministicLoss::new(0x5EED_0930);
-    let payload: Vec<u8> = (0..8 << 20).map(|_| noise.next_u32().to_le_bytes()[0]).collect();
+    let payload: Vec<u8> = (0..8 << 20)
+        .map(|_| noise.next_u32().to_le_bytes()[0])
+        .collect();
     std::fs::write(&source, &payload).expect("write source");
 
     let mut cfg = transport_authenticated_configs();
@@ -1079,7 +1084,8 @@ fn refusing_receiver_does_not_wait_for_a_streaming_sender() {
         let server_addr = server_endpoint.local_addr();
         zip(
             async {
-                let result = send_path(&cx, server_addr, &source, send_cfg, "atp-quic-client").await;
+                let result =
+                    send_path(&cx, server_addr, &source, send_cfg, "atp-quic-client").await;
                 (result, started.elapsed())
             },
             async {
@@ -1497,7 +1503,9 @@ fn assert_changed_chunk_destination(destination: &Path, expected: &[u8]) {
     );
     assert_no_staging_residue(destination);
     assert_eq!(
-        std::fs::read_dir(destination).expect("read destination").count(),
+        std::fs::read_dir(destination)
+            .expect("read destination")
+            .count(),
         1,
         "only the destination file may survive a terminal transfer"
     );
@@ -1602,7 +1610,11 @@ fn retained_resume_cache(destination: &Path) -> PathBuf {
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    assert_eq!(caches.len(), 1, "one retained cache for this source identity");
+    assert_eq!(
+        caches.len(),
+        1,
+        "one retained cache for this source identity"
+    );
     let cache = caches.into_iter().next().unwrap();
     let name = cache.file_name().unwrap().to_str().unwrap();
     let identity = name.strip_prefix(".atp-quic-resume-").unwrap();
@@ -1675,7 +1687,9 @@ fn real_udp_quic_resume_reopens_durable_prefix_after_cancellation() {
         None,
     );
     assert_changed_chunk_reports(
-        &resumed.send.expect("fresh sender resumes the journaled transfer"),
+        &resumed
+            .send
+            .expect("fresh sender resumes the journaled transfer"),
         &resumed
             .receive
             .expect("fresh receiver reopens and commits the cache"),
@@ -1741,7 +1755,9 @@ fn real_udp_quic_resume_refuses_corrupt_receipted_payload_without_publication() 
         None,
     );
     assert_changed_chunk_reports(
-        &initial.send.expect("initial resumable copy sends every chunk"),
+        &initial
+            .send
+            .expect("initial resumable copy sends every chunk"),
         &initial.receive.expect("initial resumable copy commits"),
         payload.len(),
     );
@@ -2067,7 +2083,10 @@ fn real_udp_quic_tree_delta_reuses_plain_and_packed_files_and_noops() {
     let dst = tempfile::tempdir().expect("destination directory");
     let root = src.path().join("tree");
     let mut files = write_tree_delta_fixture(&root);
-    let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+    let total_bytes = files
+        .iter()
+        .map(|(_, bytes)| bytes.len() as u64)
+        .sum::<u64>();
     let mut configs = changed_chunk_configs();
     configs.send.metadata_policy.preserve_unix_permissions = cfg!(unix);
     configs.recv.metadata_policy.preserve_unix_permissions = cfg!(unix);
@@ -2188,7 +2207,10 @@ fn real_udp_quic_tree_delta_preserves_legacy_peer_fallback() {
             .expect("changed member");
         changed[19] ^= 0x3C;
         std::fs::write(root.join("small/changed.bin"), changed).expect("change tree source");
-        let total_bytes = files.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+        let total_bytes = files
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum::<u64>();
         let configs = changed_chunk_configs();
         let (send, receive, _) = run_counted_transfer_with_options(
             configs.send,
@@ -2532,7 +2554,10 @@ fn real_udp_quic_changed_chunks_reject_wrong_client_key_before_destination_chang
         QuicSendOptions::new().with_delta_chunks(true),
         QuicReceiveOptions::new().with_delta_chunks(true),
     );
-    assert!(send.is_err(), "an unauthorized sender must receive no successful receipt");
+    assert!(
+        send.is_err(),
+        "an unauthorized sender must receive no successful receipt"
+    );
     assert!(
         matches!(&receive, Err(QuicTransportError::HandshakeRejected(reason))
             if reason.contains("authentication failed")),

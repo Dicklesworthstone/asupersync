@@ -627,7 +627,10 @@ fn compact_receiver_executable_resumes_a_large_file_with_a_small_wal() {
         let before = std::fs::read(&wal).unwrap();
         let intent_before = std::fs::read(&intent).unwrap();
         assert_eq!(&before[..8], b"ATPRFL02");
-        assert_eq!(u32::from_be_bytes(before[8..12].try_into().unwrap()), 262_144);
+        assert_eq!(
+            u32::from_be_bytes(before[8..12].try_into().unwrap()),
+            262_144
+        );
         assert_eq!(
             u64::from_be_bytes(before[16..24].try_into().unwrap()),
             WAL_LIMIT

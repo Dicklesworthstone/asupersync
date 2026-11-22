@@ -867,7 +867,10 @@ async fn wait_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> 
         let clock = cx.timer_driver();
         let deadline = clock
             .as_ref()
-            .map_or_else(crate::time::raw_wall_now, crate::time::TimerDriverHandle::now)
+            .map_or_else(
+                crate::time::raw_wall_now,
+                crate::time::TimerDriverHandle::now,
+            )
             .saturating_add_nanos(delay.as_nanos().min(u128::from(u64::MAX)) as u64);
         let mut sleeper = clock.map_or_else(
             || crate::time::Sleep::with_wall_clock(deadline),
@@ -2063,9 +2066,11 @@ impl KafkaDelivery {
                 // deadline still takes precedence over wait cancellation.
                 return Poll::Ready(self.result().map_or_else(
                     || {
-                        Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
-                            CancelReason::user("Kafka delivery wait cancelled")
-                        }))
+                        Outcome::Cancelled(
+                            cx.cancel_reason().unwrap_or_else(|| {
+                                CancelReason::user("Kafka delivery wait cancelled")
+                            }),
+                        )
                     },
                     Outcome::from,
                 ));
@@ -2288,9 +2293,7 @@ impl KafkaProducer {
                 headers: request
                     .headers
                     .iter()
-                    .map(|(key, value)| {
-                        (key.to_owned(), value.map(std::borrow::ToOwned::to_owned))
-                    })
+                    .map(|(key, value)| (key.to_owned(), value.map(std::borrow::ToOwned::to_owned)))
                     .collect(),
             };
             let delivery = KafkaDelivery::pending();
@@ -2437,13 +2440,7 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
-            send_with_producer(
-                &self.producer,
-                cx,
-                &self.config,
-                request,
-            )
-            .await
+            send_with_producer(&self.producer, cx, &self.config, request).await
         }
 
         // Only the opt-in test harness may use the deterministic broker;
@@ -2459,7 +2456,8 @@ impl KafkaProducer {
                 key: request.key.map(std::borrow::ToOwned::to_owned),
                 payload: request.payload.map(std::borrow::ToOwned::to_owned),
                 timestamp: None,
-                headers: request.headers
+                headers: request
+                    .headers
                     .iter()
                     .map(|(key, value)| (key.to_owned(), value.map(std::borrow::ToOwned::to_owned)))
                     .collect(),
@@ -3048,9 +3046,7 @@ impl TransactionOperationGuard {
             TransactionOperation::Begin
             | TransactionOperation::Finalize
             | TransactionOperation::SendOffsets
-            | TransactionOperation::Commit => {
-                TransactionPhase::Active
-            }
+            | TransactionOperation::Commit => TransactionPhase::Active,
         };
         if state.generation != generation || state.operation_in_flight || state.phase != expected {
             return Err(KafkaError::Transaction(
@@ -3386,7 +3382,9 @@ impl Transaction<'_> {
                 key: request.key.map(std::borrow::ToOwned::to_owned),
                 payload: request.payload.map(std::borrow::ToOwned::to_owned),
                 timestamp: None,
-                headers: request.headers.iter()
+                headers: request
+                    .headers
+                    .iter()
                     .map(|(key, value)| (key.to_owned(), value.map(std::borrow::ToOwned::to_owned)))
                     .collect(),
             });
@@ -3483,7 +3481,11 @@ impl Transaction<'_> {
                     return Err(error);
                 }
             };
-            let offsets = operation.offsets.as_ref().expect("claimed offset enrollment").clone();
+            let offsets = operation
+                .offsets
+                .as_ref()
+                .expect("claimed offset enrollment")
+                .clone();
             let producer = self.producer.producer.clone();
             let timeout = self.producer.config.transaction_timeout;
             // This also covers native success before a completed waiter is
@@ -3546,7 +3548,10 @@ impl Transaction<'_> {
         {
             let (enrolled_offsets, resume_pending_commits) = {
                 let state = self.producer.state.lock();
-                (state.pending_offsets.is_some(), state.resume_pending_commits)
+                (
+                    state.pending_offsets.is_some(),
+                    state.resume_pending_commits,
+                )
             };
             let operation = TransactionOperationGuard::claim(
                 &self.producer.state,

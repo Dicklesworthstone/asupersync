@@ -243,7 +243,11 @@ fn fatal_application_flush_errors_revoke_bindings_and_remain_sticky() {
             for record_write in [true, false] {
                 for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
                     run_pair(version, true, move |mut client, mut server| {
-                        let stream = if client_side { &mut client } else { &mut server };
+                        let stream = if client_side {
+                            &mut client
+                        } else {
+                            &mut server
+                        };
                         if version.version == rustls::ProtocolVersion::TLSv1_3 {
                             stream.tls_exporter_channel_binding().unwrap();
                         }
@@ -336,8 +340,15 @@ fn application_flush_cannot_send_queued_records_after_a_fatal_read() {
                     assert_binding_revoked(stream);
                 }
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
-                assert!(buf.filled().is_empty(), "terminal flush published application bytes");
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
+                assert!(
+                    buf.filled().is_empty(),
+                    "terminal flush published application bytes"
+                );
             });
         }
     }
@@ -465,7 +476,11 @@ fn interrupted_final_handshake_flush_keeps_bindings_unavailable_until_success() 
                         break;
                     }
                 }
-                let stream = if client_side { &mut client } else { &mut server };
+                let stream = if client_side {
+                    &mut client
+                } else {
+                    &mut server
+                };
                 assert!(!stream.conn.is_handshaking(), "did not reach final flush");
                 assert_eq!(stream.state, TlsState::Handshaking);
                 stream.io.block_flush = false;
@@ -483,7 +498,10 @@ fn interrupted_final_handshake_flush_keeps_bindings_unavailable_until_success() 
                         Err(TlsError::Rustls(rustls::Error::HandshakeNotComplete))
                     ));
                 }
-                assert!(matches!(stream.poll_handshake(&mut cx), Poll::Ready(Ok(()))));
+                assert!(matches!(
+                    stream.poll_handshake(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
                 assert!(stream.is_ready());
                 for _ in 0..128 {
                     for stream in [&mut client, &mut server] {
@@ -519,7 +537,10 @@ fn read_plaintext(stream: &mut Stream, expected: &[u8]) {
             Pin::new(&mut *stream).poll_read(&mut cx, &mut buf),
             Poll::Ready(Ok(()))
         ));
-        assert!(!buf.filled().is_empty(), "EOF before all accepted bytes arrived");
+        assert!(
+            !buf.filled().is_empty(),
+            "EOF before all accepted bytes arrived"
+        );
         offset += buf.filled().len();
     }
     assert_eq!(received, expected);
@@ -550,10 +571,16 @@ fn bounded_transport_capacity_does_not_deadlock_handshakes() {
                     break;
                 }
             }
-            assert!(client.is_ready() && server.is_ready(), "capacity deadlocked TLS");
+            assert!(
+                client.is_ready() && server.is_ready(),
+                "capacity deadlocked TLS"
+            );
             for stream in [&client, &server] {
                 assert_eq!(stream.protocol_version(), Some(version.version));
-                assert!(stream.io.capacity_stalls > 0, "must reach actual buffer exhaustion");
+                assert!(
+                    stream.io.capacity_stalls > 0,
+                    "must reach actual buffer exhaustion"
+                );
                 assert_eq!(stream.io.max_buffered, stream.io.buffer_capacity.unwrap());
                 assert!(stream.io.buffered.is_empty());
                 assert!(!stream.conn.wants_write());
@@ -648,7 +675,11 @@ fn bounded_transport_pending_and_interrupted_flushes_keep_partial_records() {
                 }
                 let mut bytes = [0; 1];
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
                 assert!(buf.filled().is_empty());
                 // The task that resumes a pending flush may have a new waker.
                 stream.io.block_flush = false;
@@ -668,7 +699,11 @@ fn bounded_transport_pending_and_interrupted_flushes_keep_partial_records() {
                 assert!(stream.io.buffered.is_empty());
                 read_plaintext(peer, &message);
                 let mut buf = ReadBuf::new(&mut bytes);
-                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(
+                    Pin::new(&mut *peer)
+                        .poll_read(&mut cx, &mut buf)
+                        .is_pending()
+                );
                 assert!(buf.filled().is_empty());
                 assert_eq!(stream.tls_exporter_channel_binding().ok(), binding);
                 assert_eq!(peer.tls_exporter_channel_binding().ok(), binding);
@@ -721,7 +756,11 @@ fn bounded_transport_flush_failure_after_acceptance_is_sticky() {
                     }
                     let mut bytes = [0; 1];
                     let mut buf = ReadBuf::new(&mut bytes);
-                    assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                    assert!(
+                        Pin::new(&mut *peer)
+                            .poll_read(&mut cx, &mut buf)
+                            .is_pending()
+                    );
                     assert!(buf.filled().is_empty());
                 });
             }
@@ -820,7 +859,11 @@ fn direct_handshake_transport_failures_do_not_become_clean_read_eof() {
                             // reach its first record-write failure boundary.
                             assert!(client.poll_handshake(&mut cx).is_pending());
                         }
-                        let stream = if client_side { &mut client } else { &mut server };
+                        let stream = if client_side {
+                            &mut client
+                        } else {
+                            &mut server
+                        };
                         match stage {
                             0 => stream.io.read_error = Some(kind),
                             1 => stream.io.write_error = Some(kind),
@@ -867,7 +910,11 @@ fn failed_final_handshake_flush_does_not_become_clean_read_eof() {
                         break;
                     }
                 }
-                let stream = if client_side { &mut client } else { &mut server };
+                let stream = if client_side {
+                    &mut client
+                } else {
+                    &mut server
+                };
                 assert!(!stream.conn.is_handshaking(), "final flush was not reached");
                 assert_eq!(stream.state, TlsState::Handshaking);
                 stream.io.block_flush = false;
@@ -935,7 +982,10 @@ fn buffered_certificate_failure_delivers_its_alert_and_remains_a_read_error() {
                             rustls::AlertDescription::UnknownCA
                         ).to_string()
                 ));
-                assert!(client.io.buffered.is_empty(), "fatal alert remained buffered");
+                assert!(
+                    client.io.buffered.is_empty(),
+                    "fatal alert remained buffered"
+                );
                 assert!(!client.transport_needs_flush);
                 assert_failed_handshake_reads_error(&mut client, &client_error);
                 assert_failed_handshake_reads_error(&mut server, &server_error);
@@ -988,10 +1038,14 @@ fn buffered_bad_record_alert_is_delivered_from_either_endpoint() {
                     assert!(buf.filled().is_empty());
                     assert!(receiver.is_closed());
                     assert_binding_revoked(receiver);
-                    assert!(receiver.io.buffered.is_empty(), "fatal alert remained buffered");
+                    assert!(
+                        receiver.io.buffered.is_empty(),
+                        "fatal alert remained buffered"
+                    );
                     assert!(!receiver.transport_needs_flush);
                     let mut buf = ReadBuf::new(&mut bytes);
-                    let Poll::Ready(Err(error)) = Pin::new(&mut *sender).poll_read(&mut cx, &mut buf)
+                    let Poll::Ready(Err(error)) =
+                        Pin::new(&mut *sender).poll_read(&mut cx, &mut buf)
                     else {
                         panic!("peer did not receive the buffered bad_record_mac alert");
                     };
@@ -1032,7 +1086,8 @@ fn pending_or_failed_alert_flush_does_not_replace_the_original_tls_error() {
                     let mut buf = ReadBuf::new(&mut bytes);
                     // The read must report the fatal record error immediately,
                     // not wait for alert delivery or replace it with BrokenPipe.
-                    let Poll::Ready(Err(error)) = Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf)
+                    let Poll::Ready(Err(error)) =
+                        Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf)
                     else {
                         panic!("best-effort alert delayed the original failure");
                     };
@@ -1060,7 +1115,6 @@ fn pending_or_failed_alert_flush_does_not_replace_the_original_tls_error() {
     }
 }
 
-
 #[test]
 fn peer_certificate_metadata_is_hidden_before_wrapper_handshake_completion() {
     for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
@@ -1077,88 +1131,99 @@ fn peer_certificate_metadata_is_hidden_before_wrapper_handshake_completion() {
 
 #[test]
 fn client_certificate_metadata_waits_for_the_final_tls13_transport_flush() {
-    run_pair(&rustls::version::TLS13, false, move |mut client, mut server| {
-        let mut cx = Context::from_waker(Waker::noop());
+    run_pair(
+        &rustls::version::TLS13,
+        false,
+        move |mut client, mut server| {
+            let mut cx = Context::from_waker(Waker::noop());
 
-        // Publish ClientHello, then let the server return its authenticated
-        // certificate/Finished flight. The client will know the certificate
-        // during its next poll, but its own final Finished still must flush.
-        assert!(client.poll_handshake(&mut cx).is_pending());
-        assert!(server.poll_handshake(&mut cx).is_pending());
+            // Publish ClientHello, then let the server return its authenticated
+            // certificate/Finished flight. The client will know the certificate
+            // during its next poll, but its own final Finished still must flush.
+            assert!(client.poll_handshake(&mut cx).is_pending());
+            assert!(server.poll_handshake(&mut cx).is_pending());
 
-        client.io.block_flush = true;
-        assert!(client.poll_handshake(&mut cx).is_pending());
-        assert!(
-            !client.conn.is_handshaking(),
-            "rustls must have authenticated the server before the blocked final flush"
-        );
-        assert!(client.conn.peer_leaf_certificate_der().is_some());
-        assert!(client.state.requires_handshake());
-        assert!(!client.handshake_completed);
-        assert!(client.peer_leaf_certificate_der().is_none());
-        assert!(client.peer_certificate_chain_der().is_none());
+            client.io.block_flush = true;
+            assert!(client.poll_handshake(&mut cx).is_pending());
+            assert!(
+                !client.conn.is_handshaking(),
+                "rustls must have authenticated the server before the blocked final flush"
+            );
+            assert!(client.conn.peer_leaf_certificate_der().is_some());
+            assert!(client.state.requires_handshake());
+            assert!(!client.handshake_completed);
+            assert!(client.peer_leaf_certificate_der().is_none());
+            assert!(client.peer_certificate_chain_der().is_none());
 
-        client.io.block_flush = false;
-        assert!(matches!(client.poll_handshake(&mut cx), Poll::Ready(Ok(()))));
-        assert!(client.handshake_completed);
-        assert!(client.is_ready());
+            client.io.block_flush = false;
+            assert!(matches!(
+                client.poll_handshake(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(client.handshake_completed);
+            assert!(client.is_ready());
 
-        let expected = CertificateChain::from_pem(CERT).unwrap().into_inner();
-        assert_eq!(
-            client.peer_leaf_certificate_der().as_deref(),
-            Some(expected[0].as_ref())
-        );
-        assert_eq!(
-            client.peer_certificate_chain_der().unwrap(),
-            expected
-                .iter()
-                .map(|certificate| certificate.as_ref().to_vec())
-                .collect::<Vec<_>>()
-        );
-    });
+            let expected = CertificateChain::from_pem(CERT).unwrap().into_inner();
+            assert_eq!(
+                client.peer_leaf_certificate_der().as_deref(),
+                Some(expected[0].as_ref())
+            );
+            assert_eq!(
+                client.peer_certificate_chain_der().unwrap(),
+                expected
+                    .iter()
+                    .map(|certificate| certificate.as_ref().to_vec())
+                    .collect::<Vec<_>>()
+            );
+        },
+    );
 }
 
 #[test]
 fn failed_final_tls13_flush_never_publishes_peer_certificate_metadata() {
-    run_pair(&rustls::version::TLS13, false, move |mut client, mut server| {
-        let mut cx = Context::from_waker(Waker::noop());
-        assert!(client.poll_handshake(&mut cx).is_pending());
-        assert!(server.poll_handshake(&mut cx).is_pending());
+    run_pair(
+        &rustls::version::TLS13,
+        false,
+        move |mut client, mut server| {
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(client.poll_handshake(&mut cx).is_pending());
+            assert!(server.poll_handshake(&mut cx).is_pending());
 
-        // Every handshake poll flushes the transport before it reads, so a
-        // flush error injected now would fire before the client even reads
-        // the server's flight. Block the flush first: the client reads that
-        // flight, authenticates the server and writes its Finished, and only
-        // the final flush is left.
-        client.io.block_flush = true;
-        assert!(client.poll_handshake(&mut cx).is_pending());
-        assert!(
-            !client.conn.is_handshaking(),
-            "rustls had already authenticated the server before wrapper failure"
-        );
-        assert!(client.state.requires_handshake());
+            // Every handshake poll flushes the transport before it reads, so a
+            // flush error injected now would fire before the client even reads
+            // the server's flight. Block the flush first: the client reads that
+            // flight, authenticates the server and writes its Finished, and only
+            // the final flush is left.
+            client.io.block_flush = true;
+            assert!(client.poll_handshake(&mut cx).is_pending());
+            assert!(
+                !client.conn.is_handshaking(),
+                "rustls had already authenticated the server before wrapper failure"
+            );
+            assert!(client.state.requires_handshake());
 
-        client.io.block_flush = false;
-        client.io.flush_error = Some(io::ErrorKind::BrokenPipe);
-        let Poll::Ready(Err(TlsError::Io(error))) = client.poll_handshake(&mut cx) else {
-            panic!("the final wrapper flush must fail");
-        };
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-        assert!(client.conn.peer_leaf_certificate_der().is_some());
-        assert!(!client.handshake_completed);
-        assert!(client.is_closed());
-        assert!(client.peer_leaf_certificate_der().is_none());
-        assert!(client.peer_certificate_chain_der().is_none());
+            client.io.block_flush = false;
+            client.io.flush_error = Some(io::ErrorKind::BrokenPipe);
+            let Poll::Ready(Err(TlsError::Io(error))) = client.poll_handshake(&mut cx) else {
+                panic!("the final wrapper flush must fail");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert!(client.conn.peer_leaf_certificate_der().is_some());
+            assert!(!client.handshake_completed);
+            assert!(client.is_closed());
+            assert!(client.peer_leaf_certificate_der().is_none());
+            assert!(client.peer_certificate_chain_der().is_none());
 
-        client.io.flush_error = None;
-        assert!(matches!(
-            client.poll_handshake(&mut cx),
-            Poll::Ready(Err(TlsError::Io(error)))
-                if error.kind() == io::ErrorKind::NotConnected
-        ));
-        assert!(client.peer_leaf_certificate_der().is_none());
-        assert!(client.peer_certificate_chain_der().is_none());
-    });
+            client.io.flush_error = None;
+            assert!(matches!(
+                client.poll_handshake(&mut cx),
+                Poll::Ready(Err(TlsError::Io(error)))
+                    if error.kind() == io::ErrorKind::NotConnected
+            ));
+            assert!(client.peer_leaf_certificate_der().is_none());
+            assert!(client.peer_certificate_chain_der().is_none());
+        },
+    );
 }
 
 #[test]
@@ -1176,7 +1241,10 @@ fn established_peer_certificate_metadata_survives_later_connection_close() {
             assert_eq!(chain.first().map(Vec::as_slice), Some(leaf.as_slice()));
 
             let mut cx = Context::from_waker(Waker::noop());
-            assert!(matches!(client.poll_shutdown_tls(&mut cx), Poll::Ready(Ok(()))));
+            assert!(matches!(
+                client.poll_shutdown_tls(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
             let mut bytes = [0; 1];
             let mut buf = ReadBuf::new(&mut bytes);
             // Process the client's close_notify at the server.
@@ -1186,15 +1254,24 @@ fn established_peer_certificate_metadata_survives_later_connection_close() {
             ));
             assert!(buf.filled().is_empty());
 
-            assert!(matches!(server.poll_shutdown_tls(&mut cx), Poll::Ready(Ok(()))));
+            assert!(matches!(
+                server.poll_shutdown_tls(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
             let mut buf = ReadBuf::new(&mut bytes);
             assert!(matches!(
                 Pin::new(&mut client).poll_read(&mut cx, &mut buf),
                 Poll::Ready(Ok(()))
             ));
             assert!(client.is_closed());
-            assert_eq!(client.peer_leaf_certificate_der().as_deref(), Some(leaf.as_slice()));
-            assert_eq!(client.peer_certificate_chain_der().as_deref(), Some(chain.as_slice()));
+            assert_eq!(
+                client.peer_leaf_certificate_der().as_deref(),
+                Some(leaf.as_slice())
+            );
+            assert_eq!(
+                client.peer_certificate_chain_der().as_deref(),
+                Some(chain.as_slice())
+            );
         });
     }
 }

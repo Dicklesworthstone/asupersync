@@ -10,13 +10,13 @@
 //! destructor attempt bounds the work, but may leak that secondary payload.
 
 use crate::observability::metrics::MetricsProvider;
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, outcome::PanicPayload};
 use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sync::pl::Mutex;
 use std::time::Instant;

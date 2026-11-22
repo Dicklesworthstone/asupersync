@@ -176,11 +176,7 @@ impl OtlpSnapshotExporter {
     }
 
     /// Encode and send one complete cumulative snapshot using native async I/O.
-    pub async fn export(
-        &self,
-        cx: &Cx,
-        batch: MetricsExportBatch<'_>,
-    ) -> Result<(), ExportError> {
+    pub async fn export(&self, cx: &Cx, batch: MetricsExportBatch<'_>) -> Result<(), ExportError> {
         checkpoint(cx)?;
         let Some(bytes) = encode_snapshot(batch, &self.resource_attributes)? else {
             return Ok(());
@@ -335,9 +331,12 @@ fn encode_snapshot(
                 .iter()
                 .map(|(name, labels, value)| (name, labels, Value::Gauge(*value))),
         )
-        .chain(snapshot.histograms.iter().map(|(name, labels, count, sum)| {
-            (name, labels, Value::Histogram(*count, *sum))
-        }));
+        .chain(
+            snapshot
+                .histograms
+                .iter()
+                .map(|(name, labels, count, sum)| (name, labels, Value::Histogram(*count, *sum))),
+        );
     for (name, labels, value) in points {
         if name.is_empty() || name.len() > 1024 {
             return Err(failure("invalid_name"));

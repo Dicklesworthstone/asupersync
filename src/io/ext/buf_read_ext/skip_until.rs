@@ -181,7 +181,10 @@ impl<R: AsyncBufRead + Unpin + ?Sized> SkipUntilSession<'_, R> {
 }
 
 fn limit_error() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "delimiter discard exceeds max_bytes")
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "delimiter discard exceeds max_bytes",
+    )
 }
 
 #[cfg(test)]

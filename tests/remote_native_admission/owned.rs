@@ -20,11 +20,14 @@ fn domain(handle: &RuntimeHandle, route: NativeRemoteRoute) -> AdmittedNativeRem
     AdmittedNativeRemoteRuntime::new(
         handle.clone(),
         NodeId::new("origin"),
-        [(route, NativeRemotePeerAdmissionLimits {
-            max_in_flight: 1,
-            max_buffer_bytes: CHARGE,
-            max_input_bytes: 1024,
-        })],
+        [(
+            route,
+            NativeRemotePeerAdmissionLimits {
+                max_in_flight: 1,
+                max_buffer_bytes: CHARGE,
+                max_input_bytes: 1024,
+            },
+        )],
         NativeRemoteAdmissionLimits {
             max_routes: 1,
             max_in_flight: 1,
@@ -71,7 +74,10 @@ fn exercise_owned(workers: usize, case: Case) {
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread().build().unwrap()
     } else {
-        RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
     };
     let runtime_handle = runtime.handle();
     runtime.block_on(async {
@@ -288,7 +294,8 @@ fn checked(workers: usize, case: Case) {
         exercise_owned(workers, case);
         done.send(()).unwrap();
     });
-    result.recv_timeout(Duration::from_secs(30))
+    result
+        .recv_timeout(Duration::from_secs(30))
         .expect("owned native lifecycle must finish without a wall-clock hang");
     thread.join().unwrap();
 }
@@ -296,8 +303,13 @@ fn checked(workers: usize, case: Case) {
 #[test]
 fn admitted_native_owned_reports_and_admission_failures() {
     for workers in [1, 2] {
-        for case in [Case::UnreadSuccess, Case::UnpolledInline, Case::FrameRefusal,
-            Case::Attenuated, Case::LastDomainOwner] {
+        for case in [
+            Case::UnreadSuccess,
+            Case::UnpolledInline,
+            Case::FrameRefusal,
+            Case::Attenuated,
+            Case::LastDomainOwner,
+        ] {
             checked(workers, case);
         }
     }

@@ -1,10 +1,10 @@
 //! Typed payloads retain the real node/membership/native lifecycle boundaries.
 
 use super::*;
+use asupersync::distributed::remote_owned::RemoteLeaseSettlement;
 use asupersync::distributed::{
     NativeDistributedTypedRemoteError, NativeDistributedTypedRemoteResult,
 };
-use asupersync::distributed::remote_owned::RemoteLeaseSettlement;
 use asupersync::remote::{
     PreparedTypedRemoteCall, TypedRemoteComputation, TypedRemoteError, TypedRemoteLimits,
     TypedRemoteOutcome, TypedRemoteStage,
@@ -36,31 +36,42 @@ impl TypedRemoteComputation for Text {
 pub(super) const NAMES: [&str; 3] = [Add::NAME, Wait::NAME, Text::NAME];
 
 pub(super) fn register(registry: &mut RemoteComputationRegistry, parked: Arc<ParkedInvocation>) {
-    registry.register_typed_json::<Add, _, _>(TypedRemoteLimits::default(), |_, (left, right)| async move {
-        TypedRemoteOutcome::Success(left + right)
-    }).unwrap();
-    registry.register_typed_json::<Text, _, _>(TypedRemoteLimits::default(), |_, text| async move {
-        TypedRemoteOutcome::Success(text)
-    }).unwrap();
-    registry.register_typed_json::<Wait, _, _>(TypedRemoteLimits::default(), move |body, ()| {
-        let parked = Arc::clone(&parked);
-        async move {
-            let mut cancelled = std::pin::pin!(body.cancelled());
-            poll_fn(|task| {
-                let next = cancelled.as_mut().poll(task);
-                if next.is_pending() {
-                    parked.entered.store(true, Ordering::Release);
-                    parked.changed.notify_waiters();
-                }
-                next
-            }).await;
-            assert!(body.checkpoint().is_err());
-            parked.cancelled.store(true, Ordering::Release);
-            parked.changed.notify_waiters();
-            parked.changed.wait_until(|| parked.release.load(Ordering::Acquire)).await;
-            TypedRemoteOutcome::Cancelled(body.cancel_reason().unwrap())
-        }
-    }).unwrap();
+    registry
+        .register_typed_json::<Add, _, _>(
+            TypedRemoteLimits::default(),
+            |_, (left, right)| async move { TypedRemoteOutcome::Success(left + right) },
+        )
+        .unwrap();
+    registry
+        .register_typed_json::<Text, _, _>(TypedRemoteLimits::default(), |_, text| async move {
+            TypedRemoteOutcome::Success(text)
+        })
+        .unwrap();
+    registry
+        .register_typed_json::<Wait, _, _>(TypedRemoteLimits::default(), move |body, ()| {
+            let parked = Arc::clone(&parked);
+            async move {
+                let mut cancelled = std::pin::pin!(body.cancelled());
+                poll_fn(|task| {
+                    let next = cancelled.as_mut().poll(task);
+                    if next.is_pending() {
+                        parked.entered.store(true, Ordering::Release);
+                        parked.changed.notify_waiters();
+                    }
+                    next
+                })
+                .await;
+                assert!(body.checkpoint().is_err());
+                parked.cancelled.store(true, Ordering::Release);
+                parked.changed.notify_waiters();
+                parked
+                    .changed
+                    .wait_until(|| parked.release.load(Ordering::Acquire))
+                    .await;
+                TypedRemoteOutcome::Cancelled(body.cancel_reason().unwrap())
+            }
+        })
+        .unwrap();
 }
 
 #[derive(Deserialize)]
@@ -71,7 +82,9 @@ impl Serialize for EncodingTripwire {
     }
 }
 impl HasSchema for EncodingTripwire {
-    fn schema() -> SchemaDescriptor { <(u64, u64)>::schema() }
+    fn schema() -> SchemaDescriptor {
+        <(u64, u64)>::schema()
+    }
 }
 struct RefusedAdd;
 impl TypedRemoteComputation for RefusedAdd {
@@ -83,7 +96,9 @@ impl TypedRemoteComputation for RefusedAdd {
 static DECODE_CALLS: AtomicUsize = AtomicUsize::new(0);
 struct ObservedValue(u64);
 impl HasSchema for ObservedValue {
-    fn schema() -> SchemaDescriptor { u64::schema() }
+    fn schema() -> SchemaDescriptor {
+        u64::schema()
+    }
 }
 impl Serialize for ObservedValue {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -116,7 +131,10 @@ fn success<T>(result: NativeDistributedTypedRemoteResult<T>) -> T {
     assert_eq!(result.retirement, Ok(()));
     let membership = result.outcome.expect("actual typed owner result").unwrap();
     assert!(membership.is_success(), "{membership:?}");
-    assert!(matches!(membership.work.lease, Ok(OwnedLeaseStatus::Released)));
+    assert!(matches!(
+        membership.work.lease,
+        Ok(OwnedLeaseStatus::Released)
+    ));
     let remote = membership.work.task.unwrap().unwrap();
     assert!(remote.is_success(), "{remote:?}");
     let reply = remote.task.unwrap();
@@ -131,8 +149,14 @@ fn success<T>(result: NativeDistributedTypedRemoteResult<T>) -> T {
 fn typed_node_round_trip_retains_capacity_and_preserves_codec_failure_receipts() {
     for workers in [1, 2] {
         DECODE_CALLS.store(0, Ordering::SeqCst);
-        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
-            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
         let handle = runtime.handle();
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
@@ -245,16 +269,26 @@ fn release_parked(parked: &ParkedInvocation) {
 }
 
 async fn wait_parked(cx: &Cx, parked: &ParkedInvocation, signal: &AtomicBool) {
-    asupersync::time::timeout(cx.now(), WINDOW,
+    asupersync::time::timeout(
+        cx.now(),
+        WINDOW,
         parked.changed.wait_until(|| signal.load(Ordering::Acquire)),
-    ).await.expect("native typed handler progress");
+    )
+    .await
+    .expect("native typed handler progress");
 }
 
 #[test]
 fn typed_node_drop_revocation_rejoin_and_close_preserve_real_drain() {
     for workers in [1, 2] {
-        let runtime = if workers == 1 { RuntimeBuilder::current_thread().build().unwrap() }
-            else { RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap() };
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
         let handle = runtime.handle();
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
@@ -355,7 +389,9 @@ fn typed_node_drop_revocation_rejoin_and_close_preserve_real_drain() {
 
 struct ReentrantInput(Arc<dyn Fn() + Send + Sync>);
 impl HasSchema for ReentrantInput {
-    fn schema() -> SchemaDescriptor { u64::schema() }
+    fn schema() -> SchemaDescriptor {
+        u64::schema()
+    }
 }
 impl Serialize for ReentrantInput {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -382,13 +418,27 @@ fn typed_node_rechecks_authority_and_capacity_after_reentrant_serialization() {
     let handle = runtime.handle();
     runtime.block_on(async {
         let cx = Cx::current().unwrap();
-        let Fixture { service, membership, client, hello, .. } =
-            fixture_protocol(&cx, RemoteProtocolVersion::V3).await;
-        membership.apply_authenticated(&NodeId::new("authority"), &statement(1)).unwrap();
+        let Fixture {
+            service,
+            membership,
+            client,
+            hello,
+            ..
+        } = fixture_protocol(&cx, RemoteProtocolVersion::V3).await;
+        membership
+            .apply_authenticated(&NodeId::new("authority"), &statement(1))
+            .unwrap();
         let route = NativeRemoteRoute::new(NodeId::new("worker"), hello, client);
         let node = NativeDistributedNode::start_with_outbound(
-            &cx, service, membership.clone(), None, outbound_config(handle), ChildRegionSpec::inherit(),
-        ).await.unwrap();
+            &cx,
+            service,
+            membership.clone(),
+            None,
+            outbound_config(handle),
+            ChildRegionSpec::inherit(),
+        )
+        .await
+        .unwrap();
         let outbound = node.client().unwrap();
         outbound.publish_peer(route.clone(), 1).unwrap();
 
@@ -396,9 +446,18 @@ fn typed_node_rechecks_authority_and_capacity_after_reentrant_serialization() {
         let withdraw = ReentrantInput(Arc::new(move || {
             mutate.remove_peer(&NodeId::new("worker")).unwrap();
         }));
-        assert!(matches!(outbound.spawn_remote_typed::<Reentrant>(
-            NodeId::new("worker"), 1, &withdraw, TypedRemoteLimits::default(), remote_run_config(),
-        ), Err(NativeDistributedTypedRemoteError::Outbound(NativeDistributedOutboundError::Membership))));
+        assert!(matches!(
+            outbound.spawn_remote_typed::<Reentrant>(
+                NodeId::new("worker"),
+                1,
+                &withdraw,
+                TypedRemoteLimits::default(),
+                remote_run_config(),
+            ),
+            Err(NativeDistributedTypedRemoteError::Outbound(
+                NativeDistributedOutboundError::Membership
+            ))
+        ));
         assert_eq!(outbound.retained_operations(), 0);
         outbound.publish_peer(route, 1).unwrap();
 
@@ -406,16 +465,34 @@ fn typed_node_rechecks_authority_and_capacity_after_reentrant_serialization() {
         let retained = Arc::clone(&slot);
         let mutate = outbound.clone();
         let fill = ReentrantInput(Arc::new(move || {
-            let owner = mutate.spawn_remote(
-                NodeId::new("worker"), 1, ComputationName::new("echo"),
-                RemoteInput::new(b"reentrant owner".to_vec()), remote_run_config(),
-            ).unwrap();
+            let owner = mutate
+                .spawn_remote(
+                    NodeId::new("worker"),
+                    1,
+                    ComputationName::new("echo"),
+                    RemoteInput::new(b"reentrant owner".to_vec()),
+                    remote_run_config(),
+                )
+                .unwrap();
             *retained.lock().unwrap() = Some(owner);
         }));
-        assert!(matches!(outbound.spawn_remote_typed::<Reentrant>(
-            NodeId::new("worker"), 1, &fill, TypedRemoteLimits::default(), remote_run_config(),
-        ), Err(NativeDistributedTypedRemoteError::Outbound(NativeDistributedOutboundError::OperationCapacity))));
-        assert_eq!(outbound.retained_operations(), 1, "only the reentrant raw owner holds credit");
+        assert!(matches!(
+            outbound.spawn_remote_typed::<Reentrant>(
+                NodeId::new("worker"),
+                1,
+                &fill,
+                TypedRemoteLimits::default(),
+                remote_run_config(),
+            ),
+            Err(NativeDistributedTypedRemoteError::Outbound(
+                NativeDistributedOutboundError::OperationCapacity
+            ))
+        ));
+        assert_eq!(
+            outbound.retained_operations(),
+            1,
+            "only the reentrant raw owner holds credit"
+        );
         let mut admitted = slot.lock().unwrap().take().unwrap();
         assert_node_remote_success(admitted.join().await, b"reentrant owner");
         assert_eq!(outbound.retained_operations(), 0);
@@ -425,9 +502,18 @@ fn typed_node_rechecks_authority_and_capacity_after_reentrant_serialization() {
         let close = ReentrantInput(Arc::new(move || {
             closing.lock().unwrap().as_ref().unwrap().begin_close();
         }));
-        assert!(matches!(outbound.spawn_remote_typed::<Reentrant>(
-            NodeId::new("worker"), 1, &close, TypedRemoteLimits::default(), remote_run_config(),
-        ), Err(NativeDistributedTypedRemoteError::Outbound(NativeDistributedOutboundError::Closed))));
+        assert!(matches!(
+            outbound.spawn_remote_typed::<Reentrant>(
+                NodeId::new("worker"),
+                1,
+                &close,
+                TypedRemoteLimits::default(),
+                remote_run_config(),
+            ),
+            Err(NativeDistributedTypedRemoteError::Outbound(
+                NativeDistributedOutboundError::Closed
+            ))
+        ));
         assert_eq!(outbound.retained_operations(), 0);
         let node = node.lock().unwrap().take().unwrap();
         let report = node.close().await;
@@ -435,7 +521,9 @@ fn typed_node_rechecks_authority_and_capacity_after_reentrant_serialization() {
         let remote = report.outbound.unwrap();
         assert_eq!((remote.active_sessions, remote.retained_operations), (0, 0));
         assert_eq!(membership.live_leases(), 0);
-        println!("typed_node serializer_reentry route=refused capacity=refused close=refused owners=0");
+        println!(
+            "typed_node serializer_reentry route=refused capacity=refused close=refused owners=0"
+        );
     });
     finish(runtime);
 }

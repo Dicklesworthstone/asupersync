@@ -161,6 +161,7 @@
 use crate::cx::Cx;
 use crate::cx::cx::LazyCurrentCx;
 use crate::runtime::JoinError;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::types::outcome::PanicPayload;
 use crate::types::{CancelKind, CancelReason};
 use crate::sync::pl::Mutex;
@@ -168,7 +169,6 @@ use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 

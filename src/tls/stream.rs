@@ -442,7 +442,10 @@ impl<IO> TlsStream<IO> {
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
-        if matches!(error.kind(), io::ErrorKind::WriteZero | io::ErrorKind::Interrupted) {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::WriteZero | io::ErrorKind::Interrupted
+        ) {
             return Poll::Ready(Err(error));
         }
         Poll::Ready(Err(self.fail_write(error)))
@@ -721,7 +724,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                     // once to register readiness again if still blocked;
                     // without newly accepted bytes we cannot loop on flush.
                 }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted && interrupted_io_is_retryable() => {
+                Err(e)
+                    if e.kind() == io::ErrorKind::Interrupted && interrupted_io_is_retryable() =>
+                {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }

@@ -15,12 +15,12 @@ use crate::obligation::ledger::ObligationLedger;
 use crate::observability::LogLevel;
 use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use crate::runtime::RuntimeBuilder;
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
 use std::path::Path;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

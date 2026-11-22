@@ -30,11 +30,11 @@
 //! - DP-BS05: Sequence reset operations preserve monotonicity guarantees
 
 #[cfg(any(test, feature = "test-internals"))]
+use crate::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(test, feature = "test-internals"))]
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(any(test, feature = "test-internals"))]
 use std::sync::Mutex;
-#[cfg(any(test, feature = "test-internals"))]
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

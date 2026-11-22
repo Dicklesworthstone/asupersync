@@ -60,16 +60,15 @@ pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, Sq
 pub use postgres::{
     DEFAULT_NOTIFICATION_CAPACITY, Format as PgFormat, FromSql as PgFromSql, IsNull as PgIsNull,
     PgArray, PgArrayDimension, PgArrayElement, PgColumn, PgConnectOptions, PgConnection, PgCursor,
-    PgCursorComplete,
-    PgCursorConfig, PgError, PgNotification,
-    PgNotificationError, PgNotifications, PgRow, PgStatement, PgTransaction, PgValue,
-    PreparedCacheStats, SslMode, ToSql as PgToSql, Untyped as PgUntyped, oid as pg_oid,
+    PgCursorComplete, PgCursorConfig, PgError, PgNotification, PgNotificationError,
+    PgNotifications, PgRow, PgStatement, PgTransaction, PgValue, PreparedCacheStats, SslMode,
+    ToSql as PgToSql, Untyped as PgUntyped, oid as pg_oid,
 };
 
 #[cfg(feature = "mysql")]
 pub use mysql::{
-    MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlConnectionManager, MySqlCursor, MySqlError,
-    MySqlExecResult, MySqlPreparedCacheStats, MySqlRow, MySqlTransaction, MySqlValue,
+    MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlConnectionManager, MySqlCursor,
+    MySqlError, MySqlExecResult, MySqlPreparedCacheStats, MySqlRow, MySqlTransaction, MySqlValue,
     SslMode as MySqlSslMode, column_type as mysql_column_type,
 };
 

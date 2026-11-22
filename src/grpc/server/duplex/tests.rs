@@ -1194,10 +1194,10 @@ fn native_duplex_compression_refusal_advertises_decoders_before_input_and_allows
                     1,
                     move |server| {
                         if accept_gzip {
-                            server.config.accept_compression.extend([
-                                CompressionEncoding::Gzip,
-                                CompressionEncoding::Gzip,
-                            ]);
+                            server
+                                .config
+                                .accept_compression
+                                .extend([CompressionEncoding::Gzip, CompressionEncoding::Gzip]);
                         }
                     },
                     move |address, _, probe, count| {
@@ -1211,8 +1211,13 @@ fn native_duplex_compression_refusal_advertises_decoders_before_input_and_allows
                         assert_eq!(peer.reset, None);
                         assert_eq!(peer.field("grpc-status"), Some("12"));
                         assert_eq!(peer.field("grpc-accept-encoding"), Some(expected));
-                        assert_eq!(peer.fields.iter()
-                            .filter(|header| header.name == "grpc-accept-encoding").count(), 1);
+                        assert_eq!(
+                            peer.fields
+                                .iter()
+                                .filter(|header| header.name == "grpc-accept-encoding")
+                                .count(),
+                            1
+                        );
                         assert!(peer.body.is_empty());
                         assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
                         until(|| count.load(Ordering::SeqCst) == 0);
@@ -1222,21 +1227,30 @@ fn native_duplex_compression_refusal_advertises_decoders_before_input_and_allows
                             let compress = CompressionEncoding::Gzip.frame_compressor().unwrap();
                             let compressed = compress(Bytes::from_static(payload)).unwrap();
                             let mut wire = vec![1];
-                            wire.extend_from_slice(&u32::try_from(compressed.len()).unwrap().to_be_bytes());
+                            wire.extend_from_slice(
+                                &u32::try_from(compressed.len()).unwrap().to_be_bytes(),
+                            );
                             wire.extend_from_slice(&compressed);
                             wire
                         } else {
                             message(payload)
                         };
-                        peer.request_with_encoding(3, path, None,
-                            Some(if gzip { "gzip" } else { "identity" }));
+                        peer.request_with_encoding(
+                            3,
+                            path,
+                            None,
+                            Some(if gzip { "gzip" } else { "identity" }),
+                        );
                         peer.send(0, 1, 3, &wire);
                         peer.finish();
                         assert_eq!(peer.reset, None);
                         assert_eq!(peer.field("grpc-status"), Some("0"));
                         assert_eq!(peer.field("grpc-accept-encoding"), Some(expected));
-                        assert_eq!(peer.field("grpc-encoding"), None,
-                            "accepting gzip does not enable response compression");
+                        assert_eq!(
+                            peer.field("grpc-encoding"),
+                            None,
+                            "accepting gzip does not enable response compression"
+                        );
                         let expected_body = if path.ends_with("/Aggregate") {
                             message(&(payload.len() as u64).to_be_bytes())
                         } else {
@@ -1271,7 +1285,9 @@ fn native_bidirectional_initial_metadata_arrives_before_request_messages() {
                     assert_eq!(peer.field("grpc-status"), None);
                     assert_eq!(peer.field("x-terminal"), None);
                     assert!(peer.body.is_empty());
-                    starts.recv_timeout(LIMIT).expect("source is waiting for input");
+                    starts
+                        .recv_timeout(LIMIT)
+                        .expect("source is waiting for input");
                     assert_eq!(probe.messages.load(Ordering::SeqCst), 0);
 
                     peer.send(8, 0, 1, &65_535u32.to_be_bytes());
@@ -1317,7 +1333,9 @@ fn native_legacy_duplex_headers_precede_request_upload_and_factory_completion() 
                         assert_eq!(peer.field("grpc-status"), None);
                         assert_eq!(peer.field("x-begin"), None);
                         if path != "/native.Duplex/Unary" {
-                            starts.recv_timeout(LIMIT).expect("factory waiting for input");
+                            starts
+                                .recv_timeout(LIMIT)
+                                .expect("factory waiting for input");
                         }
                         assert_eq!(probe.messages.load(Ordering::SeqCst), 0);
 
@@ -1530,8 +1548,14 @@ fn legacy_client_case(workers: usize, case: LegacyCase) {
     if case.expected_handler_calls() > 0 {
         retirements.recv_timeout(LIMIT).unwrap();
     }
-    assert_eq!(probe.calls.load(Ordering::SeqCst), case.expected_handler_calls());
-    assert_eq!(probe.drops.load(Ordering::SeqCst), case.expected_handler_calls());
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        case.expected_handler_calls()
+    );
+    assert_eq!(
+        probe.drops.load(Ordering::SeqCst),
+        case.expected_handler_calls()
+    );
     shutdown_native(runtime);
     eprintln!("grpc_legacy_client_native workers={workers} case={case:?} ok");
 }
@@ -1571,7 +1595,6 @@ fn legacy_grpc_client_streaming_methods_cross_native_http2_on_one_and_two_worker
     }
 }
 
-
 // Builder wiring is exercised through the real native request decoder and
 // registered bidirectional handler. A descriptor-only facade cannot pass.
 mod reflection_builder {
@@ -1597,8 +1620,7 @@ mod reflection_builder {
         fn descriptor(&self) -> &ServiceDescriptor {
             static METHODS: &[MethodDescriptor] =
                 &[MethodDescriptor::unary("Ping", "/demo.Echo/Ping")];
-            static DESCRIPTOR: ServiceDescriptor =
-                ServiceDescriptor::new("Echo", "demo", METHODS);
+            static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Echo", "demo", METHODS);
             &DESCRIPTOR
         }
         fn method_names(&self) -> Vec<&str> {
@@ -1663,13 +1685,14 @@ mod reflection_builder {
             version: Version::Http11,
             headers: vec![("content-type".to_owned(), "application/grpc".to_owned())],
         };
-        let (writer, body) =
-            IncomingRequestBody::framed_channel_with_limits(cx, None, 8, 65_535);
+        let (writer, body) = IncomingRequestBody::framed_channel_with_limits(cx, None, 8, 65_535);
         let (_, request) = server
             .decode_live_request(StreamingServerRequest::new(head, body), 65_535)
             .unwrap();
         let name = path.strip_prefix('/').unwrap().split('/').next().unwrap();
-        let handler = server.get_service(name).expect("versioned reflection route");
+        let handler = server
+            .get_service(name)
+            .expect("versioned reflection route");
         let mut call = handler.call_bidirectional_streaming(cx, path, request);
         let result = match call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
             Poll::Ready(result) => result,
@@ -1752,14 +1775,21 @@ mod reflection_builder {
                 let (mut output, _) = output.expect("callable reflection").into_parts();
                 put(&mut writer, &cx, &message(LIST));
                 let names = next_reply(output.as_mut())
-                    .services.unwrap()
-                    .services.into_iter().map(|service| service.name).collect::<Vec<_>>();
-                assert_eq!(names, [
-                    "demo.Echo",
-                    "extra.Later",
-                    ReflectionRpcService::NAME,
-                    ReflectionRpcV1AlphaService::NAME,
-                ]);
+                    .services
+                    .unwrap()
+                    .services
+                    .into_iter()
+                    .map(|service| service.name)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    names,
+                    [
+                        "demo.Echo",
+                        "extra.Later",
+                        ReflectionRpcService::NAME,
+                        ReflectionRpcV1AlphaService::NAME,
+                    ]
+                );
 
                 put(&mut writer, &cx, &message(b"\x1a\x0aecho.proto"));
                 let files = next_reply(output.as_mut()).files.unwrap().files;
@@ -1772,12 +1802,17 @@ mod reflection_builder {
                 // A missing descriptor is an in-band error, so the same stream
                 // can still serve a valid query after the refusal.
                 put(&mut writer, &cx, &message(b"\x1a\x0dmissing.proto"));
-                assert_eq!(next_reply(output.as_mut()).error.unwrap().code, Code::NotFound as i32);
+                assert_eq!(
+                    next_reply(output.as_mut()).error.unwrap().code,
+                    Code::NotFound as i32
+                );
                 put(&mut writer, &cx, &message(LIST));
                 assert!(next_reply(output.as_mut()).services.is_some());
                 writer.finish(&cx).unwrap();
                 assert!(matches!(
-                    output.as_mut().poll_next(&mut Context::from_waker(Waker::noop())),
+                    output
+                        .as_mut()
+                        .poll_next(&mut Context::from_waker(Waker::noop())),
                     Poll::Ready(None)
                 ));
             }
@@ -1821,7 +1856,10 @@ mod reflection_builder {
             .enable_reflection_with_auth(|_, _| Ok(()))
             .enable_reflection_rpc(
                 catalog(),
-                ReflectionRpcConfig { max_streams: 1, ..ReflectionRpcConfig::default() },
+                ReflectionRpcConfig {
+                    max_streams: 1,
+                    ..ReflectionRpcConfig::default()
+                },
             )
             .unwrap()
             .build();
@@ -1832,7 +1870,10 @@ mod reflection_builder {
         assert_eq!(refused.unwrap_err().code(), Code::ResourceExhausted);
         drop(first);
         let (_second_writer, second) = open(&server, &cx, ALPHA);
-        assert!(second.is_ok(), "dropping the first source releases the shared cap");
+        assert!(
+            second.is_ok(),
+            "dropping the first source releases the shared cap"
+        );
         drop(second);
         let (_third_writer, third) = open(&server, &cx, V1);
         assert!(third.is_ok());
@@ -1872,18 +1913,32 @@ mod reflection_builder {
     #[test]
     fn callable_reflection_builder_refuses_invalid_limits_but_allows_a_closed_cap() {
         for config in [
-            ReflectionRpcConfig { max_request_bytes: 0, ..ReflectionRpcConfig::default() },
-            ReflectionRpcConfig { max_response_bytes: 0, ..ReflectionRpcConfig::default() },
-            ReflectionRpcConfig { max_queries_per_stream: 0, ..ReflectionRpcConfig::default() },
+            ReflectionRpcConfig {
+                max_request_bytes: 0,
+                ..ReflectionRpcConfig::default()
+            },
+            ReflectionRpcConfig {
+                max_response_bytes: 0,
+                ..ReflectionRpcConfig::default()
+            },
+            ReflectionRpcConfig {
+                max_queries_per_stream: 0,
+                ..ReflectionRpcConfig::default()
+            },
         ] {
-            let refused = Server::builder().enable_reflection_rpc(catalog(), config).unwrap_err();
+            let refused = Server::builder()
+                .enable_reflection_rpc(catalog(), config)
+                .unwrap_err();
             assert_eq!(refused.code(), Code::InvalidArgument);
         }
         let server = Server::builder()
             .enable_reflection_with_auth(|_, _| Ok(()))
             .enable_reflection_rpc(
                 catalog(),
-                ReflectionRpcConfig { max_streams: 0, ..ReflectionRpcConfig::default() },
+                ReflectionRpcConfig {
+                    max_streams: 0,
+                    ..ReflectionRpcConfig::default()
+                },
             )
             .unwrap()
             .build();

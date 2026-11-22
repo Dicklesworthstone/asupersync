@@ -22,9 +22,8 @@ fn run_native(workers: usize, work: impl Future<Output = ()> + Send + 'static) {
         let mut work = std::pin::pin!(work);
         // Ordinary Sleep observes ambient cancellation. The watchdog must let
         // the operation finish its cancellation-resistant cleanup instead.
-        let mut watchdog = std::pin::pin!(super::super::cancel_drain_delay(
-            Duration::from_secs(15)
-        ));
+        let mut watchdog =
+            std::pin::pin!(super::super::cancel_drain_delay(Duration::from_secs(15)));
         poll_fn(|task| {
             if work.as_mut().poll(task).is_ready() {
                 return Poll::Ready(());
@@ -304,10 +303,14 @@ fn bounded_capture_drop_owns_cleanup_even_before_first_poll() {
             let cx = Cx::current().expect("admitted native owner");
             for poll_first in [false, true] {
                 let child = piped_child("exec sleep 30");
-                assert!(!child.kill_on_drop, "exercise the stronger capture ownership");
+                assert!(
+                    !child.kill_on_drop,
+                    "exercise the stronger capture ownership"
+                );
                 let pid = child.id().unwrap();
-                let mut future =
-                    Box::pin(child.wait_with_output_bounded_async(&cx, OutputCaptureLimits::new(0, 0)));
+                let mut future = Box::pin(
+                    child.wait_with_output_bounded_async(&cx, OutputCaptureLimits::new(0, 0)),
+                );
                 if poll_first {
                     poll_fn(|task| {
                         assert!(future.as_mut().poll(task).is_pending());
@@ -354,12 +357,11 @@ fn bounded_overflow_kills_descendant_before_reaping_exited_group_leader() {
                 .unwrap();
             let leader_pid = child.id().unwrap();
             wait_until(|| directory.path().join("ready").exists()).await;
-            let descendant_pid: u32 =
-                std::fs::read_to_string(directory.path().join("descendant"))
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap();
+            let descendant_pid: u32 = std::fs::read_to_string(directory.path().join("descendant"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
             // Reading procfs observes exit without releasing the leader's PID.
             // Calling try_wait here would destroy the identity being tested.
             wait_until(|| process_state(leader_pid) == Some('Z')).await;

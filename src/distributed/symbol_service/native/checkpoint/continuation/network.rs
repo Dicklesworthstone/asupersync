@@ -1,12 +1,12 @@
 //! Fetch an exact replica checkpoint and prepare only its supported application.
 
+use super::super::super::RemoteSymbolTransport;
+use super::super::super::recovery::{RemoteRecoveryConfig, SnapshotDecodeLimits};
+use super::super::{CheckpointError, RecoveryManifest};
 use super::{
     ContinuationError, ContinuationLimits, DecodedSnapshot, PreparedContinuation,
     RestorableWorkload, descriptor, prepare_workload,
 };
-use super::super::{CheckpointError, RecoveryManifest};
-use super::super::super::RemoteSymbolTransport;
-use super::super::super::recovery::{RemoteRecoveryConfig, SnapshotDecodeLimits};
 use crate::security::AuthKey;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -40,11 +40,17 @@ impl RemoteSymbolTransport {
     /// There is no automatic retry, code loading, checkpoint upgrade or rollback.
     #[allow(clippy::too_many_arguments)]
     pub async fn recover_workload<W: RestorableWorkload>(
-        &self, manifest: &RecoveryManifest, config: RemoteRecoveryConfig,
-        decode_limits: SnapshotDecodeLimits, snapshot_key: &AuthKey,
-        limits: ContinuationLimits, workload: Arc<W>,
+        &self,
+        manifest: &RecoveryManifest,
+        config: RemoteRecoveryConfig,
+        decode_limits: SnapshotDecodeLimits,
+        snapshot_key: &AuthKey,
+        limits: ContinuationLimits,
+        workload: Arc<W>,
     ) -> Result<PreparedContinuation<W>, ContinuationRecoveryError> {
-        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled.into()); }
+        if self.cx.is_cancel_requested() {
+            return Err(CheckpointError::Cancelled.into());
+        }
         descriptor::<W>()?;
         let bytes = usize::try_from(manifest.params().object_size)
             .map_err(|_| ContinuationError::Limit("snapshot bytes"))?;
@@ -53,17 +59,34 @@ impl RemoteSymbolTransport {
         }
         let timer = self.cx.timer_driver().ok_or(CheckpointError::NoTimer)?;
         let deadline = timer.now() + config.recovery_timeout;
-        let snapshot = DecodedSnapshot(self.recover_checkpoint(manifest, config, decode_limits, snapshot_key).await?);
-        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled.into()); }
-        if timer.now() >= deadline { return Err(CheckpointError::Deadline.into()); }
+        let snapshot = DecodedSnapshot(
+            self.recover_checkpoint(manifest, config, decode_limits, snapshot_key)
+                .await?,
+        );
+        if self.cx.is_cancel_requested() {
+            return Err(CheckpointError::Cancelled.into());
+        }
+        if timer.now() >= deadline {
+            return Err(CheckpointError::Deadline.into());
+        }
         // The authenticated network decoder already bounded this snapshot by its
         // object size. Keep the additional serialized copy zeroizing and release
         // the previous metadata before admitting the typed application state.
         let encoded = Zeroizing::new(snapshot.0.to_bytes());
         drop(snapshot);
-        let result = prepare_workload(&encoded, manifest.identity(), snapshot_key, limits, workload);
-        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled.into()); }
-        if timer.now() >= deadline { return Err(CheckpointError::Deadline.into()); }
+        let result = prepare_workload(
+            &encoded,
+            manifest.identity(),
+            snapshot_key,
+            limits,
+            workload,
+        );
+        if self.cx.is_cancel_requested() {
+            return Err(CheckpointError::Cancelled.into());
+        }
+        if timer.now() >= deadline {
+            return Err(CheckpointError::Deadline.into());
+        }
         Ok(result?)
     }
 }

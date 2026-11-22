@@ -220,9 +220,7 @@ pub fn flat_merkle_root_from_slices<'a>(
 /// Rejects duplicate paths, non-content-addressed file ids, and contradictory
 /// size or SHA-256 claims for a shared content id. Silently keeping the first
 /// such claim would leave part of the supplied transfer outside the commitment.
-pub fn flat_merkle_root_v2_from_digests(
-    entries: &[EntryDigest],
-) -> Result<String, StreamingError> {
+pub fn flat_merkle_root_v2_from_digests(entries: &[EntryDigest]) -> Result<String, StreamingError> {
     let mut sorted: Vec<&EntryDigest> = entries.iter().collect();
     sorted.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
@@ -270,12 +268,7 @@ pub fn flat_merkle_root_v2_from_digests(
             platform: PlatformMetadata::default(),
             application: None,
         };
-        hasher.object(
-            id,
-            &metadata,
-            &[],
-            Some((entry.size, entry.content_sha256)),
-        );
+        hasher.object(id, &metadata, &[], Some((entry.size, entry.content_sha256)));
     }
     hasher.object(&root.id, &root.metadata, &root.children, None);
     Ok(hasher.finish().to_hex())

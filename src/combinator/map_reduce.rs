@@ -1144,13 +1144,7 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    execute_map_reduce_source_scoped(
-        cx,
-        limits,
-        move || crate::stream::iter(inputs),
-        map,
-        reduce,
-    )
+    execute_map_reduce_source_scoped(cx, limits, move || crate::stream::iter(inputs), map, reduce)
 }
 
 /// Maps an asynchronous source inside an independently owned operation region.

@@ -16,8 +16,8 @@
 //! not be torn down out of order.
 
 use super::{
-    BracketConfig, BracketHandle, BracketPhase, BracketReport, BracketUseFuture,
-    Cx, Outcome, cancel_reason, evaluate, panic_payload,
+    BracketConfig, BracketHandle, BracketPhase, BracketReport, BracketUseFuture, Cx, Outcome,
+    cancel_reason, evaluate, panic_payload,
 };
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::{PanicPayload, TaskId};
@@ -90,19 +90,27 @@ pub struct ResourceKey<T> {
 }
 impl<T> Clone for ResourceKey<T> {
     fn clone(&self) -> Self {
-        Self { owner: Arc::clone(&self.owner), index: self.index, marker: PhantomData }
+        Self {
+            owner: Arc::clone(&self.owner),
+            index: self.index,
+            marker: PhantomData,
+        }
     }
 }
 impl<T> fmt::Debug for ResourceKey<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceKey").field("index", &self.index).finish_non_exhaustive()
+        f.debug_struct("ResourceKey")
+            .field("index", &self.index)
+            .finish_non_exhaustive()
     }
 }
 impl<T> ResourceKey<T> {
     /// Zero-based registration index, also used by the cleanup report.
     /// This integer alone is not a key and is not globally unique.
     #[must_use]
-    pub const fn index(&self) -> usize { self.index }
+    pub const fn index(&self) -> usize {
+        self.index
+    }
 }
 
 trait OwnedResource<C>: Send {
@@ -112,15 +120,22 @@ trait OwnedResource<C>: Send {
     fn discard(self: Box<Self>) -> (Option<PanicPayload>, Option<PanicPayload>);
 }
 
-struct Entry<T, F> { resource: T, release: F }
+struct Entry<T, F> {
+    resource: T,
+    release: F,
+}
 impl<T, C, F, Fut> OwnedResource<C> for Entry<T, F>
 where
     T: Send + 'static,
     F: FnOnce(Cx, T) -> Fut + Send + 'static,
     Fut: Future<Output = Outcome<(), C>> + Send + 'static,
 {
-    fn resource(&self) -> &dyn Any { &self.resource }
-    fn resource_mut(&mut self) -> &mut dyn Any { &mut self.resource }
+    fn resource(&self) -> &dyn Any {
+        &self.resource
+    }
+    fn resource_mut(&mut self) -> &mut dyn Any {
+        &mut self.resource
+    }
     fn release(self: Box<Self>, cx: Cx) -> ReleaseFuture<C> {
         let Self { resource, release } = *self;
         Box::pin(release(cx, resource))
@@ -131,9 +146,11 @@ where
         // Isolate the two owners independently: a resource destructor must not
         // cause a second captured-factory destructor to unwind during its panic.
         let resource_panic = catch_unwind(AssertUnwindSafe(|| drop(resource)))
-            .err().map(panic_payload);
+            .err()
+            .map(panic_payload);
         let release_panic = catch_unwind(AssertUnwindSafe(|| drop(release)))
-            .err().map(panic_payload);
+            .err()
+            .map(panic_payload);
         (resource_panic, release_panic)
     }
 }
@@ -164,7 +181,10 @@ impl<C> ResourceCleanupReport<C> {
     }
 }
 
-struct Active<C> { index: usize, future: EvaluatedRelease<C> }
+struct Active<C> {
+    index: usize,
+    future: EvaluatedRelease<C>,
+}
 
 /// Exclusive owner of heterogeneous `Send` resources; neither Clone nor Sync is
 /// required on those resources or their cleanup errors.
@@ -199,9 +219,16 @@ impl<C: Send + 'static> ResourceStack<C> {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
-            owner: Arc::new(()), capacity, entries: Vec::new(), closing: false,
-            next: 0, active: None,
-            report: ResourceCleanupReport { entries: Vec::new(), complete: false },
+            owner: Arc::new(()),
+            capacity,
+            entries: Vec::new(),
+            closing: false,
+            next: 0,
+            active: None,
+            report: ResourceCleanupReport {
+                entries: Vec::new(),
+                complete: false,
+            },
         }
     }
 
@@ -210,23 +237,35 @@ impl<C: Send + 'static> ResourceStack<C> {
     /// It borrows the stack exclusively, so another registration or close cannot
     /// invalidate the reserved position while acquisition is pending.
     pub fn reserve(&mut self) -> Result<ResourceReservation<'_, C>, ResourceStackError> {
-        if self.closing { return Err(ResourceStackError::Closed); }
+        if self.closing {
+            return Err(ResourceStackError::Closed);
+        }
         if self.entries.len() >= self.capacity {
-            return Err(ResourceStackError::Capacity { limit: self.capacity });
+            return Err(ResourceStackError::Capacity {
+                limit: self.capacity,
+            });
         }
         let count = self.entries.len() + 1; // strictly below the usize capacity
-        self.entries.try_reserve(1).map_err(|_| ResourceStackError::Allocation)?;
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| ResourceStackError::Allocation)?;
         // No release runs while registration is open. Reserve enough eventual
         // result slots, not merely one extra slot relative to the still-empty Vec.
-        self.report.entries.try_reserve(count).map_err(|_| ResourceStackError::Allocation)?;
+        self.report
+            .entries
+            .try_reserve(count)
+            .map_err(|_| ResourceStackError::Allocation)?;
         Ok(ResourceReservation { stack: self })
     }
 
     /// Register an already-acquired resource or return both unchanged owners.
     /// Prefer `reserve` before acquisition when registration failure would leave
     /// the caller with a resource requiring asynchronous release.
-    pub fn try_insert<T, F, Fut>(&mut self, resource: T, release: F)
-        -> Result<ResourceKey<T>, ResourceInsertError<T, F>>
+    pub fn try_insert<T, F, Fut>(
+        &mut self,
+        resource: T,
+        release: F,
+    ) -> Result<ResourceKey<T>, ResourceInsertError<T, F>>
     where
         T: Send + 'static,
         F: FnOnce(Cx, T) -> Fut + Send + 'static,
@@ -234,28 +273,46 @@ impl<C: Send + 'static> ResourceStack<C> {
     {
         match self.reserve() {
             Ok(slot) => Ok(slot.insert(resource, release)),
-            Err(error) => Err(ResourceInsertError { error, resource, release }),
+            Err(error) => Err(ResourceInsertError {
+                error,
+                resource,
+                release,
+            }),
         }
     }
 
     /// Borrow a live resource. Foreign keys and keys used after close return None.
     #[must_use]
     pub fn get<T: 'static>(&self, key: &ResourceKey<T>) -> Option<&T> {
-        if self.closing || !Arc::ptr_eq(&self.owner, &key.owner) { return None; }
-        self.entries.get(key.index)?.as_ref()?.resource().downcast_ref()
+        if self.closing || !Arc::ptr_eq(&self.owner, &key.owner) {
+            return None;
+        }
+        self.entries
+            .get(key.index)?
+            .as_ref()?
+            .resource()
+            .downcast_ref()
     }
 
     /// Mutably borrow a live resource. As with any `&mut T`, a caller can replace
     /// its value; release then receives the replacement. Interior ownership and
     /// any explicitly extracted/replaced values remain the caller's responsibility.
     pub fn get_mut<T: 'static>(&mut self, key: &ResourceKey<T>) -> Option<&mut T> {
-        if self.closing || !Arc::ptr_eq(&self.owner, &key.owner) { return None; }
-        self.entries.get_mut(key.index)?.as_mut()?.resource_mut().downcast_mut()
+        if self.closing || !Arc::ptr_eq(&self.owner, &key.owner) {
+            return None;
+        }
+        self.entries
+            .get_mut(key.index)?
+            .as_mut()?
+            .resource_mut()
+            .downcast_mut()
     }
 
     /// Observe completed cleanup entries without executing callbacks.
     #[must_use]
-    pub fn report(&self) -> &ResourceCleanupReport<C> { &self.report }
+    pub fn report(&self) -> &ResourceCleanupReport<C> {
+        &self.report
+    }
 
     /// Seal and drive LIFO cleanup AFTER the caller establishes user quiescence.
     ///
@@ -271,8 +328,13 @@ impl<C: Send + 'static> ResourceStack<C> {
     }
 
     fn poll_close(&mut self, cx: &Cx, task: &mut Context<'_>) -> Poll<()> {
-        if self.report.complete { return Poll::Ready(()); }
-        if !self.closing { self.closing = true; self.next = self.entries.len(); }
+        if self.report.complete {
+            return Poll::Ready(());
+        }
+        if !self.closing {
+            self.closing = true;
+            self.next = self.entries.len();
+        }
         for _ in 0..RELEASES_PER_POLL {
             if self.active.is_none() {
                 if self.next == 0 {
@@ -281,7 +343,9 @@ impl<C: Send + 'static> ResourceStack<C> {
                 }
                 self.next -= 1;
                 let index = self.next;
-                let entry = self.entries[index].take().expect("unreleased resource slot");
+                let entry = self.entries[index]
+                    .take()
+                    .expect("unreleased resource slot");
                 let release_cx = cx.clone();
                 // Reuse bracket's factory/poll/retirement isolation. No release
                 // factory is invoked before this owned future is installed.
@@ -318,10 +382,14 @@ impl<C: Send + 'static> ResourceStack<C> {
         self.next = self.entries.len();
         poll_fn(|task| {
             for _ in 0..RELEASES_PER_POLL {
-                if self.next == 0 { return Poll::Ready(()); }
+                if self.next == 0 {
+                    return Poll::Ready(());
+                }
                 self.next -= 1;
                 let index = self.next;
-                let entry = self.entries[index].take().expect("undiscarded resource slot");
+                let entry = self.entries[index]
+                    .take()
+                    .expect("undiscarded resource slot");
                 let (resource_panic, release_panic) = entry.discard();
                 record(index, resource_panic, release_panic);
             }
@@ -331,18 +399,24 @@ impl<C: Send + 'static> ResourceStack<C> {
                 task.waker().wake_by_ref();
                 Poll::Pending
             }
-        }).await;
+        })
+        .await;
     }
 
-    pub(super) fn into_cleanup_report(self) -> ResourceCleanupReport<C> { self.report }
+    pub(super) fn into_cleanup_report(self) -> ResourceCleanupReport<C> {
+        self.report
+    }
 }
 
 /// Exclusively reserved stack slot. No resource is owned until insertion.
 #[must_use = "insert an acquired resource, or drop the unused reservation"]
-pub struct ResourceReservation<'a, C> { stack: &'a mut ResourceStack<C> }
+pub struct ResourceReservation<'a, C> {
+    stack: &'a mut ResourceStack<C>,
+}
 impl<C> fmt::Debug for ResourceReservation<'_, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceReservation").finish_non_exhaustive()
+        f.debug_struct("ResourceReservation")
+            .finish_non_exhaustive()
     }
 }
 impl<C: Send + 'static> ResourceReservation<'_, C> {
@@ -357,7 +431,10 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
     /// future while acquisition is pending drops that acquisition, not any older
     /// registered resources. Use a resource scope to retain controller ownership.
     pub async fn acquire<T, E, A, AF, F, FF>(
-        self, cx: &Cx, acquire: A, release: F,
+        self,
+        cx: &Cx,
+        acquire: A,
+        release: F,
     ) -> BracketPhase<ResourceKey<T>, E>
     where
         T: Send + 'static,
@@ -368,11 +445,14 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
     {
         if cx.checkpoint().is_err() {
             return BracketPhase {
-                outcome: Outcome::Cancelled(cancel_reason(cx)), retirement_panic: None,
+                outcome: Outcome::Cancelled(cancel_reason(cx)),
+                retirement_panic: None,
             };
         }
-        let BracketPhase { outcome, retirement_panic } =
-            evaluate(|| acquire(cx.clone()), None).await;
+        let BracketPhase {
+            outcome,
+            retirement_panic,
+        } = evaluate(|| acquire(cx.clone()), None).await;
         let outcome = match outcome {
             // No checkpoint or await may separate a returned resource from the
             // reserved release owner, including after an acquisition Drop panic.
@@ -381,7 +461,10 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
         };
-        BracketPhase { outcome, retirement_panic }
+        BracketPhase {
+            outcome,
+            retirement_panic,
+        }
     }
 
     /// Infallibly commit this slot; no cancellation checkpoint separates successful
@@ -394,8 +477,14 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
         Fut: Future<Output = Outcome<(), C>> + Send + 'static,
     {
         let index = self.stack.entries.len();
-        self.stack.entries.push(Some(Box::new(Entry { resource, release })));
-        ResourceKey { owner: Arc::clone(&self.stack.owner), index, marker: PhantomData }
+        self.stack
+            .entries
+            .push(Some(Box::new(Entry { resource, release })));
+        ResourceKey {
+            owner: Arc::clone(&self.stack.owner),
+            index,
+            marker: PhantomData,
+        }
     }
 }
 
@@ -404,10 +493,14 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
 /// This facade provides registration and borrowing, but NOT close, extraction,
 /// or replacement of the stack. Dropping the facade does not drop its resources.
 /// Returned keys carry identity only and do not keep resources alive after close.
-pub struct ResourceScope<'a, C> { stack: &'a mut ResourceStack<C> }
+pub struct ResourceScope<'a, C> {
+    stack: &'a mut ResourceStack<C>,
+}
 impl<C> fmt::Debug for ResourceScope<'_, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceScope").field("stack", &self.stack).finish()
+        f.debug_struct("ResourceScope")
+            .field("stack", &self.stack)
+            .finish()
     }
 }
 impl<C: Send + 'static> ResourceScope<'_, C> {
@@ -417,8 +510,11 @@ impl<C: Send + 'static> ResourceScope<'_, C> {
     }
 
     /// Register an existing resource or recover it and its release factory.
-    pub fn try_insert<T, F, FF>(&mut self, resource: T, release: F)
-        -> Result<ResourceKey<T>, ResourceInsertError<T, F>>
+    pub fn try_insert<T, F, FF>(
+        &mut self,
+        resource: T,
+        release: F,
+    ) -> Result<ResourceKey<T>, ResourceInsertError<T, F>>
     where
         T: Send + 'static,
         F: FnOnce(Cx, T) -> FF + Send + 'static,
@@ -429,7 +525,9 @@ impl<C: Send + 'static> ResourceScope<'_, C> {
 
     /// Borrow a resource from this scope; foreign keys return None.
     #[must_use]
-    pub fn get<T: 'static>(&self, key: &ResourceKey<T>) -> Option<&T> { self.stack.get(key) }
+    pub fn get<T: 'static>(&self, key: &ResourceKey<T>) -> Option<&T> {
+        self.stack.get(key)
+    }
 
     /// Mutably borrow the registered value. Replacing the value changes what its
     /// release factory later owns, exactly as with a standalone stack's get_mut.
@@ -456,7 +554,10 @@ impl<T, E, C> ResourceScopeReport<T, E, C> {
     #[must_use]
     pub fn is_success(&self) -> bool {
         self.lifecycle.is_success()
-            && self.cleanup.as_ref().is_some_and(ResourceCleanupReport::is_success)
+            && self
+                .cleanup
+                .as_ref()
+                .is_some_and(ResourceCleanupReport::is_success)
     }
 }
 
@@ -469,16 +570,22 @@ pub struct ResourceScopeHandle<T, E, C> {
 }
 impl<T, E, C> fmt::Debug for ResourceScopeHandle<T, E, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceScopeHandle").field("bracket", &self.bracket).finish_non_exhaustive()
+        f.debug_struct("ResourceScopeHandle")
+            .field("bracket", &self.bracket)
+            .finish_non_exhaustive()
     }
 }
 impl<T, E, C> ResourceScopeHandle<T, E, C> {
     /// Current identity of the bracket controller task.
     #[must_use]
-    pub fn task_id(&self) -> TaskId { self.bracket.task_id() }
+    pub fn task_id(&self) -> TaskId {
+        self.bracket.task_id()
+    }
 
     /// Request stop; joining still waits for subtree drain and LIFO cleanup.
-    pub fn abort(&self) { self.bracket.abort(); }
+    pub fn abort(&self) {
+        self.bracket.abort();
+    }
 
     /// Join once. Dropping a borrowing wait neither requests stop nor discards
     /// partial work/cleanup results. This wait is deliberately uninterruptible;
@@ -510,12 +617,16 @@ impl Cx {
     /// Returns the original SpawnError if controller submission is refused.
     /// Later admission/work/drain/cleanup failures remain in the joined report.
     pub fn spawn_resource_scope<T, E, C, U>(
-        &self, config: BracketConfig, capacity: usize, work: U,
+        &self,
+        config: BracketConfig,
+        capacity: usize,
+        work: U,
     ) -> Result<ResourceScopeHandle<T, E, C>, SpawnError>
     where
-        T: Send + 'static, E: Send + 'static, C: Send + 'static,
-        U: for<'a> FnOnce(Cx, ResourceScope<'a, C>) -> BracketUseFuture<'a, T, E>
-            + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+        C: Send + 'static,
+        U: for<'a> FnOnce(Cx, ResourceScope<'a, C>) -> BracketUseFuture<'a, T, E> + Send + 'static,
     {
         let cleanup = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&cleanup);
@@ -532,7 +643,11 @@ impl Cx {
                 let old = publication.lock().replace(report);
                 debug_assert!(old.is_none(), "one cleanup report per resource scope");
                 drop(old);
-                if success { Outcome::Ok(()) } else { Outcome::Err(()) }
+                if success {
+                    Outcome::Ok(())
+                } else {
+                    Outcome::Err(())
+                }
             },
         )?;
         Ok(ResourceScopeHandle { bracket, cleanup })

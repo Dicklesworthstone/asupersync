@@ -38,16 +38,16 @@ use crate::cx::Cx;
 use crate::database::transaction::trace_database_transaction;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
+use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::time::{sleep, wall_now};
 use crate::types::{CancelReason, Outcome};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::Duration;
@@ -2566,12 +2566,13 @@ struct ConnectionOpControl {
 }
 
 /// Retires the connection-global hook and phase while the worker still owns the
-/// connection mutex. Declared after that mutex guard, so unwinding statement or
+/// connection mutex. Holds the mutex guard directly so unwinding statement or
 /// setup code cannot leave a live callback or a Running phase for the next user.
 struct ConnectionOpWorkerGuard<'connection> {
     phase: &'connection Mutex<SqliteConnectionOpPhase>,
     control: &'connection ConnectionOpControl,
-    progress_connection: Option<&'connection rusqlite::Connection>,
+    guard: MutexGuard<'connection, SqliteConnectionInner>,
+    progress_armed: bool,
     finished: bool,
 }
 
@@ -2583,8 +2584,11 @@ impl ConnectionOpWorkerGuard<'_> {
         // Deactivate before uninstalling. If disarm fails, the retained closure
         // must not impose an old cancellation or deadline on a later borrower.
         self.control.progress_active.store(false, Ordering::Release);
-        if let Some(conn) = self.progress_connection.take() {
-            let _ = conn.progress_handler(0, None::<fn() -> bool>);
+        if self.progress_armed {
+            self.progress_armed = false;
+            if let Ok(conn) = self.guard.get_mut() {
+                let _ = conn.progress_handler(0, None::<fn() -> bool>);
+            }
         }
         let mut phase = self.phase.lock();
         let cancellation_requested = *phase == SqliteConnectionOpPhase::CancelRequested;
@@ -2705,6 +2709,10 @@ impl SqliteConnectionInner {
 
     fn get(&self) -> Result<&rusqlite::Connection, SqliteError> {
         self.conn.as_ref().ok_or(SqliteError::ConnectionClosed)
+    }
+
+    fn get_mut(&mut self) -> Result<&mut rusqlite::Connection, SqliteError> {
+        self.conn.as_mut().ok_or(SqliteError::ConnectionClosed)
     }
 
     fn close(&mut self) {
@@ -2830,7 +2838,7 @@ impl SqliteConnection {
     ) -> Outcome<R, SqliteError>
     where
         R: Send + 'static,
-        F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
     {
         self.run_connection_op_inner(cx, op_name, SqliteOperation::BlockingPool, None, f)
             .await
@@ -2845,7 +2853,7 @@ impl SqliteConnection {
     ) -> Outcome<R, SqliteOperationError>
     where
         R: Send + 'static,
-        F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteOperationError> + Send + 'static,
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R, SqliteOperationError> + Send + 'static,
     {
         self.run_connection_op_inner(cx, op_name, operation, None, f)
             .await
@@ -2864,7 +2872,7 @@ impl SqliteConnection {
     where
         R: Send + 'static,
         E: SqliteConnectionOpError,
-        F: FnOnce(&rusqlite::Connection) -> Result<R, E> + Send + 'static,
+        F: FnOnce(&mut rusqlite::Connection) -> Result<R, E> + Send + 'static,
     {
         /// SQLite VM instructions between cancellation/deadline checks in the
         /// progress handler — small enough for prompt aborts, large enough
@@ -2917,11 +2925,11 @@ impl SqliteConnection {
 
         let handle = self.pool.spawn(move || {
             let completion = (|| {
-                let guard = inner.lock();
                 let mut worker_guard = ConnectionOpWorkerGuard {
                     phase: worker_phase.as_ref(),
                     control: worker_control.as_ref(),
-                    progress_connection: None,
+                    guard: inner.lock(),
+                    progress_armed: false,
                     finished: false,
                 };
                 {
@@ -2944,16 +2952,19 @@ impl SqliteConnection {
                 // caused is relabelled as a timeout below.
                 let deadline_fired = Arc::new(AtomicBool::new(false));
                 let result = (|| {
-                    let conn = guard
-                        .get()
+                    {
+                        let conn = worker_guard
+                            .guard
+                            .get()
+                            .map_err(|error| E::from_legacy(operation, error))?;
+                        ensure_managed_transaction_open(
+                            conn,
+                            transaction_state.as_ref(),
+                            transaction_generation.as_ref(),
+                            expected_generation,
+                        )
                         .map_err(|error| E::from_legacy(operation, error))?;
-                    ensure_managed_transaction_open(
-                        conn,
-                        transaction_state.as_ref(),
-                        transaction_generation.as_ref(),
-                        expected_generation,
-                    )
-                    .map_err(|error| E::from_legacy(operation, error))?;
+                    }
                     // A one-shot interrupt before the first sqlite3_step is a
                     // no-op. Keep an operation-local request in this callback,
                     // also when no statement timeout was configured. Deadline
@@ -2961,10 +2972,14 @@ impl SqliteConnection {
                     let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
                     let fired = Arc::clone(&deadline_fired);
                     let callback_control = Arc::clone(&worker_control);
-                    worker_guard.progress_connection = Some(conn);
+                    worker_guard.progress_armed = true;
                     worker_control
                         .progress_active
                         .store(true, Ordering::Release);
+                    let conn = worker_guard
+                        .guard
+                        .get_mut()
+                        .map_err(|error| E::from_legacy(operation, error))?;
                     conn.progress_handler(
                         TIMEOUT_PROGRESS_OPS,
                         Some(move || {
@@ -3014,14 +3029,13 @@ impl SqliteConnection {
                 // Handler removal, phase completion, and any racing interrupt
                 // all retire before releasing the connection to another job.
                 let cancellation_requested = worker_guard.finish();
-                drop(worker_guard);
                 let result = match (cancellation_requested, timeout, result) {
                     (_, _, Ok(None)) => {
-                        drop(guard);
+                        drop(worker_guard);
                         return SqliteConnectionOpCompletion::Cancelled;
                     }
                     (true, _, Err(err)) if err.is_interrupt() => {
-                        drop(guard);
+                        drop(worker_guard);
                         return SqliteConnectionOpCompletion::Cancelled;
                     }
                     (_, Some(limit), Err(err))
@@ -3032,7 +3046,7 @@ impl SqliteConnection {
                     (_, _, Ok(Some(value))) => Ok(value),
                     (_, _, Err(err)) => Err(err),
                 };
-                drop(guard);
+                drop(worker_guard);
                 SqliteConnectionOpCompletion::Finished(result)
             })();
             let _ = permit.send(completion);
@@ -4067,7 +4081,7 @@ impl SqliteConnection {
             // stream's own deadline handler is relabelled as a timeout.
             let deadline_fired = Arc::new(AtomicBool::new(false));
             let result = (|| {
-                let guard = inner.lock();
+                let mut guard = inner.lock();
                 {
                     let mut phase = worker_phase.lock();
                     match *phase {
@@ -4086,7 +4100,7 @@ impl SqliteConnection {
                     }
                 }
                 let body_result = (|| {
-                    let conn = guard.get()?;
+                    let conn = guard.get_mut()?;
                     ensure_managed_transaction_open(
                         conn,
                         transaction_state.as_ref(),

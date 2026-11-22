@@ -1,10 +1,10 @@
 //! Temporary File and Path Management for Sparse Writer Operations
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_SAFE_FILENAME_COMPONENT_LEN: usize = 96;
@@ -200,7 +200,8 @@ impl TempPathManager {
     /// from exclusive staging acquisition. Neither existence nor uniqueness
     /// proves that an absent name is private rather than a public destination.
     pub(crate) fn for_destination(final_path: &Path) -> Self {
-        let parent = final_path.parent()
+        let parent = final_path
+            .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let mut manager = Self::new(parent);
@@ -240,7 +241,9 @@ impl TempPathManager {
         if self.active_temps.len() >= self.config.max_active_temps {
             return Err(TempManagementError::TooManyTempFiles);
         }
-        Ok(self.base_dir.join(self.generate_temp_filename(operation_id)?))
+        Ok(self
+            .base_dir
+            .join(self.generate_temp_filename(operation_id)?))
     }
 
     fn track_temp_path(&mut self, temp_path: &Path, operation_id: &str) {
@@ -334,7 +337,9 @@ impl TempPathManager {
                 // Generated names are ASCII. Conservatively exclude ASCII case
                 // variants too, including when the host filesystem folds case.
                 // This is not a general path-alias or parent-race confinement.
-                candidate.as_encoded_bytes().eq_ignore_ascii_case(protected.as_encoded_bytes())
+                candidate
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(protected.as_encoded_bytes())
             }
             _ => false,
         }

@@ -1097,11 +1097,7 @@ impl AsyncWrite for File {
 }
 
 impl File {
-    fn poll_write_inner(
-        &self,
-        poll_cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write_inner(&self, poll_cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let this = self;
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
@@ -1249,11 +1245,7 @@ impl AsyncSeek for File {
 }
 
 impl File {
-    fn poll_seek_inner(
-        &self,
-        poll_cx: &mut Context<'_>,
-        pos: SeekFrom,
-    ) -> Poll<io::Result<u64>> {
+    fn poll_seek_inner(&self, poll_cx: &mut Context<'_>, pos: SeekFrom) -> Poll<io::Result<u64>> {
         let this = self;
         let mut pending = this.pending.lock();
         // A write retried after the cursor moves is a new write, not a retry.

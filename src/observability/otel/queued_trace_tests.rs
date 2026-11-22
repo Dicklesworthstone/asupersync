@@ -15,16 +15,35 @@ fn collection_admission_is_atomic_and_counts_the_inflight_request() {
         assert_eq!(exporter.enqueue_owned_traces(&traces, &[first]).unwrap(), 1);
     }
     let before = exporter.queue_stats();
-    assert!(exporter.enqueue_owned_traces(&traces, &[first, second]).is_err());
+    assert!(
+        exporter
+            .enqueue_owned_traces(&traces, &[first, second])
+            .is_err()
+    );
     assert_eq!(exporter.queue_stats(), before);
 
     let consumer = exporter.export_queue.consumer().unwrap();
     let delivery = exporter.export_queue.take().unwrap();
-    assert!(exporter.enqueue_owned_traces(&traces, &[first, second]).is_err());
-    assert_eq!(exporter.queue_stats().retained_batches, before.retained_batches);
+    assert!(
+        exporter
+            .enqueue_owned_traces(&traces, &[first, second])
+            .is_err()
+    );
+    assert_eq!(
+        exporter.queue_stats().retained_batches,
+        before.retained_batches
+    );
     drop(delivery);
-    assert_eq!(exporter.enqueue_owned_traces(&traces, &[first, second]).unwrap(), 2);
-    assert_eq!(exporter.queue_stats().retained_batches, OTLP_EXPORT_QUEUE_MAX_BATCHES);
+    assert_eq!(
+        exporter
+            .enqueue_owned_traces(&traces, &[first, second])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        exporter.queue_stats().retained_batches,
+        OTLP_EXPORT_QUEUE_MAX_BATCHES
+    );
     assert_eq!(exporter.queue_stats().failed_batches, 1);
     drop(consumer);
 }
@@ -39,7 +58,12 @@ fn encoded_bytes_and_configuration_are_reserved_for_every_request() {
         vec![0; OWNED_OTLP_DEFAULT_REQUEST_BYTES],
         vec![0; OWNED_OTLP_DEFAULT_REQUEST_BYTES],
     ];
-    assert!(exporter.export_queue.admit_traces(&exporter, requests).is_err());
+    assert!(
+        exporter
+            .export_queue
+            .admit_traces(&exporter, requests)
+            .is_err()
+    );
     assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
 
     let span = OtlpTraceSpanInput::new([1; 16], [1; 8], "captured", 10, 20);
@@ -47,20 +71,39 @@ fn encoded_bytes_and_configuration_are_reserved_for_every_request() {
     // any encoding or admission, and this lane has no `tls` feature for an
     // https:// endpoint. Pin that refusal, then reserve the same encoded
     // collection through the queue admission enqueue_owned_traces delegates to.
-    let refused = exporter.enqueue_owned_traces(&traces(), &[span]).unwrap_err();
-    assert!(refused.message.contains("otlp.config.insecure_auth_transport"));
+    let refused = exporter
+        .enqueue_owned_traces(&traces(), &[span])
+        .unwrap_err();
+    assert!(
+        refused
+            .message
+            .contains("otlp.config.insecure_auth_transport")
+    );
     assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
     let attributes = exporter
         .resource_attributes
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let requests = traces().collect(&[span], &attributes).unwrap().into_requests();
-    assert_eq!(exporter.export_queue.admit_traces(&exporter, requests).unwrap(), 1);
+    let requests = traces()
+        .collect(&[span], &attributes)
+        .unwrap()
+        .into_requests();
+    assert_eq!(
+        exporter
+            .export_queue
+            .admit_traces(&exporter, requests)
+            .unwrap(),
+        1
+    );
     let later = exporter.clone().with_bearer_token("later-token");
     let delivery = later.export_queue.take().unwrap();
     let batch = delivery.batch.as_ref().unwrap();
-    let Payload::Encoded { signal: OtlpGrpcSignal::Traces, body } = &batch.payload else {
+    let Payload::Encoded {
+        signal: OtlpGrpcSignal::Traces,
+        body,
+    } = &batch.payload
+    else {
         panic!("trace admission must retain the already encoded request");
     };
     let Destination::Http { config, .. } = &batch.destination else {
@@ -80,8 +123,17 @@ fn invalid_late_span_admits_nothing_and_sampling_avoids_empty_batches() {
     let traces = traces();
     let first = OtlpTraceSpanInput::new([1; 16], [1; 8], "first", 10, 20);
     let invalid = OtlpTraceSpanInput::new([1; 16], [2; 8], "late-invalid", 20, 10);
-    assert!(exporter.enqueue_owned_traces(&traces, &[first, invalid]).is_err());
+    assert!(
+        exporter
+            .enqueue_owned_traces(&traces, &[first, invalid])
+            .is_err()
+    );
     assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
-    assert_eq!(exporter.enqueue_owned_traces(&traces, &[first.with_trace_flags(0)]).unwrap(), 0);
+    assert_eq!(
+        exporter
+            .enqueue_owned_traces(&traces, &[first.with_trace_flags(0)])
+            .unwrap(),
+        0
+    );
     assert_eq!(exporter.queue_stats(), OtlpExportQueueStats::default());
 }

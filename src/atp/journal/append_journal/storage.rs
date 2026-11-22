@@ -45,7 +45,8 @@ pub(super) fn append_frame(
 // belongs to the caller: compaction synchronizes the complete snapshot once.
 pub(super) fn write_frame(writer: &mut impl Write, encoded: &[u8]) -> Result<(), JournalError> {
     let length = frame_length(encoded.len())?;
-    writer.write_all(&length.to_le_bytes())
+    writer
+        .write_all(&length.to_le_bytes())
         .and_then(|()| writer.write_all(encoded))
         .map_err(|error| JournalError::WriteFailure(error.to_string()))
 }
@@ -82,16 +83,19 @@ impl AppendJournal {
             return Outcome::Err(error);
         }
         let Some(next_sequence) = self.sequence.checked_add(1) else {
-            return Outcome::Err(JournalError::Serialization("journal sequence exhausted".to_owned()));
+            return Outcome::Err(JournalError::Serialization(
+                "journal sequence exhausted".to_owned(),
+            ));
         };
         let is_boundary = matches!(record, JournalRecord::CompactionBoundary { .. });
         if let Err(error) = validate_record_lengths(&record) {
             return Outcome::Err(error);
         }
-        let entry = match JournalEntry::try_new(self.sequence, record.with_signature(&self.auth_key)) {
-            Ok(entry) => entry,
-            Err(error) => return Outcome::Err(error),
-        };
+        let entry =
+            match JournalEntry::try_new(self.sequence, record.with_signature(&self.auth_key)) {
+                Ok(entry) => entry,
+                Err(error) => return Outcome::Err(error),
+            };
         let encoded = entry.encode();
         if let Err(error) = frame_length(encoded.len()) {
             return Outcome::Err(error);
@@ -105,7 +109,9 @@ impl AppendJournal {
         }
         self.storage_failed = true;
         let Some(writer) = self.writer.take() else {
-            return Outcome::Err(JournalError::WriteFailure("journal writer is absent".to_owned()));
+            return Outcome::Err(JournalError::WriteFailure(
+                "journal writer is absent".to_owned(),
+            ));
         };
         let mut pending = PendingWriter(Some(writer));
         if let Err(error) = write(pending.writer(), &encoded, self.config.force_sync) {

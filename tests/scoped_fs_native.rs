@@ -63,10 +63,19 @@ fn real_file_workflow_and_io_errors_on_both_native_schedulers() {
                 let bytes = b"owned filesystem\n".to_vec();
                 fs.write(source.clone(), bytes.clone()).await.unwrap();
                 assert_eq!(fs.read(source.clone()).await.unwrap(), bytes);
-                assert_eq!(fs.copy(source.clone(), copy.clone()).await.unwrap(), bytes.len() as u64);
+                assert_eq!(
+                    fs.copy(source.clone(), copy.clone()).await.unwrap(),
+                    bytes.len() as u64
+                );
                 fs.rename(copy.clone(), renamed.clone()).await.unwrap();
-                assert_eq!(fs.read_to_string(renamed.clone()).await.unwrap(), "owned filesystem\n");
-                assert_eq!(fs.metadata(renamed).await.unwrap().len(), bytes.len() as u64);
+                assert_eq!(
+                    fs.read_to_string(renamed.clone()).await.unwrap(),
+                    "owned filesystem\n"
+                );
+                assert_eq!(
+                    fs.metadata(renamed).await.unwrap().len(),
+                    bytes.len() as u64
+                );
                 assert!(matches!(fs.read(copy).await,
                     Err(ScopedFsError::Io(error)) if error.kind() == io::ErrorKind::NotFound));
                 fs.write(source.clone(), vec![0xff]).await.unwrap();
@@ -87,7 +96,10 @@ fn dropping_a_running_call_keeps_its_region_open_until_io_finishes() {
             let runtime = runtime(workers);
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
-                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let region = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
                 let expected_region = region.region_id();
                 let fs = region.cx().scoped_fs();
                 let (started, mut start) = oneshot::channel();
@@ -105,25 +117,33 @@ fn dropping_a_running_call_keeps_its_region_open_until_io_finishes() {
                 poll_fn(|task| {
                     assert!(work.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 let worker_cx = start.recv(&cx).await.unwrap();
                 drop(work);
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while !worker_cx.is_cancel_requested() {
-                    assert!(Instant::now() < deadline, "drop cancellation must reach the worker");
+                    assert!(
+                        Instant::now() < deadline,
+                        "drop cancellation must reach the worker"
+                    );
                     yield_now().await;
                 }
                 let mut closing = Box::pin(region.close());
                 poll_fn(|task| {
                     assert!(closing.as_mut().poll(task).is_pending());
                     Poll::Ready(())
-                }).await;
+                })
+                .await;
                 assert!(!path.exists(), "worker is still held before its write");
                 release.send(()).unwrap();
                 closing.await.unwrap();
                 assert_eq!(std::fs::read(&path).unwrap(), b"finished before close");
                 // Closing one invocation must not close unrelated parent I/O.
-                assert_eq!(cx.scoped_fs().read(path.clone()).await.unwrap(), b"finished before close");
+                assert_eq!(
+                    cx.scoped_fs().read(path.clone()).await.unwrap(),
+                    b"finished before close"
+                );
             });
             drained(&runtime);
         }
@@ -141,24 +161,36 @@ fn caller_cancellation_reaches_the_worker_before_return_and_preserves_its_result
                 let (started, mut start) = oneshot::channel();
                 let (release, wait_release) = mpsc::channel();
                 let observed = Arc::clone(&after_return);
-                let mut owner = cx.spawn(move |owner_cx| async move {
-                    let result = owner_cx.scoped_fs().run_io(move |worker| {
-                        started.send_blocking(worker.clone()).unwrap();
-                        wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
-                        assert_eq!(worker.cancel_reason().unwrap().kind, CancelKind::User);
-                        Ok(73_usize)
-                    }).await;
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    result
-                }).unwrap();
+                let mut owner = cx
+                    .spawn(move |owner_cx| async move {
+                        let result = owner_cx
+                            .scoped_fs()
+                            .run_io(move |worker| {
+                                started.send_blocking(worker.clone()).unwrap();
+                                wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
+                                assert_eq!(worker.cancel_reason().unwrap().kind, CancelKind::User);
+                                Ok(73_usize)
+                            })
+                            .await;
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        result
+                    })
+                    .unwrap();
                 let worker_cx = start.recv(&cx).await.unwrap();
                 owner.abort();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while !worker_cx.is_cancel_requested() {
-                    assert!(Instant::now() < deadline, "caller cancellation was not forwarded");
+                    assert!(
+                        Instant::now() < deadline,
+                        "caller cancellation was not forwarded"
+                    );
                     yield_now().await;
                 }
-                assert_eq!(after_return.load(Ordering::SeqCst), 0, "caller must still be draining");
+                assert_eq!(
+                    after_return.load(Ordering::SeqCst),
+                    0,
+                    "caller must still be draining"
+                );
                 assert!(matches!(owner.try_join(), Ok(None)));
                 release.send(()).unwrap();
                 assert!(matches!(owner.join(&cx).await, Ok(Ok(73))));
@@ -177,7 +209,10 @@ fn an_already_cancelled_context_does_not_touch_the_filesystem() {
         let runtime = runtime(2);
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
-            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let region = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
             let child = region.cx();
             child.cancel_with(CancelKind::User, Some("before filesystem dispatch"));
             let result = child.scoped_fs().write(path.clone(), vec![42]).await;
@@ -188,4 +223,3 @@ fn an_already_cancelled_context_does_not_touch_the_filesystem() {
         drained(&runtime);
     });
 }
-

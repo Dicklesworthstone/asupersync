@@ -28,8 +28,10 @@ use super::symbols::{SYMBOL_CATALOG_COMPUTATION, capture_symbol_catalog};
 use super::wire::{self, Page, Root};
 use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::remote_owned::{RemoteRunConfig, run_remote};
-use crate::distributed::symbol_service::{RemoteSymbolError, RemoteSymbolTransport,
-    SymbolBatchKey, SymbolReplicaStore, SymbolStoreError, encode_symbol_batch};
+use crate::distributed::symbol_service::{
+    RemoteSymbolError, RemoteSymbolTransport, SymbolBatchKey, SymbolReplicaStore, SymbolStoreError,
+    encode_symbol_batch,
+};
 use crate::remote::{ComputationName, NodeId, RemoteInput, RemoteOutcome};
 use crate::types::{Outcome, symbol::ObjectId};
 use std::fmt;
@@ -40,8 +42,9 @@ mod worker;
 pub use worker::{
     SymbolRepairMembership, SymbolRepairMembershipReport, SymbolRepairMembershipStop,
     SymbolRepairRequest, SymbolRepairRoundError, SymbolRepairRoundReport, SymbolRepairRoundTrigger,
-    SymbolRepairWorker, SymbolRepairWorkerConfig, SymbolRepairWorkerError, SymbolRepairWorkerHandle,
-    SymbolRepairWorkerReport, SymbolRepairWorkerSnapshot, SymbolRepairWorkerStatus,
+    SymbolRepairWorker, SymbolRepairWorkerConfig, SymbolRepairWorkerError,
+    SymbolRepairWorkerHandle, SymbolRepairWorkerReport, SymbolRepairWorkerSnapshot,
+    SymbolRepairWorkerStatus,
 };
 
 /// Immutable per-cursor resource policy; no unbounded defaults.
@@ -132,7 +135,9 @@ pub struct SymbolRepairCursor {
 
 impl fmt::Debug for SymbolRepairCursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SymbolRepairCursor").field("progress", &self.progress()).finish_non_exhaustive()
+        f.debug_struct("SymbolRepairCursor")
+            .field("progress", &self.progress())
+            .finish_non_exhaustive()
     }
 }
 
@@ -140,10 +145,14 @@ impl SymbolRepairCursor {
     /// Read progress without advancing, consuming or resetting the continuation.
     #[must_use]
     pub fn progress(&self) -> SymbolRepairProgress {
-        SymbolRepairProgress { source_snapshot: self.source.snapshot,
+        SymbolRepairProgress {
+            source_snapshot: self.source.snapshot,
             complete: self.frontier.is_empty() && self.next == self.pending.len(),
-            visited_nodes: self.visited_nodes, repaired_batches: self.repaired_batches,
-            repaired_bytes: self.repaired_bytes, already_present: self.already_present }
+            visited_nodes: self.visited_nodes,
+            repaired_batches: self.repaired_batches,
+            repaired_bytes: self.repaired_bytes,
+            already_present: self.already_present,
+        }
     }
 }
 
@@ -165,42 +174,78 @@ pub struct SymbolRepairClient {
 
 impl fmt::Debug for SymbolRepairClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SymbolRepairClient").field("limits", &self.limits).finish_non_exhaustive()
+        f.debug_struct("SymbolRepairClient")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
     }
 }
 
 impl SymbolRepairClient {
     /// Bind labels, a local destination and finite work allowances. This grants
     /// no network capability and performs no I/O or catalog capture.
-    pub fn new(origin: NodeId, source: NodeId, destination: Arc<SymbolReplicaStore>, limits: SymbolRepairLimits)
-        -> Result<Self, SymbolRepairError>
-    {
+    pub fn new(
+        origin: NodeId,
+        source: NodeId,
+        destination: Arc<SymbolReplicaStore>,
+        limits: SymbolRepairLimits,
+    ) -> Result<Self, SymbolRepairError> {
         limits.catalog.validate()?;
-        if !label(origin.as_str()) || !label(source.as_str()) || limits.catalog.max_key_bytes < 16
-            || limits.max_catalog_requests_per_step < 2 || limits.max_repairs_per_step == 0
-            || limits.max_batch_bytes == 0 || limits.max_bytes_per_step < limits.max_batch_bytes
+        if !label(origin.as_str())
+            || !label(source.as_str())
+            || limits.catalog.max_key_bytes < 16
+            || limits.max_catalog_requests_per_step < 2
+            || limits.max_repairs_per_step == 0
+            || limits.max_batch_bytes == 0
+            || limits.max_bytes_per_step < limits.max_batch_bytes
             || limits.request_timeout.is_zero()
-        { return Err(CatalogError::Configuration.into()); }
-        Ok(Self { identity: Arc::new(()), origin, source, destination, limits })
+        {
+            return Err(CatalogError::Configuration.into());
+        }
+        Ok(Self {
+            identity: Arc::new(()),
+            origin,
+            source,
+            destination,
+            limits,
+        })
     }
 
     fn check_owner(&self, cx: &Cx) -> Result<(), SymbolRepairError> {
-        if cx.checkpoint().is_err() { return Err(SymbolRepairError::Cancelled); }
-        if cx.remote().is_none_or(|cap| cap.local_node() != &self.origin || cap.runtime().is_none()) {
+        if cx.checkpoint().is_err() {
+            return Err(SymbolRepairError::Cancelled);
+        }
+        if cx
+            .remote()
+            .is_none_or(|cap| cap.local_node() != &self.origin || cap.runtime().is_none())
+        {
             return Err(SymbolRepairError::Authority);
         }
         Ok(())
     }
 
-    async fn query(&self, cx: &Cx, node: Option<(Hash, u32)>) -> Result<Vec<u8>, SymbolRepairError> {
+    async fn query(
+        &self,
+        cx: &Cx,
+        node: Option<(Hash, u32)>,
+    ) -> Result<Vec<u8>, SymbolRepairError> {
         self.check_owner(cx)?;
         let input = wire::request(self.source.as_str(), node)?;
-        let report = run_remote(cx, self.source.clone(), ComputationName::new(SYMBOL_CATALOG_COMPUTATION),
-            RemoteInput::new(input), RemoteRunConfig { timeout: self.limits.request_timeout,
-                child: ChildRegionSpec::inherit() }).await;
+        let report = run_remote(
+            cx,
+            self.source.clone(),
+            ComputationName::new(SYMBOL_CATALOG_COMPUTATION),
+            RemoteInput::new(input),
+            RemoteRunConfig {
+                timeout: self.limits.request_timeout,
+                child: ChildRegionSpec::inherit(),
+            },
+        )
+        .await;
         self.check_owner(cx)?;
         let report = report.map_err(|_| SymbolRepairError::Remote)?;
-        if !report.is_success() { return Err(SymbolRepairError::Remote); }
+        if !report.is_success() {
+            return Err(SymbolRepairError::Remote);
+        }
         let reply = report.task.map_err(|_| SymbolRepairError::Remote)?;
         match reply.outcome {
             Outcome::Ok(RemoteOutcome::Success(bytes)) => {
@@ -221,15 +266,37 @@ impl SymbolRepairClient {
         let source = wire::root(&bytes, &self.origin, self.limits.catalog)?;
         drop(bytes);
         self.check_owner(cx)?;
-        let local = capture_symbol_catalog(&self.destination, self.origin.clone(), 0, self.limits.catalog)?;
+        let local = capture_symbol_catalog(
+            &self.destination,
+            self.origin.clone(),
+            0,
+            self.limits.catalog,
+        )?;
         let mut frontier = Vec::new();
         let maximum = usize::from(self.limits.catalog.depth) + 1;
-        frontier.try_reserve_exact(maximum).map_err(|_| CatalogError::Allocation)?;
-        if frontier.capacity() > maximum { return Err(CatalogError::Limit("frontier capacity").into()); }
-        if local.root() != source.root { frontier.push((1, source.root)); }
-        Ok(SymbolRepairCursor { owner: Arc::clone(&self.identity), source, local, frontier,
-            pending: Vec::new(), next: 0, seen_entries: 0, seen_key_bytes: 0,
-            visited_nodes: 0, repaired_batches: 0, repaired_bytes: 0, already_present: 0 })
+        frontier
+            .try_reserve_exact(maximum)
+            .map_err(|_| CatalogError::Allocation)?;
+        if frontier.capacity() > maximum {
+            return Err(CatalogError::Limit("frontier capacity").into());
+        }
+        if local.root() != source.root {
+            frontier.push((1, source.root));
+        }
+        Ok(SymbolRepairCursor {
+            owner: Arc::clone(&self.identity),
+            source,
+            local,
+            frontier,
+            pending: Vec::new(),
+            next: 0,
+            seen_entries: 0,
+            seen_key_bytes: 0,
+            visited_nodes: 0,
+            repaired_batches: 0,
+            repaired_bytes: 0,
+            already_present: 0,
+        })
     }
 
     /// Advance by finite metadata and value allowances. A partial successful
@@ -242,14 +309,26 @@ impl SymbolRepairClient {
     /// Source replacement refuses; already completed verified puts remain valid.
     /// Recheck each fetched value's exact digest and length before local put;
     /// a catalog assertion is never sufficient authority to publish raw bytes.
-    pub async fn step(&self, cx: &Cx, symbols: &RemoteSymbolTransport, cursor: &mut SymbolRepairCursor)
-        -> Result<SymbolRepairProgress, SymbolRepairError>
-    {
+    pub async fn step(
+        &self,
+        cx: &Cx,
+        symbols: &RemoteSymbolTransport,
+        cursor: &mut SymbolRepairCursor,
+    ) -> Result<SymbolRepairProgress, SymbolRepairError> {
         self.check_owner(cx)?;
-        if !Arc::ptr_eq(&self.identity, &cursor.owner) { return Err(CatalogError::Cursor.into()); }
-        let batch_limits = symbols.repair_binding(&self.origin, self.source.as_str(), self.limits.max_batch_bytes)
+        if !Arc::ptr_eq(&self.identity, &cursor.owner) {
+            return Err(CatalogError::Cursor.into());
+        }
+        let batch_limits = symbols
+            .repair_binding(
+                &self.origin,
+                self.source.as_str(),
+                self.limits.max_batch_bytes,
+            )
             .ok_or(SymbolRepairError::Authority)?;
-        if cursor.progress().complete { return Ok(cursor.progress()); }
+        if cursor.progress().complete {
+            return Ok(cursor.progress());
+        }
         let bytes = self.query(cx, None).await?;
         if wire::root(&bytes, &self.origin, self.limits.catalog)? != cursor.source {
             return Err(CatalogError::SnapshotChanged.into());
@@ -261,14 +340,21 @@ impl SymbolRepairClient {
         loop {
             self.check_owner(cx)?;
             if cursor.next < cursor.pending.len() {
-                if values == self.limits.max_repairs_per_step { break; }
+                if values == self.limits.max_repairs_per_step {
+                    break;
+                }
                 let entry = &cursor.pending[cursor.next];
                 let key = symbol_key(entry)?;
-                let size = usize::try_from(entry.value_bytes).map_err(|_| CatalogError::Overflow)?;
-                if size > self.limits.max_batch_bytes { return Err(CatalogError::Limit("batch bytes").into()); }
+                let size =
+                    usize::try_from(entry.value_bytes).map_err(|_| CatalogError::Overflow)?;
+                if size > self.limits.max_batch_bytes {
+                    return Err(CatalogError::Limit("batch bytes").into());
+                }
                 match self.destination.get(&self.origin, key) {
                     Ok(existing) => {
-                        if existing.as_ref().as_ref().len() != size { return Err(CatalogError::Integrity.into()); }
+                        if existing.as_ref().as_ref().len() != size {
+                            return Err(CatalogError::Integrity.into());
+                        }
                         cursor.already_present = add(cursor.already_present, 1)?;
                         cursor.next += 1;
                         values += 1;
@@ -278,13 +364,17 @@ impl SymbolRepairClient {
                     Err(error) => return Err(error.into()),
                 }
                 let next_bytes = add(value_bytes, batch_limits.max_encoded_bytes)?;
-                if next_bytes > self.limits.max_bytes_per_step { break; }
+                if next_bytes > self.limits.max_bytes_per_step {
+                    break;
+                }
                 let total_bytes = add(cursor.repaired_bytes, size)?;
                 if total_bytes > self.limits.max_total_repair_bytes {
                     return Err(CatalogError::Limit("total repair bytes").into());
                 }
                 let repaired_batches = add(cursor.repaired_batches, 1)?;
-                let fetched = symbols.fetch_symbols_for_repair(cx, self.source.as_str(), key).await;
+                let fetched = symbols
+                    .fetch_symbols_for_repair(cx, self.source.as_str(), key)
+                    .await;
                 self.check_owner(cx)?;
                 let fetched = fetched?;
                 let encoded = encode_symbol_batch(&fetched, batch_limits)?;
@@ -304,9 +394,15 @@ impl SymbolRepairClient {
             }
             cursor.pending = Vec::new();
             cursor.next = 0;
-            let Some(&(index, expected)) = cursor.frontier.last() else { break; };
-            if requests == self.limits.max_catalog_requests_per_step { break; }
-            let bytes = self.query(cx, Some((cursor.source.snapshot, index))).await?;
+            let Some(&(index, expected)) = cursor.frontier.last() else {
+                break;
+            };
+            if requests == self.limits.max_catalog_requests_per_step {
+                break;
+            }
+            let bytes = self
+                .query(cx, Some((cursor.source.snapshot, index)))
+                .await?;
             requests += 1;
             let page = wire::page(&bytes, cursor.source, self.limits.catalog, index, expected)?;
             drop(bytes);
@@ -316,28 +412,43 @@ impl SymbolRepairClient {
         Ok(cursor.progress())
     }
 
-    fn accept_page(&self, cursor: &mut SymbolRepairCursor, index: u32, page: Page)
-        -> Result<(), CatalogError>
-    {
+    fn accept_page(
+        &self,
+        cursor: &mut SymbolRepairCursor,
+        index: u32,
+        page: Page,
+    ) -> Result<(), CatalogError> {
         let visited = add(cursor.visited_nodes, 1)?;
-        if visited >= (2usize << self.limits.catalog.depth) { return Err(CatalogError::Limit("visited nodes")); }
+        if visited >= (2usize << self.limits.catalog.depth) {
+            return Err(CatalogError::Limit("visited nodes"));
+        }
         match page {
             Page::Branch(left, right) => {
                 let candidates = [(index * 2 + 1, right), (index * 2, left)];
-                let added = candidates.iter().filter(|(child, hash)| cursor.local.node(*child) != Some(*hash)).count();
-                if add(cursor.frontier.len() - 1, added)? > usize::from(self.limits.catalog.depth) + 1 {
+                let added = candidates
+                    .iter()
+                    .filter(|(child, hash)| cursor.local.node(*child) != Some(*hash))
+                    .count();
+                if add(cursor.frontier.len() - 1, added)?
+                    > usize::from(self.limits.catalog.depth) + 1
+                {
                     return Err(CatalogError::Limit("frontier"));
                 }
                 cursor.frontier.pop();
                 for (child, hash) in candidates {
-                    if cursor.local.node(child) != Some(hash) { cursor.frontier.push((child, hash)); }
+                    if cursor.local.node(child) != Some(hash) {
+                        cursor.frontier.push((child, hash));
+                    }
                 }
             }
             Page::Leaf(mut entries) => {
                 let seen_entries = add(cursor.seen_entries, entries.len())?;
-                let key_bytes = entries.iter().try_fold(0, |total, entry| add(total, entry.key.len()))?;
+                let key_bytes = entries
+                    .iter()
+                    .try_fold(0, |total, entry| add(total, entry.key.len()))?;
                 let seen_key_bytes = add(cursor.seen_key_bytes, key_bytes)?;
-                if seen_entries > cursor.source.entries || seen_key_bytes > cursor.source.key_bytes {
+                if seen_entries > cursor.source.entries || seen_key_bytes > cursor.source.key_bytes
+                {
                     return Err(CatalogError::Limit("source traversal"));
                 }
                 let mut present = 0usize;
@@ -347,7 +458,9 @@ impl SymbolRepairClient {
                         return Err(CatalogError::Limit("batch bytes"));
                     }
                     if let Some(local) = cursor.local.find(&entry.key) {
-                        if local.value_hash != entry.value_hash || local.value_bytes != entry.value_bytes {
+                        if local.value_hash != entry.value_hash
+                            || local.value_bytes != entry.value_bytes
+                        {
                             return Err(CatalogError::Conflict);
                         }
                         present += 1;
@@ -369,7 +482,18 @@ impl SymbolRepairClient {
 }
 
 fn symbol_key(entry: &CatalogEntry) -> Result<SymbolBatchKey, CatalogError> {
-    if entry.key.len() != 16 || entry.value_bytes == 0 { return Err(CatalogError::Format); }
-    let object = u128::from_le_bytes(entry.key.as_slice().try_into().map_err(|_| CatalogError::Format)?);
-    Ok(SymbolBatchKey { object_id: ObjectId::from_u128(object), digest: entry.value_hash })
+    if entry.key.len() != 16 || entry.value_bytes == 0 {
+        return Err(CatalogError::Format);
+    }
+    let object = u128::from_le_bytes(
+        entry
+            .key
+            .as_slice()
+            .try_into()
+            .map_err(|_| CatalogError::Format)?,
+    );
+    Ok(SymbolBatchKey {
+        object_id: ObjectId::from_u128(object),
+        digest: entry.value_hash,
+    })
 }

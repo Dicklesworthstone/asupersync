@@ -75,11 +75,11 @@
 //! like rate-limit, timeout, circuit-breaker, and load-shed so their synthetic
 //! 4xx/5xx responses still carry the security headers.
 
+use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
@@ -108,12 +108,14 @@ use super::handler::Handler;
 use super::response::{IntoResponse, Redirect, Response, StatusCode};
 
 mod decompression;
-pub use decompression::{RequestDecompressionLayer, RequestDecompressionMiddleware};
-#[cfg(not(target_arch = "wasm32"))]
-pub use decompression::{StreamingRequestDecompressionLayer, StreamingRequestDecompressionMiddleware};
 pub(crate) use decompression::RequestContentCodings;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use decompression::request_content_decoder;
+pub use decompression::{RequestDecompressionLayer, RequestDecompressionMiddleware};
+#[cfg(not(target_arch = "wasm32"))]
+pub use decompression::{
+    StreamingRequestDecompressionLayer, StreamingRequestDecompressionMiddleware,
+};
 
 // ─── CorsMiddleware ─────────────────────────────────────────────────────────
 

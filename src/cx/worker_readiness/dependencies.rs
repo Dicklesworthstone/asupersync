@@ -97,7 +97,9 @@ pub struct DependencyLoss {
 
 fn vector<T>(capacity: usize) -> Result<Vec<T>, DependencyError> {
     let mut values = Vec::new();
-    values.try_reserve_exact(capacity).map_err(|_| DependencyError::Allocation)?;
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| DependencyError::Allocation)?;
     Ok(values)
 }
 
@@ -113,7 +115,8 @@ impl WorkerDependencies {
     ) -> Result<Self, DependencyError> {
         if workers.len() > max_dependencies {
             return Err(DependencyError::Capacity {
-                requested: workers.len(), limit: max_dependencies,
+                requested: workers.len(),
+                limit: max_dependencies,
             });
         }
         let mut identities = vector(workers.len())?;
@@ -121,23 +124,30 @@ impl WorkerDependencies {
             identities.push((Arc::as_ptr(&worker.shared) as usize, index));
         }
         identities.sort_unstable();
-        let duplicate = identities.windows(2)
+        let duplicate = identities
+            .windows(2)
             .filter(|pair| pair[0].0 == pair[1].0)
             .map(|pair| pair[1].1)
             .min();
         if let Some(index) = duplicate {
             return Err(DependencyError::Duplicate { index });
         }
-        Ok(Self { set: Arc::new(Set { workers }) })
+        Ok(Self {
+            set: Arc::new(Set { workers }),
+        })
     }
 
     /// Number of immutable prerequisites.
     #[must_use]
-    pub fn len(&self) -> usize { self.set.workers.len() }
+    pub fn len(&self) -> usize {
+        self.set.workers.len()
+    }
 
     /// Whether startup has no readiness prerequisites.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.set.workers.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.set.workers.is_empty()
+    }
 
     /// Observe all prerequisites without registering waiters or touching a Cx.
     ///
@@ -149,13 +159,21 @@ impl WorkerDependencies {
         let mut ready = vector(self.len())?;
         let mut pending = false;
         for (index, worker) in self.set.workers.iter().enumerate() {
-            match worker.try_ready().map_err(|cause| DependencyError::Worker { index, cause })? {
+            match worker
+                .try_ready()
+                .map_err(|cause| DependencyError::Worker { index, cause })?
+            {
                 Some(observation) => ready.push(observation),
                 None => pending = true,
             }
         }
-        if pending { return Ok(None); }
-        let snapshot = ReadyDependencies { set: Arc::clone(&self.set), ready };
+        if pending {
+            return Ok(None);
+        }
+        let snapshot = ReadyDependencies {
+            set: Arc::clone(&self.set),
+            ready,
+        };
         Ok(snapshot.is_current().then_some(snapshot))
     }
 
@@ -198,18 +216,23 @@ impl WorkerDependencies {
                 Ok(None) => Poll::Pending,
                 Err(error) => Poll::Ready(Err(error)),
             }
-        }).await
+        })
+        .await
     }
 }
 
 impl ReadyDependencies {
     /// Number of generations in this snapshot.
     #[must_use]
-    pub fn len(&self) -> usize { self.ready.len() }
+    pub fn len(&self) -> usize {
+        self.ready.len()
+    }
 
     /// Whether this snapshot has no prerequisites.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.ready.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty()
+    }
 
     /// Full managed identities, in dependency input order.
     pub fn generations(&self) -> impl ExactSizeIterator<Item = ManagedGeneration> + '_ {
@@ -219,17 +242,27 @@ impl ReadyDependencies {
     /// True while this exact generation vector is observed as Ready.
     /// A replacement is never accepted as the previous generation becoming ready.
     #[must_use]
-    pub fn is_current(&self) -> bool { self.first_lost().is_none() }
+    pub fn is_current(&self) -> bool {
+        self.first_lost().is_none()
+    }
 
     /// Inspect invalidation without changing any task or registration.
     #[must_use]
     pub fn first_lost(&self) -> Option<DependencyLoss> {
-        self.set.workers.iter().zip(&self.ready).enumerate()
+        self.set
+            .workers
+            .iter()
+            .zip(&self.ready)
+            .enumerate()
             .find_map(|(index, (worker, expected))| {
                 let observed = worker.state();
                 (observed.phase != WorkerReadinessPhase::Ready
                     || observed.generation != Some(expected.generation))
-                    .then_some(DependencyLoss { index, expected: expected.generation, observed })
+                .then_some(DependencyLoss {
+                    index,
+                    expected: expected.generation,
+                    observed,
+                })
             })
     }
 
@@ -240,7 +273,9 @@ impl ReadyDependencies {
     /// An empty snapshot waits only for observer cancellation. Dropping this
     /// borrowing wait unregisters its own waiters and does not stop any worker.
     pub async fn wait_lost(&self, cx: &Cx) -> Result<DependencyLoss, DependencyError> {
-        let dependencies = WorkerDependencies { set: Arc::clone(&self.set) };
+        let dependencies = WorkerDependencies {
+            set: Arc::clone(&self.set),
+        };
         dependencies.wait_until(cx, || Ok(self.first_lost())).await
     }
 }
@@ -250,8 +285,8 @@ mod tests;
 
 mod scope;
 pub use scope::{
-    DependencyRegionOutcome, DependencyScopeConfig, DependencyScopeError,
-    DependencyScopeReport, DependencyStop,
+    DependencyRegionOutcome, DependencyScopeConfig, DependencyScopeError, DependencyScopeReport,
+    DependencyStop,
 };
 
 pub mod supervisor;

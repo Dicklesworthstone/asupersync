@@ -653,8 +653,12 @@ impl Worker {
                 poll_operation,
             )
         } else {
-            self.panic_isolator
-                .isolate_task_execution(task_id, region_id, poll_attempt, poll_operation)
+            self.panic_isolator.isolate_task_execution(
+                task_id,
+                region_id,
+                poll_attempt,
+                poll_operation,
+            )
         };
 
         match poll_result {

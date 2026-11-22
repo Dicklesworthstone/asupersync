@@ -213,7 +213,11 @@ struct ModelState {
 }
 
 impl ModelState {
-    fn check_failure(&mut self, operation: ReactorOperation, token: Option<Token>) -> io::Result<()> {
+    fn check_failure(
+        &mut self,
+        operation: ReactorOperation,
+        token: Option<Token>,
+    ) -> io::Result<()> {
         let index = operation.index();
         self.attempts[index] = self.attempts[index].saturating_add(1);
         let Some(position) = self.failures.iter().position(|rule| {
@@ -226,7 +230,10 @@ impl ModelState {
             rule.skip -= 1;
             return Ok(());
         }
-        let rule = self.failures.remove(position).expect("matched failure rule exists");
+        let rule = self
+            .failures
+            .remove(position)
+            .expect("matched failure rule exists");
         let attempt = self.attempts[index];
         self.injected_failures[index] = self.injected_failures[index].saturating_add(1);
         self.last_failure = Some(InjectedReactorFailure {
@@ -354,7 +361,11 @@ impl LabReactorModel {
         ReactorFaultStats {
             attempts: state.attempts[index],
             injected_failures: state.injected_failures[index],
-            pending_failures: state.failures.iter().filter(|rule| rule.operation == operation).count(),
+            pending_failures: state
+                .failures
+                .iter()
+                .filter(|rule| rule.operation == operation)
+                .count(),
         }
     }
 
@@ -407,7 +418,10 @@ impl LabReactorModel {
     pub fn set_ready(&self, token: Token, ready: Interest) -> io::Result<()> {
         validate_readiness(ready)?;
         let mut state = self.state.lock();
-        let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
+        let registration = state
+            .registrations
+            .get_mut(&token)
+            .ok_or_else(not_registered)?;
         registration.set_ready(ready);
         self.queue_clock_pump(&mut state);
         Ok(())
@@ -422,7 +436,10 @@ impl LabReactorModel {
     pub fn clear_ready(&self, token: Token, ready: Interest) -> io::Result<()> {
         validate_readiness(ready)?;
         let mut state = self.state.lock();
-        let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
+        let registration = state
+            .registrations
+            .get_mut(&token)
+            .ok_or_else(not_registered)?;
         registration.ready &= !ready;
         registration.edges &= !ready;
         Ok(())
@@ -454,7 +471,10 @@ impl LabReactorModel {
     /// another source error is pending. Rejection changes no state.
     pub fn inject_source_error(&self, token: Token, kind: io::ErrorKind) -> io::Result<()> {
         let mut state = self.state.lock();
-        let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
+        let registration = state
+            .registrations
+            .get_mut(&token)
+            .ok_or_else(not_registered)?;
         if registration.source_error.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -480,7 +500,8 @@ impl LabReactorModel {
         if !state.registrations.contains_key(&token) {
             return Err(not_registered());
         }
-        self.events.inject_event(token, Event::new(token, ready), delay);
+        self.events
+            .inject_event(token, Event::new(token, ready), delay);
         Ok(())
     }
 
@@ -520,7 +541,10 @@ impl LabReactorModel {
 }
 
 fn not_registered() -> io::Error {
-    io::Error::new(io::ErrorKind::NotFound, "readiness model token not registered")
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        "readiness model token not registered",
+    )
 }
 
 fn validate_readiness(ready: Interest) -> io::Result<()> {
@@ -544,7 +568,10 @@ impl Reactor for LabReactorModel {
             ));
         }
         if state.registrations.contains_key(&token) {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "token already registered"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "token already registered",
+            ));
         }
         // The injector must retain conditions even when not currently selected.
         // Delivery policy is owned solely by this model, not the event queue.
@@ -566,7 +593,10 @@ impl Reactor for LabReactorModel {
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
         state.check_failure(ReactorOperation::Modify, Some(token))?;
-        let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
+        let registration = state
+            .registrations
+            .get_mut(&token)
+            .ok_or_else(not_registered)?;
         registration.interest = interest;
         registration.armed = true;
         // A native re-arm samples readiness again, even in edge-triggered mode.
@@ -595,7 +625,11 @@ impl Reactor for LabReactorModel {
             .registrations
             .values()
             .any(|registration| !registration.deliverable().is_empty());
-        let timeout = if already_ready { Some(Duration::ZERO) } else { timeout };
+        let timeout = if already_ready {
+            Some(Duration::ZERO)
+        } else {
+            timeout
+        };
         // Reuse the caller's event buffer for the underlying queue, then replace
         // injected occurrences with one coalesced notification per ready source.
         self.events.poll(events, timeout)?;
@@ -692,11 +726,21 @@ mod tests {
         model.set_ready(token, Interest::READABLE).unwrap();
         let mut events = Events::with_capacity(8);
         for _ in 0..3 {
-            assert_eq!(model.poll(&mut events, Some(Duration::from_secs(30))).unwrap(), 1);
+            assert_eq!(
+                model
+                    .poll(&mut events, Some(Duration::from_secs(30)))
+                    .unwrap(),
+                1
+            );
             assert_eq!(model.now(), Time::ZERO);
         }
         model.clear_ready(token, Interest::READABLE).unwrap();
-        assert_eq!(model.poll(&mut events, Some(Duration::from_secs(2))).unwrap(), 0);
+        assert_eq!(
+            model
+                .poll(&mut events, Some(Duration::from_secs(2)))
+                .unwrap(),
+            0
+        );
         assert_eq!(model.now(), Time::from_secs(2));
     }
 
@@ -742,7 +786,9 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(5);
         register(&model, token, Interest::READABLE);
-        model.schedule_ready(token, Interest::WRITABLE, Duration::ZERO).unwrap();
+        model
+            .schedule_ready(token, Interest::WRITABLE, Duration::ZERO)
+            .unwrap();
         assert!(poll(&model).is_empty());
         assert_eq!(model.readiness(token).unwrap(), Interest::WRITABLE);
         assert!(model.is_armed(token).unwrap());
@@ -772,25 +818,44 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(30);
         register(&model, token, Interest::NONE);
-        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::ConnectionReset)
+            .unwrap();
         assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
         assert_eq!(model.next_event_time(), Some(Time::ZERO));
         assert_eq!(
-            model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap_err().kind(),
+            model
+                .inject_source_error(token, io::ErrorKind::BrokenPipe)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(poll(&model), vec![Event::errored(token)]);
         assert!(!model.is_armed(token).unwrap());
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionReset));
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::ConnectionReset)
+        );
         assert_eq!(source_error_kind(&model, token), None);
         assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
-        assert!(!model.is_armed(token).unwrap(), "consumption must not re-arm");
+        assert!(
+            !model.is_armed(token).unwrap(),
+            "consumption must not re-arm"
+        );
         assert_eq!(model.now(), Time::ZERO);
         model.modify(token, Interest::NONE).unwrap();
         assert!(poll(&model).is_empty());
-        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
-        assert!(poll(&model).is_empty(), "an error consumed before delivery is no longer ready");
+        model
+            .inject_source_error(token, io::ErrorKind::BrokenPipe)
+            .unwrap();
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::BrokenPipe)
+        );
+        assert!(
+            poll(&model).is_empty(),
+            "an error consumed before delivery is no longer ready"
+        );
     }
 
     #[test]
@@ -800,17 +865,31 @@ mod tests {
         register(&model, token, Interest::READABLE);
         let manual = Interest::READABLE | Interest::ERROR | Interest::HUP;
         model.set_ready(token, manual).unwrap();
-        assert_eq!(source_error_kind(&model, token), None, "ERROR alone has no invented kind");
-        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(
+            source_error_kind(&model, token),
+            None,
+            "ERROR alone has no invented kind"
+        );
+        model
+            .inject_source_error(token, io::ErrorKind::BrokenPipe)
+            .unwrap();
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::BrokenPipe)
+        );
         assert_eq!(model.readiness(token).unwrap(), manual);
         assert_eq!(poll(&model), vec![Event::new(token, manual)]);
 
-        model.inject_source_error(token, io::ErrorKind::ConnectionAborted).unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::ConnectionAborted)
+            .unwrap();
         model.clear_ready(token, manual).unwrap();
         assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionAborted));
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::ConnectionAborted)
+        );
         assert!(poll(&model).is_empty());
     }
 
@@ -822,13 +901,18 @@ mod tests {
         model.set_ready(token, Interest::READABLE).unwrap();
         assert_eq!(poll(&model), vec![Event::readable(token)]);
         model.clear_ready(token, Interest::READABLE).unwrap();
-        model.inject_source_error(token, io::ErrorKind::TimedOut).unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::TimedOut)
+            .unwrap();
         assert!(!model.is_armed(token).unwrap());
         assert_eq!(model.next_event_time(), None);
         assert!(poll(&model).is_empty());
         model.modify(token, Interest::WRITABLE).unwrap();
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::TimedOut));
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::TimedOut)
+        );
         assert!(poll(&model).is_empty());
     }
 
@@ -838,16 +922,29 @@ mod tests {
         let token = Token::new(33);
         let interest = Interest::READABLE | Interest::EDGE_TRIGGERED;
         register(&model, token, interest);
-        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::ConnectionReset)
+            .unwrap();
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert!(poll(&model).is_empty(), "an unconsumed error is not a new edge");
+        assert!(
+            poll(&model).is_empty(),
+            "an unconsumed error is not a new edge"
+        );
         assert!(model.is_armed(token).unwrap());
         model.modify(token, interest).unwrap();
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::ConnectionReset));
-        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::ConnectionReset)
+        );
+        model
+            .inject_source_error(token, io::ErrorKind::BrokenPipe)
+            .unwrap();
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::BrokenPipe)
+        );
         assert!(poll(&model).is_empty());
     }
 
@@ -858,24 +955,43 @@ mod tests {
         let other = Token::new(35);
         register(&model, token, Interest::READABLE);
         register(&model, other, Interest::READABLE);
-        model.inject_source_error(token, io::ErrorKind::ConnectionReset).unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::ConnectionReset)
+            .unwrap();
         assert_eq!(source_error_kind(&model, other), None);
-        model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Interrupted).unwrap();
-        assert_eq!(model.deregister(token).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        model
+            .fail_next(
+                ReactorOperation::Deregister,
+                Some(token),
+                io::ErrorKind::Interrupted,
+            )
+            .unwrap();
+        assert_eq!(
+            model.deregister(token).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
         assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
         model.deregister(token).unwrap();
         assert_eq!(source_error_kind(&model, token), None);
         assert_eq!(
-            model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap_err().kind(),
+            model
+                .inject_source_error(token, io::ErrorKind::BrokenPipe)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::NotFound
         );
         register(&model, token, Interest::READABLE);
         assert_eq!(source_error_kind(&model, token), None);
         assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
         assert!(poll(&model).is_empty());
-        model.inject_source_error(other, io::ErrorKind::TimedOut).unwrap();
+        model
+            .inject_source_error(other, io::ErrorKind::TimedOut)
+            .unwrap();
         assert_eq!(poll(&model), vec![Event::errored(other)]);
-        assert_eq!(source_error_kind(&model, other), Some(io::ErrorKind::TimedOut));
+        assert_eq!(
+            source_error_kind(&model, other),
+            Some(io::ErrorKind::TimedOut)
+        );
     }
 
     #[test]
@@ -883,13 +999,23 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(36);
         register(&model, token, Interest::READABLE);
-        model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
-        model.inject_source_error(token, io::ErrorKind::BrokenPipe).unwrap();
+        model
+            .fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted)
+            .unwrap();
+        model
+            .inject_source_error(token, io::ErrorKind::BrokenPipe)
+            .unwrap();
         assert_eq!(model.fault_stats(ReactorOperation::Poll).attempts, 0);
-        assert_eq!(model.fault_stats(ReactorOperation::Poll).pending_failures, 1);
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Poll).pending_failures,
+            1
+        );
         let mut events = Events::with_capacity(4);
         assert_eq!(
-            model.poll(&mut events, Some(Duration::from_secs(30))).unwrap_err().kind(),
+            model
+                .poll(&mut events, Some(Duration::from_secs(30)))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::Interrupted
         );
         assert!(events.is_empty());
@@ -897,9 +1023,18 @@ mod tests {
         assert_eq!(model.readiness(token).unwrap(), Interest::ERROR);
         assert_eq!(model.now(), Time::ZERO);
         assert_eq!(poll(&model), vec![Event::errored(token)]);
-        assert_eq!(source_error_kind(&model, token), Some(io::ErrorKind::BrokenPipe));
-        assert_eq!(model.fault_stats(ReactorOperation::Poll).injected_failures, 1);
-        assert_eq!(model.last_failure().unwrap().kind, io::ErrorKind::Interrupted);
+        assert_eq!(
+            source_error_kind(&model, token),
+            Some(io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Poll).injected_failures,
+            1
+        );
+        assert_eq!(
+            model.last_failure().unwrap().kind,
+            io::ErrorKind::Interrupted
+        );
     }
 
     #[test]
@@ -908,12 +1043,19 @@ mod tests {
         for index in [9, 2, 7] {
             let token = Token::new(index);
             register(&model, token, Interest::READABLE | Interest::WRITABLE);
-            model.schedule_ready(token, Interest::WRITABLE, Duration::ZERO).unwrap();
-            model.schedule_ready(token, Interest::READABLE, Duration::ZERO).unwrap();
+            model
+                .schedule_ready(token, Interest::WRITABLE, Duration::ZERO)
+                .unwrap();
+            model
+                .schedule_ready(token, Interest::READABLE, Duration::ZERO)
+                .unwrap();
         }
         assert_eq!(
             poll(&model),
-            [2, 7, 9].map(|index| Event::new(Token::new(index), Interest::READABLE | Interest::WRITABLE))
+            [2, 7, 9].map(|index| Event::new(
+                Token::new(index),
+                Interest::READABLE | Interest::WRITABLE
+            ))
         );
     }
 
@@ -925,7 +1067,9 @@ mod tests {
         model.set_ready(token, Interest::READABLE).unwrap();
         assert_eq!(poll(&model).len(), 1);
         model.clear_ready(token, Interest::READABLE).unwrap();
-        model.schedule_ready(token, Interest::WRITABLE, Duration::from_millis(10)).unwrap();
+        model
+            .schedule_ready(token, Interest::WRITABLE, Duration::from_millis(10))
+            .unwrap();
         assert_eq!(model.next_event_time(), Some(Time::from_nanos(10_000_000)));
         let mut events = Events::with_capacity(4);
         assert_eq!(model.poll(&mut events, None).unwrap(), 0);
@@ -942,7 +1086,9 @@ mod tests {
         let token = Token::new(9);
         register(&model, token, Interest::READABLE);
         model.set_ready(token, Interest::READABLE).unwrap();
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(1)).unwrap();
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(1))
+            .unwrap();
         model.deregister(token).unwrap();
         assert_eq!(model.registration_count(), 0);
         assert_eq!(model.next_event_time(), None);
@@ -957,7 +1103,9 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(10);
         register(&model, token, Interest::READABLE);
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(5)).unwrap();
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(5))
+            .unwrap();
         model.wake().unwrap();
         let mut events = Events::with_capacity(4);
         assert_eq!(model.poll(&mut events, None).unwrap(), 0);
@@ -970,11 +1118,30 @@ mod tests {
     fn invalid_readiness_and_unknown_tokens_do_not_mutate_the_model() {
         let model = LabReactorModel::new();
         let token = Token::new(11);
-        assert_eq!(model.set_ready(token, Interest::READABLE).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            model
+                .set_ready(token, Interest::READABLE)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
         register(&model, token, Interest::READABLE);
-        for invalid in [Interest::ONESHOT, Interest::EDGE_TRIGGERED, Interest::DISPATCH] {
-            assert_eq!(model.set_ready(token, invalid).unwrap_err().kind(), io::ErrorKind::InvalidInput);
-            assert_eq!(model.schedule_ready(token, invalid, Duration::ZERO).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        for invalid in [
+            Interest::ONESHOT,
+            Interest::EDGE_TRIGGERED,
+            Interest::DISPATCH,
+        ] {
+            assert_eq!(
+                model.set_ready(token, invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                model
+                    .schedule_ready(token, invalid, Duration::ZERO)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
         assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
         assert_eq!(model.next_event_time(), None);
@@ -994,14 +1161,25 @@ mod tests {
         let driver = IoDriverHandle::new(model.clone());
         let count = Arc::new(CountWakes(AtomicUsize::new(0)));
         let waker = Waker::from(count.clone());
-        let mut registration = driver.register(&std::io::stdin(), Interest::READABLE, waker.clone()).unwrap();
+        let mut registration = driver
+            .register(&std::io::stdin(), Interest::READABLE, waker.clone())
+            .unwrap();
         let token = registration.token();
         model.set_ready(token, Interest::READABLE).unwrap();
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            1
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            0
+        );
         assert!(registration.rearm(Interest::READABLE, &waker).unwrap());
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            1
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         drop(registration);
         assert!(driver.is_empty());
@@ -1030,11 +1208,14 @@ mod tests {
             .unwrap();
         assert_eq!(driver.waker_count(), 1);
         assert_eq!(model.registration_count(), 1);
-        assert_eq!(model.fault_stats(ReactorOperation::Register), ReactorFaultStats {
-            attempts: 2,
-            injected_failures: 1,
-            pending_failures: 0,
-        });
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Register),
+            ReactorFaultStats {
+                attempts: 2,
+                injected_failures: 1,
+                pending_failures: 0,
+            }
+        );
         drop(registration);
         assert!(driver.is_empty());
         assert_eq!(model.registration_count(), 0);
@@ -1052,26 +1233,47 @@ mod tests {
         let token = registration.token();
         let ready = Interest::READABLE | Interest::WRITABLE;
         model.set_ready(token, ready).unwrap();
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            1
+        );
         assert!(!model.is_armed(token).unwrap());
         model
-            .fail_next(ReactorOperation::Modify, Some(token), io::ErrorKind::PermissionDenied)
+            .fail_next(
+                ReactorOperation::Modify,
+                Some(token),
+                io::ErrorKind::PermissionDenied,
+            )
             .unwrap();
         assert_eq!(
-            registration.rearm(Interest::WRITABLE, &waker).unwrap_err().kind(),
+            registration
+                .rearm(Interest::WRITABLE, &waker)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(registration.interest(), Interest::READABLE);
         assert_eq!(model.readiness(token).unwrap(), ready);
         assert!(!model.is_armed(token).unwrap());
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+        assert_eq!(
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+            0
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert!(registration.rearm(Interest::WRITABLE, &waker).unwrap());
         let mut captured = Vec::new();
-        assert_eq!(driver.turn_with(Some(Duration::ZERO), |event, interest| {
-            captured.push((*event, interest));
-        }).unwrap(), 1);
-        assert_eq!(captured, vec![(Event::writable(token), Some(Interest::WRITABLE))]);
+        assert_eq!(
+            driver
+                .turn_with(Some(Duration::ZERO), |event, interest| {
+                    captured.push((*event, interest));
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            captured,
+            vec![(Event::writable(token), Some(Interest::WRITABLE))]
+        );
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
     }
 
@@ -1080,12 +1282,19 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(30);
         register(&model, token, Interest::READABLE);
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(5)).unwrap();
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(5))
+            .unwrap();
         model.wake().unwrap();
-        model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
+        model
+            .fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted)
+            .unwrap();
         let mut events = Events::with_capacity(4);
         events.push(Event::errored(Token::new(999)));
-        assert_eq!(model.poll(&mut events, None).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            model.poll(&mut events, None).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
         assert!(events.is_empty());
         assert_eq!(model.now(), Time::ZERO);
         assert!(model.is_armed(token).unwrap());
@@ -1095,7 +1304,10 @@ mod tests {
         assert_eq!(model.poll(&mut events, None).unwrap(), 0);
         assert_eq!(model.now(), Time::ZERO);
         assert_eq!(model.poll(&mut events, None).unwrap(), 1);
-        assert_eq!(events.iter().copied().collect::<Vec<_>>(), vec![Event::readable(token)]);
+        assert_eq!(
+            events.iter().copied().collect::<Vec<_>>(),
+            vec![Event::readable(token)]
+        );
         assert_eq!(model.now(), Time::from_secs(5));
         assert_eq!(model.fault_stats(ReactorOperation::Poll).attempts, 3);
     }
@@ -1108,7 +1320,12 @@ mod tests {
         register(&model, target, Interest::READABLE);
         register(&model, other, Interest::READABLE);
         model
-            .fail_after(ReactorOperation::Modify, Some(target), 1, io::ErrorKind::Interrupted)
+            .fail_after(
+                ReactorOperation::Modify,
+                Some(target),
+                1,
+                io::ErrorKind::Interrupted,
+            )
             .unwrap();
         for _ in 0..3 {
             model.modify(other, Interest::WRITABLE).unwrap();
@@ -1116,16 +1333,25 @@ mod tests {
             assert!(poll(&model).is_empty());
         }
         model.modify(target, Interest::READABLE).unwrap();
-        assert_eq!(model.modify(target, Interest::WRITABLE).unwrap_err().kind(), io::ErrorKind::Interrupted);
-        assert_eq!(model.last_failure(), Some(InjectedReactorFailure {
-            operation: ReactorOperation::Modify,
-            token: Some(target),
-            kind: io::ErrorKind::Interrupted,
-            attempt: 5,
-        }));
+        assert_eq!(
+            model.modify(target, Interest::WRITABLE).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            model.last_failure(),
+            Some(InjectedReactorFailure {
+                operation: ReactorOperation::Modify,
+                token: Some(target),
+                kind: io::ErrorKind::Interrupted,
+                attempt: 5,
+            })
+        );
         model.modify(target, Interest::WRITABLE).unwrap();
         assert_eq!(model.fault_stats(ReactorOperation::Modify).attempts, 6);
-        assert_eq!(model.fault_stats(ReactorOperation::Modify).pending_failures, 0);
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Modify).pending_failures,
+            0
+        );
     }
 
     #[test]
@@ -1133,16 +1359,45 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(33);
         register(&model, token, Interest::READABLE);
-        model.fail_after(ReactorOperation::Modify, None, 1, io::ErrorKind::Interrupted).unwrap();
-        model.fail_next(ReactorOperation::Modify, Some(token), io::ErrorKind::PermissionDenied).unwrap();
-        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        model
+            .fail_after(
+                ReactorOperation::Modify,
+                None,
+                1,
+                io::ErrorKind::Interrupted,
+            )
+            .unwrap();
+        model
+            .fail_next(
+                ReactorOperation::Modify,
+                Some(token),
+                io::ErrorKind::PermissionDenied,
+            )
+            .unwrap();
+        model
+            .fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe)
+            .unwrap();
         model.modify(token, Interest::READABLE).unwrap();
         assert_eq!(model.wake().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
-        assert_eq!(model.modify(token, Interest::READABLE).unwrap_err().kind(), io::ErrorKind::Interrupted);
-        assert_eq!(model.modify(token, Interest::READABLE).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            model.modify(token, Interest::READABLE).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            model.modify(token, Interest::READABLE).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         model.modify(token, Interest::READABLE).unwrap();
-        assert_eq!(model.fault_stats(ReactorOperation::Modify).injected_failures, 2);
-        assert_eq!(model.fault_stats(ReactorOperation::Wake).injected_failures, 1);
+        assert_eq!(
+            model
+                .fault_stats(ReactorOperation::Modify)
+                .injected_failures,
+            2
+        );
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Wake).injected_failures,
+            1
+        );
     }
 
     #[test]
@@ -1150,14 +1405,28 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(34);
         register(&model, token, Interest::READABLE);
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(1)).unwrap();
-        model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
-        assert_eq!(model.deregister(token).unwrap_err().kind(), io::ErrorKind::Other);
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(1))
+            .unwrap();
+        model
+            .fail_next(
+                ReactorOperation::Deregister,
+                Some(token),
+                io::ErrorKind::Other,
+            )
+            .unwrap();
+        assert_eq!(
+            model.deregister(token).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
         assert_eq!(model.registration_count(), 1);
         assert!(model.is_armed(token).unwrap());
         let mut events = Events::with_capacity(4);
         assert_eq!(model.poll(&mut events, None).unwrap(), 1);
-        assert_eq!(events.iter().copied().collect::<Vec<_>>(), vec![Event::readable(token)]);
+        assert_eq!(
+            events.iter().copied().collect::<Vec<_>>(),
+            vec![Event::readable(token)]
+        );
         model.deregister(token).unwrap();
         assert_eq!(model.registration_count(), 0);
         register(&model, token, Interest::READABLE);
@@ -1176,20 +1445,32 @@ mod tests {
                     .unwrap();
                 let token = registration.token();
                 for _ in 0..failures {
-                    model.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
+                    model
+                        .fail_next(
+                            ReactorOperation::Deregister,
+                            Some(token),
+                            io::ErrorKind::Other,
+                        )
+                        .unwrap();
                 }
                 if explicit {
                     assert_eq!(registration.deregister().is_ok(), failures < 2);
                 } else {
                     drop(registration);
                 }
-                assert!(driver.is_empty(), "explicit={explicit}, failures={failures}");
+                assert!(
+                    driver.is_empty(),
+                    "explicit={explicit}, failures={failures}"
+                );
                 assert_eq!(model.registration_count(), 0);
-                assert_eq!(model.fault_stats(ReactorOperation::Deregister), ReactorFaultStats {
-                    attempts: failures + 1,
-                    injected_failures: failures,
-                    pending_failures: 0,
-                });
+                assert_eq!(
+                    model.fault_stats(ReactorOperation::Deregister),
+                    ReactorFaultStats {
+                        attempts: failures + 1,
+                        injected_failures: failures,
+                        pending_failures: 0,
+                    }
+                );
             }
         }
     }
@@ -1199,15 +1480,21 @@ mod tests {
         let model = LabReactorModel::new();
         let token = Token::new(35);
         register(&model, token, Interest::READABLE);
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(5)).unwrap();
-        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(5))
+            .unwrap();
+        model
+            .fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe)
+            .unwrap();
         assert_eq!(model.wake().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         let mut events = Events::with_capacity(4);
         assert_eq!(model.poll(&mut events, None).unwrap(), 1);
         assert_eq!(model.now(), Time::from_secs(5));
         model.clear_ready(token, Interest::READABLE).unwrap();
         model.modify(token, Interest::READABLE).unwrap();
-        model.schedule_ready(token, Interest::READABLE, Duration::from_secs(2)).unwrap();
+        model
+            .schedule_ready(token, Interest::READABLE, Duration::from_secs(2))
+            .unwrap();
         model.wake().unwrap();
         assert_eq!(model.poll(&mut events, None).unwrap(), 0);
         assert_eq!(model.now(), Time::from_secs(5));
@@ -1220,20 +1507,33 @@ mod tests {
         let model = LabReactorModel::new();
         for operation in [ReactorOperation::Poll, ReactorOperation::Wake] {
             assert_eq!(
-                model.fail_next(operation, Some(Token::new(1)), io::ErrorKind::Other).unwrap_err().kind(),
+                model
+                    .fail_next(operation, Some(Token::new(1)), io::ErrorKind::Other)
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::InvalidInput
             );
             assert_eq!(model.fault_stats(operation).pending_failures, 0);
             assert_eq!(model.fault_stats(operation).attempts, 0);
         }
-        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::Other).unwrap();
+        model
+            .fail_next(ReactorOperation::Wake, None, io::ErrorKind::Other)
+            .unwrap();
         assert!(model.wake().is_err());
         let before = model.last_failure();
-        model.fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe).unwrap();
+        model
+            .fail_next(ReactorOperation::Wake, None, io::ErrorKind::BrokenPipe)
+            .unwrap();
         model.clear_failures();
         assert_eq!(model.last_failure(), before);
-        assert_eq!(model.fault_stats(ReactorOperation::Wake).injected_failures, 1);
-        assert_eq!(model.fault_stats(ReactorOperation::Wake).pending_failures, 0);
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Wake).injected_failures,
+            1
+        );
+        assert_eq!(
+            model.fault_stats(ReactorOperation::Wake).pending_failures,
+            0
+        );
         model.wake().unwrap();
         assert_eq!(model.last_failure(), before);
     }
@@ -1245,40 +1545,73 @@ mod tests {
             let count = Arc::new(CountWakes(AtomicUsize::new(0)));
             let waker = Waker::from(count.clone());
             let mut callbacks = 0;
-            model.fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted).unwrap();
+            model
+                .fail_next(ReactorOperation::Poll, None, io::ErrorKind::Interrupted)
+                .unwrap();
             if shared {
                 let driver = IoDriverHandle::new(model.clone());
-                let registration = driver.register(&std::io::stdin(), Interest::READABLE, waker).unwrap();
-                model.set_ready(registration.token(), Interest::READABLE).unwrap();
-                assert_eq!(driver.try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap_err().kind(), io::ErrorKind::Interrupted);
+                let registration = driver
+                    .register(&std::io::stdin(), Interest::READABLE, waker)
+                    .unwrap();
+                model
+                    .set_ready(registration.token(), Interest::READABLE)
+                    .unwrap();
+                assert_eq!(
+                    driver
+                        .try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::Interrupted
+                );
                 assert_eq!(callbacks, 0);
                 assert_eq!(count.0.load(Ordering::SeqCst), 0);
                 assert_eq!(driver.poll_error_count(), 1);
                 assert_eq!(driver.stats().polls, 0);
-                assert_eq!(driver.try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap(), Some(1));
+                assert_eq!(
+                    driver
+                        .try_turn_with(Some(Duration::ZERO), |_, _| callbacks += 1)
+                        .unwrap(),
+                    Some(1)
+                );
                 drop(registration);
                 assert!(driver.is_empty());
             } else {
                 let mut driver = IoDriver::new(model.clone());
-                let token = driver.register(&std::io::stdin(), Interest::READABLE, waker).unwrap();
+                let token = driver
+                    .register(&std::io::stdin(), Interest::READABLE, waker)
+                    .unwrap();
                 model.set_ready(token, Interest::READABLE).unwrap();
-                assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap_err().kind(), io::ErrorKind::Interrupted);
+                assert_eq!(
+                    driver
+                        .turn_with(Some(Duration::ZERO), |_, _| callbacks += 1)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::Interrupted
+                );
                 assert_eq!(callbacks, 0);
                 assert_eq!(count.0.load(Ordering::SeqCst), 0);
                 assert_eq!(driver.poll_error_count(), 1);
                 assert_eq!(driver.stats().polls, 0);
-                assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| callbacks += 1).unwrap(), 1);
+                assert_eq!(
+                    driver
+                        .turn_with(Some(Duration::ZERO), |_, _| callbacks += 1)
+                        .unwrap(),
+                    1
+                );
                 driver.deregister(token).unwrap();
                 assert!(driver.is_empty());
             }
             assert_eq!(count.0.load(Ordering::SeqCst), 1);
             assert_eq!(callbacks, 1);
             assert_eq!(model.registration_count(), 0);
-            assert_eq!(model.fault_stats(ReactorOperation::Poll), ReactorFaultStats {
-                attempts: 2,
-                injected_failures: 1,
-                pending_failures: 0,
-            });
+            assert_eq!(
+                model.fault_stats(ReactorOperation::Poll),
+                ReactorFaultStats {
+                    attempts: 2,
+                    injected_failures: 1,
+                    pending_failures: 0,
+                }
+            );
         }
     }
 
@@ -1293,7 +1626,9 @@ mod tests {
         let model = LabReactorModel::new();
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
-        writer.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        writer
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let token = Token::new(17);
         native.register(&reader, token, Interest::READABLE).unwrap();
         model.register(&reader, token, Interest::READABLE).unwrap();
@@ -1302,7 +1637,10 @@ mod tests {
 
         let compare = |expected: usize| {
             let mut actual = Events::with_capacity(4);
-            assert_eq!(native.poll(&mut actual, Some(Duration::ZERO)).unwrap(), expected);
+            assert_eq!(
+                native.poll(&mut actual, Some(Duration::ZERO)).unwrap(),
+                expected
+            );
             assert_eq!(poll(&model), actual.iter().copied().collect::<Vec<_>>());
         };
         compare(1);

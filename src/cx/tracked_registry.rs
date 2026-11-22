@@ -22,10 +22,10 @@ use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::obligation_mailbox::{
     ObligationAdmissionError, ObligationMailbox, ObligationToken, ObligationTransferError,
 };
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{RegionId, TaskId, Time};
 use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 /// Refusal of a runtime-accounted name operation.
@@ -61,7 +61,9 @@ impl std::fmt::Display for TrackedNameError {
             Self::UnscopedRegion => f.write_str("a name lease requires a non-sentinel region"),
             Self::Admission(error) => write!(f, "name obligation admission: {error}"),
             Self::DifferentRuntime => f.write_str("name registry belongs to a different runtime"),
-            Self::TimerRequired => f.write_str("name wait deadline requires an explicit timer driver"),
+            Self::TimerRequired => {
+                f.write_str("name wait deadline requires an explicit timer driver")
+            }
             Self::Registry(error) => std::fmt::Display::fmt(error, f),
             Self::SettlementRejected => f.write_str("name removed but runtime settlement refused"),
             Self::Transfer(error) => write!(f, "name lease transfer: {error}"),
@@ -228,11 +230,16 @@ impl TrackedNameRegistry {
 
     fn subscribe<'a>(&'a self, name: &'a str) -> NameInterest<'a> {
         let mut waiters = self.waiters.lock();
-        let entry = waiters.entry(name.to_owned()).or_insert_with(|| NameWaitEntry {
-            users: 0,
-            signal: Arc::new(NameAvailability::default()),
-        });
-        entry.users = entry.users.checked_add(1).expect("name waiter count overflow");
+        let entry = waiters
+            .entry(name.to_owned())
+            .or_insert_with(|| NameWaitEntry {
+                users: 0,
+                signal: Arc::new(NameAvailability::default()),
+            });
+        entry.users = entry
+            .users
+            .checked_add(1)
+            .expect("name waiter count overflow");
         NameInterest {
             waiters: &self.waiters,
             name,
@@ -243,7 +250,10 @@ impl TrackedNameRegistry {
     // Call only AFTER removing ownership, with no registry lock held. The
     // returned guard signals after quota settlement, including notifier unwind.
     fn publish_availability(&self, name: &str) -> Option<NameChanged> {
-        self.waiters.lock().get(name).map(|entry| NameChanged(Arc::clone(&entry.signal)))
+        self.waiters
+            .lock()
+            .get(name)
+            .map(|entry| NameChanged(Arc::clone(&entry.signal)))
     }
 }
 
@@ -270,7 +280,9 @@ struct NameInterest<'a> {
 
 impl NameInterest<'_> {
     fn changed(&self, epoch: u64) -> impl std::future::Future<Output = ()> + '_ {
-        self.signal.notify.wait_until(move || self.signal.epoch.load(Ordering::Acquire) != epoch)
+        self.signal
+            .notify
+            .wait_until(move || self.signal.epoch.load(Ordering::Acquire) != epoch)
     }
 }
 
@@ -288,7 +300,11 @@ impl Drop for NameInterest<'_> {
             } else {
                 false
             };
-            if remove { waiters.remove(self.name) } else { None }
+            if remove {
+                waiters.remove(self.name)
+            } else {
+                None
+            }
         };
         drop(retired);
     }
@@ -355,7 +371,10 @@ impl TrackedNameLease {
     /// Stable runtime mailbox ticket for diagnostics.
     #[must_use]
     pub fn obligation_ticket(&self) -> u64 {
-        self.obligation.as_ref().expect("live name obligation").ticket()
+        self.obligation
+            .as_ref()
+            .expect("live name obligation")
+            .ticket()
     }
 
     /// Removes discovery and commits the obligation, returning quota immediately.
@@ -482,7 +501,11 @@ impl TrackedNameLease {
             gateway.notify();
         }
         result?;
-        if accepted { Ok(()) } else { Err(TrackedNameError::SettlementRejected) }
+        if accepted {
+            Ok(())
+        } else {
+            Err(TrackedNameError::SettlementRejected)
+        }
     }
 }
 

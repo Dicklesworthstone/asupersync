@@ -33,9 +33,11 @@ fn unencoded_and_identity_bodies_are_bounded_without_mutation() {
             .decode_content(&Method::Get, DecompressionLimit::new(7))
             .unwrap();
         assert_unchanged(&response, &before);
-        assert!(response
-            .decode_content(&Method::Get, DecompressionLimit::new(6))
-            .is_err());
+        assert!(
+            response
+                .decode_content(&Method::Get, DecompressionLimit::new(6))
+                .is_err()
+        );
         assert_unchanged(&response, &before);
     }
 }
@@ -77,17 +79,20 @@ fn invalid_unknown_and_excessive_codings_leave_response_unchanged() {
             .with_header("Content-Encoding", coding)
             .with_header("Content-Length", "4");
         let before = response.clone();
-        assert!(response
-            .decode_content(&Method::Get, DecompressionLimit::new(1024))
-            .is_err(), "accepted coding {coding:?}");
+        assert!(
+            response
+                .decode_content(&Method::Get, DecompressionLimit::new(1024))
+                .is_err(),
+            "accepted coding {coding:?}"
+        );
         assert_unchanged(&response, &before);
     }
 }
 
 #[test]
 fn empty_list_members_do_not_count_as_extra_coding_layers() {
-    let mut response = Response::new(200, "OK", b"x".to_vec())
-        .with_header("Content-Encoding", " , identity, ,\t");
+    let mut response =
+        Response::new(200, "OK", b"x".to_vec()).with_header("Content-Encoding", " , identity, ,\t");
     let before = response.clone();
     response
         .decode_content(&Method::Get, DecompressionLimit::new(1))
@@ -116,8 +121,8 @@ fn encoded_partial_responses_are_not_reinterpreted() {
 #[test]
 fn unavailable_codecs_are_explicit_errors_in_default_builds() {
     for coding in ["gzip", "deflate", "br"] {
-        let mut response = Response::new(200, "OK", b"wire".to_vec())
-            .with_header("Content-Encoding", coding);
+        let mut response =
+            Response::new(200, "OK", b"wire".to_vec()).with_header("Content-Encoding", coding);
         let before = response.clone();
         let error = response
             .decode_content(&Method::Get, DecompressionLimit::new(1024))
@@ -132,7 +137,11 @@ fn unavailable_codecs_are_explicit_errors_in_default_builds() {
 fn every_supported_codec_reaches_the_json_response_api() {
     use asupersync::http::compress::ContentEncoding;
     let plain = br#"{"answer":42,"ready":true}"#;
-    for coding in [ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Brotli] {
+    for coding in [
+        ContentEncoding::Gzip,
+        ContentEncoding::Deflate,
+        ContentEncoding::Brotli,
+    ] {
         let wire = encode(plain, coding);
         let mut response = Response::new(200, "OK", wire.clone())
             .with_header("Content-Encoding", coding.as_token())
@@ -150,9 +159,12 @@ fn every_supported_codec_reaches_the_json_response_api() {
             name.eq_ignore_ascii_case("content-encoding")
                 || name.eq_ignore_ascii_case("content-length")
         }));
-        assert!(response.headers.iter().any(|(name, value)| {
-            name == "ETag" && value == "origin-validator"
-        }));
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| { name == "ETag" && value == "origin-validator" })
+        );
         let before = response.clone();
         response
             .decode_content(&Method::Get, DecompressionLimit::new(plain.len()))
@@ -195,9 +207,11 @@ fn inner_layer_failure_does_not_publish_successfully_decoded_outer_layer() {
         .with_header("Content-Encoding", "deflate, gzip")
         .with_header("Digest", "original-digest");
     let before = response.clone();
-    assert!(response
-        .decode_content(&Method::Get, DecompressionLimit::new(1024))
-        .is_err());
+    assert!(
+        response
+            .decode_content(&Method::Get, DecompressionLimit::new(1024))
+            .is_err()
+    );
     assert_unchanged(&response, &before);
 }
 
@@ -208,12 +222,14 @@ fn intermediate_and_final_expansions_both_obey_the_limit() {
     for (plain, limit) in [(vec![b'a'; 4096], 128), (vec![b'a'], 1)] {
         let inner = encode(&plain, ContentEncoding::Gzip);
         let wire = encode(&inner, ContentEncoding::Deflate);
-        let mut response = Response::new(200, "OK", wire)
-            .with_header("Content-Encoding", "gzip, deflate");
+        let mut response =
+            Response::new(200, "OK", wire).with_header("Content-Encoding", "gzip, deflate");
         let before = response.clone();
-        assert!(response
-            .decode_content(&Method::Get, DecompressionLimit::new(limit))
-            .is_err());
+        assert!(
+            response
+                .decode_content(&Method::Get, DecompressionLimit::new(limit))
+                .is_err()
+        );
         assert_unchanged(&response, &before);
     }
 }
@@ -236,7 +252,10 @@ fn decoding_removes_stale_payload_digests_in_headers_and_trailers() {
         .decode_content(&Method::Get, DecompressionLimit::new(1024))
         .unwrap();
     assert!(response.headers.is_empty());
-    assert_eq!(response.trailers, vec![("X-Trace-ID".to_string(), "keep".to_string())]);
+    assert_eq!(
+        response.trailers,
+        vec![("X-Trace-ID".to_string(), "keep".to_string())]
+    );
 }
 
 #[cfg(feature = "compression")]
@@ -248,9 +267,11 @@ fn truncated_content_cannot_become_a_successful_response() {
         let mut response = Response::new(200, "OK", wire[..len].to_vec())
             .with_header("Content-Encoding", "deflate");
         let before = response.clone();
-        assert!(response
-            .decode_content(&Method::Get, DecompressionLimit::new(1024))
-            .is_err());
+        assert!(
+            response
+                .decode_content(&Method::Get, DecompressionLimit::new(1024))
+                .is_err()
+        );
         assert_unchanged(&response, &before);
     }
 }

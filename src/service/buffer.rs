@@ -644,10 +644,8 @@ where
             slots.reserved += 1;
             self.ready_reserved = true;
             self.ready_waiting = false;
-            let retired = remove_capacity_waiter(
-                &mut self.shared.ready_wakers.lock(),
-                &self.readiness_owner,
-            );
+            let retired =
+                remove_capacity_waiter(&mut self.shared.ready_wakers.lock(), &self.readiness_owner);
             drop(slots);
             if !retired.is_empty() {
                 drop(super::ReadinessRelease::new(move || drop(retired)));

@@ -148,7 +148,9 @@ mod sqlite_wal_tests {
             }
 
             // Test PASSIVE checkpoint
-            let passive_result = match conn.query_unchecked(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[]).await
+            let passive_result = match conn
+                .query_unchecked(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[])
+                .await
             {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed PASSIVE checkpoint: {:?}", other),
@@ -158,7 +160,9 @@ mod sqlite_wal_tests {
             println!("✓ PASSIVE checkpoint executed successfully");
 
             // Test RESTART checkpoint
-            let restart_result = match conn.query_unchecked(&cx, "PRAGMA wal_checkpoint(RESTART)", &[]).await
+            let restart_result = match conn
+                .query_unchecked(&cx, "PRAGMA wal_checkpoint(RESTART)", &[])
+                .await
             {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed RESTART checkpoint: {:?}", other),
@@ -267,11 +271,13 @@ mod sqlite_wal_tests {
             };
 
             // Configure autocheckpoint threshold
-            let autocheckpoint_result =
-                match conn.query_unchecked(&cx, "PRAGMA wal_autocheckpoint(100)", &[]).await {
-                    Outcome::Ok(rows) => rows,
-                    other => panic!("Failed to set wal_autocheckpoint: {:?}", other),
-                };
+            let autocheckpoint_result = match conn
+                .query_unchecked(&cx, "PRAGMA wal_autocheckpoint(100)", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("Failed to set wal_autocheckpoint: {:?}", other),
+            };
 
             assert!(!autocheckpoint_result.is_empty());
             println!("✓ WAL autocheckpoint threshold configured");
@@ -323,7 +329,10 @@ mod sqlite_wal_tests {
             assert_eq!(count_result.len(), 1);
 
             // Check WAL status after operations
-            let wal_status = match conn.query_unchecked(&cx, "PRAGMA wal_checkpoint", &[]).await {
+            let wal_status = match conn
+                .query_unchecked(&cx, "PRAGMA wal_checkpoint", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("Failed to check WAL status: {:?}", other),
             };
@@ -438,7 +447,10 @@ mod sqlite_wal_tests {
             };
 
             // Configure WAL settings for comprehensive test
-            match conn.query_unchecked(&cx, "PRAGMA wal_autocheckpoint(20)", &[]).await {
+            match conn
+                .query_unchecked(&cx, "PRAGMA wal_autocheckpoint(20)", &[])
+                .await
+            {
                 Outcome::Ok(_) => {}
                 other => panic!("Failed to configure autocheckpoint: {:?}", other),
             };
@@ -491,7 +503,10 @@ mod sqlite_wal_tests {
 
                 // Trigger checkpoint periodically
                 if batch % 2 == 0 {
-                    match conn.query_unchecked(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[]).await {
+                    match conn
+                        .query_unchecked(&cx, "PRAGMA wal_checkpoint(PASSIVE)", &[])
+                        .await
+                    {
                         Outcome::Ok(_) => {}
                         other => panic!(
                             "Failed integrated test checkpoint at batch {}: {:?}",

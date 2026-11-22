@@ -355,7 +355,9 @@ impl Http2Client {
         if url.scheme == Scheme::Https {
             #[cfg(feature = "tls")]
             if self.tls_connector.is_none() {
-                return Err(Http2ClientError::Tls("HTTPS requires a TLS connector".into()));
+                return Err(Http2ClientError::Tls(
+                    "HTTPS requires a TLS connector".into(),
+                ));
             }
             #[cfg(not(feature = "tls"))]
             return Err(Http2ClientError::Tls("TLS support is disabled".into()));
@@ -372,15 +374,18 @@ impl Http2Client {
         };
         #[cfg(feature = "tls")]
         if url.scheme == Scheme::Https {
-            let connector = self.tls_connector.as_ref().ok_or_else(|| {
-                Http2ClientError::Tls("HTTPS requires a TLS connector".into())
-            })?;
+            let connector = self
+                .tls_connector
+                .as_ref()
+                .ok_or_else(|| Http2ClientError::Tls("HTTPS requires a TLS connector".into()))?;
             let tls = connector
                 .connect(host, tcp)
                 .await
                 .map_err(|error| Http2ClientError::Tls(error.to_string()))?;
             if tls.alpn_protocol() != Some(b"h2".as_slice()) {
-                return Err(Http2ClientError::Tls("peer did not negotiate h2 ALPN".into()));
+                return Err(Http2ClientError::Tls(
+                    "peer did not negotiate h2 ALPN".into(),
+                ));
             }
             return Ok(Http2ClientIo::Tls(tls));
         }
@@ -669,7 +674,10 @@ impl Http2RequestBuilder {
             }
             headers.push(header.clone());
         }
-        if content_length.zip(exact_length).is_some_and(|(declared, exact)| declared != exact) {
+        if content_length
+            .zip(exact_length)
+            .is_some_and(|(declared, exact)| declared != exact)
+        {
             return Err(invalid("content-length does not match request body"));
         }
         if content_length.is_some_and(|length| length > self.client.max_request_body as u64) {
@@ -795,7 +803,9 @@ impl RequestControl {
         let mut deadline = now.saturating_add_nanos(nanos);
         for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
             if let Some(budget) = context.budget().deadline {
-                let remaining = budget.as_nanos().saturating_sub(budget_now(context).as_nanos());
+                let remaining = budget
+                    .as_nanos()
+                    .saturating_sub(budget_now(context).as_nanos());
                 deadline = deadline.min(now.saturating_add_nanos(remaining));
             }
         }
@@ -1865,8 +1875,9 @@ mod streaming {
             self,
             cx: &Cx,
             source: B,
-        ) -> impl Future<Output = Result<Http2StreamingResponse<Http2ClientIo, B>, Http2ClientError>>
-        + use<B>
+        ) -> impl Future<
+            Output = Result<Http2StreamingResponse<Http2ClientIo, B>, Http2ClientError>,
+        > + use<B>
         where
             B: Body,
             B::Error: fmt::Display,
@@ -1924,7 +1935,8 @@ mod streaming {
                     pool,
                     true,
                 )
-                .response().await
+                .response()
+                .await
             }
         }
 
@@ -1939,8 +1951,7 @@ mod streaming {
             cx: &Cx,
             transport: T,
             source: B,
-        ) -> impl Future<Output = Result<Http2StreamingResponse<T, B>, Http2ClientError>>
-        + use<T, B>
+        ) -> impl Future<Output = Result<Http2StreamingResponse<T, B>, Http2ClientError>> + use<T, B>
         where
             T: AsyncRead + AsyncWrite + Unpin,
             B: Body,
@@ -1956,7 +1967,12 @@ mod streaming {
                     return Err(invalid("streaming request also has a buffered body"));
                 }
                 let request = self.prepare_for_length(
-                    supplied.source.as_ref().expect("owned source").size_hint().exact(),
+                    supplied
+                        .source
+                        .as_ref()
+                        .expect("owned source")
+                        .size_hint()
+                        .exact(),
                 )?;
                 let timeout = self
                     .timeout
@@ -2016,11 +2032,20 @@ mod streaming {
                 eof: false,
             };
             Self {
-                conn: Some(conn), control: Some(control), upload: Some(upload), owner, pool,
+                conn: Some(conn),
+                control: Some(control),
+                upload: Some(upload),
+                owner,
+                pool,
                 response: ResponseState::new(request.head, response_limit),
-                request_headers: Some(request.headers), stream_id: None,
-                credit_due: 0, response_done: false, done: false, poisoned: false,
-                native, poller: None,
+                request_headers: Some(request.headers),
+                stream_id: None,
+                credit_due: 0,
+                response_done: false,
+                done: false,
+                poisoned: false,
+                native,
+                poller: None,
             }
         }
 
@@ -2034,18 +2059,26 @@ mod streaming {
         }
 
         fn check_owner(&mut self, task: &mut Context<'_>) -> Result<(), Http2ClientError> {
-            let control = self.control.as_mut().ok_or_else(|| protocol("retired streaming owner"))?;
+            let control = self
+                .control
+                .as_mut()
+                .ok_or_else(|| protocol("retired streaming owner"))?;
             if self.native {
                 require_native_io(&control.caller.cx)?;
             }
             let current = Cx::current().filter(|current| {
                 !Arc::ptr_eq(&current.inner, &control.caller.cx.inner)
-                    && !control.ambient.as_ref().is_some_and(|ambient| {
-                        Arc::ptr_eq(&current.inner, &ambient.cx.inner)
-                    })
+                    && !control
+                        .ambient
+                        .as_ref()
+                        .is_some_and(|ambient| Arc::ptr_eq(&current.inner, &ambient.cx.inner))
             });
             if let Some(current) = current {
-                if self.poller.as_ref().is_none_or(|poller| !Arc::ptr_eq(&poller.cx.inner, &current.inner)) {
+                if self
+                    .poller
+                    .as_ref()
+                    .is_none_or(|poller| !Arc::ptr_eq(&poller.cx.inner, &current.inner))
+                {
                     self.poller = Some(Cancellation::new(current));
                 }
             } else {
@@ -2080,7 +2113,9 @@ mod streaming {
             let upload = self.upload.take();
             let control = self.control.take();
             let poller = self.poller.take();
-            let now = control.as_ref().map(|control| context_now(&control.caller.cx));
+            let now = control
+                .as_ref()
+                .map(|control| context_now(&control.caller.cx));
             match (conn, pool) {
                 (Some(conn), Some((pool, origin))) if reuse && conn.reusable() => {
                     // A producer destructor that panics cannot publish a
@@ -2111,7 +2146,8 @@ mod streaming {
             if std::mem::replace(&mut self.poisoned, true) {
                 self.retire(false);
                 return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData, "streaming HTTP/2 owner resumed after a panic",
+                    io::ErrorKind::InvalidData,
+                    "streaming HTTP/2 owner resumed after a panic",
                 ))));
             }
             let result = match self.check_owner(task) {
@@ -2135,7 +2171,8 @@ mod streaming {
         ) -> Poll<Result<Option<BodyFrame<BytesCursor>>, Http2ClientError>> {
             if self.credit_due != 0 {
                 if let (Some(conn), Some(id)) = (&mut self.conn, self.stream_id) {
-                    conn.connection.release_stream_receive_capacity(id, self.credit_due)?;
+                    conn.connection
+                        .release_stream_receive_capacity(id, self.credit_due)?;
                 }
                 self.credit_due = 0;
             }
@@ -2143,26 +2180,37 @@ mod streaming {
                 let mut progress = false;
                 let mut delivery = None;
                 if !self.response_done {
-                    let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+                    let conn = self
+                        .conn
+                        .as_mut()
+                        .ok_or_else(|| protocol("missing streaming connection"))?;
                     match Pin::new(&mut conn.wire).poll_next(task) {
                         Poll::Ready(Some(Ok(frame))) => {
                             progress = true;
-                            if is_overhead_frame(&frame, &conn.connection, &mut conn.settings_acked) {
+                            if is_overhead_frame(&frame, &conn.connection, &mut conn.settings_acked)
+                            {
                                 if conn.overhead_frames >= conn.max_overhead_frames {
                                     return Poll::Ready(Err(H2Error::connection(
                                         ErrorCode::EnhanceYourCalm,
                                         "HTTP/2 connection frame overhead limit exceeded",
-                                    ).into()));
+                                    )
+                                    .into()));
                                 }
                                 conn.overhead_frames = conn.overhead_frames.saturating_add(1);
                             }
                             match conn.connection.process_frame(frame)? {
-                                Some(ReceivedFrame::Headers { stream_id: id, headers, end_stream })
-                                    if Some(id) == self.stream_id =>
-                                {
+                                Some(ReceivedFrame::Headers {
+                                    stream_id: id,
+                                    headers,
+                                    end_stream,
+                                }) if Some(id) == self.stream_id => {
                                     let had_final_headers = self.response.response.status != 0;
-                                    self.response_done = self.response.headers(headers, end_stream)?;
-                                    if !had_final_headers && self.response.response.status != 0 && !end_stream {
+                                    self.response_done =
+                                        self.response.headers(headers, end_stream)?;
+                                    if !had_final_headers
+                                        && self.response.response.status != 0
+                                        && !end_stream
+                                    {
                                         // Informational HEADERS do not initialize the
                                         // stream's receive body. Defer only after final
                                         // headers, and before processing any DATA.
@@ -2170,54 +2218,80 @@ mod streaming {
                                     }
                                     if had_final_headers {
                                         let mut trailers = HeaderMap::new();
-                                        for header in std::mem::take(&mut self.response.response.trailers) {
-                                            trailers.append(HeaderName::from_string(&header.name),
-                                                HeaderValue::from_string(header.value));
+                                        for header in
+                                            std::mem::take(&mut self.response.response.trailers)
+                                        {
+                                            trailers.append(
+                                                HeaderName::from_string(&header.name),
+                                                HeaderValue::from_string(header.value),
+                                            );
                                         }
                                         delivery = Some(BodyFrame::Trailers(trailers));
                                     }
                                 }
-                                Some(ReceivedFrame::Data { stream_id: id, data, end_stream })
-                                    if Some(id) == self.stream_id =>
-                                {
+                                Some(ReceivedFrame::Data {
+                                    stream_id: id,
+                                    data,
+                                    end_stream,
+                                }) if Some(id) == self.stream_id => {
                                     self.response.record_data(data.len())?;
                                     if end_stream {
                                         self.response_done = self.response.finish()?;
                                     }
                                     if !data.is_empty() {
-                                        self.credit_due = u32::try_from(data.len())
-                                            .map_err(|_| protocol("response DATA length exceeds u32"))?;
+                                        self.credit_due =
+                                            u32::try_from(data.len()).map_err(|_| {
+                                                protocol("response DATA length exceeds u32")
+                                            })?;
                                         delivery = Some(BodyFrame::Data(BytesCursor::new(data)));
                                     }
                                 }
-                                Some(ReceivedFrame::Reset { stream_id: id, error_code })
-                                    if Some(id) == self.stream_id =>
-                                {
+                                Some(ReceivedFrame::Reset {
+                                    stream_id: id,
+                                    error_code,
+                                }) if Some(id) == self.stream_id => {
                                     return Poll::Ready(Err(Http2ClientError::Reset(error_code)));
                                 }
-                                Some(ReceivedFrame::GoAway { last_stream_id, error_code, .. }) => {
+                                Some(ReceivedFrame::GoAway {
+                                    last_stream_id,
+                                    error_code,
+                                    ..
+                                }) => {
                                     if error_code != ErrorCode::NoError
                                         || self.stream_id.is_none_or(|id| id > last_stream_id)
                                     {
-                                        return Poll::Ready(Err(Http2ClientError::GoAway { last_stream_id, error_code }));
+                                        return Poll::Ready(Err(Http2ClientError::GoAway {
+                                            last_stream_id,
+                                            error_code,
+                                        }));
                                     }
                                 }
-                                Some(ReceivedFrame::Headers { stream_id: id, .. }
+                                Some(
+                                    ReceivedFrame::Headers { stream_id: id, .. }
                                     | ReceivedFrame::Data { stream_id: id, .. }
-                                    | ReceivedFrame::Reset { stream_id: id, .. })
-                                    if self.stream_id.is_some_and(|current| id < current) => {}
-                                Some(_) => return Poll::Ready(Err(protocol("unexpected HTTP/2 response stream"))),
+                                    | ReceivedFrame::Reset { stream_id: id, .. },
+                                ) if self.stream_id.is_some_and(|current| id < current) => {}
+                                Some(_) => {
+                                    return Poll::Ready(Err(protocol(
+                                        "unexpected HTTP/2 response stream",
+                                    )));
+                                }
                                 None => {}
                             }
                         }
                         Poll::Ready(Some(Err(error))) => {
-                            let error = conn.wire.get_mut().read_error.take()
+                            let error = conn
+                                .wire
+                                .get_mut()
+                                .read_error
+                                .take()
                                 .map_or_else(|| error.into(), Http2ClientError::Io);
                             return Poll::Ready(Err(error));
                         }
                         Poll::Ready(None) => {
                             return Poll::Ready(Err(Http2ClientError::Io(io::Error::new(
-                                io::ErrorKind::UnexpectedEof, "peer closed before response completed",
+                                io::ErrorKind::UnexpectedEof,
+                                "peer closed before response completed",
                             ))));
                         }
                         Poll::Pending => {}
@@ -2236,12 +2310,17 @@ mod streaming {
                 }
 
                 {
-                    let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+                    let conn = self
+                        .conn
+                        .as_mut()
+                        .ok_or_else(|| protocol("missing streaming connection"))?;
                     if self.stream_id.is_none()
                         && conn.connection.state() == ConnectionState::Open
                         && conn.connection.remote_settings().max_concurrent_streams != 0
                     {
-                        let headers = self.request_headers.take()
+                        let headers = self
+                            .request_headers
+                            .take()
                             .ok_or_else(|| protocol("request headers already consumed"))?;
                         // Even an exact zero hint must be checked at producer
                         // EOF; END_STREAM is not inferred from a hint.
@@ -2258,8 +2337,12 @@ mod streaming {
                         let (wrote, flushed) = self.poll_outbound(task)?;
                         progress |= wrote;
                         if !flushed
-                            || !self.conn.as_ref().expect("live connection")
-                                .connection.has_pending_frames()
+                            || !self
+                                .conn
+                                .as_ref()
+                                .expect("live connection")
+                                .connection
+                                .has_pending_frames()
                         {
                             break;
                         }
@@ -2273,11 +2356,18 @@ mod streaming {
                 let (wrote, flushed) = self.poll_outbound(task)?;
                 progress |= wrote;
                 if self.response_done && flushed {
-                    let conn = self.conn.as_ref().ok_or_else(|| protocol("missing streaming connection"))?;
-                    if !conn.connection.has_pending_frames() && conn.wire.write_buffer().is_empty() {
+                    let conn = self
+                        .conn
+                        .as_ref()
+                        .ok_or_else(|| protocol("missing streaming connection"))?;
+                    if !conn.connection.has_pending_frames() && conn.wire.write_buffer().is_empty()
+                    {
                         if self.credit_due != 0 {
                             if let Some(id) = self.stream_id {
-                                self.conn.as_mut().expect("connection checked above").connection
+                                self.conn
+                                    .as_mut()
+                                    .expect("connection checked above")
+                                    .connection
                                     .release_stream_receive_capacity(id, self.credit_due)?;
                             }
                             self.credit_due = 0;
@@ -2298,10 +2388,21 @@ mod streaming {
         }
 
         fn poll_upload(&mut self, task: &mut Context<'_>) -> Poll<Result<bool, Http2ClientError>> {
-            let Some(id) = self.stream_id else { return Poll::Ready(Ok(false)); };
-            let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
-            let upload = self.upload.as_mut().ok_or_else(|| protocol("missing upload owner"))?;
-            if upload.eof || conn.connection.has_pending_frames() || !conn.wire.write_buffer().is_empty() {
+            let Some(id) = self.stream_id else {
+                return Poll::Ready(Ok(false));
+            };
+            let conn = self
+                .conn
+                .as_mut()
+                .ok_or_else(|| protocol("missing streaming connection"))?;
+            let upload = self
+                .upload
+                .as_mut()
+                .ok_or_else(|| protocol("missing upload owner"))?;
+            if upload.eof
+                || conn.connection.has_pending_frames()
+                || !conn.wire.write_buffer().is_empty()
+            {
                 return Poll::Ready(Ok(false));
             }
             if let Some(data) = &mut upload.data {
@@ -2310,13 +2411,17 @@ mod streaming {
                     return Poll::Pending;
                 }
                 if data.data.remaining() != data.remaining || data.data.chunk().is_empty() {
-                    return Poll::Ready(Err(invalid("request body buffer violated its remaining/chunk contract")));
+                    return Poll::Ready(Err(invalid(
+                        "request body buffer violated its remaining/chunk contract",
+                    )));
                 }
                 let length = capacity.min(data.remaining).min(data.data.chunk().len());
                 let bytes = data.data.copy_to_bytes(length);
                 let remaining = data.remaining - length;
                 if bytes.len() != length || data.data.remaining() != remaining {
-                    return Poll::Ready(Err(invalid("request body buffer did not advance by the emitted length")));
+                    return Poll::Ready(Err(invalid(
+                        "request body buffer did not advance by the emitted length",
+                    )));
                 }
                 data.remaining = remaining;
                 conn.connection.send_data(id, bytes, false)?;
@@ -2331,26 +2436,36 @@ mod streaming {
                     // Error formatting and destruction are user code too.
                     // Retire the transport before either can panic or re-enter.
                     self.retire(false);
-                    Poll::Ready(Err(Http2ClientError::Io(io::Error::other(
-                        format!("HTTP/2 request body failed: {error}"),
-                    ))))
+                    Poll::Ready(Err(Http2ClientError::Io(io::Error::other(format!(
+                        "HTTP/2 request body failed: {error}"
+                    )))))
                 }
                 Poll::Ready(Some(Ok(BodyFrame::Data(data)))) => {
-                    upload.data = Some(UploadData { data: Box::new(data), remaining: 0 });
+                    upload.data = Some(UploadData {
+                        data: Box::new(data),
+                        remaining: 0,
+                    });
                     if upload.saw_trailers {
                         return Poll::Ready(Err(invalid("request DATA follows trailers")));
                     }
                     let data = upload.data.as_mut().expect("stored above");
                     let length = data.data.remaining();
                     if length as u64 > (upload.limit as u64).saturating_sub(upload.produced) {
-                        return Poll::Ready(Err(Http2ClientError::BodyTooLarge { request: true, limit: upload.limit }));
+                        return Poll::Ready(Err(Http2ClientError::BodyTooLarge {
+                            request: true,
+                            limit: upload.limit,
+                        }));
                     }
-                    if upload.expected.is_some_and(|expected| length as u64 > expected.saturating_sub(upload.produced)) {
+                    if upload.expected.is_some_and(|expected| {
+                        length as u64 > expected.saturating_sub(upload.produced)
+                    }) {
                         return Poll::Ready(Err(invalid("request body exceeds content-length")));
                     }
                     upload.produced += length as u64;
                     data.remaining = length;
-                    if length == 0 { upload.data = None; }
+                    if length == 0 {
+                        upload.data = None;
+                    }
                     Poll::Ready(Ok(true))
                 }
                 Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers)))) => {
@@ -2362,8 +2477,13 @@ mod streaming {
                     Poll::Ready(Ok(true))
                 }
                 Poll::Ready(None) => {
-                    if upload.expected.is_some_and(|expected| expected != upload.produced) {
-                        return Poll::Ready(Err(invalid("request body ends before content-length")));
+                    if upload
+                        .expected
+                        .is_some_and(|expected| expected != upload.produced)
+                    {
+                        return Poll::Ready(Err(invalid(
+                            "request body ends before content-length",
+                        )));
                     }
                     upload.eof = true;
                     if let Some(trailers) = upload.trailers.take() {
@@ -2378,8 +2498,14 @@ mod streaming {
 
         /// Progress at most one queued protocol frame, then flush. A frame
         /// removed from Connection is still owned by Framed until flush ends.
-        fn poll_outbound(&mut self, task: &mut Context<'_>) -> Result<(bool, bool), Http2ClientError> {
-            let conn = self.conn.as_mut().ok_or_else(|| protocol("missing streaming connection"))?;
+        fn poll_outbound(
+            &mut self,
+            task: &mut Context<'_>,
+        ) -> Result<(bool, bool), Http2ClientError> {
+            let conn = self
+                .conn
+                .as_mut()
+                .ok_or_else(|| protocol("missing streaming connection"))?;
             let mut progress = false;
             if conn.connection.has_pending_frames() {
                 match conn.wire.poll_ready(task) {
@@ -2402,11 +2528,16 @@ mod streaming {
         }
     }
 
-    fn request_trailers(trailers: HeaderMap, mut size: usize) -> Result<Vec<Header>, Http2ClientError> {
+    fn request_trailers(
+        trailers: HeaderMap,
+        mut size: usize,
+    ) -> Result<Vec<Header>, Http2ClientError> {
         let mut headers = Vec::new();
         for (name, value) in trailers.iter() {
-            size = size.saturating_add(name.as_str().len())
-                .saturating_add(value.as_bytes().len()).saturating_add(32);
+            size = size
+                .saturating_add(name.as_str().len())
+                .saturating_add(value.as_bytes().len())
+                .saturating_add(32);
             if size > HEADER_LIMIT {
                 return Err(invalid("request headers and trailers exceed 64 KiB"));
             }
@@ -2415,8 +2546,11 @@ mod streaming {
             {
                 return Err(invalid("forbidden request trailer field"));
             }
-            let value = value.to_str().map_err(|_| invalid("request trailer is not UTF-8"))?;
-            validate_header_field(name.as_str(), value).map_err(|error| invalid(error.to_string()))?;
+            let value = value
+                .to_str()
+                .map_err(|_| invalid("request trailer is not UTF-8"))?;
+            validate_header_field(name.as_str(), value)
+                .map_err(|error| invalid(error.to_string()))?;
             if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) {
                 return Err(invalid("trailer value has leading or trailing whitespace"));
             }
@@ -2445,7 +2579,9 @@ mod streaming {
             }
         }
 
-        fn is_end_stream(&self) -> bool { self.done }
+        fn is_end_stream(&self) -> bool {
+            self.done
+        }
 
         fn size_hint(&self) -> SizeHint {
             if self.done || self.response.bodyless() {

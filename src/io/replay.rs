@@ -165,7 +165,9 @@ impl PendingRequest {
         match self {
             Self::Read { .. } => IoOperation::Read,
             Self::Write { slices: None, .. } => IoOperation::Write,
-            Self::Write { slices: Some(_), .. } => IoOperation::WriteVectored,
+            Self::Write {
+                slices: Some(_), ..
+            } => IoOperation::WriteVectored,
             Self::Flush => IoOperation::Flush,
             Self::Shutdown => IoOperation::Shutdown,
         }
@@ -250,7 +252,11 @@ impl IoTape {
     #[must_use]
     pub fn replay(self) -> ReplayIo {
         let (remaining_reads, remaining_writes) = if self.pending_polls {
-            let reads = self.events.iter().filter(|event| event.operation().is_read()).count();
+            let reads = self
+                .events
+                .iter()
+                .filter(|event| event.operation().is_read())
+                .count();
             (reads, self.events.len() - reads)
         } else {
             (0, 0)
@@ -389,7 +395,10 @@ impl<T> RecordingIo<T> {
             let extra = (self.limits.max_operations - self.tape.events.len())
                 .min(self.tape.events.len().max(8));
             let mut grown = Vec::new();
-            if grown.try_reserve_exact(self.tape.events.len() + extra).is_err() {
+            if grown
+                .try_reserve_exact(self.tape.events.len() + extra)
+                .is_err()
+            {
                 self.fail(IoCaptureError::Allocation);
                 return false;
             }
@@ -553,9 +562,9 @@ impl<T: AsyncRead + Unpin> AsyncRead for RecordingIo<T> {
         } else if !bytes.is_empty() {
             this.fail(IoCaptureError::InvalidProgress);
         } else if this.tape.pending_polls && this.reserve(0, 0, 0) {
-            this.tape.events.push(Event::Pending(PendingRequest::Read {
-                capacity,
-            }));
+            this.tape
+                .events
+                .push(Event::Pending(PendingRequest::Read { capacity }));
         }
         result
     }
@@ -629,7 +638,9 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingIo<T> {
                 ));
             }
         } else if this.tape.pending_polls && this.reserve(0, 0, 0) {
-            this.tape.events.push(Event::Pending(PendingRequest::Shutdown));
+            this.tape
+                .events
+                .push(Event::Pending(PendingRequest::Shutdown));
         }
         result
     }
@@ -781,7 +792,10 @@ impl ReplayIo {
         } else {
             &mut self.write_waiter
         };
-        if !slot.as_ref().is_some_and(|waker| waker.will_wake(ctx.waker())) {
+        if !slot
+            .as_ref()
+            .is_some_and(|waker| waker.will_wake(ctx.waker()))
+        {
             *slot = Some(ctx.waker().clone());
         }
     }
@@ -829,16 +843,22 @@ impl ReplayIo {
         ready!(self.ready(ctx, operation))?;
         let (length, slices, digest, result) = match &self.tape.events[self.index] {
             Event::Write {
-                length, slices, digest, accepted, error,
+                length,
+                slices,
+                digest,
+                accepted,
+                error,
             } => (
                 length,
                 slices,
                 digest,
                 Some(error.map_or(Ok(*accepted), |error| Err(error.replay()))),
             ),
-            Event::Pending(PendingRequest::Write { length, slices, digest }) => {
-                (length, slices, digest, None)
-            }
+            Event::Pending(PendingRequest::Write {
+                length,
+                slices,
+                digest,
+            }) => (length, slices, digest, None),
             _ => unreachable!("operation checked above"),
         };
         if input.length() != Some(*length)
@@ -885,7 +905,9 @@ impl AsyncRead for ReplayIo {
         ready!(this.ready(ctx, IoOperation::Read))?;
         if let Event::Pending(PendingRequest::Read { capacity }) = &this.tape.events[this.index] {
             if buf.remaining() != *capacity {
-                return Poll::Ready(Err(this.refuse(IoOperation::Read, IoReplayMismatch::Request)));
+                return Poll::Ready(Err(
+                    this.refuse(IoOperation::Read, IoReplayMismatch::Request)
+                ));
             }
             this.pending(ctx, IoOperation::Read);
             return Poll::Pending;

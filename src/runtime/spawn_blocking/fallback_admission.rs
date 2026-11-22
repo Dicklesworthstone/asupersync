@@ -98,7 +98,10 @@ impl Future for FallbackAdmission<'_> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
-        assert!(!this.completed, "fallback admission polled after completion");
+        assert!(
+            !this.completed,
+            "fallback admission polled after completion"
+        );
         // No relay allocation or waker cloning on uncontended admission.
         if try_claim_fallback_slot(this.count, this.cap) {
             this.completed = true;

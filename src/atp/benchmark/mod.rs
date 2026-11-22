@@ -179,7 +179,7 @@ impl BenchmarkConfig {
 // Helper functions
 
 fn get_available_memory() -> u64 {
-    sysinfo::System::new_all().available_memory()
+    sysinfo::System::new_all().map_or(0, |system| system.available_memory())
 }
 
 fn collect_relevant_env_vars() -> BTreeMap<String, String> {

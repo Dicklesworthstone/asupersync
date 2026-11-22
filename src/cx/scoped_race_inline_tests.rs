@@ -255,16 +255,14 @@ fn scoped_race_drop_before_late_admission_closes_both_published_regions() {
         else {
             panic!("the dequeued branch reaches its publication seam");
         };
-        let (wakes, observer) = cancel_publication.publish_with_spawn_effects(
-            spawn_effects,
-            |cancel_priority| {
+        let (wakes, observer) =
+            cancel_publication.publish_with_spawn_effects(spawn_effects, |cancel_priority| {
                 if let Some(priority) = cancel_priority {
                     lab.scheduler.lock().schedule_cancel(task_id, priority);
                 } else {
                     lab.scheduler.lock().schedule(task_id, priority);
                 }
-            },
-        );
+            });
         if let Some(observer) = observer {
             observer.dispatch();
         }
@@ -647,10 +645,26 @@ fn scoped_race_second_submission_refusal_drains_the_first_late_admission() {
             async { "never submitted" }
         },
     ));
-    assert!(poll_once(race.as_mut()).is_pending(), "the left request still owns admission");
-    let parts = frozen.lock().take().expect("left request captured before refusal");
-    let slot = Arc::clone(parts.admitted_slot.as_ref().unwrap().branch_region().unwrap());
-    assert!(slot.close_requested(), "whole-subtree stop precedes the left join");
+    assert!(
+        poll_once(race.as_mut()).is_pending(),
+        "the left request still owns admission"
+    );
+    let parts = frozen
+        .lock()
+        .take()
+        .expect("left request captured before refusal");
+    let slot = Arc::clone(
+        parts
+            .admitted_slot
+            .as_ref()
+            .unwrap()
+            .branch_region()
+            .unwrap(),
+    );
+    assert!(
+        slot.close_requested(),
+        "whole-subtree stop precedes the left join"
+    );
     assert!(slot.get().is_none());
 
     let SpawnAdmission::Admitted {
@@ -662,16 +676,14 @@ fn scoped_race_second_submission_refusal_drains_the_first_late_admission() {
     else {
         panic!("the originally authorized left request still admits");
     };
-    let (wakes, observer) = cancel_publication.publish_with_spawn_effects(
-        spawn_effects,
-        |cancel_priority| {
+    let (wakes, observer) =
+        cancel_publication.publish_with_spawn_effects(spawn_effects, |cancel_priority| {
             if let Some(priority) = cancel_priority {
                 lab.scheduler.lock().schedule_cancel(task_id, priority);
             } else {
                 lab.scheduler.lock().schedule(task_id, priority);
             }
-        },
-    );
+        });
     if let Some(observer) = observer {
         observer.dispatch();
     }

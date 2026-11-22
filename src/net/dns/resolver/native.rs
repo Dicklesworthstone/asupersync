@@ -74,8 +74,20 @@ impl Resolver {
                 }
                 let nameservers = self.native_nameservers()?;
                 let (v6, v4) = crate::util::future::zip(
-                    self.query_records_native(cx, host, DnsQueryType::Aaaa, &nameservers, &query_deadline),
-                    self.query_records_native(cx, host, DnsQueryType::A, &nameservers, &query_deadline),
+                    self.query_records_native(
+                        cx,
+                        host,
+                        DnsQueryType::Aaaa,
+                        &nameservers,
+                        &query_deadline,
+                    ),
+                    self.query_records_native(
+                        cx,
+                        host,
+                        DnsQueryType::A,
+                        &nameservers,
+                        &query_deadline,
+                    ),
                 )
                 .await;
                 let result = merge_ip_records(host, v6, v4);
@@ -95,12 +107,19 @@ impl Resolver {
     /// rules of [`Self::lookup_ip_native`]. This does not use the blocking pool.
     pub async fn lookup_mx_native(&self, cx: &Cx, domain: &str) -> Result<LookupMx, DnsError> {
         let answers = self.native_records(cx, domain, DnsQueryType::Mx).await?;
-        let records = answers.into_iter().filter_map(|answer| match answer.data {
-            DnsRecordData::Mx { preference, exchange } => {
-                Some(crate::net::dns::MxRecord { preference, exchange })
-            }
-            _ => None,
-        }).collect();
+        let records = answers
+            .into_iter()
+            .filter_map(|answer| match answer.data {
+                DnsRecordData::Mx {
+                    preference,
+                    exchange,
+                } => Some(crate::net::dns::MxRecord {
+                    preference,
+                    exchange,
+                }),
+                _ => None,
+            })
+            .collect();
         Ok(LookupMx::new(records))
     }
 
@@ -108,12 +127,23 @@ impl Resolver {
     /// rules of [`Self::lookup_ip_native`]. Service names may contain underscores.
     pub async fn lookup_srv_native(&self, cx: &Cx, name: &str) -> Result<LookupSrv, DnsError> {
         let answers = self.native_records(cx, name, DnsQueryType::Srv).await?;
-        let records = answers.into_iter().filter_map(|answer| match answer.data {
-            DnsRecordData::Srv { priority, weight, port, target } => {
-                Some(crate::net::dns::SrvRecord { priority, weight, port, target })
-            }
-            _ => None,
-        }).collect();
+        let records = answers
+            .into_iter()
+            .filter_map(|answer| match answer.data {
+                DnsRecordData::Srv {
+                    priority,
+                    weight,
+                    port,
+                    target,
+                } => Some(crate::net::dns::SrvRecord {
+                    priority,
+                    weight,
+                    port,
+                    target,
+                }),
+                _ => None,
+            })
+            .collect();
         Ok(LookupSrv::new(records))
     }
 
@@ -121,10 +151,13 @@ impl Resolver {
     /// rules of [`Self::lookup_ip_native`].
     pub async fn lookup_txt_native(&self, cx: &Cx, name: &str) -> Result<LookupTxt, DnsError> {
         let answers = self.native_records(cx, name, DnsQueryType::Txt).await?;
-        let records = answers.into_iter().filter_map(|answer| match answer.data {
-            DnsRecordData::Txt(text) => Some(text),
-            _ => None,
-        }).collect();
+        let records = answers
+            .into_iter()
+            .filter_map(|answer| match answer.data {
+                DnsRecordData::Txt(text) => Some(text),
+                _ => None,
+            })
+            .collect();
         Ok(LookupTxt::new(records))
     }
 
@@ -166,14 +199,17 @@ impl Resolver {
     ) -> Result<Vec<DnsAnswer>, DnsError> {
         let mut owner = NativeOwner::new(cx, self.config.timeout);
         let deadline = owner.query_deadline();
-        owner.run(async {
-            validate_dns_record_name(name)?;
-            if is_invalid_special_use_domain(name) {
-                return Err(DnsError::NoRecords(name.to_owned()));
-            }
-            let nameservers = self.native_nameservers()?;
-            self.query_records_native(cx, name, kind, &nameservers, &deadline).await
-        }).await
+        owner
+            .run(async {
+                validate_dns_record_name(name)?;
+                if is_invalid_special_use_domain(name) {
+                    return Err(DnsError::NoRecords(name.to_owned()));
+                }
+                let nameservers = self.native_nameservers()?;
+                self.query_records_native(cx, name, kind, &nameservers, &deadline)
+                    .await
+            })
+            .await
     }
 
     async fn query_records_native(
@@ -247,9 +283,11 @@ impl Resolver {
                                 no_records = true;
                                 answered[index] = true;
                             }
-                            rcode => last_error = Some(DnsError::ServerError(format!(
-                                "DNS server returned rcode {rcode} for {current}",
-                            ))),
+                            rcode => {
+                                last_error = Some(DnsError::ServerError(format!(
+                                    "DNS server returned rcode {rcode} for {current}",
+                                )))
+                            }
                         },
                         Err(DnsError::Cancelled) => return Err(DnsError::Cancelled),
                         Err(error) => last_error = Some(error),
@@ -286,18 +324,20 @@ fn merge_ip_records(
     let mut failure = None;
     for result in [v6, v4] {
         match result {
-            Ok(records) => for record in records {
-                ttl = Some(ttl.map_or(record.ttl, |previous| previous.min(record.ttl)));
-                let address = match record.data {
-                    DnsRecordData::A(ip) => IpAddr::V4(ip),
-                    DnsRecordData::Aaaa(ip) => IpAddr::V6(ip),
-                    _ => continue,
-                };
-                if !addresses.contains(&address) {
-                    addresses.push(address);
+            Ok(records) => {
+                for record in records {
+                    ttl = Some(ttl.map_or(record.ttl, |previous| previous.min(record.ttl)));
+                    let address = match record.data {
+                        DnsRecordData::A(ip) => IpAddr::V4(ip),
+                        DnsRecordData::Aaaa(ip) => IpAddr::V6(ip),
+                        _ => continue,
+                    };
+                    if !addresses.contains(&address) {
+                        addresses.push(address);
+                    }
                 }
-            },
-            Err(DnsError::NoRecords(_)) => {},
+            }
+            Err(DnsError::NoRecords(_)) => {}
             Err(DnsError::Cancelled) => return Err(DnsError::Cancelled),
             Err(error) => failure = Some(error),
         }
@@ -305,11 +345,14 @@ fn merge_ip_records(
     if addresses.is_empty() {
         Err(failure.unwrap_or_else(|| DnsError::NoRecords(host.to_owned())))
     } else {
-        Ok(LookupIp::new(addresses, if failure.is_some() {
-            Duration::ZERO
-        } else {
-            ttl.unwrap_or(Duration::ZERO)
-        }))
+        Ok(LookupIp::new(
+            addresses,
+            if failure.is_some() {
+                Duration::ZERO
+            } else {
+                ttl.unwrap_or(Duration::ZERO)
+            },
+        ))
     }
 }
 
@@ -324,7 +367,9 @@ impl NativeDeadline {
         // A missing owner driver means process time, not the polling task's
         // ambient clock. This also applies before the owned future is entered
         // (query-budget construction and the outer cancellation/deadline gate).
-        self.clock.as_ref().map_or_else(crate::time::raw_wall_now, |clock| clock.now())
+        self.clock
+            .as_ref()
+            .map_or_else(crate::time::raw_wall_now, |clock| clock.now())
     }
 
     fn remaining(&self) -> Duration {
@@ -332,7 +377,10 @@ impl NativeDeadline {
     }
 
     fn shorten(&self, allowance: Duration) -> Self {
-        Self { clock: self.clock.clone(), at: self.at.min(self.now() + allowance) }
+        Self {
+            clock: self.clock.clone(),
+            at: self.at.min(self.now() + allowance),
+        }
     }
 
     fn sleep(&self) -> Sleep {
@@ -342,7 +390,10 @@ impl NativeDeadline {
         )
     }
 
-    async fn run<T>(&self, future: impl Future<Output = Result<T, DnsError>>) -> Result<T, DnsError> {
+    async fn run<T>(
+        &self,
+        future: impl Future<Output = Result<T, DnsError>>,
+    ) -> Result<T, DnsError> {
         let mut future = std::pin::pin!(future);
         let mut timer = self.sleep();
         poll_fn(|task| {
@@ -350,7 +401,8 @@ impl NativeDeadline {
                 return Poll::Ready(Err(DnsError::Timeout));
             }
             future.as_mut().poll(task)
-        }).await
+        })
+        .await
     }
 }
 
@@ -360,7 +412,9 @@ struct Cancellation {
 }
 
 impl Cancellation {
-    fn new(cx: Cx) -> Self { Self { cx, token: None } }
+    fn new(cx: Cx) -> Self {
+        Self { cx, token: None }
+    }
 
     fn register(&mut self, task: &Context<'_>) {
         self.token = Some(self.cx.refresh_cancel_waker(self.token, task.waker()));
@@ -386,21 +440,33 @@ struct NativeOwner {
 impl NativeOwner {
     fn new(cx: &Cx, timeout: Duration) -> Self {
         let clock = cx.timer_driver();
-        let now = clock.as_ref().map_or_else(crate::time::raw_wall_now, |clock| clock.now());
+        let now = clock
+            .as_ref()
+            .map_or_else(crate::time::raw_wall_now, |clock| clock.now());
         let ambient = Cx::current().map(Cancellation::new);
-        let mut deadline = NativeDeadline { clock, at: now + timeout };
+        let mut deadline = NativeDeadline {
+            clock,
+            at: now + timeout,
+        };
         for context in std::iter::once(cx).chain(ambient.as_ref().map(|guard| &guard.cx)) {
             meet_budget(&mut deadline, context);
         }
         let timer = deadline.sleep();
-        Self { owner: Cancellation::new(cx.clone()), ambient, poller: None, deadline, timer }
+        Self {
+            owner: Cancellation::new(cx.clone()),
+            ambient,
+            poller: None,
+            deadline,
+            timer,
+        }
     }
 
     fn query_deadline(&self) -> NativeDeadline {
         // Leave a bounded margin for joining a successful family with a timed
         // out family and publishing a TTL-zero partial result. The explicit
         // owner deadline still bounds the entire operation.
-        self.deadline.shorten(query_budget(self.deadline.remaining()))
+        self.deadline
+            .shorten(query_budget(self.deadline.remaining()))
     }
 
     fn check(&mut self, task: &mut Context<'_>) -> Result<(), DnsError> {
@@ -411,19 +477,33 @@ impl NativeOwner {
         }
         if let Some(current) = current.filter(|current| {
             !Arc::ptr_eq(&current.inner, &self.owner.cx.inner)
-                && !self.ambient.as_ref().is_some_and(|guard| Arc::ptr_eq(&current.inner, &guard.cx.inner))
+                && !self
+                    .ambient
+                    .as_ref()
+                    .is_some_and(|guard| Arc::ptr_eq(&current.inner, &guard.cx.inner))
         }) {
-            if self.poller.as_ref().is_none_or(|guard| !Arc::ptr_eq(&current.inner, &guard.cx.inner)) {
+            if self
+                .poller
+                .as_ref()
+                .is_none_or(|guard| !Arc::ptr_eq(&current.inner, &guard.cx.inner))
+            {
                 self.poller = Some(Cancellation::new(current));
             }
         } else {
             self.poller = None;
         }
         self.owner.register(task);
-        if let Some(ambient) = &mut self.ambient { ambient.register(task); }
-        if let Some(poller) = &mut self.poller { poller.register(task); }
+        if let Some(ambient) = &mut self.ambient {
+            ambient.register(task);
+        }
+        if let Some(poller) = &mut self.poller {
+            poller.register(task);
+        }
         let old_deadline = self.deadline.at;
-        for guard in std::iter::once(&self.owner).chain(self.ambient.iter()).chain(self.poller.iter()) {
+        for guard in std::iter::once(&self.owner)
+            .chain(self.ambient.iter())
+            .chain(self.poller.iter())
+        {
             meet_budget(&mut self.deadline, &guard.cx);
         }
         if self.deadline.at < old_deadline {
@@ -432,7 +512,10 @@ impl NativeOwner {
         if self.deadline.now() >= self.deadline.at {
             return Err(DnsError::Timeout);
         }
-        for guard in std::iter::once(&self.owner).chain(self.ambient.iter()).chain(self.poller.iter()) {
+        for guard in std::iter::once(&self.owner)
+            .chain(self.ambient.iter())
+            .chain(self.poller.iter())
+        {
             // Checkpoints also enforce budgets. A driverless context must
             // observe its own process clock, not another task's virtual time.
             let _current = guard.cx.clone().set_current_restricted();
@@ -446,12 +529,16 @@ impl NativeOwner {
         Ok(())
     }
 
-    async fn run<T>(&mut self, future: impl Future<Output = Result<T, DnsError>>) -> Result<T, DnsError> {
+    async fn run<T>(
+        &mut self,
+        future: impl Future<Output = Result<T, DnsError>>,
+    ) -> Result<T, DnsError> {
         let mut future = std::pin::pin!(self.owner.cx.with_ambient(future));
         poll_fn(|task| {
             self.check(task)?;
             future.as_mut().poll(task)
-        }).await
+        })
+        .await
     }
 }
 
@@ -472,7 +559,9 @@ fn meet_budget(deadline: &mut NativeDeadline, cx: &Cx) {
             cx.now()
         };
         let remaining = budget.as_nanos().saturating_sub(now.as_nanos());
-        deadline.at = deadline.at.min(deadline.now().saturating_add_nanos(remaining));
+        deadline.at = deadline
+            .at
+            .min(deadline.now().saturating_add_nanos(remaining));
     }
 }
 
@@ -489,34 +578,70 @@ async fn query_nameserver_native(
     }
 }
 
-async fn udp_query(nameserver: SocketAddr, query: &[u8], id: u16) -> Result<ParsedDnsResponse, DnsError> {
-    let mut socket = UdpSocket::bind(bind_addr_for(nameserver)).await.map_err(|error| dns_io_error(&error))?;
-    socket.connect(nameserver).await.map_err(|error| dns_io_error(&error))?;
-    let sent = socket.send(query).await.map_err(|error| dns_io_error(&error))?;
+async fn udp_query(
+    nameserver: SocketAddr,
+    query: &[u8],
+    id: u16,
+) -> Result<ParsedDnsResponse, DnsError> {
+    let mut socket = UdpSocket::bind(bind_addr_for(nameserver))
+        .await
+        .map_err(|error| dns_io_error(&error))?;
+    socket
+        .connect(nameserver)
+        .await
+        .map_err(|error| dns_io_error(&error))?;
+    let sent = socket
+        .send(query)
+        .await
+        .map_err(|error| dns_io_error(&error))?;
     if sent != query.len() {
         return Err(DnsError::Io("short DNS UDP send".into()));
     }
     let mut packet = vec![0u8; MAX_DNS_PACKET];
     for _ in 0..MAX_UNRELATED_REPLIES {
-        let count = socket.recv(&mut packet).await.map_err(|error| dns_io_error(&error))?;
+        let count = socket
+            .recv(&mut packet)
+            .await
+            .map_err(|error| dns_io_error(&error))?;
         if matches_query(&packet[..count], query, id) {
             return parse_dns_response(&packet[..count], id, first_question(query).as_ref());
         }
     }
-    Err(DnsError::Protocol("too many unrelated DNS UDP responses".into()))
+    Err(DnsError::Protocol(
+        "too many unrelated DNS UDP responses".into(),
+    ))
 }
 
-async fn tcp_query(nameserver: SocketAddr, query: &[u8], id: u16) -> Result<ParsedDnsResponse, DnsError> {
-    let mut stream = TcpStream::connect(nameserver).await.map_err(|error| dns_io_error(&error))?;
-    let length = u16::try_from(query.len()).map_err(|_| DnsError::Protocol("DNS query exceeds TCP framing limit".into()))?;
-    stream.write_all(&length.to_be_bytes()).await.map_err(|error| dns_io_error(&error))?;
-    stream.write_all(query).await.map_err(|error| dns_io_error(&error))?;
+async fn tcp_query(
+    nameserver: SocketAddr,
+    query: &[u8],
+    id: u16,
+) -> Result<ParsedDnsResponse, DnsError> {
+    let mut stream = TcpStream::connect(nameserver)
+        .await
+        .map_err(|error| dns_io_error(&error))?;
+    let length = u16::try_from(query.len())
+        .map_err(|_| DnsError::Protocol("DNS query exceeds TCP framing limit".into()))?;
+    stream
+        .write_all(&length.to_be_bytes())
+        .await
+        .map_err(|error| dns_io_error(&error))?;
+    stream
+        .write_all(query)
+        .await
+        .map_err(|error| dns_io_error(&error))?;
     stream.flush().await.map_err(|error| dns_io_error(&error))?;
     for _ in 0..MAX_UNRELATED_REPLIES {
         let mut length = [0u8; 2];
-        stream.read_exact(&mut length).await.map_err(|error| dns_io_error(&error))?;
+        stream
+            .read_exact(&mut length)
+            .await
+            .map_err(|error| dns_io_error(&error))?;
         let mut packet = vec![0u8; usize::from(u16::from_be_bytes(length))];
-        stream.read_exact(&mut packet).await.map_err(|error| dns_io_error(&error))?;
+        stream
+            .read_exact(&mut packet)
+            .await
+            .map_err(|error| dns_io_error(&error))?;
         if matches_query(&packet, query, id) {
             let response = parse_dns_response(&packet, id, first_question(query).as_ref())?;
             if response.truncated {
@@ -525,7 +650,9 @@ async fn tcp_query(nameserver: SocketAddr, query: &[u8], id: u16) -> Result<Pars
             return Ok(response);
         }
     }
-    Err(DnsError::Protocol("too many unrelated DNS TCP responses".into()))
+    Err(DnsError::Protocol(
+        "too many unrelated DNS TCP responses".into(),
+    ))
 }
 
 #[cfg(test)]

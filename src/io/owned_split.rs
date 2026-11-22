@@ -189,7 +189,11 @@ impl<T> Shared<T> {
     fn clear_waiter(&self, side: Side) {
         let stale = {
             let mut state = self.lock();
-            if state.waiter.as_ref().is_some_and(|(owner, _)| *owner == side) {
+            if state
+                .waiter
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == side)
+            {
                 state.waiter.take()
             } else {
                 None
@@ -206,7 +210,9 @@ struct StreamGuard<'a, T> {
 
 impl<'a, T> StreamGuard<'a, T> {
     fn stream_mut(&mut self) -> &mut T {
-        self.stream.as_mut().expect("owned split guard has a stream")
+        self.stream
+            .as_mut()
+            .expect("owned split guard has a stream")
     }
 
     /// Parks `side`'s waker and returns the context to poll the stream with.

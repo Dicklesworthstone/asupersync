@@ -1,9 +1,9 @@
 //! Membership owns admitted native cancellation and terminal buffer retention.
 use super::*;
+use asupersync::distributed::membership::owned::OwnedLeaseStatus;
 use asupersync::distributed::membership::owned::work::{
     MembershipWorkError, MembershipWorkTrigger,
 };
-use asupersync::distributed::membership::owned::OwnedLeaseStatus;
 use asupersync::distributed::remote_owned::{RemoteLeaseSettlement, RemoteRunTrigger};
 use asupersync::observability::task_inspector::TaskInspectorConfig;
 use asupersync::remote::NativeRemoteMembershipError;
@@ -70,7 +70,11 @@ fn admitted_membership_retirement_cancels_and_drains_the_exact_native_invocation
             .await;
             let admitted = domain(
                 &runtime,
-                serving.route.clone().with_membership(owner.clone(), 1).unwrap(),
+                serving
+                    .route
+                    .clone()
+                    .with_membership(owner.clone(), 1)
+                    .unwrap(),
             );
             let _stop = Stop {
                 owner: owner.clone(),
@@ -136,7 +140,10 @@ fn admitted_membership_retirement_cancels_and_drains_the_exact_native_invocation
             assert_ne!(remote.close.unwrap().region_id, outer.region_id);
             let reply = remote.task.unwrap();
             assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
-            assert!(matches!(reply.outcome, Outcome::Ok(RemoteOutcome::Cancelled(_))));
+            assert!(matches!(
+                reply.outcome,
+                Outcome::Ok(RemoteOutcome::Cancelled(_))
+            ));
             assert!(reply.cancellation.is_some());
             assert!(witness.retired.load(Ordering::Acquire));
             assert_eq!(owner.live_leases(), 0);
@@ -167,7 +174,11 @@ fn admitted_membership_requires_a_bound_live_generation_and_explicit_rejoin() {
         let unbound = domain(&runtime, serving.route.clone());
         let bound = domain(
             &runtime,
-            serving.route.clone().with_membership(owner.clone(), 1).unwrap(),
+            serving
+                .route
+                .clone()
+                .with_membership(owner.clone(), 1)
+                .unwrap(),
         );
         let mut stop = Stop {
             owner: owner.clone(),
@@ -184,7 +195,10 @@ fn admitted_membership_requires_a_bound_live_generation_and_explicit_rejoin() {
             .unwrap()
             .run_membership_owned(&cx, &echo, &[], LEASE, config())
             .await;
-        assert!(matches!(refused, Err(NativeRemoteMembershipError::MembershipRequired)));
+        assert!(matches!(
+            refused,
+            Err(NativeRemoteMembershipError::MembershipRequired)
+        ));
         assert_eq!(unbound.usage().buffer_bytes, 0);
 
         let reserved = bound.reserve(&cx, &peer, 0, WAIT).await.unwrap();
@@ -194,9 +208,11 @@ fn admitted_membership_requires_a_bound_live_generation_and_explicit_rejoin() {
             .await;
         assert!(matches!(
             refused,
-            Err(NativeRemoteMembershipError::Membership(MembershipWorkError::Lease(
-                OwnedMembershipError::Control(MembershipControlError::GrantDenied)
-            )))
+            Err(NativeRemoteMembershipError::Membership(
+                MembershipWorkError::Lease(OwnedMembershipError::Control(
+                    MembershipControlError::GrantDenied
+                ))
+            ))
         ));
         apply(&owner, 1, 3, MembershipKind::Alive);
         let stale = bound.reserve(&cx, &peer, 0, WAIT).await.unwrap();
@@ -206,9 +222,11 @@ fn admitted_membership_requires_a_bound_live_generation_and_explicit_rejoin() {
             .await;
         assert!(matches!(
             refused,
-            Err(NativeRemoteMembershipError::Membership(MembershipWorkError::Lease(
-                OwnedMembershipError::Control(MembershipControlError::GrantDenied)
-            )))
+            Err(NativeRemoteMembershipError::Membership(
+                MembershipWorkError::Lease(OwnedMembershipError::Control(
+                    MembershipControlError::GrantDenied
+                ))
+            ))
         ));
         assert_eq!(owner.live_leases(), 0);
         assert_eq!(bound.usage().buffer_bytes, 0);
@@ -216,7 +234,11 @@ fn admitted_membership_requires_a_bound_live_generation_and_explicit_rejoin() {
 
         let fresh = domain(
             &runtime,
-            serving.route.clone().with_membership(owner.clone(), 2).unwrap(),
+            serving
+                .route
+                .clone()
+                .with_membership(owner.clone(), 2)
+                .unwrap(),
         );
         stop.admitted.push(fresh.clone());
         let report = fresh
@@ -269,7 +291,11 @@ fn admitted_membership_retains_unread_body_result_credit_until_consume_or_drop()
             .await;
             let admitted = domain(
                 &runtime,
-                serving.route.clone().with_membership(owner.clone(), 1).unwrap(),
+                serving
+                    .route
+                    .clone()
+                    .with_membership(owner.clone(), 1)
+                    .unwrap(),
             );
             let _stop = Stop {
                 owner: owner.clone(),
@@ -301,16 +327,21 @@ fn admitted_membership_retains_unread_body_result_credit_until_consume_or_drop()
                 .await
                 .unwrap();
             let computation = ComputationName::new("wait");
-            let mut invocation = Box::pin(
-                reserved.run_membership_owned(&cx, &computation, &[], LEASE, config()),
-            );
+            let mut invocation =
+                Box::pin(reserved.run_membership_owned(&cx, &computation, &[], LEASE, config()));
             let mut parked = std::pin::pin!(
-                witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire))
+                witness
+                    .changed
+                    .wait_until(|| witness.parked.load(Ordering::Acquire))
             );
-            asupersync::time::timeout(cx.now(), WAIT, poll_fn(|task| {
-                assert!(invocation.as_mut().poll(task).is_pending());
-                parked.as_mut().poll(task)
-            }))
+            asupersync::time::timeout(
+                cx.now(),
+                WAIT,
+                poll_fn(|task| {
+                    assert!(invocation.as_mut().poll(task).is_pending());
+                    parked.as_mut().poll(task)
+                }),
+            )
             .await
             .expect("membership body has started the real native peer");
 
@@ -346,7 +377,17 @@ fn admitted_membership_retains_unread_body_result_credit_until_consume_or_drop()
                 let report = invocation.await.unwrap();
                 assert!(!report.is_success());
                 assert!(report.work.close.is_ok());
-                assert!(report.work.task.as_ref().unwrap().as_ref().unwrap().close.is_ok());
+                assert!(
+                    report
+                        .work
+                        .task
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .close
+                        .is_ok()
+                );
                 eventually(&cx, || admitted.usage().buffer_bytes == 0).await;
                 // Holding the public report now retains caller-owned bytes.
                 assert!(report.work.task.is_ok());

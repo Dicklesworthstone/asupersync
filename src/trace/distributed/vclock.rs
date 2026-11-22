@@ -29,15 +29,15 @@
 //! assert!(merged.get(&node_b) == 1);
 //! ```
 
+use crate::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::pl::Mutex;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
-use crate::sync::pl::Mutex;
 #[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Identifier for a remote node in the cluster.
 ///

@@ -363,7 +363,7 @@ impl MerkleV2Hasher {
         self.bytes(value.as_bytes());
     }
 
-    fn option<T>(&mut self, value: &Option<T>, encode: impl FnOnce(&mut Self, &T)) {
+    fn option<T>(&mut self, value: Option<&T>, encode: impl FnOnce(&mut Self, &T)) {
         self.boolean(value.is_some());
         if let Some(value) = value {
             encode(self, value);
@@ -427,8 +427,8 @@ impl MerkleV2Hasher {
     }
 
     fn compare_paths(
-        left: &Option<std::path::PathBuf>,
-        right: &Option<std::path::PathBuf>,
+        left: Option<&std::path::PathBuf>,
+        right: Option<&std::path::PathBuf>,
     ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
 
@@ -472,15 +472,23 @@ impl MerkleV2Hasher {
     ) {
         self.id(id);
         self.byte(metadata.kind as u8);
-        self.option(&metadata.size_bytes, |h, value| h.u64(*value));
+        self.option(metadata.size_bytes.as_ref(), |h, value| h.u64(*value));
         let platform = &metadata.platform;
-        self.option(&platform.unix_mode, |h, value| h.u32(*value));
-        self.option(&platform.windows_attributes, |h, value| h.u32(*value));
+        self.option(platform.unix_mode.as_ref(), |h, value| h.u32(*value));
+        self.option(platform.windows_attributes.as_ref(), |h, value| {
+            h.u32(*value)
+        });
         self.attributes(&platform.extended_attributes);
-        self.option(&platform.created_time_nanos, |h, value| h.u64(*value));
-        self.option(&platform.modified_time_nanos, |h, value| h.u64(*value));
-        self.option(&platform.accessed_time_nanos, |h, value| h.u64(*value));
-        self.option(&metadata.application, |h, application| {
+        self.option(platform.created_time_nanos.as_ref(), |h, value| {
+            h.u64(*value)
+        });
+        self.option(platform.modified_time_nanos.as_ref(), |h, value| {
+            h.u64(*value)
+        });
+        self.option(platform.accessed_time_nanos.as_ref(), |h, value| {
+            h.u64(*value)
+        });
+        self.option(metadata.application.as_ref(), |h, application| {
             h.string(&application.extension_type);
             h.u32(application.schema_version);
             h.attributes(&application.metadata);
@@ -495,7 +503,7 @@ impl MerkleV2Hasher {
                     // Path ordering normalizes separators, while the digest
                     // binds the original bytes. Break every tie by those bytes
                     // so even equivalent path spellings have a stable order.
-                    Self::compare_paths(&left.symlink_target, &right.symlink_target)
+                    Self::compare_paths(left.symlink_target.as_ref(), right.symlink_target.as_ref())
                 })
         });
         self.count(children.len());
@@ -503,9 +511,9 @@ impl MerkleV2Hasher {
             self.string(&edge.name);
             self.id(&edge.child_id);
             self.boolean(edge.is_symlink);
-            self.option(&edge.symlink_target, |h, target| h.path(target));
+            self.option(edge.symlink_target.as_ref(), |h, target| h.path(target));
         }
-        self.option(&content, |h, (length, hash)| {
+        self.option(content.as_ref(), |h, (length, hash)| {
             h.u64(*length);
             h.0.update(hash);
         });
@@ -514,7 +522,9 @@ impl MerkleV2Hasher {
     fn key_derivation(&mut self, value: &KeyDerivation) {
         self.byte(value.kdf as u8);
         self.bytes(&value.salt);
-        self.option(&value.iterations, |h, iterations| h.u32(*iterations));
+        self.option(value.iterations.as_ref(), |h, iterations| {
+            h.u32(*iterations)
+        });
     }
 
     fn capability_policy(&mut self, value: &CapabilityPolicy) {
@@ -525,7 +535,7 @@ impl MerkleV2Hasher {
             h.string(&rule.capability);
             h.string(&rule.target);
             h.sequence(&rule.constraints, |h, constraint| h.string(constraint));
-            h.option(&rule.expires_at, |h, expiry| h.u64(*expiry));
+            h.option(rule.expires_at.as_ref(), |h, expiry| h.u64(*expiry));
         });
     }
 
@@ -567,7 +577,7 @@ impl MerkleV2Hasher {
             } => {
                 self.byte(3);
                 self.boolean(*is_sparse_hole);
-                self.option(hole_metadata, |h, hole| {
+                self.option(hole_metadata.as_ref(), |h, hole| {
                     h.u64(hole.hole_size);
                     h.string(&hole.hole_type);
                     h.attributes(&hole.attributes);
@@ -579,7 +589,9 @@ impl MerkleV2Hasher {
             } => {
                 self.byte(4);
                 self.string(&build_context.build_system);
-                self.option(&build_context.build_timestamp, |h, value| h.u64(*value));
+                self.option(build_context.build_timestamp.as_ref(), |h, value| {
+                    h.u64(*value)
+                });
                 self.0.update(build_context.environment_hash);
                 self.string(&build_context.toolchain_version);
                 self.byte(*proof_strength as u8);
@@ -598,20 +610,20 @@ impl MerkleV2Hasher {
     fn manifest_object(&mut self, object: &ManifestObject) {
         self.id(&object.id);
         self.byte(object.kind as u8);
-        self.option(&object.size_bytes, |h, value| h.u64(*value));
+        self.option(object.size_bytes.as_ref(), |h, value| h.u64(*value));
         self.count(object.children.len());
         for (name, id) in &object.children {
             self.string(name);
             self.id(id);
         }
-        self.option(&object.content_hash, |h, hash| h.0.update(hash));
+        self.option(object.content_hash.as_ref(), |h, hash| h.0.update(hash));
         self.sequence(&object.chunk_boundaries, |h, chunk| {
             h.u32(chunk.index);
             h.u64(chunk.byte_offset);
             h.u64(chunk.size_bytes);
             h.0.update(chunk.content_hash);
             h.byte(chunk.strategy as u8);
-            h.option(&chunk.metadata, Self::chunk_metadata);
+            h.option(chunk.metadata.as_ref(), Self::chunk_metadata);
         });
         self.sequence(&object.raptorq_symbols, |h, symbol| {
             h.u32(symbol.index);
@@ -619,19 +631,19 @@ impl MerkleV2Hasher {
             h.u32(symbol.size_bytes);
             h.0.update(symbol.content_hash);
             h.boolean(symbol.is_source);
-            h.option(&symbol.repair_group_id, |h, group| {
+            h.option(symbol.repair_group_id.as_ref(), |h, group| {
                 h.0.update(group.as_bytes());
             });
-            h.option(&symbol.auth_tag, |h, tag| h.0.update(tag));
+            h.option(symbol.auth_tag.as_ref(), |h, tag| h.0.update(tag));
         });
-        self.option(&object.compression_metadata, |h, compression| {
+        self.option(object.compression_metadata.as_ref(), |h, compression| {
             h.byte(compression.algorithm as u8);
             h.byte(compression.level);
             h.u64(compression.original_size);
             h.u64(compression.compressed_size);
             h.u32(compression.compression_ratio.to_bits());
         });
-        self.option(&object.encryption_metadata, |h, encryption| {
+        self.option(object.encryption_metadata.as_ref(), |h, encryption| {
             h.byte(encryption.algorithm as u8);
             h.bytes(&encryption.iv);
             h.bytes(&encryption.auth_tag);
@@ -670,7 +682,7 @@ impl MerkleV2Hasher {
         self.string(&group.hash_domain.domain_id);
         self.byte(group.hash_domain.hash_algorithm as u8);
         self.bytes(&group.hash_domain.context);
-        self.option(&group.transform_policy, Self::transform_order);
+        self.option(group.transform_policy.as_ref(), Self::transform_order);
         let auth = &group.auth_domain;
         self.string(&auth.domain_id);
         self.byte(auth.required_proof_strength as u8);
@@ -678,7 +690,7 @@ impl MerkleV2Hasher {
         self.boolean(auth.peer_identity_required);
         self.boolean(auth.transfer_identity_binding);
         self.boolean(auth.session_binding);
-        self.option(&group.capability_policy, Self::capability_policy);
+        self.option(group.capability_policy.as_ref(), Self::capability_policy);
         // This is the existing v1 binding, not the detached v2 digest.
         // Committing its bytes and symbol tags introduces no fixed point.
         self.0.update(group.manifest_root.hash());
@@ -687,13 +699,13 @@ impl MerkleV2Hasher {
     fn components(
         &mut self,
         objects: &BTreeMap<ObjectId, ManifestObject>,
-        chunk_plan: &Option<ChunkPlan>,
-        raptorq_layout: &Option<RaptorQRepairLayout>,
-        compression_policy: &Option<CompressionPolicy>,
-        encryption_policy: &Option<EncryptionPolicy>,
-        capability_policy: &Option<CapabilityPolicy>,
-        transform_order: &Option<TransformOrder>,
-        transform_proof_policy: &Option<TransformProofPolicy>,
+        chunk_plan: Option<&ChunkPlan>,
+        raptorq_layout: Option<&RaptorQRepairLayout>,
+        compression_policy: Option<&CompressionPolicy>,
+        encryption_policy: Option<&EncryptionPolicy>,
+        capability_policy: Option<&CapabilityPolicy>,
+        transform_order: Option<&TransformOrder>,
+        transform_proof_policy: Option<&TransformProofPolicy>,
         repair_groups: &BTreeMap<RepairGroupId, RepairGroup>,
     ) {
         self.count(objects.len());
@@ -706,7 +718,7 @@ impl MerkleV2Hasher {
             h.u64(plan.target_chunk_size);
             h.u64(plan.min_chunk_size);
             h.u64(plan.max_chunk_size);
-            h.option(&plan.cdc_params, |h, cdc| {
+            h.option(plan.cdc_params.as_ref(), |h, cdc| {
                 h.u32(cdc.window_size);
                 h.u64(cdc.average_chunk_size);
                 h.u64(cdc.normalization);
@@ -743,7 +755,9 @@ impl MerkleV2Hasher {
             h.boolean(proof.require_deterministic_transforms);
             h.boolean(proof.allow_lossy_transforms);
             h.boolean(proof.require_plaintext_hash);
-            h.option(&proof.max_compression_ratio, |h, ratio| h.u32(ratio.to_bits()));
+            h.option(proof.max_compression_ratio.as_ref(), |h, ratio| {
+                h.u32(ratio.to_bits())
+            });
             h.sequence(&proof.encryption_domains, |h, domain| {
                 h.string(&domain.domain_id);
                 h.sequence(&domain.allowed_kdfs, |h, kdf| h.byte(*kdf as u8));
@@ -945,13 +959,13 @@ impl MerkleRoot {
         let mut hasher = MerkleV2Hasher::new(b"manifest-components");
         hasher.components(
             objects,
-            chunk_plan,
-            raptorq_layout,
-            compression_policy,
-            encryption_policy,
-            capability_policy,
-            transform_order,
-            transform_proof_policy,
+            chunk_plan.as_ref(),
+            raptorq_layout.as_ref(),
+            compression_policy.as_ref(),
+            encryption_policy.as_ref(),
+            capability_policy.as_ref(),
+            transform_order.as_ref(),
+            transform_proof_policy.as_ref(),
             repair_groups,
         );
         hasher.finish()
@@ -989,13 +1003,13 @@ impl MerkleRoot {
         });
         hasher.components(
             &manifest.objects,
-            &manifest.chunk_plan,
-            &manifest.raptorq_layout,
-            &manifest.compression_policy,
-            &manifest.encryption_policy,
-            &manifest.capability_policy,
-            &manifest.transform_order,
-            &manifest.transform_proof_policy,
+            manifest.chunk_plan.as_ref(),
+            manifest.raptorq_layout.as_ref(),
+            manifest.compression_policy.as_ref(),
+            manifest.encryption_policy.as_ref(),
+            manifest.capability_policy.as_ref(),
+            manifest.transform_order.as_ref(),
+            manifest.transform_proof_policy.as_ref(),
             &manifest.repair_groups,
         );
         hasher.sequence(&manifest.unknown_optional_fields, |h, field| {

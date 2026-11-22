@@ -1,7 +1,9 @@
 //! Byte-limited atomic copies on the same region-owned staging/commit boundary.
 
-use super::{OperationProbeHook, ScopedFs, ScopedFsError, checkpoint, stage_with,
-    validate_safe_path, write_checkpointed, WRITE_CHUNK_BYTES};
+use super::{
+    OperationProbeHook, ScopedFs, ScopedFsError, WRITE_CHUNK_BYTES, checkpoint, stage_with,
+    validate_safe_path, write_checkpointed,
+};
 use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -55,16 +57,24 @@ where
         self.run_io(move |child| {
             validate_safe_path(&from, true)?;
             let mut copied = 0;
-            let staged = stage_with(&to, true, || checkpoint(&child), |file| {
-                let mut source = File::open(from)?;
-                copied = copy_checkpointed(&mut source, file, max_bytes, || checkpoint(&child))?;
-                // The source closes here before staging sync and target commit.
-                Ok(())
-            }, OperationProbeHook::default())?;
+            let staged = stage_with(
+                &to,
+                true,
+                || checkpoint(&child),
+                |file| {
+                    let mut source = File::open(from)?;
+                    copied =
+                        copy_checkpointed(&mut source, file, max_bytes, || checkpoint(&child))?;
+                    // The source closes here before staging sync and target commit.
+                    Ok(())
+                },
+                OperationProbeHook::default(),
+            )?;
             checkpoint(&child)?;
             staged.commit()?;
             Ok(copied)
-        }).await
+        })
+        .await
     }
 }
 
@@ -80,20 +90,25 @@ fn copy_checkpointed(
         checkpoint()?;
         let remaining = max_bytes - copied;
         let requested = usize::try_from(remaining.min(WRITE_CHUNK_BYTES as u64))
-            .expect("request is bounded by scratch length").max(1);
+            .expect("request is bounded by scratch length")
+            .max(1);
         let count = match source.read(&mut scratch[..requested]) {
             Ok(0) => return Ok(copied),
             Ok(count) if count <= requested => count,
-            Ok(_) => return Err(io::Error::new(
-                io::ErrorKind::InvalidData, "reader reported more bytes than requested",
-            )),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "reader reported more bytes than requested",
+                ));
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
         let count_u64 = u64::try_from(count).expect("read fits the fixed scratch buffer");
         if count_u64 > remaining {
             return Err(io::Error::new(
-                io::ErrorKind::FileTooLarge, "source exceeds atomic copy byte limit",
+                io::ErrorKind::FileTooLarge,
+                "source exceeds atomic copy byte limit",
             ));
         }
         write_checkpointed(target, &scratch[..count], &mut checkpoint)?;

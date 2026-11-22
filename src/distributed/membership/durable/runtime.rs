@@ -66,66 +66,119 @@ impl fmt::Debug for PersistentMembershipController {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PersistentMembershipController")
             .field("closed", &self.closed.load(Ordering::Acquire))
-            .field("update_in_flight", &self.update_in_flight()).finish_non_exhaustive()
+            .field("update_in_flight", &self.update_in_flight())
+            .finish_non_exhaustive()
     }
 }
 impl PersistentMembershipController {
     /// Consume a verified/synced journal and reconstruct the private live policy.
     /// Call off the async executor during startup. Initial floors, epoch and keys
     /// were already checked by journal open. No lease is revived by this method.
-    pub fn new(journal: MembershipJournal, clock: TimerDriverHandle) -> Result<Self, PersistentMembershipError> {
+    pub fn new(
+        journal: MembershipJournal,
+        clock: TimerDriverHandle,
+    ) -> Result<Self, PersistentMembershipError> {
         if journal.status() == MembershipJournalStatus::Poisoned {
             return Err(MembershipJournalError::NotWritable(journal.status()).into());
         }
         let config = &journal.core.config;
-        let owner = OwnedMembershipController::new(config.authority.clone(), config.epoch,
-            config.statement_key.clone(), config.floors.clone(), config.controller_limits, clock)?;
-        for bytes in journal.core.latest.values() { owner.apply_authenticated(&config.authority, bytes)?; }
-        Ok(Self { authority: config.authority.clone(), owner,
-            journal: Mutex::new(Some(journal)), closed: AtomicBool::new(false), driver_started: AtomicBool::new(false) })
+        let owner = OwnedMembershipController::new(
+            config.authority.clone(),
+            config.epoch,
+            config.statement_key.clone(),
+            config.floors.clone(),
+            config.controller_limits,
+            clock,
+        )?;
+        for bytes in journal.core.latest.values() {
+            owner.apply_authenticated(&config.authority, bytes)?;
+        }
+        Ok(Self {
+            authority: config.authority.clone(),
+            owner,
+            journal: Mutex::new(Some(journal)),
+            closed: AtomicBool::new(false),
+            driver_started: AtomicBool::new(false),
+        })
     }
     /// The last durably admitted decision, once projected to the owned controller.
-    pub fn stamp(&self, node: &NodeId) -> Option<MembershipStamp> { self.owner.stamp(node) }
+    pub fn stamp(&self, node: &NodeId) -> Option<MembershipStamp> {
+        self.owner.stamp(node)
+    }
     /// Owned guards and pending checked runtime registrations.
-    pub fn live_leases(&self) -> usize { self.owner.live_leases() }
+    pub fn live_leases(&self) -> usize {
+        self.owner.live_leases()
+    }
     /// Whether another update owns the journal, including a queued blocking job.
     pub fn update_in_flight(&self) -> bool {
         self.journal.try_lock().is_none_or(|slot| slot.is_none())
     }
     /// No I/O: None means an update currently owns the journal or mutex.
     pub fn journal_status(&self) -> Option<MembershipJournalStatus> {
-        self.journal.try_lock().and_then(|slot| slot.as_ref().map(MembershipJournal::status))
+        self.journal
+            .try_lock()
+            .and_then(|slot| slot.as_ref().map(MembershipJournal::status))
     }
     /// Checked lease admission under only already-persisted decisions.
-    pub fn try_grant(&self, cx: &Cx, node: &NodeId, incarnation: u64, duration: Duration)
-        -> Result<OwnedMembershipLease, OwnedMembershipError>
-    {
-        if self.closed.load(Ordering::Acquire) { return Err(OwnedMembershipError::Closed); }
+    pub fn try_grant(
+        &self,
+        cx: &Cx,
+        node: &NodeId,
+        incarnation: u64,
+        duration: Duration,
+    ) -> Result<OwnedMembershipLease, OwnedMembershipError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(OwnedMembershipError::Closed);
+        }
         self.owner.try_grant(cx, node, incarnation, duration)
     }
     /// Existing child-region execution/drain behavior, with durable grant policy.
-    pub async fn run_scoped<T, F, Fut>(&self, cx: &Cx, node: &NodeId, incarnation: u64,
-        duration: Duration, spec: ChildRegionSpec, factory: F)
-        -> Result<MembershipWorkReport<T>, MembershipWorkError>
-    where T: Send + 'static, F: FnOnce(Cx) -> Fut + Send + 'static,
+    pub async fn run_scoped<T, F, Fut>(
+        &self,
+        cx: &Cx,
+        node: &NodeId,
+        incarnation: u64,
+        duration: Duration,
+        spec: ChildRegionSpec,
+        factory: F,
+    ) -> Result<MembershipWorkReport<T>, MembershipWorkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        if self.closed.load(Ordering::Acquire) { return Err(OwnedMembershipError::Closed.into()); }
-        self.owner.run_scoped(cx, node, incarnation, duration, spec, factory).await
+        if self.closed.load(Ordering::Acquire) {
+            return Err(OwnedMembershipError::Closed.into());
+        }
+        self.owner
+            .run_scoped(cx, node, incarnation, duration, spec, factory)
+            .await
     }
     /// Drive the existing expiry loop in a caller-owned task. This adds no task.
     pub async fn run(&self, cx: &Cx) -> Result<(), OwnedMembershipError> {
-        if self.closed.load(Ordering::Acquire) { return Err(OwnedMembershipError::Closed); }
-        if self.driver_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(OwnedMembershipError::Closed);
+        }
+        if self
+            .driver_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err(OwnedMembershipError::DriverRunning);
         }
         struct Driver<'a>(&'a PersistentMembershipController);
-        impl Drop for Driver<'_> { fn drop(&mut self) { self.0.close(); } }
+        impl Drop for Driver<'_> {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
         let _driver = Driver(self);
         self.owner.run(cx).await
     }
     /// Explicit expiry for embeddings with their own timer driver.
-    pub fn expire(&self) -> Result<usize, OwnedMembershipError> { self.owner.expire() }
+    pub fn expire(&self) -> Result<usize, OwnedMembershipError> {
+        self.owner.expire()
+    }
     /// Close local admission and abort guards. Does not cancel a started disk
     /// syscall, erase its possibly committed decision, or persist a new statement.
     pub fn close(&self) {
@@ -135,24 +188,42 @@ impl PersistentMembershipController {
     /// Synchronous local adapter. Peer identity is caller authority, not a proof
     /// from a string; network users should register the certificate-bound service.
     /// Use a blocking worker, never an async executor thread. No retry is added.
-    pub fn apply_blocking(self: &Arc<Self>, peer: &NodeId, bytes: &[u8])
-        -> Result<MembershipApplied, PersistentMembershipError>
-    {
+    pub fn apply_blocking(
+        self: &Arc<Self>,
+        peer: &NodeId,
+        bytes: &[u8],
+    ) -> Result<MembershipApplied, PersistentMembershipError> {
         self.prepare(peer, bytes)?.execute()
     }
-    fn prepare(self: &Arc<Self>, peer: &NodeId, bytes: &[u8]) -> Result<UpdateJob, PersistentMembershipError> {
-        if self.closed.load(Ordering::Acquire) { return Err(PersistentMembershipError::Closed); }
+    fn prepare(
+        self: &Arc<Self>,
+        peer: &NodeId,
+        bytes: &[u8],
+    ) -> Result<UpdateJob, PersistentMembershipError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PersistentMembershipError::Closed);
+        }
         if peer != &self.authority {
             return Err(MembershipJournalError::Control(MembershipControlError::Authority).into());
         }
         if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) {
             return Err(MembershipJournalError::Control(MembershipControlError::Format).into());
         }
-        let journal = self.journal.try_lock().ok_or(PersistentMembershipError::Busy)?
-            .take().ok_or(PersistentMembershipError::Busy)?;
-        let mut job = UpdateJob { controller: Arc::clone(self), journal: Some(journal),
-            bytes: Zeroizing::new(Vec::new()), projecting: false };
-        job.bytes.try_reserve_exact(bytes.len()).map_err(|_| MembershipJournalError::Allocation)?;
+        let journal = self
+            .journal
+            .try_lock()
+            .ok_or(PersistentMembershipError::Busy)?
+            .take()
+            .ok_or(PersistentMembershipError::Busy)?;
+        let mut job = UpdateJob {
+            controller: Arc::clone(self),
+            journal: Some(journal),
+            bytes: Zeroizing::new(Vec::new()),
+            projecting: false,
+        };
+        job.bytes
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| MembershipJournalError::Allocation)?;
         job.bytes.extend_from_slice(bytes);
         Ok(job)
     }
@@ -163,7 +234,9 @@ impl PersistentMembershipController {
     }
 }
 impl Drop for PersistentMembershipController {
-    fn drop(&mut self) { self.owner.close(); }
+    fn drop(&mut self) {
+        self.owner.close();
+    }
 }
 
 // Ownership exists before request copying/spawn. A cancelled unstarted closure
@@ -176,29 +249,53 @@ struct UpdateJob {
 }
 impl UpdateJob {
     fn execute(mut self) -> Result<MembershipApplied, PersistentMembershipError> {
-        if self.controller.closed.load(Ordering::Acquire) { return Err(PersistentMembershipError::Closed); }
-        self.journal.as_mut().expect("admitted journal").append(&self.bytes)?;
+        if self.controller.closed.load(Ordering::Acquire) {
+            return Err(PersistentMembershipError::Closed);
+        }
+        self.journal
+            .as_mut()
+            .expect("admitted journal")
+            .append(&self.bytes)?;
         // A crash now replays the synced decision. A projection refusal/panic
         // instead closes this live owner so it cannot continue under stale policy.
         self.projecting = true;
-        let applied = self.controller.owner.apply_authenticated(&self.controller.authority, &self.bytes)?;
+        let applied = self
+            .controller
+            .owner
+            .apply_authenticated(&self.controller.authority, &self.bytes)?;
         self.projecting = false;
         Ok(applied)
     }
 }
 impl Drop for UpdateJob {
     fn drop(&mut self) {
-        let Some(journal) = self.journal.take() else { return; };
+        let Some(journal) = self.journal.take() else {
+            return;
+        };
         let must_close = self.projecting || journal.status() == MembershipJournalStatus::Poisoned;
         // Return even when a close notifier unwinds, but only AFTER local closure
         // and sensitive request retirement. No callback runs with the slot locked.
-        struct Return<'a> { controller: &'a PersistentMembershipController, journal: Option<MembershipJournal> }
-        impl Drop for Return<'_> {
-            fn drop(&mut self) { self.controller.return_journal(self.journal.take().expect("return once")); }
+        struct Return<'a> {
+            controller: &'a PersistentMembershipController,
+            journal: Option<MembershipJournal>,
         }
-        let _return = Return { controller: &self.controller, journal: Some(journal) };
-        drop(std::mem::replace(&mut self.bytes, Zeroizing::new(Vec::new())));
-        if must_close { self.controller.close(); }
+        impl Drop for Return<'_> {
+            fn drop(&mut self) {
+                self.controller
+                    .return_journal(self.journal.take().expect("return once"));
+            }
+        }
+        let _return = Return {
+            controller: &self.controller,
+            journal: Some(journal),
+        };
+        drop(std::mem::replace(
+            &mut self.bytes,
+            Zeroizing::new(Vec::new()),
+        ));
+        if must_close {
+            self.controller.close();
+        }
     }
 }
 
@@ -207,21 +304,35 @@ impl Drop for UpdateJob {
 struct Request;
 struct Response;
 impl HasSchema for Request {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.membership-authority.signed-statement.v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("asupersync.membership-authority.signed-statement.v1")
+    }
 }
 impl HasSchema for Response {
-    fn schema() -> SchemaDescriptor { SchemaDescriptor::primitive("asupersync.membership-authority.accepted-statement-echo.v1") }
+    fn schema() -> SchemaDescriptor {
+        SchemaDescriptor::primitive("asupersync.membership-authority.accepted-statement-echo.v1")
+    }
 }
 fn cancelled(cx: &Cx) -> RemoteOutcome {
-    cx.cancel_reason().map_or_else(|| RemoteOutcome::Failed("persistent membership worker refused".to_owned()), RemoteOutcome::Cancelled)
+    cx.cancel_reason().map_or_else(
+        || RemoteOutcome::Failed("persistent membership worker refused".to_owned()),
+        RemoteOutcome::Cancelled,
+    )
 }
 
 async fn dispatch(
-    cx: &Cx, controller: Arc<PersistentMembershipController>, peer: &NodeId, bytes: &[u8],
+    cx: &Cx,
+    controller: Arc<PersistentMembershipController>,
+    peer: &NodeId,
+    bytes: &[u8],
 ) -> RemoteOutcome {
-    if cx.checkpoint().is_err() { return cancelled(cx); }
+    if cx.checkpoint().is_err() {
+        return cancelled(cx);
+    }
     if cx.blocking_pool_handle().is_none() {
-        return RemoteOutcome::Failed("persistent membership requires a context blocking pool".to_owned());
+        return RemoteOutcome::Failed(
+            "persistent membership requires a context blocking pool".to_owned(),
+        );
     }
     let job = match controller.prepare(peer, bytes) {
         Ok(job) => job,
@@ -229,14 +340,20 @@ async fn dispatch(
     };
     let receipt = job.bytes.to_vec();
     let mut worker = match cx.spawn_blocking_drained(move |worker| {
-        if worker.checkpoint().is_err() { return cancelled(&worker); }
+        if worker.checkpoint().is_err() {
+            return cancelled(&worker);
+        }
         match job.execute() {
             Ok(_) => RemoteOutcome::Success(receipt),
             Err(error) => RemoteOutcome::Failed(error.to_string()),
         }
     }) {
         Ok(worker) => worker,
-        Err(_) => return RemoteOutcome::Failed("persistent membership worker admission refused".to_owned()),
+        Err(_) => {
+            return RemoteOutcome::Failed(
+                "persistent membership worker admission refused".to_owned(),
+            );
+        }
     };
     // Handler cancellation cannot retire the region owner while a queued or
     // running update still owns its journal. Joining independently of the
@@ -249,7 +366,9 @@ async fn dispatch(
     // cooperative completion policy as well as through the worker's join.
     // Acknowledge an observed cancellation only after the worker has retired;
     // an already-persisted decision cannot be replaced with a cancellation.
-    if cx.is_cancel_requested() { let _ = cx.checkpoint(); }
+    if cx.is_cancel_requested() {
+        let _ = cx.checkpoint();
+    }
     outcome
 }
 
@@ -268,15 +387,25 @@ async fn dispatch(
 /// delay region drain. The echo follows sync and checked local revocation posts;
 /// it does not certify child drain, peer liveness or persistent runtime tokens.
 /// V1 avoids replaying framework-cached lifecycle receipts after backend restart.
-pub fn register_persistent_membership_service(registry: &mut RemoteComputationRegistry,
-    controller: Arc<PersistentMembershipController>) -> Result<(), ComputationSchemaRegistryError>
-{
-    registry.register::<Request, Response, _, _>(MEMBERSHIP_SERVICE_COMPUTATION, move |cx, invocation| {
-        let controller = Arc::clone(&controller);
-        async move {
-            Ok(dispatch(&cx, controller, invocation.peer_node(), invocation.request().input.data()).await)
-        }
-    })
+pub fn register_persistent_membership_service(
+    registry: &mut RemoteComputationRegistry,
+    controller: Arc<PersistentMembershipController>,
+) -> Result<(), ComputationSchemaRegistryError> {
+    registry.register::<Request, Response, _, _>(
+        MEMBERSHIP_SERVICE_COMPUTATION,
+        move |cx, invocation| {
+            let controller = Arc::clone(&controller);
+            async move {
+                Ok(dispatch(
+                    &cx,
+                    controller,
+                    invocation.peer_node(),
+                    invocation.request().input.data(),
+                )
+                .await)
+            }
+        },
+    )
 }
 
 #[cfg(test)]

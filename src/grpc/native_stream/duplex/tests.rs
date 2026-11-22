@@ -460,9 +460,16 @@ mod keepalive {
     }
 
     fn terminal(connection: &mut Connection) {
-        connection.send_headers(1, vec![
-            Header::new("grpc-status", "0"), Header::new("x-terminal", "keepalive"),
-        ], true).unwrap();
+        connection
+            .send_headers(
+                1,
+                vec![
+                    Header::new("grpc-status", "0"),
+                    Header::new("x-terminal", "keepalive"),
+                ],
+                true,
+            )
+            .unwrap();
     }
 
     fn heartbeat_peer(
@@ -505,7 +512,9 @@ mod keepalive {
             let mut terminated = false;
             loop {
                 let mut bytes = [0; FRAME_BYTES];
-                let read = socket.read(&mut bytes).expect("keepalive peer read or retirement EOF");
+                let read = socket
+                    .read(&mut bytes)
+                    .expect("keepalive peer read or retirement EOF");
                 if read == 0 {
                     assert!(received_data && body.is_empty());
                     return (probes, peer_acks, uploads);
@@ -514,7 +523,9 @@ mod keepalive {
                 while let Some(frame) = frames.decode(&mut input).unwrap() {
                     if let Frame::Ping(ping) = &frame {
                         if ping.ack {
-                            if ping.opaque_data == 99_u64.to_be_bytes() { peer_acks += 1; }
+                            if ping.opaque_data == 99_u64.to_be_bytes() {
+                                peer_acks += 1;
+                            }
                         } else if !received_data {
                             // A slow test worker may spend an idle interval
                             // before uploading; acknowledge setup probes too.
@@ -527,10 +538,15 @@ mod keepalive {
                                 Mode::Ack => {
                                     write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
                                     if probes == 1 {
-                                        write_ping(&mut socket, PingFrame::new(99_u64.to_be_bytes()));
+                                        write_ping(
+                                            &mut socket,
+                                            PingFrame::new(99_u64.to_be_bytes()),
+                                        );
                                     }
                                     reply(&mut connection, &mut codec, b"beat");
-                                    if watch && probes == 2 { terminal(&mut connection); }
+                                    if watch && probes == 2 {
+                                        terminal(&mut connection);
+                                    }
                                 }
                                 Mode::WrongAck => {
                                     let mut wrong = ping.opaque_data;
@@ -557,9 +573,13 @@ mod keepalive {
                                     write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
                                 }
                                 Mode::Cancel => {
-                                    let owner = witnessed.recv_timeout(LIMIT)
+                                    let owner = witnessed
+                                        .recv_timeout(LIMIT)
                                         .expect("actual parked native owner witness");
-                                    owner.cancel_with(CancelKind::User, Some("keepalive parked call"));
+                                    owner.cancel_with(
+                                        CancelKind::User,
+                                        Some("keepalive parked call"),
+                                    );
                                 }
                             }
                             write_pending(&mut socket, &mut connection);
@@ -573,7 +593,9 @@ mod keepalive {
                             assert_eq!(stream_id, 1);
                             response_headers(&mut connection);
                         }
-                        Some(ReceivedFrame::Data { data, end_stream, .. }) => {
+                        Some(ReceivedFrame::Data {
+                            data, end_stream, ..
+                        }) => {
                             body.extend_from_slice(&data);
                             while let Some(message) = codec.decode_message(&mut body).unwrap() {
                                 assert_eq!(message.as_ref(), b"upload");
@@ -661,8 +683,13 @@ mod keepalive {
     fn scenario(workers: usize, mode: Mode, watch: bool) {
         let (witness, witnessed) = mpsc::channel();
         let (address, peer) = heartbeat_peer(mode, watch, witnessed);
-        let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
-            else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .unwrap();
         let result = runtime.block_on(runtime.handle().spawn_checked(async move {
             let cx = Cx::current().unwrap();
             let channel = Channel::builder(format!("http://{address}"))
@@ -767,11 +794,20 @@ mod keepalive {
         }
         let (probes, peer_acks, _) = peer.join().expect("peer observed transport retirement EOF");
         assert_eq!(probes, if matches!(mode, Mode::Ack) { 2 } else { 1 });
-        assert_eq!(peer_acks, usize::from(matches!(mode, Mode::Ack | Mode::WrongAck)));
+        assert_eq!(
+            peer_acks,
+            usize::from(matches!(mode, Mode::Ack | Mode::WrongAck))
+        );
         let report = runtime.shutdown_drained(LIMIT);
         assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
-        assert_eq!(report.live_tasks + report.pending_obligations + report.live_regions
-            + report.queued_finalizers + report.pending_spawns, 0);
+        assert_eq!(
+            report.live_tasks
+                + report.pending_obligations
+                + report.live_regions
+                + report.queued_finalizers
+                + report.pending_spawns,
+            0
+        );
         assert!(!report.has_pending_obligation_posts);
         assert!(runtime.shutdown_timeout(LIMIT));
     }
@@ -785,59 +821,73 @@ mod keepalive {
         const UPLOADS: usize = 40;
         let (_witness, witnessed) = mpsc::channel();
         let (address, peer) = heartbeat_peer(mode, false, witnessed);
-        let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
-            else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
-        let (result, sent, echoes) = runtime.block_on(runtime.handle().spawn_checked(async move {
-            let cx = Cx::current().unwrap();
-            let mut builder = Channel::builder(format!("http://{address}"))
-                .keepalive_interval(Duration::from_millis(100))
-                .keepalive_timeout(Duration::from_millis(300))
-                .connect_timeout(LIMIT);
-            if matches!(mode, Mode::PackedEchoes) {
-                // Retention bound = 64 + 5 + one frame: two full frames of
-                // small messages exceed it unless the flush drain stops.
-                builder = builder.max_recv_message_size(64);
-            }
-            let channel = builder.connect().await.unwrap();
-            let mut stream = GrpcClient::new(channel).into_native_duplex(
-                &cx, "/svc/Upload", Request::new(()),
-            ).await.unwrap();
-            let mut sent = 0;
-            let mut echoes = 0;
-            let mut closed = false;
-            let result = loop {
-                match stream.next_event().await {
-                    Ok(Some(NativeDuplexEvent::RequestFlushed)) if sent < UPLOADS => {
-                        if sent > 0 {
-                            crate::time::sleep(cx.now(), Duration::from_millis(25)).await;
-                        }
-                        stream.queue_message(&Bytes::from_static(b"upload")).unwrap();
-                        sent += 1;
-                    }
-                    Ok(Some(NativeDuplexEvent::RequestFlushed)) => {
-                        if !closed {
-                            stream.close_requests().unwrap();
-                            closed = true;
-                        }
-                    }
-                    Ok(Some(NativeDuplexEvent::Message(message)))
-                        if matches!(mode, Mode::EchoingUpload | Mode::PackedEchoes) =>
-                    {
-                        assert_eq!(message.as_ref(), b"echo");
-                        echoes += 1;
-                    }
-                    Ok(Some(NativeDuplexEvent::Message(message))) => {
-                        panic!("the slow-upload peer sends no messages: {message:?}");
-                    }
-                    Ok(None) => break Ok(()),
-                    Err(status) => break Err(status),
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .unwrap();
+        let (result, sent, echoes) = runtime
+            .block_on(runtime.handle().spawn_checked(async move {
+                let cx = Cx::current().unwrap();
+                let mut builder = Channel::builder(format!("http://{address}"))
+                    .keepalive_interval(Duration::from_millis(100))
+                    .keepalive_timeout(Duration::from_millis(300))
+                    .connect_timeout(LIMIT);
+                if matches!(mode, Mode::PackedEchoes) {
+                    // Retention bound = 64 + 5 + one frame: two full frames of
+                    // small messages exceed it unless the flush drain stops.
+                    builder = builder.max_recv_message_size(64);
                 }
-            };
-            (result, sent, echoes)
-        })).expect("slow upload owner completes");
-        let (probes, _, uploads) = peer.join().expect("slow-upload peer observed retirement EOF");
-        let outcome = format!("workers={workers} mode={mode:?} sent={sent} uploads={uploads} echoes={echoes} probes={probes} result={:?}",
-            result.as_ref().map_err(Status::code));
+                let channel = builder.connect().await.unwrap();
+                let mut stream = GrpcClient::new(channel)
+                    .into_native_duplex(&cx, "/svc/Upload", Request::new(()))
+                    .await
+                    .unwrap();
+                let mut sent = 0;
+                let mut echoes = 0;
+                let mut closed = false;
+                let result = loop {
+                    match stream.next_event().await {
+                        Ok(Some(NativeDuplexEvent::RequestFlushed)) if sent < UPLOADS => {
+                            if sent > 0 {
+                                crate::time::sleep(cx.now(), Duration::from_millis(25)).await;
+                            }
+                            stream
+                                .queue_message(&Bytes::from_static(b"upload"))
+                                .unwrap();
+                            sent += 1;
+                        }
+                        Ok(Some(NativeDuplexEvent::RequestFlushed)) => {
+                            if !closed {
+                                stream.close_requests().unwrap();
+                                closed = true;
+                            }
+                        }
+                        Ok(Some(NativeDuplexEvent::Message(message)))
+                            if matches!(mode, Mode::EchoingUpload | Mode::PackedEchoes) =>
+                        {
+                            assert_eq!(message.as_ref(), b"echo");
+                            echoes += 1;
+                        }
+                        Ok(Some(NativeDuplexEvent::Message(message))) => {
+                            panic!("the slow-upload peer sends no messages: {message:?}");
+                        }
+                        Ok(None) => break Ok(()),
+                        Err(status) => break Err(status),
+                    }
+                };
+                (result, sent, echoes)
+            }))
+            .expect("slow upload owner completes");
+        let (probes, _, uploads) = peer
+            .join()
+            .expect("slow-upload peer observed retirement EOF");
+        let outcome = format!(
+            "workers={workers} mode={mode:?} sent={sent} uploads={uploads} echoes={echoes} probes={probes} result={:?}",
+            result.as_ref().map_err(Status::code)
+        );
         if matches!(mode, Mode::EarlyStatus) {
             // The flush drain read the peer's terminal status. The call
             // reports it instead of a send boundary that the next
@@ -863,7 +913,10 @@ mod keepalive {
             } else {
                 assert_eq!(echoes, 0, "{outcome}");
             }
-            assert!(probes >= 2, "the upload outlived several acknowledged probes: {outcome}");
+            assert!(
+                probes >= 2,
+                "the upload outlived several acknowledged probes: {outcome}"
+            );
         }
         let report = runtime.shutdown_drained(LIMIT);
         assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
@@ -883,14 +936,18 @@ mod keepalive {
             }
             done.send(()).unwrap();
         });
-        finished.recv_timeout(Duration::from_secs(20)).expect("keepalive native wall watchdog");
+        finished
+            .recv_timeout(Duration::from_secs(20))
+            .expect("keepalive native wall watchdog");
         thread.join().unwrap();
     }
 
     #[test]
     fn native_channel_keepalive_drives_idle_watch_and_bidi_with_live_data_and_peer_probes() {
         for workers in [1, 2] {
-            for watch in [false, true] { checked(workers, Mode::Ack, watch); }
+            for watch in [false, true] {
+                checked(workers, Mode::Ack, watch);
+            }
         }
     }
 

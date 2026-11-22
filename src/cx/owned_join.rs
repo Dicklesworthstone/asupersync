@@ -107,7 +107,9 @@ struct Owned<C: Collection> {
 
 impl<C: Collection> Drop for Owned<C> {
     fn drop(&mut self) {
-        let reason = self.owner.cancel_reason()
+        let reason = self
+            .owner
+            .cancel_reason()
             .unwrap_or_else(|| CancelReason::user("owned join dropped"));
         self.tasks.cancel_unfinished(&reason);
     }
@@ -125,7 +127,8 @@ async fn collect<C: Collection>(mut owned: Owned<C>) -> C::Output {
         }
         if !forwarded && cancelled.as_mut().poll(task).is_ready() {
             forwarded = true;
-            let reason = owner.cancel_reason()
+            let reason = owner
+                .cancel_reason()
                 .unwrap_or_else(|| CancelReason::user("owned join owner cancelled"));
             let _ = owner.checkpoint();
             owned.tasks.cancel_unfinished(&reason);
@@ -134,7 +137,8 @@ async fn collect<C: Collection>(mut owned: Owned<C>) -> C::Output {
             task.waker().wake_by_ref();
         }
         Poll::Pending
-    }).await
+    })
+    .await
 }
 
 // A custom waker can panic. Still publish cancellation to every sibling before
@@ -151,13 +155,16 @@ fn cancel_one<T>(
     }
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
         handle.abort_with_reason(reason.clone());
-    })) && first_panic.is_none() {
+    })) && first_panic.is_none()
+    {
         *first_panic = Some(payload);
     }
 }
 
 fn finish_cancel(first_panic: Option<WakePanic>) {
-    if !std::thread::panicking() && let Some(payload) = first_panic {
+    if !std::thread::panicking()
+        && let Some(payload) = first_panic
+    {
         resume_unwind(payload);
     }
 }
@@ -187,8 +194,12 @@ impl<T1, T2> Collection for Pair<T1, T2> {
         }
         if self.first.is_none() && self.second.is_none() {
             Poll::Ready((
-                self.first_result.take().expect("first join result already returned"),
-                self.second_result.take().expect("second join result already returned"),
+                self.first_result
+                    .take()
+                    .expect("first join result already returned"),
+                self.second_result
+                    .take()
+                    .expect("second join result already returned"),
             ))
         } else {
             Poll::Pending

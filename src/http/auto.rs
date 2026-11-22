@@ -40,6 +40,7 @@ use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandl
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use crate::sync::Notify;
+use crate::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "tls")]
 use crate::tls::TlsAcceptor;
 use crate::types::Time;
@@ -49,7 +50,6 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -445,8 +445,16 @@ impl AutoCoordinator {
 
         let http1_drain = self.config.http1.drain_timeout;
         let http2_drain = self.config.http2.drain_timeout;
-        let ProtocolService { queue: http1_queue, manager: http1_manager, run: run_http1 } = http1;
-        let ProtocolService { queue: http2_queue, manager: http2_manager, run: run_http2 } = http2;
+        let ProtocolService {
+            queue: http1_queue,
+            manager: http1_manager,
+            run: run_http1,
+        } = http1;
+        let ProtocolService {
+            queue: http2_queue,
+            manager: http2_manager,
+            run: run_http2,
+        } = http2;
         let mut shutdown = ProtocolShutdown {
             signal: self.shutdown_signal.clone(),
             http1: http1_manager,
@@ -458,7 +466,9 @@ impl AutoCoordinator {
             Err(error) => {
                 drop(self.listener);
                 shutdown.finish();
-                return Err(io::Error::other(format!("spawn HTTP/1.1 listener: {error}")));
+                return Err(io::Error::other(format!(
+                    "spawn HTTP/1.1 listener: {error}"
+                )));
             }
         };
         let http2_run = match spawner.spawn(run_http2) {
@@ -578,11 +588,8 @@ impl AutoCoordinator {
                 Err(error) if is_transient_accept_error(&error) => {
                     transient_streak = transient_streak.saturating_add(1);
                     let delay = Duration::from_millis(2_u64 << transient_streak.min(5));
-                    let _ = until_shutdown(
-                        &self.shutdown_signal,
-                        crate::time::sleep(now(), delay),
-                    )
-                    .await;
+                    let _ = until_shutdown(&self.shutdown_signal, crate::time::sleep(now(), delay))
+                        .await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -947,7 +954,8 @@ impl Detection {
         #[cfg(feature = "tls")]
         if let Some(acceptor) = &self.tls {
             let counter = std::sync::Arc::new(crate::sync::atomic::AtomicU64::new(0));
-            let stream = super::handoff::SocketByteCounter::new(stream, std::sync::Arc::clone(&counter));
+            let stream =
+                super::handoff::SocketByteCounter::new(stream, std::sync::Arc::clone(&counter));
             let bound = acceptor.handshake_timeout().unwrap_or(self.timeout);
             let Ok(Ok(tls)) = crate::time::timeout(now(), bound, acceptor.accept(stream)).await
             else {

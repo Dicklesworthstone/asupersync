@@ -13,9 +13,9 @@
 //! 4. **Atomicity Preservation**: Two-phase protocol remains atomic under backpressure
 //! 5. **Resource Fairness**: Flow control doesn't cause starvation of any producers
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::types::{TaskId, Time};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::Entry};
-use crate::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for flow control monitoring.
 #[derive(Debug, Clone)]

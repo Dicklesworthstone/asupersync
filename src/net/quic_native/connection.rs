@@ -2449,8 +2449,8 @@ impl NativeQuicConnection {
                 data_len,
                 fin,
             } = frame_ref
-                && let Err(error) = self
-                    .release_sent_stream_frame_if_matches(*stream_id, *offset, *data_len, *fin)
+                && let Err(error) =
+                    self.release_sent_stream_frame_if_matches(*stream_id, *offset, *data_len, *fin)
             {
                 result = Err(error);
                 break;
@@ -2591,7 +2591,8 @@ impl NativeQuicConnection {
         let evt = self.tls.commit_local_key_update()?;
         if matches!(evt, KeyUpdateEvent::LocalUpdateScheduled { .. }) {
             self.local_key_update_floor = Some(
-                self.next_packet_numbers[packet_number_space_idx(PacketNumberSpace::ApplicationData)],
+                self.next_packet_numbers
+                    [packet_number_space_idx(PacketNumberSpace::ApplicationData)],
             );
         }
         Ok(evt)

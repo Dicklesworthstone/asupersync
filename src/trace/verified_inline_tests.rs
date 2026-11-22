@@ -1,751 +1,920 @@
-    #![allow(clippy::pedantic, clippy::nursery, missing_docs)]
-    use super::*;
-    use crate::trace::file::{HEADER_SIZE, TRACE_MAGIC, write_trace};
-    use crate::trace::replay::REPLAY_SCHEMA_VERSION;
-    use std::io::{Seek, SeekFrom};
-    use tempfile::NamedTempFile;
+#![allow(clippy::pedantic, clippy::nursery, missing_docs)]
+use super::*;
+use crate::trace::file::{HEADER_SIZE, TRACE_MAGIC, write_trace};
+use crate::trace::replay::REPLAY_SCHEMA_VERSION;
+use std::io::{Seek, SeekFrom};
+use tempfile::NamedTempFile;
 
-    fn metadata() -> TraceMetadata {
-        TraceMetadata {
-            version: REPLAY_SCHEMA_VERSION, seed: 42, recorded_at: 0,
-            config_hash: 17, description: Some("verified replay".to_owned()),
-        }
+fn metadata() -> TraceMetadata {
+    TraceMetadata {
+        version: REPLAY_SCHEMA_VERSION,
+        seed: 42,
+        recorded_at: 0,
+        config_hash: 17,
+        description: Some("verified replay".to_owned()),
     }
+}
 
-    fn events() -> Vec<ReplayEvent> {
-        (0..8).map(|seed| ReplayEvent::RngSeed { seed }).collect()
-    }
+fn events() -> Vec<ReplayEvent> {
+    (0..8).map(|seed| ReplayEvent::RngSeed { seed }).collect()
+}
 
-    fn limits() -> TraceReadLimits { TraceReadLimits::new(10_000, 4 * 1024 * 1024) }
+fn limits() -> TraceReadLimits {
+    TraceReadLimits::new(10_000, 4 * 1024 * 1024)
+}
 
-    fn write_legacy(path: &Path, events: &[ReplayEvent], declared: u64) {
-        let mut file = File::create(path).unwrap();
-        file.write_all(TRACE_MAGIC).unwrap();
-        file.write_all(&2u16.to_le_bytes()).unwrap();
-        file.write_all(&0u16.to_le_bytes()).unwrap();
-        file.write_all(&[0]).unwrap();
-        let metadata = rmp_serde::to_vec(&metadata()).unwrap();
-        file.write_all(&(metadata.len() as u32).to_le_bytes()).unwrap();
-        file.write_all(&metadata).unwrap();
-        file.write_all(&declared.to_le_bytes()).unwrap();
-        for event in events {
-            let bytes = rmp_serde::to_vec(event).unwrap();
-            file.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-            file.write_all(&bytes).unwrap();
-        }
-    }
-
-    use std::fs::File;
-
-    #[test]
-    fn verified_roundtrip_has_conservative_hints_and_continues_after_direct_reads() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &events()).unwrap();
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        assert_eq!(reader.metadata(), &metadata());
-        assert_eq!(reader.size_hint(), (0, Some(8)));
-        assert_eq!(reader.next_event().unwrap(), Some(events()[0].clone()));
-        assert_eq!(reader.events_consumed(), 1);
-        assert_eq!(reader.size_hint(), (0, Some(7)));
-        let tail: Vec<_> = reader.by_ref().collect::<Result<_, _>>().unwrap();
-        assert_eq!(tail, events()[1..]);
-        assert!(reader.is_complete());
-        assert_eq!(reader.size_hint(), (0, Some(0)));
-        assert!(reader.next().is_none());
-        assert!(reader.next().is_none());
-    }
-
-    #[test]
-    fn container_limits_apply_to_metadata_before_verified_admission() {
-        let temp = NamedTempFile::new().unwrap();
-        let mut file = File::create(temp.path()).unwrap();
-        file.write_all(TRACE_MAGIC).unwrap();
-        file.write_all(&2u16.to_le_bytes()).unwrap();
-        file.write_all(&0u16.to_le_bytes()).unwrap();
-        file.write_all(&[0]).unwrap();
-        file.write_all(&65_536u32.to_le_bytes()).unwrap();
-        file.flush().unwrap();
-        // Metadata is deliberately absent: the size gate must run before read/decode.
-        assert!(matches!(
-            VerifiedTraceReader::open_with_container_limits(
-                temp.path(),
-                limits(),
-                TraceContainerLimits::new().with_max_metadata_bytes(64),
-            ),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                field: "meta_len", actual: 65_536, max: 64,
-            }))
-        ));
-    }
-
-    #[test]
-    fn container_limits_preserve_canonical_admission_and_bound_resume() {
-        let temp = NamedTempFile::new().unwrap();
-        let event = ReplayEvent::RngSeed { seed: 7 };
-        let event_len = rmp_serde::to_vec(&event).unwrap().len();
-        let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
-        write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
-        let canonical = TraceReadLimits::new(1, event_len as u64);
-        let container = TraceContainerLimits::new()
-            .with_max_metadata_bytes(metadata_len)
-            .with_max_event_bytes(event_len)
-            .with_max_compressed_chunk_bytes(0)
-            .with_max_decompressed_chunk_bytes(0);
-        let mut reader =
-            VerifiedTraceReader::open_with_container_limits(temp.path(), canonical, container)
-                .unwrap();
-        for position in 0..=1 {
-            let checkpoint = reader.checkpoint().unwrap();
-            let mut resumed = VerifiedTraceReader::resume_with_container_limits(
-                temp.path(), checkpoint, canonical, container,
-            )
-            .unwrap();
-            let expected = if position == 0 { Some(event.clone()) } else { None };
-            assert_eq!(resumed.next_event().unwrap(), expected);
-            assert!(resumed.is_complete());
-            for (smaller, expected_field) in [
-                (container.with_max_metadata_bytes(metadata_len - 1), "meta_len"),
-                (container.with_max_event_bytes(event_len - 1), "event_len"),
-            ] {
-                assert!(matches!(
-                    VerifiedTraceReader::resume_with_container_limits(
-                        temp.path(), checkpoint, canonical, smaller,
-                    ),
-                    Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                        field, ..
-                    })) if field == expected_field
-                ));
-            }
-            let _ = reader.next_event().unwrap();
-        }
-        assert!(matches!(
-            VerifiedTraceReader::open_with_container_limits(
-                temp.path(), TraceReadLimits::new(1, event_len as u64 - 1), container,
-            ),
-            Err(VerifiedTraceError::ByteLimit { event_index: 0, .. })
-        ));
-    }
-
-    #[cfg(feature = "trace-compression")]
-    #[test]
-    fn container_chunk_limits_accept_exact_sizes_and_cannot_be_bypassed_by_resume() {
-        use crate::trace::file::{
-            CompressionMode, TRACE_CHECKSUM_LEN, TraceFileConfig, write_trace_with_config,
-        };
-        let temp = NamedTempFile::new().unwrap();
-        let source = events();
-        write_trace_with_config(
-            temp.path(), &metadata(), &source,
-            TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
-        )
+fn write_legacy(path: &Path, events: &[ReplayEvent], declared: u64) {
+    let mut file = File::create(path).unwrap();
+    file.write_all(TRACE_MAGIC).unwrap();
+    file.write_all(&2u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&[0]).unwrap();
+    let metadata = rmp_serde::to_vec(&metadata()).unwrap();
+    file.write_all(&(metadata.len() as u32).to_le_bytes())
         .unwrap();
-        let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
-        let stored = std::fs::read(temp.path()).unwrap();
-        let chunk_offset = HEADER_SIZE + metadata_len + 8 + TRACE_CHECKSUM_LEN;
-        let compressed_len = u32::from_le_bytes(
-            stored[chunk_offset..chunk_offset + 4].try_into().unwrap(),
-        ) as usize;
-        let expanded_len = u32::from_le_bytes(
-            stored[chunk_offset + 4..chunk_offset + 8].try_into().unwrap(),
-        ) as usize;
-        assert_eq!(stored.len(), chunk_offset + 4 + compressed_len);
-        let event_len = source.iter().map(|event| rmp_serde::to_vec(event).unwrap().len())
-            .max().unwrap();
-        let container = TraceContainerLimits::new()
-            .with_max_metadata_bytes(metadata_len)
-            .with_max_event_bytes(event_len)
-            .with_max_compressed_chunk_bytes(compressed_len)
-            .with_max_decompressed_chunk_bytes(expanded_len);
-        let mut reader =
-            VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), container)
-                .unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(source[0].clone()));
+    file.write_all(&metadata).unwrap();
+    file.write_all(&declared.to_le_bytes()).unwrap();
+    for event in events {
+        let bytes = rmp_serde::to_vec(event).unwrap();
+        file.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&bytes).unwrap();
+    }
+}
+
+use std::fs::File;
+
+#[test]
+fn verified_roundtrip_has_conservative_hints_and_continues_after_direct_reads() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &events()).unwrap();
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    assert_eq!(reader.metadata(), &metadata());
+    assert_eq!(reader.size_hint(), (0, Some(8)));
+    assert_eq!(reader.next_event().unwrap(), Some(events()[0].clone()));
+    assert_eq!(reader.events_consumed(), 1);
+    assert_eq!(reader.size_hint(), (0, Some(7)));
+    let tail: Vec<_> = reader.by_ref().collect::<Result<_, _>>().unwrap();
+    assert_eq!(tail, events()[1..]);
+    assert!(reader.is_complete());
+    assert_eq!(reader.size_hint(), (0, Some(0)));
+    assert!(reader.next().is_none());
+    assert!(reader.next().is_none());
+}
+
+#[test]
+fn container_limits_apply_to_metadata_before_verified_admission() {
+    let temp = NamedTempFile::new().unwrap();
+    let mut file = File::create(temp.path()).unwrap();
+    file.write_all(TRACE_MAGIC).unwrap();
+    file.write_all(&2u16.to_le_bytes()).unwrap();
+    file.write_all(&0u16.to_le_bytes()).unwrap();
+    file.write_all(&[0]).unwrap();
+    file.write_all(&65_536u32.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+    // Metadata is deliberately absent: the size gate must run before read/decode.
+    assert!(matches!(
+        VerifiedTraceReader::open_with_container_limits(
+            temp.path(),
+            limits(),
+            TraceContainerLimits::new().with_max_metadata_bytes(64),
+        ),
+        Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+            field: "meta_len",
+            actual: 65_536,
+            max: 64,
+        }))
+    ));
+}
+
+#[test]
+fn container_limits_preserve_canonical_admission_and_bound_resume() {
+    let temp = NamedTempFile::new().unwrap();
+    let event = ReplayEvent::RngSeed { seed: 7 };
+    let event_len = rmp_serde::to_vec(&event).unwrap().len();
+    let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
+    write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
+    let canonical = TraceReadLimits::new(1, event_len as u64);
+    let container = TraceContainerLimits::new()
+        .with_max_metadata_bytes(metadata_len)
+        .with_max_event_bytes(event_len)
+        .with_max_compressed_chunk_bytes(0)
+        .with_max_decompressed_chunk_bytes(0);
+    let mut reader =
+        VerifiedTraceReader::open_with_container_limits(temp.path(), canonical, container).unwrap();
+    for position in 0..=1 {
         let checkpoint = reader.checkpoint().unwrap();
-        assert_eq!(reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
-        assert!(reader.is_complete());
         let mut resumed = VerifiedTraceReader::resume_with_container_limits(
-            temp.path(), checkpoint, limits(), container,
+            temp.path(),
+            checkpoint,
+            canonical,
+            container,
         )
         .unwrap();
-        assert_eq!(resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
+        let expected = if position == 0 {
+            Some(event.clone())
+        } else {
+            None
+        };
+        assert_eq!(resumed.next_event().unwrap(), expected);
         assert!(resumed.is_complete());
         for (smaller, expected_field) in [
-            (container.with_max_compressed_chunk_bytes(compressed_len - 1), "compressed_chunk_len"),
-            (container.with_max_decompressed_chunk_bytes(expanded_len - 1), "decompressed_chunk_len"),
+            (
+                container.with_max_metadata_bytes(metadata_len - 1),
+                "meta_len",
+            ),
+            (container.with_max_event_bytes(event_len - 1), "event_len"),
         ] {
             assert!(matches!(
-                VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), smaller),
-                Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
-                    if field == expected_field
-            ));
-            assert!(matches!(
                 VerifiedTraceReader::resume_with_container_limits(
-                    temp.path(), checkpoint, limits(), smaller,
+                    temp.path(), checkpoint, canonical, smaller,
                 ),
-                Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
-                    if field == expected_field
+                Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+                    field, ..
+                })) if field == expected_field
             ));
         }
-        // Existing constructors retain format defaults and the same checkpoint identity.
-        let mut legacy = VerifiedTraceReader::resume(temp.path(), checkpoint, limits()).unwrap();
-        assert_eq!(legacy.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
+        let _ = reader.next_event().unwrap();
     }
+    assert!(matches!(
+        VerifiedTraceReader::open_with_container_limits(
+            temp.path(),
+            TraceReadLimits::new(1, event_len as u64 - 1),
+            container,
+        ),
+        Err(VerifiedTraceError::ByteLimit { event_index: 0, .. })
+    ));
+}
 
-    #[test]
-    fn frame_limit_rejects_before_reading_or_decoding_a_large_payload() {
-        let temp = NamedTempFile::new().unwrap();
-        write_legacy(temp.path(), &[], 1);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(temp.path())
-            .unwrap();
-        file.write_all(&65_536u32.to_le_bytes()).unwrap();
-        file.flush().unwrap();
-        // No payload exists: a post-decode check would report Truncated instead.
+#[cfg(feature = "trace-compression")]
+#[test]
+fn container_chunk_limits_accept_exact_sizes_and_cannot_be_bypassed_by_resume() {
+    use crate::trace::file::{
+        CompressionMode, TRACE_CHECKSUM_LEN, TraceFileConfig, write_trace_with_config,
+    };
+    let temp = NamedTempFile::new().unwrap();
+    let source = events();
+    write_trace_with_config(
+        temp.path(),
+        &metadata(),
+        &source,
+        TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
+    )
+    .unwrap();
+    let metadata_len = rmp_serde::to_vec(&metadata()).unwrap().len();
+    let stored = std::fs::read(temp.path()).unwrap();
+    let chunk_offset = HEADER_SIZE + metadata_len + 8 + TRACE_CHECKSUM_LEN;
+    let compressed_len =
+        u32::from_le_bytes(stored[chunk_offset..chunk_offset + 4].try_into().unwrap()) as usize;
+    let expanded_len = u32::from_le_bytes(
+        stored[chunk_offset + 4..chunk_offset + 8]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    assert_eq!(stored.len(), chunk_offset + 4 + compressed_len);
+    let event_len = source
+        .iter()
+        .map(|event| rmp_serde::to_vec(event).unwrap().len())
+        .max()
+        .unwrap();
+    let container = TraceContainerLimits::new()
+        .with_max_metadata_bytes(metadata_len)
+        .with_max_event_bytes(event_len)
+        .with_max_compressed_chunk_bytes(compressed_len)
+        .with_max_decompressed_chunk_bytes(expanded_len);
+    let mut reader =
+        VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), container).unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(source[0].clone()));
+    let checkpoint = reader.checkpoint().unwrap();
+    assert_eq!(
+        reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        source[1..]
+    );
+    assert!(reader.is_complete());
+    let mut resumed = VerifiedTraceReader::resume_with_container_limits(
+        temp.path(),
+        checkpoint,
+        limits(),
+        container,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        source[1..]
+    );
+    assert!(resumed.is_complete());
+    for (smaller, expected_field) in [
+        (
+            container.with_max_compressed_chunk_bytes(compressed_len - 1),
+            "compressed_chunk_len",
+        ),
+        (
+            container.with_max_decompressed_chunk_bytes(expanded_len - 1),
+            "decompressed_chunk_len",
+        ),
+    ] {
         assert!(matches!(
-            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 64),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                field: "event_len",
-                actual: 65_536,
-                max: 64,
-            }))
+            VerifiedTraceReader::open_with_container_limits(temp.path(), limits(), smaller),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
+                if field == expected_field
+        ));
+        assert!(matches!(
+            VerifiedTraceReader::resume_with_container_limits(
+                temp.path(), checkpoint, limits(), smaller,
+            ),
+            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { field, .. }))
+                if field == expected_field
         ));
     }
+    // Existing constructors retain format defaults and the same checkpoint identity.
+    let mut legacy = VerifiedTraceReader::resume(temp.path(), checkpoint, limits()).unwrap();
+    assert_eq!(
+        legacy.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        source[1..]
+    );
+}
 
-    #[test]
-    fn frame_limit_preserves_canonical_budget_and_checkpoint_semantics() {
-        let temp = NamedTempFile::new().unwrap();
-        let event = ReplayEvent::RngSeed { seed: 7 };
-        let encoded_len = rmp_serde::to_vec(&event).unwrap().len();
-        write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
-        let mut reader = VerifiedTraceReader::open_with_frame_limit(
-            temp.path(),
-            TraceReadLimits::new(1, encoded_len as u64),
-            encoded_len,
-        )
+#[test]
+fn frame_limit_rejects_before_reading_or_decoding_a_large_payload() {
+    let temp = NamedTempFile::new().unwrap();
+    write_legacy(temp.path(), &[], 1);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path())
         .unwrap();
-        let checkpoint = reader.checkpoint().unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(event.clone()));
-        assert!(reader.is_complete());
-        let mut resumed = VerifiedTraceReader::resume_with_frame_limit(
+    file.write_all(&65_536u32.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+    // No payload exists: a post-decode check would report Truncated instead.
+    assert!(matches!(
+        VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 64),
+        Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+            field: "event_len",
+            actual: 65_536,
+            max: 64,
+        }))
+    ));
+}
+
+#[test]
+fn frame_limit_preserves_canonical_budget_and_checkpoint_semantics() {
+    let temp = NamedTempFile::new().unwrap();
+    let event = ReplayEvent::RngSeed { seed: 7 };
+    let encoded_len = rmp_serde::to_vec(&event).unwrap().len();
+    write_trace(temp.path(), &metadata(), std::slice::from_ref(&event)).unwrap();
+    let mut reader = VerifiedTraceReader::open_with_frame_limit(
+        temp.path(),
+        TraceReadLimits::new(1, encoded_len as u64),
+        encoded_len,
+    )
+    .unwrap();
+    let checkpoint = reader.checkpoint().unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(event.clone()));
+    assert!(reader.is_complete());
+    let mut resumed = VerifiedTraceReader::resume_with_frame_limit(
+        temp.path(),
+        checkpoint,
+        limits(),
+        encoded_len,
+    )
+    .unwrap();
+    assert_eq!(resumed.next_event().unwrap(), Some(event));
+    assert!(resumed.is_complete());
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_frame_limit(
             temp.path(),
             checkpoint,
             limits(),
-            encoded_len,
-        )
-        .unwrap();
-        assert_eq!(resumed.next_event().unwrap(), Some(event));
-        assert!(resumed.is_complete());
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_frame_limit(
-                temp.path(),
-                checkpoint,
-                limits(),
-                encoded_len - 1,
-            ),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { .. }))
-        ));
-        assert!(matches!(
-            VerifiedTraceReader::open_with_frame_limit(
-                temp.path(),
-                TraceReadLimits::new(1, 0),
-                encoded_len,
-            ),
-            Err(VerifiedTraceError::ByteLimit {
-                event_index: 0,
-                limit: 0,
-            })
-        ));
-    }
-
-    #[test]
-    fn raw_frame_limit_does_not_redefine_the_existing_canonical_byte_budget() {
-        let temp = NamedTempFile::new().unwrap();
-        let event = ReplayEvent::RngSeed { seed: 7 };
-        let mut encoded = rmp_serde::to_vec(&event).unwrap();
-        let canonical_len = encoded.len();
-        // A uint8 encoding of 7 is valid MessagePack but one byte larger than
-        // the positive fixint emitted by canonical serialization.
-        assert_eq!(encoded.pop(), Some(7));
-        encoded.extend_from_slice(&[0xcc, 7]);
-        assert_eq!(rmp_serde::from_slice::<ReplayEvent>(&encoded).unwrap(), event);
-        write_legacy(temp.path(), &[], 1);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(temp.path())
-            .unwrap();
-        file.write_all(&(encoded.len() as u32).to_le_bytes()).unwrap();
-        file.write_all(&encoded).unwrap();
-        file.flush().unwrap();
-
-        let budget = TraceReadLimits::new(1, canonical_len as u64);
-        let mut legacy = VerifiedTraceReader::open(temp.path(), budget).unwrap();
-        assert_eq!(legacy.next_event().unwrap(), Some(event));
-        assert!(legacy.is_complete());
-        assert!(matches!(
-            VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, canonical_len),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField { .. }))
-        ));
-        assert!(
-            VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, encoded.len()).is_ok()
-        );
-    }
-
-    #[cfg(feature = "trace-compression")]
-    #[test]
-    fn frame_limit_is_enforced_inside_compressed_chunks() {
-        use crate::trace::file::{CompressionMode, TraceFileConfig, write_trace_with_config};
-        let temp = NamedTempFile::new().unwrap();
-        write_trace_with_config(
+            encoded_len - 1,
+        ),
+        Err(VerifiedTraceError::Trace(
+            TraceFileError::OversizedField { .. }
+        ))
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::open_with_frame_limit(
             temp.path(),
-            &metadata(),
-            &events(),
-            TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
-        )
+            TraceReadLimits::new(1, 0),
+            encoded_len,
+        ),
+        Err(VerifiedTraceError::ByteLimit {
+            event_index: 0,
+            limit: 0,
+        })
+    ));
+}
+
+#[test]
+fn raw_frame_limit_does_not_redefine_the_existing_canonical_byte_budget() {
+    let temp = NamedTempFile::new().unwrap();
+    let event = ReplayEvent::RngSeed { seed: 7 };
+    let mut encoded = rmp_serde::to_vec(&event).unwrap();
+    let canonical_len = encoded.len();
+    // A uint8 encoding of 7 is valid MessagePack but one byte larger than
+    // the positive fixint emitted by canonical serialization.
+    assert_eq!(encoded.pop(), Some(7));
+    encoded.extend_from_slice(&[0xcc, 7]);
+    assert_eq!(
+        rmp_serde::from_slice::<ReplayEvent>(&encoded).unwrap(),
+        event
+    );
+    write_legacy(temp.path(), &[], 1);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path())
         .unwrap();
+    file.write_all(&(encoded.len() as u32).to_le_bytes())
+        .unwrap();
+    file.write_all(&encoded).unwrap();
+    file.flush().unwrap();
+
+    let budget = TraceReadLimits::new(1, canonical_len as u64);
+    let mut legacy = VerifiedTraceReader::open(temp.path(), budget).unwrap();
+    assert_eq!(legacy.next_event().unwrap(), Some(event));
+    assert!(legacy.is_complete());
+    assert!(matches!(
+        VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, canonical_len),
+        Err(VerifiedTraceError::Trace(
+            TraceFileError::OversizedField { .. }
+        ))
+    ));
+    assert!(VerifiedTraceReader::open_with_frame_limit(temp.path(), budget, encoded.len()).is_ok());
+}
+
+#[cfg(feature = "trace-compression")]
+#[test]
+fn frame_limit_is_enforced_inside_compressed_chunks() {
+    use crate::trace::file::{CompressionMode, TraceFileConfig, write_trace_with_config};
+    let temp = NamedTempFile::new().unwrap();
+    write_trace_with_config(
+        temp.path(),
+        &metadata(),
+        &events(),
+        TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }),
+    )
+    .unwrap();
+    assert!(matches!(
+        VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1),
+        Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+            field: "event_len",
+            actual,
+            max: 1,
+        })) if actual > 1
+    ));
+    let mut reader =
+        VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1024).unwrap();
+    assert_eq!(
+        reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        events()
+    );
+    assert!(reader.is_complete());
+}
+
+#[test]
+fn every_checkpoint_position_roundtrips_and_resumes_the_correct_suffix() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &events()).unwrap();
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    for position in 0..=events().len() {
+        let checkpoint = reader.checkpoint().unwrap();
+        assert_eq!(checkpoint.position(), position as u64);
+        assert_eq!(checkpoint.total_events(), events().len() as u64);
+        let decoded = VerifiedReplayCheckpoint::from_bytes(&checkpoint.to_bytes()).unwrap();
+        assert_eq!(decoded, checkpoint);
+        let mut resumed = VerifiedTraceReader::resume(temp.path(), decoded, limits()).unwrap();
+        assert_eq!(resumed.events_consumed(), position as u64);
+        let tail: Vec<_> = resumed.by_ref().collect::<Result<_, _>>().unwrap();
+        assert_eq!(tail, events()[position..]);
+        assert!(resumed.is_complete());
+        let _ = reader.next_event().unwrap();
+    }
+}
+
+#[test]
+fn checkpoint_rejects_a_changed_unread_suffix_with_identical_metadata_and_count() {
+    let source = NamedTempFile::new().unwrap();
+    let other = NamedTempFile::new().unwrap();
+    write_trace(source.path(), &metadata(), &events()).unwrap();
+    let mut reader = VerifiedTraceReader::open(source.path(), limits()).unwrap();
+    reader.next_event().unwrap();
+    let checkpoint = reader.checkpoint().unwrap();
+    let mut changed = events();
+    *changed.last_mut().unwrap() = ReplayEvent::RngSeed { seed: 999 };
+    write_trace(other.path(), &metadata(), &changed).unwrap();
+    assert!(matches!(
+        VerifiedTraceReader::resume(other.path(), checkpoint, limits()),
+        Err(VerifiedTraceError::CheckpointMismatch)
+    ));
+}
+
+#[test]
+fn checkpoint_rejects_metadata_count_and_event_order_changes() {
+    let source = NamedTempFile::new().unwrap();
+    let other = NamedTempFile::new().unwrap();
+    write_trace(source.path(), &metadata(), &events()).unwrap();
+    let checkpoint = VerifiedTraceReader::open(source.path(), limits())
+        .unwrap()
+        .checkpoint()
+        .unwrap();
+    let mut reordered = events();
+    reordered.swap(0, 1);
+    let mut changed_metadata = metadata();
+    changed_metadata.config_hash += 1;
+    for (meta, events) in [
+        (changed_metadata, events()),
+        (metadata(), events()[..7].to_vec()),
+        (metadata(), reordered),
+    ] {
+        write_trace(other.path(), &meta, &events).unwrap();
         assert!(matches!(
-            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                field: "event_len",
-                actual,
-                max: 1,
-            })) if actual > 1
+            VerifiedTraceReader::resume(other.path(), checkpoint, limits()),
+            Err(VerifiedTraceError::CheckpointMismatch)
         ));
-        let mut reader =
-            VerifiedTraceReader::open_with_frame_limit(temp.path(), limits(), 1024).unwrap();
+    }
+}
+
+#[test]
+fn checkpoint_encoding_rejects_all_truncations_trailing_data_and_invalid_positions() {
+    let checkpoint = VerifiedReplayCheckpoint {
+        position: 1,
+        total_events: 8,
+        content_digest: [42; 32],
+    };
+    let bytes = checkpoint.to_bytes();
+    for cut in 0..bytes.len() {
+        assert!(VerifiedReplayCheckpoint::from_bytes(&bytes[..cut]).is_err());
+    }
+    let mut extra = bytes.to_vec();
+    extra.push(0);
+    assert!(VerifiedReplayCheckpoint::from_bytes(&extra).is_err());
+    let mut bad = bytes;
+    bad[7] = b'2';
+    assert!(VerifiedReplayCheckpoint::from_bytes(&bad).is_err());
+    bad = bytes;
+    bad[8..16].copy_from_slice(&9u64.to_le_bytes());
+    assert!(VerifiedReplayCheckpoint::from_bytes(&bad).is_err());
+}
+
+#[test]
+fn hostile_declared_count_is_refused_without_header_sized_preallocation() {
+    let temp = NamedTempFile::new().unwrap();
+    write_legacy(temp.path(), &[], u64::MAX);
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), limits()),
+        Err(VerifiedTraceError::EventLimit {
+            declared: u64::MAX,
+            ..
+        })
+    ));
+    // Even an explicitly enormous caller cap never causes count-based allocation.
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(u64::MAX, u64::MAX)),
+        Err(VerifiedTraceError::Trace(TraceFileError::Truncated))
+    ));
+}
+
+#[test]
+fn canonical_byte_limits_cover_the_entire_stream_before_exposing_any_event() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &events()).unwrap();
+    let size = events()
+        .iter()
+        .map(|event| rmp_serde::to_vec(event).unwrap().len() as u64)
+        .sum();
+    let reader = VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, size)).unwrap();
+    assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), events());
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, size - 1)),
+        Err(VerifiedTraceError::ByteLimit { event_index: 7, .. })
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, 0)),
+        Err(VerifiedTraceError::ByteLimit { event_index: 0, .. })
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(7, size)),
+        Err(VerifiedTraceError::EventLimit { .. })
+    ));
+}
+
+#[test]
+fn empty_trace_with_zero_limits_has_a_resumable_checkpoint() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &[]).unwrap();
+    let reader = VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(0, 0)).unwrap();
+    assert!(reader.is_complete());
+    let checkpoint = reader.checkpoint().unwrap();
+    let resumed =
+        VerifiedTraceReader::resume(temp.path(), checkpoint, TraceReadLimits::new(0, 0)).unwrap();
+    assert!(resumed.is_complete());
+    assert_eq!(resumed.count(), 0);
+    let prefix = reader.checkpoint_with_prefix().unwrap();
+    let resumed =
+        VerifiedTraceReader::resume_with_prefix(temp.path(), prefix, TraceReadLimits::new(0, 0))
+            .unwrap();
+    assert!(resumed.is_complete());
+    assert_eq!(resumed.count(), 0);
+}
+
+#[test]
+fn truncated_and_checksum_corrupt_files_are_rejected_during_open() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &events()).unwrap();
+    let baseline = std::fs::read(temp.path()).unwrap();
+    std::fs::write(temp.path(), &baseline[..baseline.len() - 1]).unwrap();
+    assert!(VerifiedTraceReader::open(temp.path(), limits()).is_err());
+    let mut corrupt = baseline;
+    let offset = HEADER_SIZE + rmp_serde::to_vec(&metadata()).unwrap().len() + 8;
+    corrupt[offset] ^= 1;
+    std::fs::write(temp.path(), corrupt).unwrap();
+    assert!(matches!(
+        VerifiedTraceReader::open(temp.path(), limits()),
+        Err(VerifiedTraceError::Trace(
+            TraceFileError::ChecksumMismatch {
+                section: "event stream"
+            }
+        ))
+    ));
+}
+
+#[test]
+fn legacy_content_is_verified_and_checkpoint_bound_without_claiming_a_persisted_checksum() {
+    let temp = NamedTempFile::new().unwrap();
+    write_legacy(temp.path(), &events(), 8);
+    let reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    let checkpoint = reader.checkpoint().unwrap();
+    assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), events());
+    let current = NamedTempFile::new().unwrap();
+    write_trace(current.path(), &metadata(), &events()).unwrap();
+    let resumed = VerifiedTraceReader::resume(current.path(), checkpoint, limits()).unwrap();
+    assert_eq!(resumed.collect::<Result<Vec<_>, _>>().unwrap(), events());
+}
+
+#[test]
+fn replay_failure_is_terminal_and_iterator_does_not_loop_or_emit_another_record() {
+    let temp = NamedTempFile::new().unwrap();
+    let many: Vec<_> = (0..4096)
+        .map(|seed| ReplayEvent::RngSeed { seed })
+        .collect();
+    write_trace(temp.path(), &metadata(), &many).unwrap();
+    let baseline = std::fs::read(temp.path()).unwrap();
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
+    // Corrupt a frame far beyond BufReader's current buffer after admission.
+    // This tests failure containment, not permission to mutate a live input.
+    let last_size = rmp_serde::to_vec(many.last().unwrap()).unwrap().len();
+    let offset = baseline.len() - last_size;
+    assert!(
+        offset > 32 * 1024,
+        "mutation must be beyond the prefetched buffer"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(temp.path())
+        .unwrap();
+    file.seek(SeekFrom::Start(offset as u64)).unwrap();
+    file.write_all(&[0xc1]).unwrap();
+    file.flush().unwrap();
+    let mut successes = 1;
+    let mut errors = 0;
+    // The bound keeps a broken fusing regression finite and observable.
+    for item in reader.by_ref().take(many.len() + 4) {
+        match item {
+            Ok(_) => successes += 1,
+            Err(_) => errors += 1,
+        }
+    }
+    assert_eq!(successes, many.len() - 1);
+    assert_eq!(errors, 1);
+    assert_eq!(reader.events_consumed(), (many.len() - 1) as u64);
+    assert!(reader.has_failed());
+    assert!(!reader.is_complete());
+    assert_eq!(reader.size_hint(), (0, Some(0)));
+    assert!(reader.next().is_none());
+    assert!(reader.checkpoint().is_err());
+    assert!(reader.checkpoint_with_prefix().is_err());
+    assert!(matches!(
+        reader.next_event(),
+        Err(VerifiedTraceError::ReaderFailed)
+    ));
+}
+
+#[cfg(feature = "trace-compression")]
+#[test]
+fn identical_compressed_and_plain_content_share_a_checkpoint() {
+    use crate::trace::file::{CompressionMode, TraceFileConfig, write_trace_with_config};
+    let plain = NamedTempFile::new().unwrap();
+    let compressed = NamedTempFile::new().unwrap();
+    write_trace(plain.path(), &metadata(), &events()).unwrap();
+    write_trace_with_config(
+        compressed.path(),
+        &metadata(),
+        &events(),
+        TraceFileConfig::new()
+            .with_compression(CompressionMode::Lz4 { level: 1 })
+            .with_chunk_size(32),
+    )
+    .unwrap();
+    let mut reader = VerifiedTraceReader::open(plain.path(), limits()).unwrap();
+    reader.next_event().unwrap();
+    let checkpoint = reader.checkpoint().unwrap();
+    let resumed = VerifiedTraceReader::resume(compressed.path(), checkpoint, limits()).unwrap();
+    assert_eq!(
+        resumed.collect::<Result<Vec<_>, _>>().unwrap(),
+        events()[1..]
+    );
+    let prefix = reader.checkpoint_with_prefix().unwrap();
+    let resumed =
+        VerifiedTraceReader::resume_with_prefix(compressed.path(), prefix, limits()).unwrap();
+    assert_eq!(
+        resumed.collect::<Result<Vec<_>, _>>().unwrap(),
+        events()[1..]
+    );
+}
+
+#[test]
+fn valid_legacy_rewrite_is_detected_by_the_final_content_fingerprint() {
+    let temp = NamedTempFile::new().unwrap();
+    let many: Vec<_> = (0..4096)
+        .map(|seed| ReplayEvent::RngSeed { seed })
+        .collect();
+    write_legacy(temp.path(), &many, many.len() as u64);
+    let baseline = std::fs::read(temp.path()).unwrap();
+    let original = rmp_serde::to_vec(many.last().unwrap()).unwrap();
+    let changed = rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 4094 }).unwrap();
+    assert_eq!(original.len(), changed.len());
+    let offset = baseline.len() - original.len();
+    assert!(offset > 32 * 1024);
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(temp.path())
+        .unwrap();
+    file.seek(SeekFrom::Start(offset as u64)).unwrap();
+    file.write_all(&changed).unwrap();
+    file.flush().unwrap();
+    for expected in &many[1..many.len() - 1] {
+        assert_eq!(reader.next_event().unwrap().as_ref(), Some(expected));
+    }
+    assert!(matches!(
+        reader.next_event(),
+        Err(VerifiedTraceError::ContentChanged)
+    ));
+    assert_eq!(reader.events_consumed(), (many.len() - 1) as u64);
+    assert!(reader.next().is_none());
+    assert!(reader.checkpoint().is_err());
+}
+
+#[test]
+fn prefix_checkpoints_roundtrip_and_resume_at_every_event_boundary() {
+    let temp = NamedTempFile::new().unwrap();
+    let source = events();
+    write_trace(temp.path(), &metadata(), &source).unwrap();
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    for position in 0..=source.len() {
+        let checkpoint = reader.checkpoint_with_prefix().unwrap();
+        assert_eq!(checkpoint.position(), position as u64);
+        assert_eq!(checkpoint.total_events(), source.len() as u64);
+        let decoded = VerifiedReplayPrefixCheckpoint::from_bytes(&checkpoint.to_bytes()).unwrap();
+        assert_eq!(decoded, checkpoint);
+        let mut resumed =
+            VerifiedTraceReader::resume_with_prefix(temp.path(), decoded, limits()).unwrap();
+        assert_eq!(resumed.events_consumed(), position as u64);
         assert_eq!(
-            reader.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
-            events()
+            resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            source[position..]
         );
-        assert!(reader.is_complete());
-    }
-
-    #[test]
-    fn every_checkpoint_position_roundtrips_and_resumes_the_correct_suffix() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &events()).unwrap();
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        for position in 0..=events().len() {
-            let checkpoint = reader.checkpoint().unwrap();
-            assert_eq!(checkpoint.position(), position as u64);
-            assert_eq!(checkpoint.total_events(), events().len() as u64);
-            let decoded = VerifiedReplayCheckpoint::from_bytes(&checkpoint.to_bytes()).unwrap();
-            assert_eq!(decoded, checkpoint);
-            let mut resumed = VerifiedTraceReader::resume(temp.path(), decoded, limits()).unwrap();
-            assert_eq!(resumed.events_consumed(), position as u64);
-            let tail: Vec<_> = resumed.by_ref().collect::<Result<_, _>>().unwrap();
-            assert_eq!(tail, events()[position..]);
-            assert!(resumed.is_complete());
-            let _ = reader.next_event().unwrap();
-        }
-    }
-
-    #[test]
-    fn checkpoint_rejects_a_changed_unread_suffix_with_identical_metadata_and_count() {
-        let source = NamedTempFile::new().unwrap();
-        let other = NamedTempFile::new().unwrap();
-        write_trace(source.path(), &metadata(), &events()).unwrap();
-        let mut reader = VerifiedTraceReader::open(source.path(), limits()).unwrap();
-        reader.next_event().unwrap();
-        let checkpoint = reader.checkpoint().unwrap();
-        let mut changed = events();
-        *changed.last_mut().unwrap() = ReplayEvent::RngSeed { seed: 999 };
-        write_trace(other.path(), &metadata(), &changed).unwrap();
-        assert!(matches!(VerifiedTraceReader::resume(other.path(), checkpoint, limits()),
-            Err(VerifiedTraceError::CheckpointMismatch)));
-    }
-
-    #[test]
-    fn checkpoint_rejects_metadata_count_and_event_order_changes() {
-        let source = NamedTempFile::new().unwrap();
-        let other = NamedTempFile::new().unwrap();
-        write_trace(source.path(), &metadata(), &events()).unwrap();
-        let checkpoint = VerifiedTraceReader::open(source.path(), limits()).unwrap().checkpoint().unwrap();
-        let mut reordered = events();
-        reordered.swap(0, 1);
-        let mut changed_metadata = metadata();
-        changed_metadata.config_hash += 1;
-        for (meta, events) in [
-            (changed_metadata, events()),
-            (metadata(), events()[..7].to_vec()),
-            (metadata(), reordered),
-        ] {
-            write_trace(other.path(), &meta, &events).unwrap();
-            assert!(matches!(VerifiedTraceReader::resume(other.path(), checkpoint, limits()),
-                Err(VerifiedTraceError::CheckpointMismatch)));
-        }
-    }
-
-    #[test]
-    fn checkpoint_encoding_rejects_all_truncations_trailing_data_and_invalid_positions() {
-        let checkpoint = VerifiedReplayCheckpoint { position: 1, total_events: 8, content_digest: [42; 32] };
-        let bytes = checkpoint.to_bytes();
-        for cut in 0..bytes.len() {
-            assert!(VerifiedReplayCheckpoint::from_bytes(&bytes[..cut]).is_err());
-        }
-        let mut extra = bytes.to_vec();
-        extra.push(0);
-        assert!(VerifiedReplayCheckpoint::from_bytes(&extra).is_err());
-        let mut bad = bytes;
-        bad[7] = b'2';
-        assert!(VerifiedReplayCheckpoint::from_bytes(&bad).is_err());
-        bad = bytes;
-        bad[8..16].copy_from_slice(&9u64.to_le_bytes());
-        assert!(VerifiedReplayCheckpoint::from_bytes(&bad).is_err());
-    }
-
-    #[test]
-    fn hostile_declared_count_is_refused_without_header_sized_preallocation() {
-        let temp = NamedTempFile::new().unwrap();
-        write_legacy(temp.path(), &[], u64::MAX);
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), limits()),
-            Err(VerifiedTraceError::EventLimit { declared: u64::MAX, .. })));
-        // Even an explicitly enormous caller cap never causes count-based allocation.
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(u64::MAX, u64::MAX)),
-            Err(VerifiedTraceError::Trace(TraceFileError::Truncated))));
-    }
-
-    #[test]
-    fn canonical_byte_limits_cover_the_entire_stream_before_exposing_any_event() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &events()).unwrap();
-        let size = events().iter().map(|event| rmp_serde::to_vec(event).unwrap().len() as u64).sum();
-        let reader = VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, size)).unwrap();
-        assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), events());
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, size - 1)),
-            Err(VerifiedTraceError::ByteLimit { event_index: 7, .. })));
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(8, 0)),
-            Err(VerifiedTraceError::ByteLimit { event_index: 0, .. })));
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(7, size)),
-            Err(VerifiedTraceError::EventLimit { .. })));
-    }
-
-    #[test]
-    fn empty_trace_with_zero_limits_has_a_resumable_checkpoint() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &[]).unwrap();
-        let reader = VerifiedTraceReader::open(temp.path(), TraceReadLimits::new(0, 0)).unwrap();
-        assert!(reader.is_complete());
-        let checkpoint = reader.checkpoint().unwrap();
-        let resumed = VerifiedTraceReader::resume(temp.path(), checkpoint, TraceReadLimits::new(0, 0)).unwrap();
         assert!(resumed.is_complete());
-        assert_eq!(resumed.count(), 0);
-        let prefix = reader.checkpoint_with_prefix().unwrap();
-        let resumed = VerifiedTraceReader::resume_with_prefix(
-            temp.path(), prefix, TraceReadLimits::new(0, 0),
-        ).unwrap();
-        assert!(resumed.is_complete());
-        assert_eq!(resumed.count(), 0);
+        let _ = reader.next_event().unwrap();
     }
+}
 
-    #[test]
-    fn truncated_and_checksum_corrupt_files_are_rejected_during_open() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &events()).unwrap();
-        let baseline = std::fs::read(temp.path()).unwrap();
-        std::fs::write(temp.path(), &baseline[..baseline.len() - 1]).unwrap();
-        assert!(VerifiedTraceReader::open(temp.path(), limits()).is_err());
-        let mut corrupt = baseline;
-        let offset = HEADER_SIZE + rmp_serde::to_vec(&metadata()).unwrap().len() + 8;
-        corrupt[offset] ^= 1;
-        std::fs::write(temp.path(), corrupt).unwrap();
-        assert!(matches!(VerifiedTraceReader::open(temp.path(), limits()),
-            Err(VerifiedTraceError::Trace(TraceFileError::ChecksumMismatch { section: "event stream" }))));
+#[test]
+fn prefix_checkpoint_encoding_is_strict_and_preserves_the_legacy_format() {
+    let legacy = VerifiedReplayCheckpoint {
+        position: 1,
+        total_events: 8,
+        content_digest: [42; 32],
+    };
+    let checkpoint = VerifiedReplayPrefixCheckpoint {
+        checkpoint: legacy,
+        prefix_digest: [19; 32],
+    };
+    let legacy_bytes = legacy.to_bytes();
+    let bytes = checkpoint.to_bytes();
+    assert_eq!(legacy_bytes.len(), 56);
+    assert_eq!(&legacy_bytes[..8], b"ASUPRC01");
+    assert_eq!(bytes.len(), 88);
+    assert_eq!(&bytes[..8], b"ASUPRC02");
+    assert_eq!(&bytes[8..56], &legacy_bytes[8..]);
+    assert_eq!(&bytes[56..], &[19; 32]);
+    assert_eq!(
+        VerifiedReplayCheckpoint::from_bytes(&legacy_bytes).unwrap(),
+        legacy
+    );
+    assert_eq!(
+        VerifiedReplayPrefixCheckpoint::from_bytes(&bytes).unwrap(),
+        checkpoint
+    );
+    assert!(VerifiedReplayCheckpoint::from_bytes(&bytes).is_err());
+    assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&legacy_bytes).is_err());
+    for cut in 0..bytes.len() {
+        assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bytes[..cut]).is_err());
     }
+    let mut extra = bytes.to_vec();
+    extra.push(0);
+    assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&extra).is_err());
+    let mut bad = bytes;
+    bad[7] = b'1';
+    assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bad).is_err());
+    bad = bytes;
+    bad[8..16].copy_from_slice(&9u64.to_le_bytes());
+    assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bad).is_err());
+}
 
-    #[test]
-    fn legacy_content_is_verified_and_checkpoint_bound_without_claiming_a_persisted_checksum() {
-        let temp = NamedTempFile::new().unwrap();
-        write_legacy(temp.path(), &events(), 8);
-        let reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        let checkpoint = reader.checkpoint().unwrap();
-        assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), events());
-        let current = NamedTempFile::new().unwrap();
-        write_trace(current.path(), &metadata(), &events()).unwrap();
-        let resumed = VerifiedTraceReader::resume(current.path(), checkpoint, limits()).unwrap();
-        assert_eq!(resumed.collect::<Result<Vec<_>, _>>().unwrap(), events());
-    }
-
-    #[test]
-    fn replay_failure_is_terminal_and_iterator_does_not_loop_or_emit_another_record() {
-        let temp = NamedTempFile::new().unwrap();
-        let many: Vec<_> = (0..4096).map(|seed| ReplayEvent::RngSeed { seed }).collect();
-        write_trace(temp.path(), &metadata(), &many).unwrap();
-        let baseline = std::fs::read(temp.path()).unwrap();
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
-        // Corrupt a frame far beyond BufReader's current buffer after admission.
-        // This tests failure containment, not permission to mutate a live input.
-        let last_size = rmp_serde::to_vec(many.last().unwrap()).unwrap().len();
-        let offset = baseline.len() - last_size;
-        assert!(offset > 32 * 1024, "mutation must be beyond the prefetched buffer");
-        let mut file = std::fs::OpenOptions::new().write(true).open(temp.path()).unwrap();
-        file.seek(SeekFrom::Start(offset as u64)).unwrap();
-        file.write_all(&[0xc1]).unwrap();
-        file.flush().unwrap();
-        let mut successes = 1;
-        let mut errors = 0;
-        // The bound keeps a broken fusing regression finite and observable.
-        for item in reader.by_ref().take(many.len() + 4) {
-            match item { Ok(_) => successes += 1, Err(_) => errors += 1 }
-        }
-        assert_eq!(successes, many.len() - 1);
-        assert_eq!(errors, 1);
-        assert_eq!(reader.events_consumed(), (many.len() - 1) as u64);
-        assert!(reader.has_failed());
-        assert!(!reader.is_complete());
-        assert_eq!(reader.size_hint(), (0, Some(0)));
-        assert!(reader.next().is_none());
-        assert!(reader.checkpoint().is_err());
-        assert!(reader.checkpoint_with_prefix().is_err());
-        assert!(matches!(reader.next_event(), Err(VerifiedTraceError::ReaderFailed)));
-    }
-
-    #[cfg(feature = "trace-compression")]
-    #[test]
-    fn identical_compressed_and_plain_content_share_a_checkpoint() {
-        use crate::trace::file::{CompressionMode, TraceFileConfig, write_trace_with_config};
-        let plain = NamedTempFile::new().unwrap();
-        let compressed = NamedTempFile::new().unwrap();
-        write_trace(plain.path(), &metadata(), &events()).unwrap();
-        write_trace_with_config(compressed.path(), &metadata(), &events(),
-            TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 }).with_chunk_size(32)).unwrap();
-        let mut reader = VerifiedTraceReader::open(plain.path(), limits()).unwrap();
-        reader.next_event().unwrap();
-        let checkpoint = reader.checkpoint().unwrap();
-        let resumed = VerifiedTraceReader::resume(compressed.path(), checkpoint, limits()).unwrap();
-        assert_eq!(resumed.collect::<Result<Vec<_>, _>>().unwrap(), events()[1..]);
-        let prefix = reader.checkpoint_with_prefix().unwrap();
-        let resumed = VerifiedTraceReader::resume_with_prefix(
-            compressed.path(), prefix, limits(),
-        ).unwrap();
-        assert_eq!(resumed.collect::<Result<Vec<_>, _>>().unwrap(), events()[1..]);
-    }
-
-    #[test]
-    fn valid_legacy_rewrite_is_detected_by_the_final_content_fingerprint() {
-        let temp = NamedTempFile::new().unwrap();
-        let many: Vec<_> = (0..4096).map(|seed| ReplayEvent::RngSeed { seed }).collect();
-        write_legacy(temp.path(), &many, many.len() as u64);
-        let baseline = std::fs::read(temp.path()).unwrap();
-        let original = rmp_serde::to_vec(many.last().unwrap()).unwrap();
-        let changed = rmp_serde::to_vec(&ReplayEvent::RngSeed { seed: 4094 }).unwrap();
-        assert_eq!(original.len(), changed.len());
-        let offset = baseline.len() - original.len();
-        assert!(offset > 32 * 1024);
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
-        let mut file = std::fs::OpenOptions::new().write(true).open(temp.path()).unwrap();
-        file.seek(SeekFrom::Start(offset as u64)).unwrap();
-        file.write_all(&changed).unwrap();
-        file.flush().unwrap();
-        for expected in &many[1..many.len() - 1] {
-            assert_eq!(reader.next_event().unwrap().as_ref(), Some(expected));
-        }
-        assert!(matches!(reader.next_event(), Err(VerifiedTraceError::ContentChanged)));
-        assert_eq!(reader.events_consumed(), (many.len() - 1) as u64);
-        assert!(reader.next().is_none());
-        assert!(reader.checkpoint().is_err());
-    }
-
-    #[test]
-    fn prefix_checkpoints_roundtrip_and_resume_at_every_event_boundary() {
-        let temp = NamedTempFile::new().unwrap();
-        let source = events();
-        write_trace(temp.path(), &metadata(), &source).unwrap();
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        for position in 0..=source.len() {
-            let checkpoint = reader.checkpoint_with_prefix().unwrap();
-            assert_eq!(checkpoint.position(), position as u64);
-            assert_eq!(checkpoint.total_events(), source.len() as u64);
-            let decoded = VerifiedReplayPrefixCheckpoint::from_bytes(&checkpoint.to_bytes()).unwrap();
-            assert_eq!(decoded, checkpoint);
-            let mut resumed = VerifiedTraceReader::resume_with_prefix(
-                temp.path(), decoded, limits(),
-            ).unwrap();
-            assert_eq!(resumed.events_consumed(), position as u64);
-            assert_eq!(resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[position..]);
-            assert!(resumed.is_complete());
-            let _ = reader.next_event().unwrap();
-        }
-    }
-
-    #[test]
-    fn prefix_checkpoint_encoding_is_strict_and_preserves_the_legacy_format() {
-        let legacy = VerifiedReplayCheckpoint {
-            position: 1, total_events: 8, content_digest: [42; 32],
-        };
-        let checkpoint = VerifiedReplayPrefixCheckpoint {
-            checkpoint: legacy, prefix_digest: [19; 32],
-        };
-        let legacy_bytes = legacy.to_bytes();
-        let bytes = checkpoint.to_bytes();
-        assert_eq!(legacy_bytes.len(), 56);
-        assert_eq!(&legacy_bytes[..8], b"ASUPRC01");
-        assert_eq!(bytes.len(), 88);
-        assert_eq!(&bytes[..8], b"ASUPRC02");
-        assert_eq!(&bytes[8..56], &legacy_bytes[8..]);
-        assert_eq!(&bytes[56..], &[19; 32]);
-        assert_eq!(VerifiedReplayCheckpoint::from_bytes(&legacy_bytes).unwrap(), legacy);
-        assert_eq!(VerifiedReplayPrefixCheckpoint::from_bytes(&bytes).unwrap(), checkpoint);
-        assert!(VerifiedReplayCheckpoint::from_bytes(&bytes).is_err());
-        assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&legacy_bytes).is_err());
-        for cut in 0..bytes.len() {
-            assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bytes[..cut]).is_err());
-        }
-        let mut extra = bytes.to_vec();
-        extra.push(0);
-        assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&extra).is_err());
-        let mut bad = bytes;
-        bad[7] = b'1';
-        assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bad).is_err());
-        bad = bytes;
-        bad[8..16].copy_from_slice(&9u64.to_le_bytes());
-        assert!(VerifiedReplayPrefixCheckpoint::from_bytes(&bad).is_err());
-    }
-
-    #[test]
-    fn prefix_resume_rejects_changed_boundary_digest_and_unread_suffix() {
-        let source = NamedTempFile::new().unwrap();
-        let other = NamedTempFile::new().unwrap();
-        write_trace(source.path(), &metadata(), &events()).unwrap();
-        let mut reader = VerifiedTraceReader::open(source.path(), limits()).unwrap();
-        reader.next_event().unwrap();
-        reader.next_event().unwrap();
-        let checkpoint = reader.checkpoint_with_prefix().unwrap();
-        let mut wrong_digest = checkpoint.to_bytes();
-        wrong_digest[56] ^= 1;
-        let mut wrong_position = checkpoint.to_bytes();
-        wrong_position[8..16].copy_from_slice(&3u64.to_le_bytes());
-        for encoded in [wrong_digest, wrong_position] {
-            let changed = VerifiedReplayPrefixCheckpoint::from_bytes(&encoded).unwrap();
-            assert!(matches!(
-                VerifiedTraceReader::resume_with_prefix(source.path(), changed, limits()),
-                Err(VerifiedTraceError::CheckpointMismatch)
-            ));
-        }
-        let mut changed = events();
-        *changed.last_mut().unwrap() = ReplayEvent::RngSeed { seed: 999 };
-        write_trace(other.path(), &metadata(), &changed).unwrap();
+#[test]
+fn prefix_resume_rejects_changed_boundary_digest_and_unread_suffix() {
+    let source = NamedTempFile::new().unwrap();
+    let other = NamedTempFile::new().unwrap();
+    write_trace(source.path(), &metadata(), &events()).unwrap();
+    let mut reader = VerifiedTraceReader::open(source.path(), limits()).unwrap();
+    reader.next_event().unwrap();
+    reader.next_event().unwrap();
+    let checkpoint = reader.checkpoint_with_prefix().unwrap();
+    let mut wrong_digest = checkpoint.to_bytes();
+    wrong_digest[56] ^= 1;
+    let mut wrong_position = checkpoint.to_bytes();
+    wrong_position[8..16].copy_from_slice(&3u64.to_le_bytes());
+    for encoded in [wrong_digest, wrong_position] {
+        let changed = VerifiedReplayPrefixCheckpoint::from_bytes(&encoded).unwrap();
         assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix(other.path(), checkpoint, limits()),
+            VerifiedTraceReader::resume_with_prefix(source.path(), changed, limits()),
             Err(VerifiedTraceError::CheckpointMismatch)
         ));
     }
+    let mut changed = events();
+    *changed.last_mut().unwrap() = ReplayEvent::RngSeed { seed: 999 };
+    write_trace(other.path(), &metadata(), &changed).unwrap();
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix(other.path(), checkpoint, limits()),
+        Err(VerifiedTraceError::CheckpointMismatch)
+    ));
+}
 
-    #[test]
-    fn prefix_resume_rejects_a_consumed_mutation_even_after_the_source_is_restored() {
-        let temp = NamedTempFile::new().unwrap();
-        let many: Vec<_> = (0..4096).map(|seed| ReplayEvent::RngSeed { seed }).collect();
-        write_trace(temp.path(), &metadata(), &many).unwrap();
-        let baseline = std::fs::read(temp.path()).unwrap();
-        let mutation_index = 3000;
-        let original = rmp_serde::to_vec(&many[mutation_index]).unwrap();
-        let changed_event = ReplayEvent::RngSeed { seed: 3001 };
-        let changed = rmp_serde::to_vec(&changed_event).unwrap();
-        assert_eq!(original.len(), changed.len());
-        let offset = HEADER_SIZE + rmp_serde::to_vec(&metadata()).unwrap().len()
-            + 8 + crate::trace::file::TRACE_CHECKSUM_LEN
-            + many[..mutation_index].iter()
-                .map(|event| 4 + rmp_serde::to_vec(event).unwrap().len()).sum::<usize>()
-            + 4;
-        assert!(offset > 32 * 1024, "mutation must be beyond the prefetched buffer");
-        assert_eq!(&baseline[offset..offset + original.len()], original.as_slice());
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
-        // Deliberately violate the immutable-source contract after admission.
-        // The original persisted checksum is checked only at the final event.
-        let mut file = std::fs::OpenOptions::new().write(true).open(temp.path()).unwrap();
-        file.seek(SeekFrom::Start(offset as u64)).unwrap();
-        file.write_all(&changed).unwrap();
-        file.flush().unwrap();
-        for expected in &many[1..mutation_index] {
-            assert_eq!(reader.next_event().unwrap().as_ref(), Some(expected));
-        }
-        assert_eq!(reader.next_event().unwrap(), Some(changed_event));
-        assert_eq!(reader.events_consumed(), (mutation_index + 1) as u64);
-        let checkpoint = reader.checkpoint_with_prefix().unwrap();
-        drop(reader);
-        // Restoring the file makes the full-source identity valid again, but
-        // cannot make the original reader's consumed prefix match it.
-        file.seek(SeekFrom::Start(offset as u64)).unwrap();
-        file.write_all(&original).unwrap();
-        file.flush().unwrap();
-        drop(file);
-        let restored = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        assert_eq!(restored.collect::<Result<Vec<_>, _>>().unwrap(), many);
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix(temp.path(), checkpoint, limits()),
-            Err(VerifiedTraceError::CheckpointMismatch)
-        ));
+#[test]
+fn prefix_resume_rejects_a_consumed_mutation_even_after_the_source_is_restored() {
+    let temp = NamedTempFile::new().unwrap();
+    let many: Vec<_> = (0..4096)
+        .map(|seed| ReplayEvent::RngSeed { seed })
+        .collect();
+    write_trace(temp.path(), &metadata(), &many).unwrap();
+    let baseline = std::fs::read(temp.path()).unwrap();
+    let mutation_index = 3000;
+    let original = rmp_serde::to_vec(&many[mutation_index]).unwrap();
+    let changed_event = ReplayEvent::RngSeed { seed: 3001 };
+    let changed = rmp_serde::to_vec(&changed_event).unwrap();
+    assert_eq!(original.len(), changed.len());
+    let offset = HEADER_SIZE
+        + rmp_serde::to_vec(&metadata()).unwrap().len()
+        + 8
+        + crate::trace::file::TRACE_CHECKSUM_LEN
+        + many[..mutation_index]
+            .iter()
+            .map(|event| 4 + rmp_serde::to_vec(event).unwrap().len())
+            .sum::<usize>()
+        + 4;
+    assert!(
+        offset > 32 * 1024,
+        "mutation must be beyond the prefetched buffer"
+    );
+    assert_eq!(
+        &baseline[offset..offset + original.len()],
+        original.as_slice()
+    );
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(many[0].clone()));
+    // Deliberately violate the immutable-source contract after admission.
+    // The original persisted checksum is checked only at the final event.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(temp.path())
+        .unwrap();
+    file.seek(SeekFrom::Start(offset as u64)).unwrap();
+    file.write_all(&changed).unwrap();
+    file.flush().unwrap();
+    for expected in &many[1..mutation_index] {
+        assert_eq!(reader.next_event().unwrap().as_ref(), Some(expected));
     }
+    assert_eq!(reader.next_event().unwrap(), Some(changed_event));
+    assert_eq!(reader.events_consumed(), (mutation_index + 1) as u64);
+    let checkpoint = reader.checkpoint_with_prefix().unwrap();
+    drop(reader);
+    // Restoring the file makes the full-source identity valid again, but
+    // cannot make the original reader's consumed prefix match it.
+    file.seek(SeekFrom::Start(offset as u64)).unwrap();
+    file.write_all(&original).unwrap();
+    file.flush().unwrap();
+    drop(file);
+    let restored = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    assert_eq!(restored.collect::<Result<Vec<_>, _>>().unwrap(), many);
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix(temp.path(), checkpoint, limits()),
+        Err(VerifiedTraceError::CheckpointMismatch)
+    ));
+}
 
-    #[test]
-    fn prefix_resume_enforces_current_event_byte_and_container_limits() {
-        let temp = NamedTempFile::new().unwrap();
-        write_trace(temp.path(), &metadata(), &events()).unwrap();
-        let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
-        reader.next_event().unwrap();
-        let checkpoint = reader.checkpoint_with_prefix().unwrap();
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix(
-                temp.path(), checkpoint, TraceReadLimits::new(7, u64::MAX),
-            ),
-            Err(VerifiedTraceError::EventLimit { declared: 8, limit: 7 })
-        ));
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix(
-                temp.path(), checkpoint, TraceReadLimits::new(8, 0),
-            ),
-            Err(VerifiedTraceError::ByteLimit { event_index: 0, limit: 0 })
-        ));
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix_and_frame_limit(
-                temp.path(), checkpoint, limits(), 1,
-            ),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                field: "event_len", max: 1, ..
-            }))
-        ));
-        assert!(matches!(
-            VerifiedTraceReader::resume_with_prefix_and_container_limits(
-                temp.path(), checkpoint, limits(),
-                TraceContainerLimits::new().with_max_metadata_bytes(1),
-            ),
-            Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
-                field: "meta_len", max: 1, ..
-            }))
-        ));
-    }
+#[test]
+fn prefix_resume_enforces_current_event_byte_and_container_limits() {
+    let temp = NamedTempFile::new().unwrap();
+    write_trace(temp.path(), &metadata(), &events()).unwrap();
+    let mut reader = VerifiedTraceReader::open(temp.path(), limits()).unwrap();
+    reader.next_event().unwrap();
+    let checkpoint = reader.checkpoint_with_prefix().unwrap();
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix(
+            temp.path(),
+            checkpoint,
+            TraceReadLimits::new(7, u64::MAX),
+        ),
+        Err(VerifiedTraceError::EventLimit {
+            declared: 8,
+            limit: 7
+        })
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix(
+            temp.path(),
+            checkpoint,
+            TraceReadLimits::new(8, 0),
+        ),
+        Err(VerifiedTraceError::ByteLimit {
+            event_index: 0,
+            limit: 0
+        })
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix_and_frame_limit(
+            temp.path(),
+            checkpoint,
+            limits(),
+            1,
+        ),
+        Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+            field: "event_len",
+            max: 1,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        VerifiedTraceReader::resume_with_prefix_and_container_limits(
+            temp.path(),
+            checkpoint,
+            limits(),
+            TraceContainerLimits::new().with_max_metadata_bytes(1),
+        ),
+        Err(VerifiedTraceError::Trace(TraceFileError::OversizedField {
+            field: "meta_len",
+            max: 1,
+            ..
+        }))
+    ));
+}
 
-    #[test]
-    fn prefix_checkpoint_binds_semantics_across_alternate_messagepack_encodings() {
-        let legacy = NamedTempFile::new().unwrap();
-        let current = NamedTempFile::new().unwrap();
-        let source = [
-            ReplayEvent::RngSeed { seed: 7 },
-            ReplayEvent::RngSeed { seed: 8 },
-        ];
-        let mut first = rmp_serde::to_vec(&source[0]).unwrap();
-        // Encode the same number as uint8 instead of a positive fixint.
-        assert_eq!(first.pop(), Some(7));
-        first.extend_from_slice(&[0xcc, 7]);
-        assert_eq!(rmp_serde::from_slice::<ReplayEvent>(&first).unwrap(), source[0]);
-        write_legacy(legacy.path(), &[], source.len() as u64);
-        let mut file = std::fs::OpenOptions::new().append(true).open(legacy.path()).unwrap();
-        for bytes in [first, rmp_serde::to_vec(&source[1]).unwrap()] {
-            file.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-            file.write_all(&bytes).unwrap();
-        }
-        file.flush().unwrap();
-        drop(file);
-        write_trace(current.path(), &metadata(), &source).unwrap();
-        let mut reader = VerifiedTraceReader::open(legacy.path(), limits()).unwrap();
-        assert_eq!(reader.next_event().unwrap(), Some(source[0].clone()));
-        let checkpoint = reader.checkpoint_with_prefix().unwrap();
-        let mut resumed = VerifiedTraceReader::resume_with_prefix(
-            current.path(), checkpoint, limits(),
-        ).unwrap();
-        assert_eq!(resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), source[1..]);
-        assert!(resumed.is_complete());
+#[test]
+fn prefix_checkpoint_binds_semantics_across_alternate_messagepack_encodings() {
+    let legacy = NamedTempFile::new().unwrap();
+    let current = NamedTempFile::new().unwrap();
+    let source = [
+        ReplayEvent::RngSeed { seed: 7 },
+        ReplayEvent::RngSeed { seed: 8 },
+    ];
+    let mut first = rmp_serde::to_vec(&source[0]).unwrap();
+    // Encode the same number as uint8 instead of a positive fixint.
+    assert_eq!(first.pop(), Some(7));
+    first.extend_from_slice(&[0xcc, 7]);
+    assert_eq!(
+        rmp_serde::from_slice::<ReplayEvent>(&first).unwrap(),
+        source[0]
+    );
+    write_legacy(legacy.path(), &[], source.len() as u64);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(legacy.path())
+        .unwrap();
+    for bytes in [first, rmp_serde::to_vec(&source[1]).unwrap()] {
+        file.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&bytes).unwrap();
     }
+    file.flush().unwrap();
+    drop(file);
+    write_trace(current.path(), &metadata(), &source).unwrap();
+    let mut reader = VerifiedTraceReader::open(legacy.path(), limits()).unwrap();
+    assert_eq!(reader.next_event().unwrap(), Some(source[0].clone()));
+    let checkpoint = reader.checkpoint_with_prefix().unwrap();
+    let mut resumed =
+        VerifiedTraceReader::resume_with_prefix(current.path(), checkpoint, limits()).unwrap();
+    assert_eq!(
+        resumed.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        source[1..]
+    );
+    assert!(resumed.is_complete());
+}

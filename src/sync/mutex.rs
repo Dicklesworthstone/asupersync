@@ -535,7 +535,9 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
         }
 
         let cx = self.cx;
-        let cancelled = self.cancelled.get_or_insert_with(|| MutexCancellation::new(cx));
+        let cancelled = self
+            .cancelled
+            .get_or_insert_with(|| MutexCancellation::new(cx));
         cancelled.refresh(context.waker());
         if cx.checkpoint().is_err() {
             // Recheck after callbacks; masked requests retain their subscription.

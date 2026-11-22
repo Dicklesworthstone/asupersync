@@ -214,7 +214,11 @@ async fn pipeline_waits_for_descendants(cx: Cx) {
     let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
     let (release_cleanup, cleanup_release) = oneshot::channel();
     let first = Arc::new(Mutex::new(Some((
-        child_ready, body_ready, finished, cleanup_ready, cleanup_release,
+        child_ready,
+        body_ready,
+        finished,
+        cleanup_ready,
+        cleanup_release,
     ))));
     let cleanup_owner = cx.clone();
     let handler_drops = Arc::clone(&drops);
@@ -239,11 +243,13 @@ async fn pipeline_waits_for_descendants(cx: Cx) {
             identities.lock().unwrap().push(body_cx.clone());
             calls.fetch_add(1, Ordering::SeqCst);
             if let Some((ready, body_ready, mut finish, cleanup_ready, cleanup_release)) = first {
-                body_cx.spawn(move |child_cx| async move {
-                    let _dropped = Dropped(drops);
-                    parked_until_cancelled(&child_cx, ready).await;
-                    parked_until_released(&cleanup_owner, cleanup_ready, cleanup_release).await;
-                }).unwrap();
+                body_cx
+                    .spawn(move |child_cx| async move {
+                        let _dropped = Dropped(drops);
+                        parked_until_cancelled(&child_cx, ready).await;
+                        parked_until_released(&cleanup_owner, cleanup_ready, cleanup_release).await;
+                    })
+                    .unwrap();
                 body_ready.send_blocking(body_cx.clone()).unwrap();
                 finish.recv(&body_cx).await.unwrap();
                 Response::new(200, "OK", b"first".to_vec())
@@ -253,11 +259,15 @@ async fn pipeline_waits_for_descendants(cx: Cx) {
             }
         }
     };
-    let server = Http1Server::with_config(handler, config())
-        .with_in_flight_requests(Arc::clone(&in_flight));
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned_with_peer_addr(&connection_cx, socket, Some(peer_addr)).await
-    }).unwrap();
+    let server =
+        Http1Server::with_config(handler, config()).with_in_flight_requests(Arc::clone(&in_flight));
+    let mut serving = cx
+        .spawn(move |connection_cx| async move {
+            server
+                .serve_owned_with_peer_addr(&connection_cx, socket, Some(peer_addr))
+                .await
+        })
+        .unwrap();
     let body_cx = body_started.recv(&cx).await.unwrap();
     let child_cx = child_parked.recv(&cx).await.unwrap();
     assert_ne!(body_cx.task_id(), serving.task_id());
@@ -309,7 +319,10 @@ async fn cancellation_joins_cleanup(cx: Cx) {
         let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
         let (release, released) = oneshot::channel();
         let signals = Arc::new(Mutex::new(Some((
-            child_ready, body_ready, cleanup_ready, released,
+            child_ready,
+            body_ready,
+            cleanup_ready,
+            released,
         ))));
         let cleanup_owner = cx.clone();
         let handler_drops = Arc::clone(&drops);
@@ -325,12 +338,14 @@ async fn cancellation_joins_cleanup(cx: Cx) {
                     let _body_drop = Dropped(Arc::clone(&drops));
                     let body_cx = Cx::current().unwrap();
                     let child_acks = Arc::clone(&acks);
-                    body_cx.spawn(move |child_cx| async move {
-                        let _child_drop = Dropped(drops);
-                        parked_until_cancelled(&child_cx, child_ready).await;
-                        child_acks.fetch_add(1, Ordering::SeqCst);
-                        parked_until_released(&cleanup_owner, cleanup_ready, released).await;
-                    }).unwrap();
+                    body_cx
+                        .spawn(move |child_cx| async move {
+                            let _child_drop = Dropped(drops);
+                            parked_until_cancelled(&child_cx, child_ready).await;
+                            child_acks.fetch_add(1, Ordering::SeqCst);
+                            parked_until_released(&cleanup_owner, cleanup_ready, released).await;
+                        })
+                        .unwrap();
                     parked_until_cancelled(&body_cx, body_ready).await;
                     acks.fetch_add(1, Ordering::SeqCst);
                     yield_now().await;
@@ -341,9 +356,11 @@ async fn cancellation_joins_cleanup(cx: Cx) {
         )
         .with_shutdown_signal(shutdown.clone())
         .with_in_flight_requests(Arc::clone(&in_flight));
-        let mut serving = cx.spawn(move |connection_cx| async move {
-            server.serve_owned(&connection_cx, socket).await
-        }).unwrap();
+        let mut serving =
+            cx.spawn(move |connection_cx| async move {
+                server.serve_owned(&connection_cx, socket).await
+            })
+            .unwrap();
         let body = body_parked.recv(&cx).await.unwrap();
         let child = child_parked.recv(&cx).await.unwrap();
         assert_eq!(body.region_id(), child.region_id());
@@ -357,9 +374,13 @@ async fn cancellation_joins_cleanup(cx: Cx) {
         assert_eq!(wire.written.load(Ordering::SeqCst), 0);
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
         poll_fn(|task| {
-            assert!(serving.poll_join(task).is_pending(), "cleanup is still admitted");
+            assert!(
+                serving.poll_join(task).is_pending(),
+                "cleanup is still admitted"
+            );
             Poll::Ready(())
-        }).await;
+        })
+        .await;
         release.send_blocking(()).unwrap();
         let result = serving.join(&cx).await;
         assert!(!matches!(result, Err(JoinError::Panicked(_))), "{result:?}");
@@ -389,7 +410,10 @@ async fn deadline_drains_before_reuse(cx: Cx) {
     let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let signals = Arc::new(Mutex::new(Some((
-        child_ready, body_ready, cleanup_ready, released,
+        child_ready,
+        body_ready,
+        cleanup_ready,
+        released,
     ))));
     let cleanup_owner = cx.clone();
     let handler_drops = Arc::clone(&drops);
@@ -409,13 +433,18 @@ async fn deadline_drains_before_reuse(cx: Cx) {
                 if let Some((child_ready, body_ready, cleanup_ready, released)) = signals {
                     let _body_drop = Dropped(Arc::clone(&drops));
                     let body_cx = Cx::current().unwrap();
-                    body_cx.spawn(move |child_cx| async move {
-                        let _child_drop = Dropped(drops);
-                        parked_until_cancelled(&child_cx, child_ready).await;
-                        parked_until_released(&cleanup_owner, cleanup_ready, released).await;
-                    }).unwrap();
+                    body_cx
+                        .spawn(move |child_cx| async move {
+                            let _child_drop = Dropped(drops);
+                            parked_until_cancelled(&child_cx, child_ready).await;
+                            parked_until_released(&cleanup_owner, cleanup_ready, released).await;
+                        })
+                        .unwrap();
                     let reason = parked_until_cancelled(&body_cx, body_ready).await;
-                    assert!(matches!(reason.kind, CancelKind::Deadline | CancelKind::Timeout));
+                    assert!(matches!(
+                        reason.kind,
+                        CancelKind::Deadline | CancelKind::Timeout
+                    ));
                     // The protocol grace must retire this future; it must not
                     // claim the still-parked descendant retired at the same time.
                     std::future::pending::<()>().await;
@@ -429,9 +458,9 @@ async fn deadline_drains_before_reuse(cx: Cx) {
         config().request_timeout_header_cap(Some(Duration::from_secs(2))),
     )
     .with_in_flight_requests(Arc::clone(&in_flight));
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned(&connection_cx, socket).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |connection_cx| async move { server.serve_owned(&connection_cx, socket).await })
+        .unwrap();
     let body = body_parked.recv(&cx).await.unwrap();
     child_parked.recv(&cx).await.unwrap();
     let monitor = cx.monitor(body.task_id()).await.unwrap();
@@ -479,9 +508,11 @@ async fn factory_and_poll_panics_are_isolated(cx: Cx) {
             },
             config(),
         );
-        let mut serving = cx.spawn(move |connection_cx| async move {
-            server.serve_owned(&connection_cx, socket).await
-        }).unwrap();
+        let mut serving =
+            cx.spawn(move |connection_cx| async move {
+                server.serve_owned(&connection_cx, socket).await
+            })
+            .unwrap();
         let received = response(&mut peer).await;
         assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 1);
         assert!(received.starts_with("HTTP/1.1 500"), "{received}");
@@ -498,10 +529,16 @@ async fn factory_and_poll_panics_are_isolated(cx: Cx) {
     // A new connection under the same owner still serves normally.
     let (socket, mut peer, _) =
         pair(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    let mut healthy = cx.spawn(move |connection_cx| async move {
-        Http1Server::with_config(|_| async { Response::new(200, "OK", b"healthy".to_vec()) }, config())
-            .serve_owned(&connection_cx, socket).await
-    }).unwrap();
+    let mut healthy = cx
+        .spawn(move |connection_cx| async move {
+            Http1Server::with_config(
+                |_| async { Response::new(200, "OK", b"healthy".to_vec()) },
+                config(),
+            )
+            .serve_owned(&connection_cx, socket)
+            .await
+        })
+        .unwrap();
     assert!(response(&mut peer).await.ends_with("healthy"));
     healthy.join(&cx).await.unwrap().unwrap();
 }
@@ -529,7 +566,10 @@ async fn handler_drop_panic_waits_for_child(cx: Cx) {
     let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let signals = Arc::new(Mutex::new(Some((
-        body_ready, child_ready, cleanup_ready, released,
+        body_ready,
+        child_ready,
+        cleanup_ready,
+        released,
     ))));
     let cleanup_owner = cx.clone();
     let handler_drops = Arc::clone(&drops);
@@ -542,26 +582,32 @@ async fn handler_drop_panic_waits_for_child(cx: Cx) {
             async move {
                 let _panicking_drop = PanicWhenRetired(Arc::clone(&drops));
                 let body_cx = Cx::current().unwrap();
-                body_cx.spawn(move |child_cx| async move {
-                    let _child_drop = Dropped(drops);
-                    parked_until_cancelled(&child_cx, child_ready).await;
-                    parked_until_released(&cleanup_owner, cleanup_ready, released).await;
-                }).unwrap();
+                body_cx
+                    .spawn(move |child_cx| async move {
+                        let _child_drop = Dropped(drops);
+                        parked_until_cancelled(&child_cx, child_ready).await;
+                        parked_until_released(&cleanup_owner, cleanup_ready, released).await;
+                    })
+                    .unwrap();
                 parked_until_cancelled(&body_cx, body_ready).await;
                 std::future::pending::<Response>().await
             }
         },
         config().request_timeout_header_cap(Some(Duration::from_secs(2))),
     );
-    let mut serving = cx.spawn(move |connection_cx| async move {
-        server.serve_owned(&connection_cx, socket).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |connection_cx| async move { server.serve_owned(&connection_cx, socket).await })
+        .unwrap();
     let body = body_parked.recv(&cx).await.unwrap();
     child_parked.recv(&cx).await.unwrap();
     let monitor = cx.monitor(body.task_id()).await.unwrap();
     cleanup_parked.recv(&cx).await.unwrap();
     monitor.down(&cx).await.unwrap();
-    assert_eq!(drops.load(Ordering::SeqCst), 1, "handler destructor ran once");
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        1,
+        "handler destructor ran once"
+    );
     assert_eq!(wire.written.load(Ordering::SeqCst), 0);
     release.send_blocking(()).unwrap();
     let received = response(&mut peer).await;
@@ -579,7 +625,10 @@ fn handler_destructor_panic_isolated_after_deadline_and_before_child_drain_respo
 async fn abandoned_serving_future_closes_subtree(cx: Cx) {
     let (socket, mut peer, wire) =
         pair(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    let enclosing = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    let enclosing = cx
+        .open_child_region(ChildRegionSpec::inherit())
+        .await
+        .unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
     let (body_ready, mut body_parked) = oneshot::channel();
     let (child_ready, mut child_parked) = oneshot::channel();
@@ -587,7 +636,10 @@ async fn abandoned_serving_future_closes_subtree(cx: Cx) {
     let (release, released) = oneshot::channel();
     let (abandon, mut abandoned) = oneshot::channel();
     let signals = Arc::new(Mutex::new(Some((
-        body_ready, child_ready, cleanup_ready, released,
+        body_ready,
+        child_ready,
+        cleanup_ready,
+        released,
     ))));
     let cleanup_owner = cx.clone();
     let handler_drops = Arc::clone(&drops);
@@ -600,11 +652,13 @@ async fn abandoned_serving_future_closes_subtree(cx: Cx) {
             async move {
                 let _body_drop = Dropped(Arc::clone(&drops));
                 let body_cx = Cx::current().unwrap();
-                body_cx.spawn(move |child_cx| async move {
-                    let _child_drop = Dropped(drops);
-                    parked_until_cancelled(&child_cx, child_ready).await;
-                    parked_until_released(&cleanup_owner, cleanup_ready, released).await;
-                }).unwrap();
+                body_cx
+                    .spawn(move |child_cx| async move {
+                        let _child_drop = Dropped(drops);
+                        parked_until_cancelled(&child_cx, child_ready).await;
+                        parked_until_released(&cleanup_owner, cleanup_ready, released).await;
+                    })
+                    .unwrap();
                 parked_until_cancelled(&body_cx, body_ready).await;
                 yield_now().await;
                 Response::new(200, "OK", Vec::new())
@@ -612,15 +666,20 @@ async fn abandoned_serving_future_closes_subtree(cx: Cx) {
         },
         config(),
     );
-    let mut serving = enclosing.cx().spawn(move |connection_cx| async move {
-        let mut serving = Box::pin(server.serve_owned(&connection_cx, socket));
-        let mut abandon = pin!(abandoned.recv(&connection_cx));
-        poll_fn(|task| {
-            assert!(serving.as_mut().poll(task).is_pending());
-            abandon.as_mut().poll(task)
-        }).await.unwrap();
-        drop(serving);
-    }).unwrap();
+    let mut serving = enclosing
+        .cx()
+        .spawn(move |connection_cx| async move {
+            let mut serving = Box::pin(server.serve_owned(&connection_cx, socket));
+            let mut abandon = pin!(abandoned.recv(&connection_cx));
+            poll_fn(|task| {
+                assert!(serving.as_mut().poll(task).is_pending());
+                abandon.as_mut().poll(task)
+            })
+            .await
+            .unwrap();
+            drop(serving);
+        })
+        .unwrap();
     body_parked.recv(&cx).await.unwrap();
     child_parked.recv(&cx).await.unwrap();
     abandon.send_blocking(()).unwrap();
@@ -630,9 +689,13 @@ async fn abandoned_serving_future_closes_subtree(cx: Cx) {
     assert_eq!(wire.written.load(Ordering::SeqCst), 0);
     let mut close = Box::pin(enclosing.close());
     poll_fn(|task| {
-        assert!(close.as_mut().poll(task).is_pending(), "drop requested cleanup, not quiescence");
+        assert!(
+            close.as_mut().poll(task).is_pending(),
+            "drop requested cleanup, not quiescence"
+        );
         Poll::Ready(())
-    }).await;
+    })
+    .await;
     release.send_blocking(()).unwrap();
     close.await.unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 2);
@@ -655,17 +718,18 @@ async fn listener_owns_buffered_requests(cx: Cx) {
         "127.0.0.1:0",
         move |request: Request| {
             assert!(request.peer_addr.is_some());
-            let (child_ready, body_ready, mut finish) =
-                signals.lock().unwrap().take().unwrap();
+            let (child_ready, body_ready, mut finish) = signals.lock().unwrap().take().unwrap();
             let drops = Arc::clone(&handler_drops);
             async move {
                 let _body_drop = Dropped(Arc::clone(&drops));
                 let body_cx = Cx::current().unwrap();
-                body_cx.spawn(move |child_cx| async move {
-                    let _child_drop = Dropped(drops);
-                    parked_until_cancelled(&child_cx, child_ready).await;
-                    yield_now().await;
-                }).unwrap();
+                body_cx
+                    .spawn(move |child_cx| async move {
+                        let _child_drop = Dropped(drops);
+                        parked_until_cancelled(&child_cx, child_ready).await;
+                        yield_now().await;
+                    })
+                    .unwrap();
                 body_ready.send_blocking(body_cx.clone()).unwrap();
                 finish.recv(&body_cx).await.unwrap();
                 Response::new(200, "OK", b"listener".to_vec())
@@ -675,18 +739,23 @@ async fn listener_owns_buffered_requests(cx: Cx) {
             .http_config(config())
             .drain_timeout(Duration::from_secs(5))
             .hard_drain_timeout(Duration::from_secs(10)),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let address = listener.local_addr().unwrap();
     let manager = listener.connection_manager().clone();
     let in_flight = listener.in_flight_requests();
-    let mut serving = cx.spawn(move |listener_cx| async move {
-        // This native spawn is also a compile-time Send requirement for the
-        // concrete listener dispatch future; no erased-future shortcut.
-        listener.run_owned_in(&listener_cx).await
-    }).unwrap();
+    let mut serving = cx
+        .spawn(move |listener_cx| async move {
+            // This native spawn is also a compile-time Send requirement for the
+            // concrete listener dispatch future; no erased-future shortcut.
+            listener.run_owned_in(&listener_cx).await
+        })
+        .unwrap();
     let mut peer = TcpStream::connect(address).await.unwrap();
     peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .await.unwrap();
+        .await
+        .unwrap();
     let body = body_started.recv(&cx).await.unwrap();
     let child = child_parked.recv(&cx).await.unwrap();
     assert_eq!(body.region_id(), child.region_id());
@@ -722,7 +791,8 @@ impl IntoHttp1Response for LocalReply {
 fn legacy_server_still_accepts_borrowed_handler_and_send_future_with_non_send_output() {
     let runtime = RuntimeBuilder::current_thread()
         .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
-        .build().unwrap();
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let local = String::from("borrowed local response");
         let borrowed = local.as_str();
@@ -734,7 +804,9 @@ fn legacy_server_still_accepts_borrowed_handler_and_send_future_with_non_send_ou
         let (socket, mut peer, _) =
             pair(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let state = Http1Server::with_config_upgradeable(handler, config())
-            .serve(socket).await.unwrap();
+            .serve(socket)
+            .await
+            .unwrap();
         assert_eq!(state.requests_served, 1);
         assert!(response(&mut peer).await.ends_with(&local));
     });

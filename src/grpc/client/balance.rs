@@ -282,7 +282,9 @@ impl<C: Codec> BalancedGrpcClient<C> {
         check_cancellation(cx)?;
         deadline.check()?;
         let mut client = GrpcClient::with_codec(channel, codec);
-        client.client_interceptors = self.client_interceptors.clone();
+        client
+            .client_interceptors
+            .clone_from(&self.client_interceptors);
         check_cancellation(cx)?;
         deadline.check()?;
         Ok((client, deadline))

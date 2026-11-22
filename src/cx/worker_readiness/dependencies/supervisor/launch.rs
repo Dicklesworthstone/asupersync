@@ -4,12 +4,17 @@
 //! A failed start joins the incumbent controller and closes its enclosing region.
 //! No timer, controller, or initializer is created until `start` is polled.
 
-use super::{InitializedBindError, InitializedChildBinding, InitializedTopologyLimits, SupervisorReadiness};
-use super::super::{DependencyError, DependencyRegionOutcome, ReadyDependencies};
 use super::super::super::Cancellation;
+use super::super::{DependencyError, DependencyRegionOutcome, ReadyDependencies};
+use super::{
+    InitializedBindError, InitializedChildBinding, InitializedTopologyLimits, SupervisorReadiness,
+};
 use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
 use crate::runtime::{JoinError, SpawnError};
-use crate::supervision::{CompiledSupervisor, ManagedSupervisor, ManagedSupervisorHandle, ManagedSupervisorReport, SupervisionConfig};
+use crate::supervision::{
+    CompiledSupervisor, ManagedSupervisor, ManagedSupervisorHandle, ManagedSupervisorReport,
+    SupervisionConfig,
+};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{Budget, CancelReason, RegionId, Time};
 use std::fmt;
@@ -35,7 +40,11 @@ impl InitializedStartConfig {
     /// Select a finite startup allowance without changing worker lifetime budgets.
     #[must_use]
     pub const fn new(timeout: Duration, shutdown_budget: Budget) -> Self {
-        Self { timeout, region: ChildRegionSpec::inherit(), shutdown_budget }
+        Self {
+            timeout,
+            region: ChildRegionSpec::inherit(),
+            shutdown_budget,
+        }
     }
 }
 
@@ -132,8 +141,10 @@ pub struct InitializedSupervisor<E> {
 
 impl<E> fmt::Debug for InitializedSupervisor<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InitializedSupervisor").field("managed", &self.managed)
-            .field("readiness", &self.readiness).finish()
+        f.debug_struct("InitializedSupervisor")
+            .field("managed", &self.managed)
+            .field("readiness", &self.readiness)
+            .finish()
     }
 }
 
@@ -141,7 +152,9 @@ impl CompiledSupervisor {
     /// Prepare the existing initialized binding with an inseparable startup owner.
     /// Legacy `bind_initialized` and ordinary managed entry points remain unchanged.
     pub fn bind_initialized_owned<E: Send + 'static>(
-        self, bindings: Vec<InitializedChildBinding<E>>, config: SupervisionConfig,
+        self,
+        bindings: Vec<InitializedChildBinding<E>>,
+        config: SupervisionConfig,
         limits: InitializedTopologyLimits,
     ) -> Result<InitializedSupervisor<E>, InitializedBindError> {
         let (managed, readiness) = self.bind_initialized(bindings, config, limits)?;
@@ -149,7 +162,8 @@ impl CompiledSupervisor {
     }
 }
 
-type CloseFuture = Pin<Box<dyn Future<Output = Result<DependencyRegionOutcome, ChildRegionError>> + Send>>;
+type CloseFuture =
+    Pin<Box<dyn Future<Output = Result<DependencyRegionOutcome, ChildRegionError>> + Send>>;
 
 /// Owns a started topology, its initial readiness vector and its teardown progress.
 ///
@@ -173,8 +187,10 @@ pub struct RunningInitializedSupervisor<E> {
 
 impl<E> fmt::Debug for RunningInitializedSupervisor<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RunningInitializedSupervisor").field("region", &self.region_id)
-            .field("stop_requested", &self.stop_requested).field("reported", &self.reported)
+        f.debug_struct("RunningInitializedSupervisor")
+            .field("region", &self.region_id)
+            .field("stop_requested", &self.stop_requested)
+            .field("reported", &self.reported)
             .finish_non_exhaustive()
     }
 }
@@ -182,29 +198,41 @@ impl<E> fmt::Debug for RunningInitializedSupervisor<E> {
 impl<E> RunningInitializedSupervisor<E> {
     /// The additional boundary owning this complete launched topology.
     #[must_use]
-    pub const fn region_id(&self) -> RegionId { self.region_id }
+    pub const fn region_id(&self) -> RegionId {
+        self.region_id
+    }
 
     /// Current named observations, not a health lease or lifecycle owner.
     #[must_use]
-    pub fn readiness(&self) -> &SupervisorReadiness { &self.readiness }
+    pub fn readiness(&self) -> &SupervisorReadiness {
+        &self.readiness
+    }
 
     /// The exact coherent vector accepted at startup. It may already be stale.
     #[must_use]
     pub fn initial_readiness(&self) -> &ReadyDependencies {
-        self.selected.as_ref().expect("running handle only escapes after acceptance")
+        self.selected
+            .as_ref()
+            .expect("running handle only escapes after acceptance")
     }
 
     /// Request whole-topology cancellation. Repeated calls do not reopen it.
     /// The original caller-side error remains available in the final exit report.
-    pub fn request_stop(&mut self) { self.stop(CancelReason::shutdown()); }
+    pub fn request_stop(&mut self) {
+        self.stop(CancelReason::shutdown());
+    }
 
     fn stop(&mut self, reason: CancelReason) {
-        if self.stop_requested || self.reported { return; }
+        if self.stop_requested || self.reported {
+            return;
+        }
         self.stop_requested = true;
         if let Some(region) = &self.region {
             if let Err(error) = region.cancel_with_budget(reason, self.shutdown_budget) {
                 self.stop_error = Some(error);
-                if let Some(controller) = &self.controller { controller.abort(); }
+                if let Some(controller) = &self.controller {
+                    controller.abort();
+                }
             }
         } else if let Some(controller) = &self.controller {
             controller.abort();
@@ -212,10 +240,13 @@ impl<E> RunningInitializedSupervisor<E> {
     }
 
     fn poll_controller(&mut self, task: &mut Context<'_>) -> Poll<()> {
-        if self.terminal.is_some() || self.controller.is_none() { return Poll::Ready(()); }
+        if self.terminal.is_some() || self.controller.is_none() {
+            return Poll::Ready(());
+        }
         let result = {
             // The managed handle retains its join receiver/report on Pending.
-            let mut join = std::pin::pin!(self.controller.as_mut().expect("owned controller").join());
+            let mut join =
+                std::pin::pin!(self.controller.as_mut().expect("owned controller").join());
             join.as_mut().poll(task)
         };
         let result = std::task::ready!(result);
@@ -225,22 +256,37 @@ impl<E> RunningInitializedSupervisor<E> {
     }
 
     fn poll_exit(&mut self, task: &mut Context<'_>) -> Poll<Result<InitializedExit<E>, JoinError>> {
-        if self.reported { return Poll::Ready(Err(JoinError::PolledAfterCompletion)); }
+        if self.reported {
+            return Poll::Ready(Err(JoinError::PolledAfterCompletion));
+        }
         std::task::ready!(self.poll_controller(task));
         if self.closing.is_none() {
             let region = self.region.take().expect("one close per owned boundary");
             self.closing = Some(Box::pin(async move {
-                region.close_with_outcome().await.map(|closed| DependencyRegionOutcome {
-                    outcome: closed.outcome, cleanup_outcome: closed.cleanup_outcome,
-                })
+                region
+                    .close_with_outcome()
+                    .await
+                    .map(|closed| DependencyRegionOutcome {
+                        outcome: closed.outcome,
+                        cleanup_outcome: closed.cleanup_outcome,
+                    })
             }));
         }
-        let close = std::task::ready!(self.closing.as_mut().expect("retained close").as_mut().poll(task));
+        let close = std::task::ready!(
+            self.closing
+                .as_mut()
+                .expect("retained close")
+                .as_mut()
+                .poll(task)
+        );
         self.reported = true;
         drop(self.closing.take());
         Poll::Ready(Ok(InitializedExit {
-            region: self.region_id, controller: self.terminal.take(), close,
-            stop_requested: self.stop_requested, stop_error: self.stop_error.take(),
+            region: self.region_id,
+            controller: self.terminal.take(),
+            close,
+            stop_requested: self.stop_requested,
+            stop_error: self.stop_error.take(),
         }))
     }
 
@@ -284,7 +330,8 @@ struct StartupWatch<'a> {
 impl StartupWatch<'_> {
     fn observe_cancel(&mut self, task: &Context<'_>) -> bool {
         let cx = self.cancellation.cx;
-        self.cancellation.token = Some(cx.refresh_cancel_waker(self.cancellation.token, task.waker()));
+        self.cancellation.token =
+            Some(cx.refresh_cancel_waker(self.cancellation.token, task.waker()));
         if self.observed_cancel.is_none() && cx.checkpoint().is_err() {
             self.observed_cancel = Some(cx.cancel_reason().unwrap_or_else(CancelReason::shutdown));
         }
@@ -293,10 +340,14 @@ impl StartupWatch<'_> {
 
     fn refusal(&mut self, task: &mut Context<'_>) -> Option<InitializedStartCause> {
         if self.observe_cancel(task) {
-            return Some(InitializedStartCause::Cancelled(self.observed_cancel.as_ref().expect("observed").clone()));
+            return Some(InitializedStartCause::Cancelled(
+                self.observed_cancel.as_ref().expect("observed").clone(),
+            ));
         }
         if self.timer.now() >= self.deadline || self.sleep.as_mut().poll(task).is_ready() {
-            return Some(InitializedStartCause::Deadline { deadline: self.deadline });
+            return Some(InitializedStartCause::Deadline {
+                deadline: self.deadline,
+            });
         }
         None
     }
@@ -306,12 +357,16 @@ impl StartupWatch<'_> {
         task: &mut Context<'_>,
         poll: impl FnOnce(&mut Context<'_>) -> Poll<T>,
     ) -> Poll<Result<T, InitializedStartCause>> {
-        if let Some(cause) = self.refusal(task) { return Poll::Ready(Err(cause)); }
+        if let Some(cause) = self.refusal(task) {
+            return Poll::Ready(Err(cause));
+        }
         let observed = poll(task);
         // Readiness/join polling may run wake callbacks, consume checkpoint
         // budget, or race clock advancement. Control refusal must still win
         // before accepting that result, including a readiness cancellation.
-        if let Some(cause) = self.refusal(task) { return Poll::Ready(Err(cause)); }
+        if let Some(cause) = self.refusal(task) {
+            return Poll::Ready(Err(cause));
+        }
         observed.map(Ok)
     }
 }
@@ -319,7 +374,9 @@ impl StartupWatch<'_> {
 impl<E: Send + 'static> InitializedSupervisor<E> {
     /// Observe preparation without starting work. Observation cannot cancel it.
     #[must_use]
-    pub fn readiness(&self) -> &SupervisorReadiness { &self.readiness }
+    pub fn readiness(&self) -> &SupervisorReadiness {
+        &self.readiness
+    }
 
     /// Start exactly this topology and accept it only while all workers are ready.
     ///
@@ -340,45 +397,77 @@ impl<E: Send + 'static> InitializedSupervisor<E> {
     /// its retained owners; it does not synchronously drain. On success the caller
     /// must retain the returned owner and ultimately join/shut it down.
     pub async fn start(
-        self, cx: &Cx, config: InitializedStartConfig,
+        self,
+        cx: &Cx,
+        config: InitializedStartConfig,
     ) -> Result<RunningInitializedSupervisor<E>, InitializedStartError<E>> {
-        let refusal = |cause| InitializedStartError { cause, cancellation: None, cleanup: None };
+        let refusal = |cause| InitializedStartError {
+            cause,
+            cancellation: None,
+            cleanup: None,
+        };
         if cx.checkpoint().is_err() {
             let reason = cx.cancel_reason().unwrap_or_else(CancelReason::shutdown);
             return Err(InitializedStartError {
-                cause: InitializedStartCause::Cancelled(reason.clone()), cancellation: Some(reason), cleanup: None,
+                cause: InitializedStartCause::Cancelled(reason.clone()),
+                cancellation: Some(reason),
+                cleanup: None,
             });
         }
-        if self.readiness.all().is_empty() { return Err(refusal(InitializedStartCause::EmptyTopology)); }
-        let timer = cx.timer_driver().ok_or_else(|| refusal(InitializedStartCause::NoTimer))?;
+        if self.readiness.all().is_empty() {
+            return Err(refusal(InitializedStartCause::EmptyTopology));
+        }
+        let timer = cx
+            .timer_driver()
+            .ok_or_else(|| refusal(InitializedStartCause::NoTimer))?;
         let limit = deadline(timer.now(), config.timeout, cx.budget().deadline)
             .ok_or_else(|| refusal(InitializedStartCause::InvalidTimeout))?;
-        if timer.now() >= limit { return Err(refusal(InitializedStartCause::Deadline { deadline: limit })); }
+        if timer.now() >= limit {
+            return Err(refusal(InitializedStartCause::Deadline { deadline: limit }));
+        }
         let mut watch = StartupWatch {
-            cancellation: Cancellation { cx, token: None }, observed_cancel: None,
-            sleep: Box::pin(Sleep::with_timer_driver(limit, timer.clone())), timer, deadline: limit,
+            cancellation: Cancellation { cx, token: None },
+            observed_cancel: None,
+            sleep: Box::pin(Sleep::with_timer_driver(limit, timer.clone())),
+            timer,
+            deadline: limit,
         };
         let mut cause = None;
         // Once submitted, observe admission even if the deadline wins; a region
         // minted late must be closed, not discarded by returning an early timeout.
         let mut opening = std::pin::pin!(cx.open_child_region(config.region));
         let admitted = poll_fn(|task| {
-            if cause.is_none() { cause = watch.refusal(task); }
-            else { watch.observe_cancel(task); }
+            if cause.is_none() {
+                cause = watch.refusal(task);
+            } else {
+                watch.observe_cancel(task);
+            }
             opening.as_mut().poll(task)
-        }).await;
+        })
+        .await;
         let region = match admitted {
             Ok(region) => region,
-            Err(error) => return Err(InitializedStartError {
-                cause: cause.unwrap_or(InitializedStartCause::Region(error)),
-                cancellation: watch.observed_cancel, cleanup: None,
-            }),
+            Err(error) => {
+                return Err(InitializedStartError {
+                    cause: cause.unwrap_or(InitializedStartCause::Region(error)),
+                    cancellation: watch.observed_cancel,
+                    cleanup: None,
+                });
+            }
         };
         let Self { managed, readiness } = self;
         let mut running = RunningInitializedSupervisor {
-            region_id: region.region_id(), region: Some(region), controller: None,
-            terminal: None, closing: None, shutdown_budget: config.shutdown_budget,
-            readiness, selected: None, stop_requested: false, stop_error: None, reported: false,
+            region_id: region.region_id(),
+            region: Some(region),
+            controller: None,
+            terminal: None,
+            closing: None,
+            shutdown_budget: config.shutdown_budget,
+            readiness,
+            selected: None,
+            stop_requested: false,
+            stop_error: None,
+            reported: false,
         };
         // Check after the admission poll too: callbacks or time advancement may
         // have consumed the remaining allowance while producing the region.
@@ -397,15 +486,24 @@ impl<E: Send + 'static> InitializedSupervisor<E> {
             let readiness = running.readiness.clone();
             let mut ready = std::pin::pin!(readiness.all().wait_ready(cx));
             let accepted = poll_fn(|task| {
-                watch.poll_controlled(task, |task| {
-                    if running.poll_controller(task).is_ready() {
-                        return Poll::Ready(Err(InitializedStartCause::ControllerTerminated));
-                    }
-                    ready.as_mut().poll(task).map(|result| result.map_err(InitializedStartCause::Readiness))
-                }).map(|result| result.and_then(std::convert::identity))
-            }).await;
+                watch
+                    .poll_controlled(task, |task| {
+                        if running.poll_controller(task).is_ready() {
+                            return Poll::Ready(Err(InitializedStartCause::ControllerTerminated));
+                        }
+                        ready
+                            .as_mut()
+                            .poll(task)
+                            .map(|result| result.map_err(InitializedStartCause::Readiness))
+                    })
+                    .map(|result| result.and_then(std::convert::identity))
+            })
+            .await;
             match accepted {
-                Ok(selected) => { running.selected = Some(selected); return Ok(running); }
+                Ok(selected) => {
+                    running.selected = Some(selected);
+                    return Ok(running);
+                }
                 Err(error) => cause = Some(error),
             }
         }
@@ -414,8 +512,14 @@ impl<E: Send + 'static> InitializedSupervisor<E> {
         let cleanup = poll_fn(|task| {
             watch.observe_cancel(task);
             running.poll_exit(task)
-        }).await.expect("unreported startup owner");
-        Err(InitializedStartError { cause, cancellation: watch.observed_cancel, cleanup: Some(cleanup) })
+        })
+        .await
+        .expect("unreported startup owner");
+        Err(InitializedStartError {
+            cause,
+            cancellation: watch.observed_cancel,
+            cleanup: Some(cleanup),
+        })
     }
 }
 

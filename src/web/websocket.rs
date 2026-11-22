@@ -498,10 +498,12 @@ impl WebSocketUpgrade {
         }
         match crate::net::websocket::compression::negotiate(&self.selected_extensions) {
             Ok(selected) => self.selected_extensions = selected,
-            Err(_) => return Self::plain_response(
-                StatusCode::NOT_IMPLEMENTED,
-                "selected WebSocket extension parameters are unsupported",
-            ),
+            Err(_) => {
+                return Self::plain_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "selected WebSocket extension parameters are unsupported",
+                );
+            }
         }
         let Some(slot) = self.http1_upgrade_slot.clone() else {
             return Self::plain_response(

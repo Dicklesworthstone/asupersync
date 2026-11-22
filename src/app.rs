@@ -63,19 +63,19 @@ pub use observability::{
 /// state-threaded lowering so existing application contracts remain intact.
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
 mod managed_execution {
-    use super::{
-        AppBudgetSpecV1, AppCxCapabilityV1, AppFeatureFlagV1, AppJobTriggerV1,
-        AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSloHookKindV1, AppSpecV1, AppSpecV1CompileError,
-        AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
-        RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
-    };
     use super::observability::ObservationCatalog;
     use super::resources::ResourceCatalog;
     use super::{
+        AppBudgetSpecV1, AppCxCapabilityV1, AppFeatureFlagV1, AppJobTriggerV1,
+        AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSloHookKindV1, AppSpecV1,
+        AppSpecV1CompileError, AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind,
+        CancelReason, ChildSpec, Cx, RegistryHandle, RuntimeState, SupervisorBuilder,
+        runtime_restart_policy,
+    };
+    use super::{
         ManagedAppEvent, ManagedAppEventOutcome, ManagedAppEventPhase,
-        ManagedAppObservabilityBinding, ManagedAppObservabilityStats,
-        ManagedAppResourceBinding, ManagedAppResourceError, ManagedAppResourceRequirement,
-        ManagedAppResources,
+        ManagedAppObservabilityBinding, ManagedAppObservabilityStats, ManagedAppResourceBinding,
+        ManagedAppResourceError, ManagedAppResourceRequirement, ManagedAppResources,
     };
     use crate::channel::mpsc;
     use crate::cx::{ChildRegion, ChildRegionSpec, cap};
@@ -85,7 +85,9 @@ mod managed_execution {
         ManagedSupervisor, ManagedSupervisorBindError, ManagedSupervisorHandle,
         ManagedSupervisorReport, SupervisionConfig,
     };
-    use crate::types::{CapabilityBudget, CapabilityBudgetRequirements, Outcome, PanicPayload, Time};
+    use crate::types::{
+        CapabilityBudget, CapabilityBudgetRequirements, Outcome, PanicPayload, Time,
+    };
     use crate::web::extract::Request;
     use crate::web::handler::Handler;
     use crate::web::{MethodRouter, Response, Router, StatusCode};
@@ -323,10 +325,16 @@ mod managed_execution {
         },
     }
 
-    type ResourceRouteFn = dyn Fn(Cx, Request, ManagedAppResources)
-        -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> + Send + Sync;
-    type ResourceWorkerFn<E> = dyn Fn(Cx, ManagedGeneration, ManagedAppResources)
-        -> crate::supervision::ManagedChildFuture<E> + Send + Sync;
+    type ResourceRouteFn = dyn Fn(
+            Cx,
+            Request,
+            ManagedAppResources,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>
+        + Send
+        + Sync;
+    type ResourceWorkerFn<E> = dyn Fn(Cx, ManagedGeneration, ManagedAppResources) -> crate::supervision::ManagedChildFuture<E>
+        + Send
+        + Sync;
 
     struct ResourceRoute {
         handler: Arc<ResourceRouteFn>,
@@ -354,15 +362,17 @@ mod managed_execution {
 
         fn bind_resources(self, resources: ManagedAppResources) -> Self {
             match self {
-                Self::ResourceRoute { handler, .. } => Self::Route(Arc::new(ResourceRoute {
-                    handler,
-                    resources,
-                })),
-                Self::ResourceWorker { mode, factory, signal, .. } => Self::Worker(
+                Self::ResourceRoute { handler, .. } => {
+                    Self::Route(Arc::new(ResourceRoute { handler, resources }))
+                }
+                Self::ResourceWorker {
                     mode,
-                    Arc::new(move |cx, generation| {
-                        factory(cx, generation, resources.clone())
-                    }),
+                    factory,
+                    signal,
+                    ..
+                } => Self::Worker(
+                    mode,
+                    Arc::new(move |cx, generation| factory(cx, generation, resources.clone())),
                     signal,
                 ),
                 plain => plain,
@@ -732,7 +742,9 @@ mod managed_execution {
                 }
                 let outcome = match &report.outcome {
                     Outcome::Ok(()) => Outcome::Ok(()),
-                    Outcome::Err(_) => Outcome::Err(ManagedAppWorkError::GroupFailed(group.clone())),
+                    Outcome::Err(_) => {
+                        Outcome::Err(ManagedAppWorkError::GroupFailed(group.clone()))
+                    }
                     Outcome::Cancelled(reason) => Outcome::Cancelled(reason.clone()),
                     Outcome::Panicked(payload) => Outcome::Panicked(payload.clone()),
                 };
@@ -1100,27 +1112,42 @@ mod managed_execution {
                 let spec = match self.policy.admission_spec(&owner, None) {
                     Ok(spec) => spec,
                     Err(WorkAdmissionFailure::Rejected { .. }) => {
-                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
-                            event.outcome = Some(ManagedAppEventOutcome::Rejected);
-                            event.http_status = Some(503);
-                        });
+                        self.policy.observe(
+                            &owner,
+                            None,
+                            ManagedAppEventPhase::AdmissionRejected,
+                            |event| {
+                                event.outcome = Some(ManagedAppEventOutcome::Rejected);
+                                event.http_status = Some(503);
+                            },
+                        );
                         return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
                     }
                     Err(WorkAdmissionFailure::Panicked(_)) => {
-                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
-                            event.outcome = Some(ManagedAppEventOutcome::Panicked);
-                            event.http_status = Some(500);
-                        });
+                        self.policy.observe(
+                            &owner,
+                            None,
+                            ManagedAppEventPhase::AdmissionRejected,
+                            |event| {
+                                event.outcome = Some(ManagedAppEventOutcome::Panicked);
+                                event.http_status = Some(500);
+                            },
+                        );
                         return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
                     }
                 };
                 let region = match owner.open_child_region(spec).await {
                     Ok(region) => region,
                     Err(_) => {
-                        self.policy.observe(&owner, None, ManagedAppEventPhase::AdmissionRejected, |event| {
-                            event.outcome = Some(ManagedAppEventOutcome::Failed);
-                            event.http_status = Some(503);
-                        });
+                        self.policy.observe(
+                            &owner,
+                            None,
+                            ManagedAppEventPhase::AdmissionRejected,
+                            |event| {
+                                event.outcome = Some(ManagedAppEventOutcome::Failed);
+                                event.http_status = Some(503);
+                            },
+                        );
                         return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
                     }
                 };
@@ -1130,10 +1157,15 @@ mod managed_execution {
                 let region_id = region.region_id();
                 let observation_owner = owner.clone();
                 let spawned = region.cx().spawn(move |cx| async move {
-                    policy.observe(&observation_owner, None, ManagedAppEventPhase::Started, |event| {
-                        event.region = Some(cx.region_id());
-                        event.task = Some(cx.task_id());
-                    });
+                    policy.observe(
+                        &observation_owner,
+                        None,
+                        ManagedAppEventPhase::Started,
+                        |event| {
+                            event.region = Some(cx.region_id());
+                            event.task = Some(cx.task_id());
+                        },
+                    );
                     let restricted = policy.restrict(cx, registry);
                     let future = {
                         let _current = Cx::set_current(Some(restricted.clone()));
@@ -1147,10 +1179,14 @@ mod managed_execution {
                     Err(_) => Err(JoinError::Cancelled(CancelReason::resource_unavailable())),
                 };
                 let mut outcome = match &result {
-                    Ok(response) if response.status.as_u16() < 400 => ManagedAppEventOutcome::Succeeded,
+                    Ok(response) if response.status.as_u16() < 400 => {
+                        ManagedAppEventOutcome::Succeeded
+                    }
                     Ok(_) => ManagedAppEventOutcome::Failed,
                     Err(JoinError::Panicked(_)) => ManagedAppEventOutcome::Panicked,
-                    Err(JoinError::Cancelled(_)) if task_id.is_some() => ManagedAppEventOutcome::Cancelled,
+                    Err(JoinError::Cancelled(_)) if task_id.is_some() => {
+                        ManagedAppEventOutcome::Cancelled
+                    }
                     Err(_) => ManagedAppEventOutcome::Failed,
                 };
                 let mut phase = ManagedAppEventPhase::CloseFailed;
@@ -1214,11 +1250,15 @@ mod managed_execution {
     ) -> Result<bool, ManagedAppWorkError<E>> {
         // Do not consume another queued notification after generation cancel.
         if owner.checkpoint().is_err() {
-            return Err(ManagedAppWorkError::SignalReceive(mpsc::RecvError::Cancelled));
+            return Err(ManagedAppWorkError::SignalReceive(
+                mpsc::RecvError::Cancelled,
+            ));
         }
         let mut lease = SignalReceiverLease::take::<E>(signal)?;
         if owner.checkpoint().is_err() {
-            return Err(ManagedAppWorkError::SignalReceive(mpsc::RecvError::Cancelled));
+            return Err(ManagedAppWorkError::SignalReceive(
+                mpsc::RecvError::Cancelled,
+            ));
         }
         // The receiver remains owned by the lease across this cancellation-
         // aware wait, with no lock guard, timer, or busy polling across await.
@@ -1267,24 +1307,39 @@ mod managed_execution {
             let spec = match policy.admission_spec(&owner, Some(generation)) {
                 Ok(spec) => spec,
                 Err(WorkAdmissionFailure::Rejected { hook, reason }) => {
-                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
-                        event.outcome = Some(ManagedAppEventOutcome::Rejected);
-                    });
+                    policy.observe(
+                        &owner,
+                        Some(generation),
+                        ManagedAppEventPhase::AdmissionRejected,
+                        |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Rejected);
+                        },
+                    );
                     return Outcome::Err(ManagedAppWorkError::SloRejected { hook, reason });
                 }
                 Err(WorkAdmissionFailure::Panicked(payload)) => {
-                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
-                        event.outcome = Some(ManagedAppEventOutcome::Panicked);
-                    });
+                    policy.observe(
+                        &owner,
+                        Some(generation),
+                        ManagedAppEventPhase::AdmissionRejected,
+                        |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Panicked);
+                        },
+                    );
                     return Outcome::Panicked(payload);
                 }
             };
             let region = match owner.open_child_region(spec).await {
                 Ok(region) => region,
                 Err(error) => {
-                    policy.observe(&owner, Some(generation), ManagedAppEventPhase::AdmissionRejected, |event| {
-                        event.outcome = Some(ManagedAppEventOutcome::Failed);
-                    });
+                    policy.observe(
+                        &owner,
+                        Some(generation),
+                        ManagedAppEventPhase::AdmissionRejected,
+                        |event| {
+                            event.outcome = Some(ManagedAppEventOutcome::Failed);
+                        },
+                    );
                     return Outcome::Err(ManagedAppWorkError::Region(error));
                 }
             };
@@ -1299,10 +1354,15 @@ mod managed_execution {
                     region: cx.region_id(),
                     task: cx.task_id(),
                 };
-                body_policy.observe(&observation_owner, Some(generation), ManagedAppEventPhase::Started, |event| {
-                    event.region = Some(cx.region_id());
-                    event.task = Some(cx.task_id());
-                });
+                body_policy.observe(
+                    &observation_owner,
+                    Some(generation),
+                    ManagedAppEventPhase::Started,
+                    |event| {
+                        event.region = Some(cx.region_id());
+                        event.task = Some(cx.task_id());
+                    },
+                );
                 let restricted = body_policy.restrict(cx, registry);
                 let future = {
                     let _current = Cx::set_current(Some(restricted.clone()));
@@ -1337,10 +1397,8 @@ mod managed_execution {
                     descendant_panicked = closed.descendant_panic.is_some();
                     if let Some(cleanup) = closed.cleanup_outcome {
                         if !cleanup.is_ok() {
-                            let retired = policy
-                                .cleanup
-                                .lock()
-                                .replace((generation, cleanup.clone()));
+                            let retired =
+                                policy.cleanup.lock().replace((generation, cleanup.clone()));
                             drop(retired);
                         }
                         if !matches!(cleanup, Outcome::Ok(()))
@@ -1460,7 +1518,9 @@ mod managed_execution {
         /// Snapshot bounded observer delivery and panic counts.
         #[must_use]
         pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
-            self.observability.as_ref().map_or_else(Vec::new, |o| o.stats())
+            self.observability
+                .as_ref()
+                .map_or_else(Vec::new, |o| o.stats())
         }
 
         /// Run until every worker stops or the owner requests cancellation.
@@ -1510,7 +1570,9 @@ mod managed_execution {
         /// Snapshot delivery counts, including after controller join.
         #[must_use]
         pub fn observability_stats(&self) -> Vec<ManagedAppObservabilityStats> {
-            self.observability.as_ref().map_or_else(Vec::new, |o| o.stats())
+            self.observability
+                .as_ref()
+                .map_or_else(Vec::new, |o| o.stats())
         }
 
         /// Router backed by this application's live route generations.
@@ -1872,7 +1934,8 @@ mod managed_execution {
                         let binding = supplied.remove(&declaration.name).ok_or_else(|| {
                             ManagedAppBindError::Missing(format!("slo:{}", declaration.name))
                         })?;
-                        if binding.kind != declaration.kind || binding.target != declaration.target {
+                        if binding.kind != declaration.kind || binding.target != declaration.target
+                        {
                             return Err(ManagedAppBindError::KindMismatch(format!(
                                 "slo:{}",
                                 declaration.name,
@@ -1959,9 +2022,9 @@ mod managed_execution {
             let mut templates = BTreeMap::new();
             let mut group_order = Vec::new();
             for group in &plan.service_groups {
-                let config = configs.remove(&group.name).ok_or_else(|| {
-                    ManagedAppBindError::MissingGroupConfig(group.name.clone())
-                })?;
+                let config = configs
+                    .remove(&group.name)
+                    .ok_or_else(|| ManagedAppBindError::MissingGroupConfig(group.name.clone()))?;
                 let stop_on_child_failure =
                     matches!(&group.restart_policy, super::AppRestartPolicyV1::Stop);
                 let restart = if stop_on_child_failure {
@@ -2060,8 +2123,12 @@ mod managed_execution {
                     })
                     .transpose()?;
                 let resource_view = if let Some(catalog) = &resource_catalog {
-                    let mut names: BTreeSet<_> =
-                        child.required_capabilities.resources.iter().cloned().collect();
+                    let mut names: BTreeSet<_> = child
+                        .required_capabilities
+                        .resources
+                        .iter()
+                        .cloned()
+                        .collect();
                     if let Some(inherited) = service_resources.get(&child.service) {
                         names.extend(inherited.iter().cloned());
                     }

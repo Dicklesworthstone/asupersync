@@ -6,6 +6,7 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use crate::tracing_compat::{Span, debug, info_span, warn};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{
@@ -13,7 +14,6 @@ use crate::types::{
 };
 use crate::sync::pl::RwLock;
 use std::cell::Cell;
-use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
@@ -1120,7 +1120,8 @@ impl RegionRecord {
     /// Keeps the sealed authorization target while forbidding placement
     /// outside this owned subtree. Installed only during private admission.
     pub(crate) fn forbid_spawn_fallback(&self) {
-        self.spawn_fallback_permitted.store(false, Ordering::Release);
+        self.spawn_fallback_permitted
+            .store(false, Ordering::Release);
     }
 
     pub(crate) fn permits_spawn_fallback(&self) -> bool {

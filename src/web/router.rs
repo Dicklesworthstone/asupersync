@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use smallvec::SmallVec;
 
-use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use super::WebBodyDiagnostic;
@@ -558,12 +558,15 @@ impl RoutePattern {
         if self.segments.len() != other.segments.len() {
             return false;
         }
-        self.segments.iter().zip(&other.segments).all(|(s1, s2)| match (s1, s2) {
-            (Segment::Literal(a), Segment::Literal(b)) => a == b,
-            (Segment::Param(_), Segment::Param(_)) => true,
-            (Segment::Wildcard, Segment::Wildcard) => true,
-            _ => false,
-        })
+        self.segments
+            .iter()
+            .zip(&other.segments)
+            .all(|(s1, s2)| match (s1, s2) {
+                (Segment::Literal(a), Segment::Literal(b)) => a == b,
+                (Segment::Param(_), Segment::Param(_)) => true,
+                (Segment::Wildcard, Segment::Wildcard) => true,
+                _ => false,
+            })
     }
 
     /// Parse a route pattern string.
@@ -3221,13 +3224,12 @@ impl Router {
                 other.legacy_body_policy_state(),
             ),
         };
-        self.merged_body_policies = if merged_body_policies.explicit.is_some()
-            || merged_body_policies.legacy.is_some()
-        {
-            Some(Box::new(merged_body_policies))
-        } else {
-            None
-        };
+        self.merged_body_policies =
+            if merged_body_policies.explicit.is_some() || merged_body_policies.legacy.is_some() {
+                Some(Box::new(merged_body_policies))
+            } else {
+                None
+            };
         for (pattern, mut method_router) in other.routes {
             if let Some((registered, existing)) = self
                 .routes
@@ -3970,7 +3972,8 @@ impl Router {
     #[must_use]
     pub fn into_http2_streaming_produced_handler(
         self,
-    ) -> impl Fn(StreamingServerRequest) -> Http2ProducedHandlerFuture + Clone + Send + Sync + 'static {
+    ) -> impl Fn(StreamingServerRequest) -> Http2ProducedHandlerFuture + Clone + Send + Sync + 'static
+    {
         let router = Arc::new(self);
         move |request| {
             let router = Arc::clone(&router);
@@ -3978,7 +3981,9 @@ impl Router {
                 let Some(cx) = Cx::current() else {
                     return http2_produced_refusal("request context unavailable");
                 };
-                router.handle_http2_streaming_produced_request_with_cx(&cx, request).await
+                router
+                    .handle_http2_streaming_produced_request_with_cx(&cx, request)
+                    .await
             })
         }
     }
@@ -4001,14 +4006,17 @@ impl Router {
     ) {
         let router = Arc::new(self);
         let admission = Arc::clone(&router);
-        let config = config.with_request_body_policy(move |head| admission.http2_streaming_body_policy(head));
+        let config = config
+            .with_request_body_policy(move |head| admission.http2_streaming_body_policy(head));
         let handler = move |request| -> Http2ProducedHandlerFuture {
             let router = Arc::clone(&router);
             Box::pin(async move {
                 let Some(cx) = Cx::current() else {
                     return http2_produced_refusal("request context unavailable");
                 };
-                router.handle_http2_streaming_produced_request_with_cx(&cx, request).await
+                router
+                    .handle_http2_streaming_produced_request_with_cx(&cx, request)
+                    .await
             })
         };
         (handler, config)
@@ -4142,7 +4150,8 @@ impl Router {
         cx: &Cx,
         request: HttpRequest,
     ) -> Http2ProducedResponse {
-        self.handle_http2_produced_web_request_with_cx(cx, web_request_from_http(request)).await
+        self.handle_http2_produced_web_request_with_cx(cx, web_request_from_http(request))
+            .await
     }
 
     /// Dispatch live HTTP/2 input and bind its response producer to the same Cx.
@@ -4160,7 +4169,8 @@ impl Router {
         let Some((request, _body_control)) = web_request_from_streaming_http(request) else {
             return http2_produced_refusal("streaming request body slot collision");
         };
-        self.handle_http2_produced_web_request_with_cx(cx, request).await
+        self.handle_http2_produced_web_request_with_cx(cx, request)
+            .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4922,10 +4932,12 @@ fn insert_wire_headers(request: &mut Request, headers: Vec<(String, String)>) {
         request.headers.insert(name, value);
     }
     if let Some(fields) = content_codings {
-        request.extensions.insert_typed(super::middleware::RequestContentCodings::new(
-            fields,
-            request.body.clone(),
-        ));
+        request
+            .extensions
+            .insert_typed(super::middleware::RequestContentCodings::new(
+                fields,
+                request.body.clone(),
+            ));
     }
 }
 

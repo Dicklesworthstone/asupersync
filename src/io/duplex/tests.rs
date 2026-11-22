@@ -20,11 +20,7 @@ fn counter() -> (Arc<Count>, Waker) {
     (count, waker)
 }
 
-fn read(
-    stream: &mut DuplexStream,
-    size: usize,
-    waker: &Waker,
-) -> (Poll<io::Result<()>>, Vec<u8>) {
+fn read(stream: &mut DuplexStream, size: usize, waker: &Waker) -> (Poll<io::Result<()>>, Vec<u8>) {
     let mut bytes = vec![0; size];
     let mut buf = ReadBuf::new(&mut bytes);
     let result = Pin::new(stream).poll_read(&mut Context::from_waker(waker), &mut buf);
@@ -68,7 +64,10 @@ fn full_pipe_parks_and_a_partial_read_wakes_the_writer_once() {
 #[test]
 fn half_close_drains_buffer_before_eof_and_keeps_reverse_direction_open() {
     let (mut a, mut b) = duplex(4);
-    assert!(matches!(write(&mut a, b"abcd", Waker::noop()), Poll::Ready(Ok(4))));
+    assert!(matches!(
+        write(&mut a, b"abcd", Waker::noop()),
+        Poll::Ready(Ok(4))
+    ));
     assert!(matches!(
         Pin::new(&mut a).poll_shutdown(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(Ok(()))
@@ -78,7 +77,10 @@ fn half_close_drains_buffer_before_eof_and_keeps_reverse_direction_open() {
     let (eof, bytes) = read(&mut b, 4, Waker::noop());
     assert!(matches!(eof, Poll::Ready(Ok(()))));
     assert!(bytes.is_empty());
-    assert!(matches!(write(&mut b, b"ok", Waker::noop()), Poll::Ready(Ok(2))));
+    assert!(matches!(
+        write(&mut b, b"ok", Waker::noop()),
+        Poll::Ready(Ok(2))
+    ));
     assert_eq!(read(&mut a, 4, Waker::noop()).1, b"ok");
     assert!(matches!(
         write(&mut a, b"no", Waker::noop()),
@@ -100,7 +102,10 @@ impl Wake for ReenterOnDrop {
 
 impl Drop for ReenterOnDrop {
     fn drop(&mut self) {
-        let unlocked = self.pipe.upgrade().is_some_and(|pipe| pipe.try_lock().is_some());
+        let unlocked = self
+            .pipe
+            .upgrade()
+            .is_some_and(|pipe| pipe.try_lock().is_some());
         self.unlocked.lock().push(unlocked);
         // The old implementation fails the witness instead of hanging this
         // test. The real peer operation runs only when the lock was released.
@@ -109,7 +114,10 @@ impl Drop for ReenterOnDrop {
             if self.read_peer {
                 assert_eq!(read(&mut peer, 1, Waker::noop()).1, b"x");
             } else {
-                assert!(matches!(write(&mut peer, b"x", Waker::noop()), Poll::Ready(Ok(1))));
+                assert!(matches!(
+                    write(&mut peer, b"x", Waker::noop()),
+                    Poll::Ready(Ok(1))
+                ));
             }
         }
     }
@@ -139,7 +147,10 @@ fn replacing_read_waker_can_reenter_peer_write_and_wake_the_new_reader() {
 fn replacing_write_waker_can_reenter_peer_read_and_wake_the_new_writer() {
     let (mut a, b) = duplex(1);
     let peer = Arc::new(Mutex::new(b));
-    assert!(matches!(write(&mut a, b"x", Waker::noop()), Poll::Ready(Ok(1))));
+    assert!(matches!(
+        write(&mut a, b"x", Waker::noop()),
+        Poll::Ready(Ok(1))
+    ));
     let unlocked = Arc::new(Mutex::new(Vec::new()));
     let old = Waker::from(Arc::new(ReenterOnDrop {
         pipe: Arc::downgrade(&a.write),
@@ -176,7 +187,11 @@ fn dropping_an_endpoint_retires_both_of_its_abandoned_wakers() {
     drop(a);
     assert!(read_weak.upgrade().is_none());
     assert!(write_weak.upgrade().is_none());
-    assert_eq!(read(&mut b, 4, Waker::noop()).1, b"x", "committed bytes survive");
+    assert_eq!(
+        read(&mut b, 4, Waker::noop()).1,
+        b"x",
+        "committed bytes survive"
+    );
     assert!(matches!(
         write(&mut b, b"z", Waker::noop()),
         Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe
@@ -215,8 +230,15 @@ impl Wake for Panics {
 fn a_panicking_reader_wake_cannot_skip_peer_write_closure_and_notification() {
     for already_unwinding in [false, true] {
         let (mut a, b) = duplex(1);
-        assert!(read(&mut a, 1, &Waker::from(Arc::new(Panics))).0.is_pending());
-        assert!(matches!(write(&mut a, b"x", Waker::noop()), Poll::Ready(Ok(1))));
+        assert!(
+            read(&mut a, 1, &Waker::from(Arc::new(Panics)))
+                .0
+                .is_pending()
+        );
+        assert!(matches!(
+            write(&mut a, b"x", Waker::noop()),
+            Poll::Ready(Ok(1))
+        ));
         let (count, writer) = counter();
         assert!(write(&mut a, b"y", &writer).is_pending());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -230,9 +252,17 @@ fn a_panicking_reader_wake_cannot_skip_peer_write_closure_and_notification() {
         let payload = result.expect_err("preserve the original panic");
         assert_eq!(
             payload.downcast_ref::<&str>().copied(),
-            Some(if already_unwinding { "outer unwind sentinel" } else { "duplex wake sentinel" })
+            Some(if already_unwinding {
+                "outer unwind sentinel"
+            } else {
+                "duplex wake sentinel"
+            })
         );
-        assert_eq!(count.0.load(Ordering::SeqCst), 1, "other direction still notified");
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            1,
+            "other direction still notified"
+        );
         assert!(matches!(
             write(&mut a, b"z", Waker::noop()),
             Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe

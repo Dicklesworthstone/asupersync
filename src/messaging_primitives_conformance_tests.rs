@@ -28,11 +28,11 @@
 //! - MUST: Offset commits during rebalance don't create gaps
 //! - MUST: Rebalance doesn't cause message loss or duplication
 
+use crate::sync::atomic::{AtomicU64, Ordering};
 #[allow(dead_code)]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 // ================================================================================================

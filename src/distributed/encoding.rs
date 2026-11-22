@@ -203,12 +203,9 @@ impl StateEncoder {
             layout_decision.effective_min_repair_symbols,
         )?;
         let params = self.calculate_params(data.len(), object_id, layout)?;
-        let mut symbols =
-            Vec::with_capacity(usize::from(source_count) + usize::from(repair_count));
-        let repair_distribution = distribute_repairs(
-            usize::from(repair_count),
-            usize::from(layout.source_blocks),
-        );
+        let mut symbols = Vec::with_capacity(usize::from(source_count) + usize::from(repair_count));
+        let repair_distribution =
+            distribute_repairs(usize::from(repair_count), usize::from(layout.source_blocks));
 
         for (block, &repairs) in repair_distribution
             .iter()
@@ -271,8 +268,7 @@ impl StateEncoder {
         let mut next_repair_esi = Vec::with_capacity(source_blocks);
         let mut maximum_repair_esi = Vec::with_capacity(source_blocks);
         for block in 0..source_blocks {
-            let (start, end) =
-                block_bounds(block, layout.max_block_size, state.original_size);
+            let (start, end) = block_bounds(block, layout.max_block_size, state.original_size);
             let source_count = (end - start).div_ceil(usize::from(state.params.symbol_size));
             let systematic = SystematicParams::try_for_source_block(
                 source_count,
@@ -280,9 +276,8 @@ impl StateEncoder {
             )
             .map_err(|err| EncodingError::Pipeline(format!("invalid source block: {err:?}")))?;
             next_repair_esi.push(source_count as u64);
-            maximum_repair_esi.push(
-                u64::from(u32::MAX) - (systematic.k_prime - systematic.k) as u64,
-            );
+            maximum_repair_esi
+                .push(u64::from(u32::MAX) - (systematic.k_prime - systematic.k) as u64);
         }
         for symbol in state.repair_symbols() {
             let block = usize::from(symbol.id().sbn());
@@ -291,8 +286,7 @@ impl StateEncoder {
                     "repair symbol block {block} exceeds declared source_blocks {source_blocks}"
                 )));
             }
-            let (start, end) =
-                block_bounds(block, layout.max_block_size, state.original_size);
+            let (start, end) = block_bounds(block, layout.max_block_size, state.original_size);
             let source_count = (end - start).div_ceil(usize::from(state.params.symbol_size));
             let esi = u64::from(symbol.id().esi());
             if symbol.id().object_id() != state.params.object_id
@@ -893,8 +887,8 @@ fn total_repair_budget(
     validate_repair_overhead(overhead)?;
     // Both operands retain their full precision in f64. Refuse oversized
     // requests before any float-to-integer cast or symbol allocation.
-    let requested = (f64::from(source_count) * f64::from(overhead)).ceil()
-        - f64::from(source_count);
+    let requested =
+        (f64::from(source_count) * f64::from(overhead)).ceil() - f64::from(source_count);
     if requested > f64::from(u16::MAX) {
         return Err(EncodingError::InvalidConfig {
             reason: "repair_overhead requires more than 65535 repair symbols".to_string(),
