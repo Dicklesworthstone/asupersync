@@ -39,17 +39,13 @@ use crate::database::transaction::trace_database_transaction;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use crate::time::{sleep, wall_now};
 use crate::types::{CancelReason, Outcome};
 use parking_lot::{Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::poll_fn;
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::Poll;
 use std::time::Duration;
 
 /// Global blocking pool for SQLite operations.
@@ -91,23 +87,11 @@ fn sqlite_error_is_interrupt(err: &SqliteError) -> bool {
 }
 
 async fn sqlite_wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
-    if delay.is_zero() {
-        cx.checkpoint().map_err(|_| sqlite_cancelled_reason(cx))?;
-        crate::runtime::yield_now().await;
-        return cx.checkpoint().map_err(|_| sqlite_cancelled_reason(cx));
-    }
-
-    let now = cx
-        .timer_driver()
-        .map_or_else(wall_now, |driver| driver.now());
-    let mut sleeper = sleep(now, delay);
-    poll_fn(|task_cx| {
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(sqlite_cancelled_reason(cx)));
-        }
-        Pin::new(&mut sleeper).poll(task_cx).map(Ok)
-    })
-    .await
+    super::transaction::wait_retry_delay(cx, delay)
+        .await
+        // SQLite historically supplies this message when cancellation has no
+        // reason; preserve it while sharing the wake and clock ownership.
+        .map_err(|_| sqlite_cancelled_reason(cx))
 }
 
 fn wal_checkpoint_i64(row: &SqliteRow, column: &str) -> Result<i64, SqliteError> {

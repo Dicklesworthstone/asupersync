@@ -53,8 +53,9 @@
 //! [`SqliteTransaction`]: super::SqliteTransaction
 //! [`MySqlTransaction`]: super::MySqlTransaction
 
+use crate::channel::OwnedCancelRegistration;
 use crate::cx::Cx;
-use crate::time::{sleep, wall_now};
+use crate::time::{Sleep, SleepError, raw_wall_now, sleep_cx};
 use crate::types::{CancelReason, Outcome};
 use std::future::{Future, poll_fn};
 use std::marker::PhantomData;
@@ -211,22 +212,59 @@ pub(crate) fn trace_database_transaction(
     );
 }
 
-async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
+fn retry_checkpoint(cx: &Cx) -> Result<(), CancelReason> {
+    // A driverless Cx's checkpoint falls back through wall_now(), which can
+    // otherwise adopt the polling task's unrelated virtual clock. The guard
+    // covers only this synchronous check, never an await or a future poll.
+    let _owner_clock = (!cx.has_timer()).then(|| Cx::set_current(Some(cx.clone())));
+    cx.checkpoint().map_err(|_| cancelled_reason(cx))
+}
+
+pub(super) async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
     if delay.is_zero() {
-        cx.checkpoint().map_err(|_| cancelled_reason(cx))?;
+        retry_checkpoint(cx)?;
         crate::runtime::yield_now().await;
-        return cx.checkpoint().map_err(|_| cancelled_reason(cx));
+        return retry_checkpoint(cx);
     }
 
-    let now = cx
-        .timer_driver()
-        .map_or_else(wall_now, |driver| driver.now());
-    let mut sleeper = sleep(now, delay);
-    poll_fn(|task_cx| {
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(cancelled_reason(cx)));
+    // The explicit owner may differ from the task polling this helper. Use
+    // its timer and cancellation subscription, including masked requests and
+    // owner deadlines, instead of adopting the ambient task's clock or wakes.
+    if cx.has_timer() {
+        match sleep_cx(cx, delay).await {
+            Ok(()) => return Ok(()),
+            // Preserve this helper's default reason when legacy callers publish
+            // cancellation without an attribution payload.
+            Err(SleepError::Cancelled(_)) => return Err(cancelled_reason(cx)),
+            Err(SleepError::TimerUnavailable) => {}
         }
-        Pin::new(&mut sleeper).poll(task_cx).map(|()| Ok(()))
+    }
+
+    // Driverless callers have historically been allowed to retry. Preserve
+    // that wall-clock fallback, but bind it before polling under another Cx.
+    // Keep the registration through a masked request so unmasking can wake
+    // this wait; a fused Cx::cancelled() observer would unregister too soon.
+    retry_checkpoint(cx)?;
+    let mut sleeper = Sleep::with_wall_clock(raw_wall_now() + delay);
+    let mut cancellation = OwnedCancelRegistration::new(cx.clone());
+    let mut owner_deadline = cx.budget_deadline_sleep();
+    poll_fn(|task_cx| {
+        cancellation.refresh(task_cx.waker());
+        if owner_deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll_deadline(task_cx).is_ready())
+        {
+            // Keep the cancel subscription after an expired masked deadline,
+            // but never poll the completed timer again or spin on its expiry.
+            owner_deadline = None;
+        }
+        if let Err(reason) = retry_checkpoint(cx) {
+            return Poll::Ready(Err(reason));
+        }
+        if Pin::new(&mut sleeper).poll_deadline(task_cx).is_pending() {
+            return Poll::Pending;
+        }
+        Poll::Ready(retry_checkpoint(cx))
     })
     .await
 }

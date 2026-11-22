@@ -14,11 +14,12 @@ use asupersync::database::transaction::{
     with_pg_transaction_retry_borrowed,
 };
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
-use asupersync::types::{Budget, CancelReason, Outcome};
+use asupersync::time::{TimerDriverHandle, VirtualClock};
+use asupersync::types::{Budget, CancelReason, Outcome, Time};
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -488,6 +489,186 @@ fn mysql_lending_callbacks_preserve_transaction_lifecycle() {
                 runtime.shutdown_drained(DEADLINE).outcome,
                 RootDrainOutcome::Quiescent
             );
+        }
+    }
+}
+
+const RETRY_BACKOFF: Duration = Duration::from_secs(3600);
+
+fn backoff_cancellation() -> CancelReason {
+    CancelReason::user("cancel parked transaction retry")
+}
+
+async fn witnessed_backoff<F: Future>(
+    future: F,
+    timer: &TimerDriverHandle,
+    parked: mpsc::Sender<()>,
+) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut parked = Some(parked);
+    poll_fn(|task| {
+        let result = future.as_mut().poll(task);
+        if result.is_pending()
+            && timer.pending_count() == 1
+            && timer.next_deadline() == Some(Time::from_secs(3600))
+            && let Some(parked) = parked.take()
+        {
+            // The callback has finished, the peer has acknowledged ROLLBACK,
+            // and the public retry helper has actually parked on its backoff.
+            // A callback-entry or server-write signal alone cannot prove that.
+            parked.send(()).unwrap();
+        }
+        result
+    })
+    .await
+}
+
+#[test]
+fn separate_request_cancellation_wakes_parked_transaction_backoff() {
+    for workers in [1, 2] {
+        for backend in [Backend::Postgres, Backend::MySql] {
+            // Cancellation during a replay-safe backoff must produce the same
+            // wire sequence as refused replay: one failed query, its rollback,
+            // then the independent reuse probe, with no second BEGIN.
+            let (address, pending, server) = peer(backend, Case::ReplayUnsafe);
+            let clock = Arc::new(VirtualClock::new());
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let runtime = RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+                .with_timer_driver(timer.clone())
+                .build()
+                .unwrap();
+            let request_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let cancel_cx = request_cx.clone();
+            let (parked, parked_rx) = mpsc::channel();
+            let (completed, completed_rx) = mpsc::channel();
+            let observed_timer = timer.clone();
+            let controller = thread::spawn(move || {
+                parked_rx
+                    .recv_timeout(DEADLINE)
+                    .expect("parked retry backoff");
+                assert_eq!(observed_timer.now(), Time::ZERO);
+                cancel_cx.cancel_with_reason(backoff_cancellation());
+                let woke_without_timer = completed_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                if !woke_without_timer {
+                    // Release an unfixed implementation so the regression fails
+                    // with a wake assertion instead of leaving a parked task.
+                    // This recovery never counts as a successful cancellation.
+                    clock.advance_to(Time::from_secs(3600));
+                    let _ = observed_timer.process_timers();
+                    let _ = completed_rx.recv_timeout(Duration::from_secs(5));
+                }
+                woke_without_timer
+            });
+            let task_timer = timer.clone();
+            let task = runtime.handle().spawn(async move {
+                let active_cx = Cx::current().expect("native transaction worker");
+                assert_ne!(active_cx.task_id(), request_cx.task_id());
+                let policy = RetryPolicy {
+                    max_retries: 1,
+                    base_delay: RETRY_BACKOFF,
+                    max_delay: RETRY_BACKOFF,
+                };
+                let sql = SQL.to_owned();
+                let borrowed_sql = sql.as_str();
+                let borrowed_pending = &pending;
+                let mut attempts = 0;
+                match backend {
+                    Backend::Postgres => {
+                        let mut connection = PgConnection::connect(
+                            &request_cx,
+                            &format!("postgres://test@{address}/test?sslmode=disable"),
+                        )
+                        .await
+                        .unwrap();
+                        let retry = with_pg_transaction_retry_borrowed(
+                            &mut connection,
+                            &request_cx,
+                            &policy,
+                            TransactionReplaySafety::ReplaySafe,
+                            |tx, cx| {
+                                attempts += 1;
+                                TransactionFuture::new(pg_body(
+                                    tx,
+                                    cx,
+                                    borrowed_sql,
+                                    borrowed_pending,
+                                    Case::ReplaySafe,
+                                ))
+                            },
+                        );
+                        let outcome = witnessed_backoff(retry, &task_timer, parked).await;
+                        assert!(matches!(outcome, Outcome::Cancelled(reason)
+                            if reason == backoff_cancellation()));
+                        assert_eq!(
+                            connection
+                                .execute_unchecked(&active_cx, REUSE_SQL)
+                                .await
+                                .unwrap(),
+                            1
+                        );
+                        connection.close().await.unwrap();
+                    }
+                    Backend::MySql => {
+                        let mut connection = MySqlConnection::connect(
+                            &request_cx,
+                            &format!("mysql://test:test@{address}/test?sslmode=disabled"),
+                        )
+                        .await
+                        .unwrap();
+                        let retry = with_mysql_transaction_retry_borrowed(
+                            &mut connection,
+                            &request_cx,
+                            &policy,
+                            TransactionReplaySafety::ReplaySafe,
+                            |tx, cx| {
+                                attempts += 1;
+                                TransactionFuture::new(mysql_body(
+                                    tx,
+                                    cx,
+                                    borrowed_sql,
+                                    borrowed_pending,
+                                    Case::ReplaySafe,
+                                ))
+                            },
+                        );
+                        let outcome = witnessed_backoff(retry, &task_timer, parked).await;
+                        assert!(matches!(outcome, Outcome::Cancelled(reason)
+                            if reason == backoff_cancellation()));
+                        assert_eq!(
+                            connection
+                                .execute_static_sql(&active_cx, REUSE_SQL)
+                                .await
+                                .unwrap(),
+                            1
+                        );
+                        connection.close().await.unwrap();
+                    }
+                }
+                assert_eq!(attempts, 1, "cancelled backoff must not replay the body");
+                assert!(!active_cx.is_cancel_requested());
+                assert_eq!(task_timer.pending_count(), 0, "backoff timer must retire");
+                completed.send(()).unwrap();
+            });
+            runtime.block_on(task);
+            let woke_without_timer = controller.join().unwrap();
+            server.join().unwrap();
+            let shutdown = runtime.shutdown_drained(DEADLINE);
+            assert_eq!(shutdown.outcome, RootDrainOutcome::Quiescent);
+            assert_eq!(shutdown.live_tasks, 0);
+            assert_eq!(shutdown.pending_spawns, 0);
+            assert_eq!(shutdown.pending_obligations, 0);
+            assert!(
+                woke_without_timer,
+                "{backend:?} {workers} workers: caller cancellation did not wake backoff"
+            );
+            assert_eq!(
+                timer.now(),
+                Time::ZERO,
+                "cancellation needs no clock advance"
+            );
+            assert_eq!(timer.pending_count(), 0);
         }
     }
 }

@@ -223,6 +223,297 @@ fn wait_retry_delay_zero_delay_returns_cancelled_after_yield() {
     crate::test_complete!("wait_retry_delay_zero_delay_returns_cancelled_after_yield");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_retry_delay_wakes_for_a_distinct_owner_without_adopting_the_worker_clock() {
+    use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use crate::time::{TimeSource, TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, Time};
+    use std::sync::{Arc, mpsc};
+
+    for workers in [1, 2] {
+        for driverless in [false, true] {
+            let owner_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(600)));
+            let owner_timer = TimerDriverHandle::with_virtual_clock(owner_clock.clone());
+            let owner_runtime = RuntimeBuilder::current_thread()
+                .with_timer_driver(owner_timer.clone())
+                .build()
+                .unwrap();
+            let owner = if driverless {
+                Cx::for_testing()
+            } else {
+                owner_runtime.request_cx_with_budget(Budget::INFINITE)
+            };
+            let worker_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(1)));
+            let worker_timer = TimerDriverHandle::with_virtual_clock(worker_clock.clone());
+            let runtime = RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .with_timer_driver(worker_timer.clone())
+                .build()
+                .unwrap();
+            let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let task = runtime.handle().spawn({
+                let owner = owner.clone();
+                let owner_timer = owner_timer.clone();
+                let worker_timer = worker_timer.clone();
+                let saved_waker = saved_waker.clone();
+                async move {
+                    let current = Cx::current().expect("native worker context");
+                    assert!(!Arc::ptr_eq(&owner.inner, &current.inner));
+                    let mut wait =
+                        std::pin::pin!(wait_retry_delay(&owner, Duration::from_secs(3600)));
+                    let mut reported = false;
+                    let result = poll_fn(|task_cx| {
+                        let result = wait.as_mut().poll(task_cx);
+                        if result.is_pending() && !reported {
+                            reported = true;
+                            *saved_waker.lock() = Some(task_cx.waker().clone());
+                            parked_tx
+                                .send((
+                                    owner_timer.pending_count(),
+                                    worker_timer.pending_count(),
+                                    owner.inner.read().cancel_waker_registrations.len(),
+                                ))
+                                .unwrap();
+                        }
+                        result
+                    })
+                    .await;
+                    assert!(current.checkpoint().is_ok(), "worker owner stays active");
+                    done_tx.send(result).unwrap();
+                }
+            });
+
+            let parked = parked_rx.recv_timeout(Duration::from_secs(3));
+            let expected = CancelReason::shutdown()
+                .with_message("stop database retry")
+                .with_cause(CancelReason::timeout());
+            owner.set_cancel_reason(expected.clone());
+            let completed = done_rx.recv_timeout(Duration::from_secs(3));
+            let woke_without_rescue = completed.is_ok();
+            if !woke_without_rescue {
+                // Let a broken old implementation retire, but never count
+                // this diagnostic wake as evidence that cancellation worked.
+                let wake = saved_waker.lock().take();
+                if let Some(waker) = wake {
+                    waker.wake();
+                }
+            }
+            let result = completed
+                .or_else(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+                .expect("retry wait must finish after the diagnostic wake");
+            runtime.block_on(task);
+            let remaining = (
+                owner_timer.pending_count(),
+                worker_timer.pending_count(),
+                owner.inner.read().cancel_waker_registrations.len(),
+            );
+            assert_eq!(
+                runtime.shutdown_drained(Duration::from_secs(3)).outcome,
+                RootDrainOutcome::Quiescent
+            );
+            assert_eq!(
+                owner_runtime
+                    .shutdown_drained(Duration::from_secs(3))
+                    .outcome,
+                RootDrainOutcome::Quiescent
+            );
+
+            assert_eq!(
+                parked.expect("retry delay must actually return Pending"),
+                (if driverless { 0 } else { 1 }, 0, 1),
+                "only the explicit owner may supply the retry timer and cancellation"
+            );
+            assert!(
+                woke_without_rescue,
+                "owner cancellation did not wake retry: workers={workers}, driverless={driverless}"
+            );
+            assert_eq!(result, Err(expected));
+            assert_eq!(owner_clock.now(), Time::from_secs(600));
+            assert_eq!(worker_clock.now(), Time::from_secs(1));
+            assert_eq!(remaining, (0, 0, 0), "completion retires owned wakes");
+            assert!(owner_timer.is_empty());
+            assert!(worker_timer.is_empty());
+            assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 0);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct RetryWakeCount(std::sync::atomic::AtomicUsize);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::task::Wake for RetryWakeCount {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn driverless_retry_delay_keeps_masked_cancellation_and_retires_only_its_own_wake() {
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let owner = Cx::for_testing();
+    let ambient_timer = TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::new()));
+    let ambient = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(ambient_timer.clone()),
+        None,
+    );
+    let _current = Cx::set_current(Some(ambient.clone()));
+    let wakes = Arc::new(RetryWakeCount::default());
+    let waker = Waker::from(wakes.clone());
+    let mut task_cx = Context::from_waker(&waker);
+    let mut first = Box::pin(wait_retry_delay(&owner, Duration::from_secs(3600)));
+    let mut second = Box::pin(wait_retry_delay(&owner, Duration::from_secs(3600)));
+
+    assert!(first.as_mut().poll(&mut task_cx).is_pending());
+    assert!(second.as_mut().poll(&mut task_cx).is_pending());
+    assert!(
+        ambient_timer.is_empty(),
+        "fallback must bind the wall clock"
+    );
+    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 2);
+    drop(first);
+    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+
+    // An unrelated current task's cancellation cannot count as a completed
+    // retry delay for this still-active explicit owner.
+    ambient.set_cancel_reason(CancelReason::user("unrelated worker cancellation"));
+    assert!(second.as_mut().poll(&mut task_cx).is_pending());
+    let expected = CancelReason::timeout().with_cause(CancelReason::user("masked retry"));
+    owner.masked(|| {
+        owner.set_cancel_reason(expected.clone());
+        assert!(second.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        wakes.0.store(0, Ordering::SeqCst);
+        assert!(second.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "masked wait must park");
+    });
+    assert!(wakes.0.load(Ordering::SeqCst) > 0, "unmask must wake retry");
+    assert_eq!(
+        second.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(expected))
+    );
+    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 0);
+    assert!(ambient_timer.is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn driverless_retry_budget_does_not_read_an_unrelated_ambient_clock() {
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId, Time};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let owner = Cx::for_testing_with_budget(
+        Budget::INFINITE.with_deadline(raw_wall_now() + Duration::from_secs(3600)),
+    );
+    let timer =
+        TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::starting_at(Time::MAX)));
+    let ambient = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(timer.clone()),
+        None,
+    );
+    let _current = Cx::set_current(Some(ambient.clone()));
+    let wakes = Arc::new(RetryWakeCount::default());
+    let waker = Waker::from(wakes.clone());
+    let mut task_cx = Context::from_waker(&waker);
+    let mut wait = Box::pin(wait_retry_delay(&owner, Duration::from_secs(3600)));
+
+    assert!(wait.as_mut().poll(&mut task_cx).is_pending());
+    assert!(
+        !owner.is_cancel_requested(),
+        "wall-clock budget is not expired"
+    );
+    assert!(timer.is_empty(), "ambient virtual driver is not borrowed");
+    assert!(Arc::ptr_eq(&Cx::current().unwrap().inner, &ambient.inner));
+    let expected = CancelReason::user("cancel driverless retry");
+    owner.set_cancel_reason(expected.clone());
+    assert!(
+        wakes.0.load(Ordering::SeqCst) > 0,
+        "explicit owner must wake"
+    );
+    assert_eq!(wait.as_mut().poll(&mut task_cx), Poll::Ready(Err(expected)));
+    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 0);
+    assert!(Arc::ptr_eq(&Cx::current().unwrap().inner, &ambient.inner));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn retry_delay_observes_a_restricted_owners_internal_deadline_once_under_a_mask() {
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, CancelKind, RegionId, TaskId, Time};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+    let owner = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 1),
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE.with_deadline(Time::from_millis(10)),
+        None,
+        None,
+        None,
+        Some(timer.clone()),
+        None,
+    );
+    let restriction = owner
+        .restrict::<crate::cx::cap::None>()
+        .set_current_restricted();
+    let restricted = Cx::current().unwrap();
+    assert!(restricted.timer_driver().is_none());
+    let wakes = Arc::new(RetryWakeCount::default());
+    let waker = Waker::from(wakes.clone());
+    let mut task_cx = Context::from_waker(&waker);
+    let mut wait = Box::pin(wait_retry_delay(&restricted, Duration::from_secs(3600)));
+
+    owner.masked(|| {
+        assert!(wait.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(timer.next_deadline(), Some(Time::from_millis(10)));
+        clock.advance_to(Time::from_millis(10));
+        assert_eq!(timer.process_timers(), 1);
+        assert!(wait.as_mut().poll(&mut task_cx).is_pending());
+        assert!(timer.is_empty(), "expired internal deadline is retired");
+        wakes.0.store(0, Ordering::SeqCst);
+        assert!(wait.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "no expired timer spin");
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+    });
+    assert!(wakes.0.load(Ordering::SeqCst) > 0, "unmask must wake retry");
+    assert!(matches!(
+        wait.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(reason)) if reason.kind == CancelKind::Deadline
+    ));
+    assert!(timer.is_empty());
+    assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 0);
+    drop(restriction);
+}
+
 #[test]
 fn retry_with_policy_stops_after_max_retries_on_persistent_error() {
     init_test("retry_with_policy_stops_after_max_retries_on_persistent_error");
