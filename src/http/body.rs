@@ -26,6 +26,9 @@ use crate::stream::Stream;
 pub use super::decode::{ContentDecodeError, ContentDecodeLimits, ContentDecodedBody};
 pub use super::encode::{ContentEncodeError, ContentEncodeLimits, ContentEncodedBody};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod admission;
+
 /// A frame of body content: either data or trailers.
 ///
 /// HTTP bodies are delivered as a stream of frames. Most frames contain

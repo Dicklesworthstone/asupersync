@@ -9,6 +9,7 @@ use crate::bytes::{Buf, BytesMut};
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
 use crate::http::body::Frame;
+use crate::http::body::admission::{BodyBudget, BodyBudgetExceeded, BodyReservation};
 use crate::http::h1::codec::{
     Http1Codec, HttpError, decode_streaming_request_head, for_each_header_value_token,
     preview_request_head, require_transfer_encoding_chunked, trim_ows, trim_ows_bytes,
@@ -62,6 +63,7 @@ pub(super) struct RequestExecutionConfig {
     drain_grace: Duration,
     connection: Option<Cx>,
     shutdown: Option<ShutdownSignal>,
+    body_reservation: Option<Arc<BodyReservation>>,
 }
 
 /// Legacy dispatch retains borrowed handlers and response conversion timing.
@@ -1107,6 +1109,7 @@ pub struct Http1Server<F> {
     config: Http1Config,
     shutdown_signal: Option<ShutdownSignal>,
     in_flight_requests: Option<Arc<AtomicUsize>>,
+    body_budget: Option<Arc<BodyBudget>>,
 }
 
 impl<F, Fut> Http1Server<F>
@@ -1140,6 +1143,7 @@ where
             config: Http1Config::default(),
             shutdown_signal: None,
             in_flight_requests: None,
+            body_budget: None,
         }
     }
 
@@ -1150,6 +1154,7 @@ where
             config,
             shutdown_signal: None,
             in_flight_requests: None,
+            body_budget: None,
         }
     }
 
@@ -1173,6 +1178,11 @@ where
     #[must_use]
     pub fn with_in_flight_requests(mut self, counter: Arc<AtomicUsize>) -> Self {
         self.in_flight_requests = Some(counter);
+        self
+    }
+
+    pub(super) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> Self {
+        self.body_budget = Some(budget);
         self
     }
 
@@ -1368,7 +1378,8 @@ where
     {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
-            .max_body_size(self.config.max_body_size);
+            .max_body_size(self.config.max_body_size)
+            .with_body_budget(self.body_budget.clone());
         // The codec assembles a whole Content-Length body (or chunk) in the
         // read buffer, so the buffer must admit max_headers_size +
         // max_body_size; Framed's default 8 MiB cap would otherwise drop the
@@ -1486,6 +1497,10 @@ where
             // is loop-iteration scoped so every exit path (including early
             // breaks and error returns) releases it via Drop.
             let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
+            // The codec's reservation includes incomplete framing-admitted
+            // bodies. Transfer it only after a complete body and trailers, and
+            // retain it through response retirement and owned subtree cleanup.
+            let body_reservation = framed.codec_mut().take_request_body_reservation();
 
             // br-asupersync-t9yqht: enforce the allowed-hosts allow-list
             // BEFORE the handler runs. A request whose well-formed Host
@@ -1594,6 +1609,7 @@ where
                     drain_grace: self.config.request_drain_grace,
                     connection: conn_cx,
                     shutdown: self.shutdown_signal.clone(),
+                    body_reservation: body_reservation.clone(),
                 },
             )
             .await?;
@@ -2213,6 +2229,7 @@ where
                         drain_grace: self.config.request_drain_grace,
                         connection: Some(cx.clone()),
                         shutdown: self.shutdown_signal.clone(),
+                        body_reservation: None,
                     },
                 },
             )
@@ -2881,6 +2898,7 @@ where
                     drain_grace: config.request_drain_grace,
                     connection: Some(cx.clone()),
                     shutdown: shutdown_signal.clone(),
+                    body_reservation: None,
                 },
             },
             policy,
@@ -4168,6 +4186,13 @@ where
 /// classification decision here instead of silently defaulting.
 fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
     let (status, message): (u16, &str) = match error {
+        HttpError::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<BodyBudgetExceeded>()) =>
+        {
+            (503, "listener request-body admission capacity exhausted")
+        }
         HttpError::HeadersTooLarge | HttpError::TooManyHeaders => {
             (431, "request header fields exceed the configured limit")
         }

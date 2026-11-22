@@ -213,6 +213,7 @@ fn spawn_capacity_failure_is_connection_scoped() {
             localhost_http_config(),
             shutdown.clone(),
             Arc::new(AtomicUsize::new(0)),
+            Arc::new(BodyBudget::default()),
             &handle,
         ) {
             Ok(_) => panic!("connection spawn should fail while root region is at capacity"),
@@ -705,6 +706,7 @@ fn fatal_listener_failure_drains_request(fail_spawn: bool, owned: bool, workers:
                                                 config.connection,
                                                 shutdown,
                                                 in_flight,
+                                                Arc::new(BodyBudget::default()),
                                             )
                                         })
                                         .map(ConnectionTask::Owned)
@@ -716,6 +718,7 @@ fn fatal_listener_failure_drains_request(fail_spawn: bool, owned: bool, workers:
                                         config.connection,
                                         shutdown,
                                         in_flight,
+                                        Arc::new(BodyBudget::default()),
                                         &runtime_handle,
                                     )
                                     .map(ConnectionTask::Root)

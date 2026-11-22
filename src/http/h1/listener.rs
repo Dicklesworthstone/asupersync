@@ -4,6 +4,7 @@
 //! each to an [`Http1Server`] handler. Integrates with [`ConnectionManager`]
 //! for capacity limits and [`ShutdownSignal`] for graceful drain.
 
+use crate::http::body::admission::BodyBudget;
 use crate::http::h1::server::{
     Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingConfig, Http1StreamingServer,
     IntoHttp1Response,
@@ -37,6 +38,7 @@ use crate::{
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -77,6 +79,7 @@ pub struct Http1ListenerStats {
     last_drain_requests_at_start: AtomicU64,
     last_drain_requests_stranded: AtomicU64,
     last_drain_duration_ms: AtomicU64,
+    body_budget: Arc<BodyBudget>,
     time_getter: fn() -> Time,
 }
 
@@ -166,8 +169,27 @@ impl Http1ListenerStats {
             last_drain_requests_at_start: AtomicU64::new(0),
             last_drain_requests_stranded: AtomicU64::new(0),
             last_drain_duration_ms: AtomicU64::new(0),
+            body_budget: Arc::new(BodyBudget::default()),
             time_getter,
         }
+    }
+
+    /// Buffered request-body payload bytes reserved across this listener.
+    ///
+    /// This includes validated Content-Length and chunk lengths whose bytes
+    /// have not arrived yet, and completed bodies still owned by handlers or
+    /// responses. It is admission accounting, not measured allocated memory,
+    /// and is maintained even without an aggregate limit.
+    #[must_use]
+    pub fn reserved_request_body_bytes(&self) -> usize {
+        self.body_budget.reserved_bytes()
+    }
+
+    /// Requests or chunk appends refused by the shared body-byte budget.
+    /// Existing per-request size-limit failures are not counted.
+    #[must_use]
+    pub fn body_budget_refusals_total(&self) -> u64 {
+        self.body_budget.refusals()
     }
 
     fn record_accepted(&self) {
@@ -870,6 +892,32 @@ where
 }
 
 impl<F> Http1Listener<F> {
+    /// Limits buffered request-body payload reservations across all connections.
+    /// No aggregate limit is configured by default.
+    ///
+    /// A validated Content-Length reserves its entire body before further
+    /// buffering; chunked requests reserve each declared chunk at its size line.
+    /// Reservations therefore include bytes that have not arrived yet. Capacity
+    /// exhaustion sends 503 with Connection: close before invoking the handler;
+    /// a refused Content-Length request never receives 100 Continue. Existing
+    /// per-request body-size limits still independently return 413.
+    ///
+    /// Completed bodies retain credit through handler execution and response
+    /// retirement. Owned serving also retains credit through actual request
+    /// descendants and finalizers, including abandoned serving futures. Observe
+    /// it with [`Http1ListenerStats::reserved_request_body_bytes`].
+    ///
+    /// This payload admission limit excludes headers, framing, read-ahead,
+    /// transient copies, spare allocation capacity, response bytes, and bodies
+    /// retained by application code outside the request. Streaming, produced,
+    /// and SSE serving APIs use their existing live-body queue limits and are
+    /// not charged here. Buffered TCP, Unix, handoff, and TLS serving are covered.
+    #[must_use]
+    pub fn max_buffered_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.body_budget.set_limit(max);
+        self
+    }
+
     /// Returns a clone of the shutdown signal for external phase observation.
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
@@ -989,9 +1037,10 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        let body_budget = Arc::clone(&self.stats.body_budget);
         self.run_with(
             runtime,
-            |stream, guard, handler, config, shutdown, in_flight, runtime| {
+            move |stream, guard, handler, config, shutdown, in_flight, runtime| {
                 spawn_stream_connection::<F, Fut, R>(
                     stream,
                     guard,
@@ -999,6 +1048,7 @@ where
                     config.connection,
                     shutdown,
                     in_flight,
+                    Arc::clone(&body_budget),
                     runtime,
                 )
             },
@@ -1017,10 +1067,12 @@ where
     /// manager behaves exactly as with [`Self::run`]
     /// (br-asupersync-issue65-criticisms-kpmoy5.4.5).
     pub async fn run_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let body_budget = Arc::clone(&self.stats.body_budget);
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
             move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                let body_budget = Arc::clone(&body_budget);
                 spawner
                     .spawn(move |_connection_cx| {
                         serve_stream_connection::<F, Fut, R>(
@@ -1030,6 +1082,7 @@ where
                             config.connection,
                             shutdown_signal,
                             in_flight_requests,
+                            body_budget,
                         )
                     })
                     .map(ConnectionTask::Owned)
@@ -1057,10 +1110,12 @@ where
         // Refuse a detached owner before accepting a connection.
         let _ =
             crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
+        let body_budget = Arc::clone(&self.stats.body_budget);
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
             move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                let body_budget = Arc::clone(&body_budget);
                 spawner
                     .spawn(move |connection_cx| {
                         serve_owned_stream_connection(
@@ -1071,6 +1126,7 @@ where
                             config.connection,
                             shutdown_signal,
                             in_flight_requests,
+                            body_budget,
                         )
                     })
                     .map(ConnectionTask::Owned)
@@ -1113,6 +1169,7 @@ where
         runtime: &RuntimeHandle,
         acceptor: TlsAcceptor,
     ) -> io::Result<ShutdownStats> {
+        let body_budget = Arc::clone(&self.stats.body_budget);
         self.run_with(
             runtime,
             move |stream, guard, handler, config, shutdown, in_flight, runtime| {
@@ -1123,6 +1180,7 @@ where
                     config.connection,
                     shutdown,
                     in_flight,
+                    Arc::clone(&body_budget),
                     acceptor.clone(),
                     runtime,
                 )
@@ -1151,11 +1209,13 @@ where
     ) -> io::Result<ShutdownStats> {
         let _ =
             crate::http::h1::server::OwnedRequests::new(cx.clone()).map_err(io::Error::other)?;
+        let body_budget = Arc::clone(&self.stats.body_budget);
         let spawner = cx.clone();
         self.run_with_spawner(
             Some(cx.clone()),
             move |stream, guard, handler, config, shutdown, in_flight| {
                 let acceptor = acceptor.clone();
+                let body_budget = Arc::clone(&body_budget);
                 spawner
                     .spawn(move |connection_cx| {
                         serve_owned_tls_connection(
@@ -1166,6 +1226,7 @@ where
                             config.connection,
                             shutdown,
                             in_flight,
+                            body_budget,
                             acceptor,
                         )
                     })
@@ -1772,6 +1833,7 @@ enum AcceptOrShutdown {
 }
 
 /// [`spawn_connection`] for a connection of either transport.
+#[allow(clippy::too_many_arguments)]
 fn spawn_stream_connection<F, Fut, R>(
     stream: H1Stream,
     guard: ConnectionGuard,
@@ -1779,6 +1841,7 @@ fn spawn_stream_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
     runtime: &RuntimeHandle,
 ) -> Result<JoinHandle<()>, SpawnError>
 where
@@ -1794,6 +1857,7 @@ where
             config,
             shutdown_signal,
             in_flight_requests,
+            body_budget,
             runtime,
         ),
         #[cfg(unix)]
@@ -1805,6 +1869,7 @@ where
             config,
             shutdown_signal,
             in_flight_requests,
+            body_budget,
         )),
         #[cfg(not(target_arch = "wasm32"))]
         H1Stream::Handoff(stream, peer) => runtime.try_spawn(serve_without_upgrades(
@@ -1815,12 +1880,14 @@ where
             config,
             shutdown_signal,
             in_flight_requests,
+            body_budget,
         )),
     }
 }
 
 /// Opt-in request ownership on every accepted native transport.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 async fn serve_owned_stream_connection<F, Fut, R>(
     cx: Cx,
     stream: H1Stream,
@@ -1829,6 +1896,7 @@ async fn serve_owned_stream_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
@@ -1853,7 +1921,8 @@ async fn serve_owned_stream_connection<F, Fut, R>(
     };
     let server = Http1Server::with_config_upgradeable(move |request| handler(request), config)
         .with_shutdown_signal(shutdown_signal.clone())
-        .with_in_flight_requests(in_flight_requests);
+        .with_in_flight_requests(in_flight_requests)
+        .with_body_budget(body_budget);
     match server
         .serve_connection_using(
             stream,
@@ -1895,6 +1964,7 @@ async fn serve_stream_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
@@ -1909,6 +1979,7 @@ async fn serve_stream_connection<F, Fut, R>(
                 config,
                 shutdown_signal,
                 in_flight_requests,
+                body_budget,
             )
             .await;
         }
@@ -1922,6 +1993,7 @@ async fn serve_stream_connection<F, Fut, R>(
                 config,
                 shutdown_signal,
                 in_flight_requests,
+                body_budget,
             )
             .await;
         }
@@ -1935,6 +2007,7 @@ async fn serve_stream_connection<F, Fut, R>(
                 config,
                 shutdown_signal,
                 in_flight_requests,
+                body_budget,
             )
             .await;
         }
@@ -1946,6 +2019,7 @@ async fn serve_stream_connection<F, Fut, R>(
 /// made with `Http1Upgrade::new_any` run on it; TCP-typed ones are refused
 /// before the `101`.
 #[cfg(any(unix, not(target_arch = "wasm32")))]
+#[allow(clippy::too_many_arguments)]
 async fn serve_without_upgrades<S, F, Fut, R>(
     stream: S,
     peer_addr: Option<SocketAddr>,
@@ -1954,6 +2028,7 @@ async fn serve_without_upgrades<S, F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
 ) where
     S: crate::io::AsyncRead + crate::io::AsyncWrite + Unpin + Send + 'static,
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1963,7 +2038,8 @@ async fn serve_without_upgrades<S, F, Fut, R>(
     let _guard = guard;
     let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
         .with_shutdown_signal(shutdown_signal.clone())
-        .with_in_flight_requests(in_flight_requests);
+        .with_in_flight_requests(in_flight_requests)
+        .with_body_budget(body_budget);
     serve_with_transport_upgrades(server, stream, peer_addr, &shutdown_signal).await;
 }
 
@@ -1999,6 +2075,7 @@ async fn serve_with_transport_upgrades<S, F, Fut, R>(
 ///
 /// The connection guard is held for the lifetime of the handler,
 /// ensuring proper tracking during drain.
+#[allow(clippy::too_many_arguments)]
 fn spawn_connection<F, Fut, R>(
     stream: crate::net::tcp::stream::TcpStream,
     guard: ConnectionGuard,
@@ -2006,6 +2083,7 @@ fn spawn_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
     runtime: &RuntimeHandle,
 ) -> Result<JoinHandle<()>, SpawnError>
 where
@@ -2020,6 +2098,7 @@ where
         config,
         shutdown_signal,
         in_flight_requests,
+        body_budget,
     ))
 }
 
@@ -2032,6 +2111,7 @@ async fn serve_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
@@ -2040,7 +2120,8 @@ async fn serve_connection<F, Fut, R>(
     let _guard = guard;
     let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
         .with_shutdown_signal(shutdown_signal.clone())
-        .with_in_flight_requests(in_flight_requests);
+        .with_in_flight_requests(in_flight_requests)
+        .with_body_budget(body_budget);
     let peer_addr = stream.peer_addr().ok();
     if let Ok(Http1ServeOutcome::Upgraded {
         io,
@@ -2063,6 +2144,7 @@ async fn serve_connection<F, Fut, R>(
 /// A force-close phase wins the handshake race and drops the socket, preventing
 /// silent peers from keeping listener shutdown non-quiescent indefinitely.
 #[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
 fn spawn_tls_connection<F, Fut, R>(
     stream: H1Stream,
     guard: ConnectionGuard,
@@ -2070,6 +2152,7 @@ fn spawn_tls_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
     acceptor: TlsAcceptor,
     runtime: &RuntimeHandle,
 ) -> Result<JoinHandle<()>, SpawnError>
@@ -2095,7 +2178,8 @@ where
 
         let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal.clone())
-            .with_in_flight_requests(in_flight_requests);
+            .with_in_flight_requests(in_flight_requests)
+            .with_body_budget(body_budget);
         // `wss://`: upgrade actions made with `Http1Upgrade::new_any` run over
         // the TLS stream; TCP-typed ones are refused before the `101`.
         serve_with_transport_upgrades(server, tls_stream, peer_addr, &shutdown_signal).await;
@@ -2166,6 +2250,7 @@ async fn accept_http1_tls(
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[allow(clippy::too_many_arguments)]
 async fn serve_owned_tls_connection<F, Fut, R>(
     cx: Cx,
     stream: H1Stream,
@@ -2174,6 +2259,7 @@ async fn serve_owned_tls_connection<F, Fut, R>(
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
+    body_budget: Arc<BodyBudget>,
     acceptor: TlsAcceptor,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -2204,7 +2290,8 @@ async fn serve_owned_tls_connection<F, Fut, R>(
     };
     let server = Http1Server::with_config_upgradeable(move |request| handler(request), config)
         .with_shutdown_signal(shutdown_signal.clone())
-        .with_in_flight_requests(in_flight_requests);
+        .with_in_flight_requests(in_flight_requests)
+        .with_body_budget(body_budget);
     match server
         .serve_connection_using(
             tls_stream,

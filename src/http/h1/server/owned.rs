@@ -25,6 +25,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+#[cfg(test)]
+#[path = "owned/body_budget_tests.rs"]
+mod body_budget_tests;
+
 #[derive(Clone)]
 pub(in crate::http::h1) struct OwnedRequests {
     owner: Cx,
@@ -345,6 +349,27 @@ where
         region: Some(region),
         body: None,
     };
+    if let Some(reservation) = config.body_reservation.clone() {
+        // Register before user work and await the scheduler's acknowledgment.
+        // The LIFO finalizer holds credit through actual subtree cleanup even
+        // when the serving future is abandoned and only the close backstop runs.
+        if let Err(error) = owner
+            .region
+            .as_ref()
+            .expect("admitted HTTP/1 request region")
+            .retain_until_finalized(reservation)
+            .await
+        {
+            owner
+                .region
+                .take()
+                .expect("admitted HTTP/1 request region")
+                .close()
+                .await
+                .map_err(ownership_error)?;
+            return Err(ownership_error(error));
+        }
+    }
     let mut owner_cancel = ListenerCancellation::new(Some(cx.clone()));
     let mut polling_cancel = ListenerCancellation::new(polling_cx);
     let owner_cancelled = owner_cancel.is_requested();

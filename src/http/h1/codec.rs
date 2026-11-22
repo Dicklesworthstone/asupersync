@@ -6,6 +6,8 @@
 
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::body::admission::{BodyBudget, BodyReservation};
 use crate::http::h1::stream::BodyKind as StreamingBodyKind;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::RequestHead;
@@ -13,6 +15,8 @@ use crate::http::h1::types::{self, Method, Request, Response, Version};
 use memchr::{memchr, memchr_iter, memmem};
 use std::fmt;
 use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 /// Maximum allowed header block size (64 KiB).
 const DEFAULT_MAX_HEADERS_SIZE: usize = 64 * 1024;
@@ -202,6 +206,12 @@ pub struct Http1Codec {
     state: DecodeState,
     max_headers_size: usize,
     max_body_size: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    body_budget: Option<Arc<BodyBudget>>,
+    /// Held from framing admission through complete body and trailers. The
+    /// server takes it before dispatching the decoded request.
+    #[cfg(not(target_arch = "wasm32"))]
+    body_reservation: Option<BodyReservation>,
     /// Buffered head bytes already checked without finding the head's end,
     /// so a head that arrives a few bytes per read is not rescanned from its
     /// first byte on every read (quadratic up to `max_headers_size`).
@@ -220,6 +230,10 @@ impl Http1Codec {
             state: DecodeState::Head,
             max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
+            #[cfg(not(target_arch = "wasm32"))]
+            body_budget: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            body_reservation: None,
             head_scanned: 0,
             #[cfg(test)]
             head_bytes_scanned: 0,
@@ -290,6 +304,20 @@ impl Http1Codec {
     pub fn max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;
         self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn with_body_budget(mut self, budget: Option<Arc<BodyBudget>>) -> Self {
+        self.body_budget = budget;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn take_request_body_reservation(&mut self) -> Option<Arc<BodyReservation>> {
+        self.body_reservation
+            .take()
+            .filter(|reservation| reservation.bytes() != 0)
+            .map(Arc::new)
     }
 
     /// Validate one request head without consuming or copying the input.
@@ -1238,6 +1266,18 @@ impl ChunkedBodyDecoder {
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<ChunkedDecoded>, HttpError> {
+        self.decode_with_budget(
+            src,
+            #[cfg(not(target_arch = "wasm32"))]
+            None,
+        )
+    }
+
+    fn decode_with_budget(
+        &mut self,
+        src: &mut BytesMut,
+        #[cfg(not(target_arch = "wasm32"))] mut reservation: Option<&mut BodyReservation>,
+    ) -> Result<Option<ChunkedDecoded>, HttpError> {
         loop {
             match self.phase {
                 ChunkPhase::SizeLine => {
@@ -1264,6 +1304,12 @@ impl ChunkedBodyDecoder {
 
                     if self.body.len().saturating_add(size) > self.max_body_size {
                         return Err(HttpError::BodyTooLarge);
+                    }
+                    // Reserve the entire validated chunk before buffering it,
+                    // including bytes that have not arrived from the peer yet.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(reservation) = reservation.as_deref_mut() {
+                        reservation.try_grow(size).map_err(io::Error::other)?;
                     }
 
                     self.phase = ChunkPhase::Data { remaining: size };
@@ -1718,7 +1764,10 @@ impl Decoder for Http1Codec {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
         match self.decode_inner(src) {
             Err(e) => {
+                // Retire decoder-owned body storage before its reservation.
                 self.state = DecodeState::Poisoned;
+                #[cfg(not(target_arch = "wasm32"))]
+                drop(self.body_reservation.take());
                 Err(e)
             }
             Ok(v) => Ok(v),
@@ -1734,6 +1783,8 @@ impl Decoder for Http1Codec {
                 // chunk without completing the request. An empty input buffer
                 // alone therefore does not establish a clean EOF.
                 self.state = DecodeState::Poisoned;
+                #[cfg(not(target_arch = "wasm32"))]
+                drop(self.body_reservation.take());
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "incomplete HTTP request at EOF",
@@ -1780,6 +1831,17 @@ impl Http1Codec {
                             if len > self.max_body_size {
                                 return Err(HttpError::BodyTooLarge);
                             }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let mut reservation = self
+                                    .body_budget
+                                    .as_ref()
+                                    .map(|budget| BodyReservation::new(Arc::clone(budget)));
+                                if let Some(reservation) = &mut reservation {
+                                    reservation.try_grow(len).map_err(io::Error::other)?;
+                                }
+                                self.body_reservation = reservation;
+                            }
                             *state = DecodeState::Body {
                                 method,
                                 uri,
@@ -1789,6 +1851,13 @@ impl Http1Codec {
                             };
                         }
                         BodyKind::Chunked => {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                self.body_reservation = self
+                                    .body_budget
+                                    .as_ref()
+                                    .map(|budget| BodyReservation::new(Arc::clone(budget)));
+                            }
                             *state = DecodeState::Chunked {
                                 method,
                                 uri,
@@ -1834,7 +1903,12 @@ impl Http1Codec {
                 }
 
                 DecodeState::Chunked { chunked, .. } => {
-                    let Some((body, trailers)) = chunked.decode(src)? else {
+                    let Some((body, trailers)) = chunked.decode_with_budget(
+                        src,
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.body_reservation.as_mut(),
+                    )?
+                    else {
                         return Ok(None);
                     };
 

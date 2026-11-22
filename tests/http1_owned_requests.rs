@@ -816,3 +816,625 @@ fn legacy_server_still_accepts_borrowed_handler_and_send_future_with_non_send_ou
     assert_eq!(report.pending_spawns, 0);
     assert_eq!(report.pending_obligations, 0);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod listener_body_budget {
+    use asupersync::Cx;
+    use asupersync::http::h1::Http1Config;
+    use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig, Http1ListenerStats};
+    use asupersync::http::h1::server::HostPolicy;
+    use asupersync::http::h1::types::{Request, Response};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::server::connection::ConnectionManager;
+    use asupersync::sync::Notify;
+    use asupersync::types::CancelKind;
+    use std::future::{Future, poll_fn};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct Peer(BufReader<TcpStream>);
+
+    struct Head {
+        status: u16,
+        headers: Vec<(String, String)>,
+    }
+
+    impl Peer {
+        fn connect(address: SocketAddr) -> Self {
+            let socket = TcpStream::connect(address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            Self(BufReader::new(socket))
+        }
+
+        fn send(&mut self, bytes: &[u8]) {
+            self.0.get_mut().write_all(bytes).unwrap();
+        }
+
+        fn fixed(&mut self, path: &str, length: usize, expect_continue: bool) {
+            let expect = if expect_continue {
+                "Expect: 100-continue\r\n"
+            } else {
+                ""
+            };
+            self.send(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\n{expect}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        fn chunked(&mut self, path: &str) {
+            self.send(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\nTrailer: x-budget\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            assert_eq!(self.head().status, 100);
+        }
+
+        fn head(&mut self) -> Head {
+            let mut line = String::new();
+            assert_ne!(self.0.read_line(&mut line).unwrap(), 0, "response status");
+            assert!(line.ends_with("\r\n"), "HTTP status line: {line:?}");
+            let mut words = line.split_whitespace();
+            assert_eq!(words.next(), Some("HTTP/1.1"));
+            let status = words.next().unwrap().parse().unwrap();
+            let mut headers = Vec::new();
+            let mut total = line.len();
+            loop {
+                line.clear();
+                assert_ne!(self.0.read_line(&mut line).unwrap(), 0, "response headers");
+                total += line.len();
+                assert!(total <= 16 * 1024, "bounded response head");
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(line.ends_with("\r\n"));
+                let (name, value) = line.trim_end().split_once(':').unwrap();
+                headers.push((name.to_ascii_lowercase(), value.trim().to_owned()));
+            }
+            Head { status, headers }
+        }
+
+        fn continued(&mut self) {
+            assert_eq!(
+                self.head().status,
+                100,
+                "admission must precede 100 Continue"
+            );
+        }
+
+        fn refusal(&mut self, status: u16) {
+            // Fixed-length callers have not consumed any response yet, so a
+            // premature 100 Continue fails the expected final-status assertion.
+            let head = self.head();
+            assert_eq!(head.status, status);
+            assert!(head.headers.iter().any(|(name, value)| {
+                name == "connection" && value.eq_ignore_ascii_case("close")
+            }));
+            let mut body = Vec::new();
+            self.0.read_to_end(&mut body).unwrap();
+        }
+
+        fn response(&mut self, expected: &[u8]) {
+            let head = self.head();
+            assert_eq!(head.status, 200);
+            let length = head
+                .headers
+                .iter()
+                .find(|(name, _)| name == "content-length")
+                .expect("buffered response declares its body length")
+                .1
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(length, expected.len());
+            let mut body = vec![0; length];
+            self.0.read_exact(&mut body).unwrap();
+            assert_eq!(body, expected);
+        }
+
+        fn echo(address: SocketAddr, body: &[u8]) {
+            let mut peer = Self::connect(address);
+            peer.fixed("/echo", body.len(), true);
+            peer.continued();
+            peer.send(body);
+            peer.response(body);
+        }
+
+        fn bodyless(address: SocketAddr) {
+            let mut peer = Self::connect(address);
+            peer.fixed("/echo", 0, false);
+            peer.response(b"");
+        }
+    }
+
+    struct HandlerState {
+        parked: std::sync::mpsc::Sender<(usize, Cx)>,
+        cleaning: std::sync::mpsc::Sender<usize>,
+        release: Notify,
+        released: AtomicBool,
+        child_started: Notify,
+        child_pending: AtomicBool,
+        calls: AtomicUsize,
+        body_drops: AtomicUsize,
+        body_verified: AtomicUsize,
+    }
+
+    struct BodyDrop(Arc<HandlerState>);
+
+    impl Drop for BodyDrop {
+        fn drop(&mut self) {
+            self.0.body_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn release_after_pending(
+        state: &HandlerState,
+        body_length: usize,
+        cleaning: bool,
+        cx: &Cx,
+    ) {
+        let mut release = std::pin::pin!(
+            state
+                .release
+                .wait_until(|| state.released.load(Ordering::Acquire))
+        );
+        let mut witnessed = false;
+        poll_fn(|task| {
+            let result = release.as_mut().poll(task);
+            if result.is_pending() && !witnessed {
+                if cleaning {
+                    state.cleaning.send(body_length).unwrap();
+                } else {
+                    state.parked.send((body_length, cx.clone())).unwrap();
+                }
+                witnessed = true;
+            }
+            result
+        })
+        .await;
+    }
+
+    async fn answer(request: Request, state: Arc<HandlerState>) -> Response {
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        let cx = Cx::current().expect("owned request context");
+        if request.uri == "/descendant" {
+            let child_state = Arc::clone(&state);
+            let body = request.body;
+            let _child = cx
+                .spawn(move |child| async move {
+                    let _drop = BodyDrop(Arc::clone(&child_state));
+                    let mut cancelled = std::pin::pin!(child.cancelled());
+                    let mut witnessed = false;
+                    poll_fn(|task| {
+                        let result = cancelled.as_mut().poll(task);
+                        if result.is_pending() && !witnessed {
+                            child_state.child_pending.store(true, Ordering::Release);
+                            child_state.child_started.notify_waiters();
+                            witnessed = true;
+                        }
+                        result
+                    })
+                    .await;
+                    assert!(child.checkpoint().is_err());
+                    release_after_pending(&child_state, body.len(), true, &child).await;
+                    assert_eq!(body.as_slice(), b"retained");
+                    child_state.body_verified.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap();
+            // A body that returns before its child is admitted could prevent
+            // the child's factory from ever running. Observe actual Pending.
+            state
+                .child_started
+                .wait_until(|| state.child_pending.load(Ordering::Acquire))
+                .await;
+            return Response::new(200, "OK", Vec::new());
+        }
+        if request.uri == "/park" || request.uri == "/cancel" {
+            let _drop = BodyDrop(Arc::clone(&state));
+            if request.uri == "/cancel" {
+                let mut cancelled = std::pin::pin!(cx.cancelled());
+                let mut witnessed = false;
+                poll_fn(|task| {
+                    let result = cancelled.as_mut().poll(task);
+                    if result.is_pending() && !witnessed {
+                        state.parked.send((request.body.len(), cx.clone())).unwrap();
+                        witnessed = true;
+                    }
+                    result
+                })
+                .await;
+                assert!(cx.checkpoint().is_err());
+            }
+            release_after_pending(&state, request.body.len(), request.uri == "/cancel", &cx).await;
+            // The original Vec remains live across both ordinary parking and
+            // cancellation cleanup, not merely a copied length or marker.
+            assert_eq!(request.body.as_slice(), b"retained");
+            state.body_verified.fetch_add(1, Ordering::SeqCst);
+        }
+        if request.uri == "/trailers" {
+            assert_eq!(
+                request.trailers,
+                vec![("x-budget".to_owned(), "complete".to_owned())],
+            );
+        }
+        Response::new(200, "OK", request.body)
+    }
+
+    struct Fixture {
+        address: SocketAddr,
+        stats: Arc<Http1ListenerStats>,
+        state: Arc<HandlerState>,
+        parked: std::sync::mpsc::Receiver<(usize, Cx)>,
+        cleaning: std::sync::mpsc::Receiver<usize>,
+        manager: ConnectionManager,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Assertion failures must not strand a cooperatively parked task
+            // while the runtime's destructor waits for request retirement.
+            self.state.released.store(true, Ordering::Release);
+            self.state.release.notify_waiters();
+            self.manager.force_close();
+        }
+    }
+
+    fn observe(label: &str, condition: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "HTTP/1 body-budget watchdog: {label}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn execute(workers: usize, limit: Option<NonZeroUsize>, workflow: impl FnOnce(&Fixture)) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .with_sharded_state(workers == 2)
+            .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        let (parked, pending) = std::sync::mpsc::channel();
+        let (cleaning, cleanup) = std::sync::mpsc::channel();
+        let state = Arc::new(HandlerState {
+            parked,
+            cleaning,
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+            child_started: Notify::new(),
+            child_pending: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            body_drops: AtomicUsize::new(0),
+            body_verified: AtomicUsize::new(0),
+        });
+        let handler_state = Arc::clone(&state);
+        let listener = runtime
+            .block_on(Http1Listener::bind_with_config(
+                "127.0.0.1:0",
+                move |request| answer(request, Arc::clone(&handler_state)),
+                Http1ListenerConfig::default()
+                    .http_config(
+                        Http1Config::default()
+                            .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                            .max_body_size(16)
+                            .request_drain_grace(Duration::from_secs(10)),
+                    )
+                    .drain_timeout(Duration::from_secs(2))
+                    .hard_drain_timeout(Duration::from_secs(5)),
+            ))
+            .unwrap();
+        let listener = if let Some(limit) = limit {
+            listener.max_buffered_request_bytes(limit)
+        } else {
+            listener
+        };
+        let fixture = Fixture {
+            address: listener.local_addr().unwrap(),
+            stats: listener.stats_handle(),
+            state,
+            parked: pending,
+            cleaning: cleanup,
+            manager: listener.connection_manager().clone(),
+        };
+        let in_flight = listener.in_flight_requests();
+        let serving: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
+            let cx = Cx::current().expect("native listener owner");
+            listener.run_owned_in(&cx).await
+        });
+        let run = runtime.handle().spawn(serving);
+
+        workflow(&fixture);
+
+        assert!(fixture.manager.begin_drain(Duration::from_secs(2)));
+        assert!(
+            runtime
+                .block_on(run)
+                .unwrap()
+                .drain_report
+                .unwrap()
+                .reached_quiescence
+        );
+        observe("all request and connection tasks retired", || {
+            runtime.is_quiescent()
+        });
+        assert_eq!(fixture.stats.reserved_request_body_bytes(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.manager.active_count(), 0);
+        assert!(
+            runtime
+                .task_inspector(Default::default())
+                .list_tasks()
+                .is_empty()
+        );
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
+    fn exercise(
+        workers: usize,
+        limit: Option<NonZeroUsize>,
+        workflow: impl FnOnce(&Fixture) + Send + 'static,
+    ) {
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute(workers, limit, workflow);
+            }));
+            let _ = send.send(result);
+        });
+        let result = receive
+            .recv_timeout(Duration::from_secs(45))
+            .expect("HTTP/1 body-budget scenario must finish its native drain");
+        worker.join().unwrap();
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn fixed_length_reservations_are_shared_before_continue_and_reusable_after_disconnect() {
+        for workers in [1, 2] {
+            exercise(workers, NonZeroUsize::new(8), |fixture| {
+                let mut first = Peer::connect(fixture.address);
+                first.fixed("/echo", 6, true);
+                first.continued();
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 6);
+                let mut second = Peer::connect(fixture.address);
+                second.fixed("/echo", 2, true);
+                second.continued();
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+
+                let mut refused = Peer::connect(fixture.address);
+                refused.fixed("/never", 1, true);
+                refused.refusal(503);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+                Peer::bodyless(fixture.address);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+
+                drop(first);
+                observe("incomplete fixed body released its declaration", || {
+                    fixture.stats.reserved_request_body_bytes() == 2
+                });
+                Peer::echo(fixture.address, b"reuse!");
+                observe("replacement response retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 2
+                });
+                drop(second);
+                observe("second incomplete fixed body retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+                Peer::echo(fixture.address, b"12345678");
+                observe("exact-cap response retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+            });
+        }
+    }
+
+    #[test]
+    fn chunk_sizes_reserve_before_payload_and_trailers_keep_the_completed_charge() {
+        for workers in [1, 2] {
+            exercise(workers, NonZeroUsize::new(8), |fixture| {
+                let mut chunks = Peer::connect(fixture.address);
+                chunks.chunked("/trailers");
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 0);
+                chunks.send(b"6\r\n");
+                observe("chunk declaration admitted before payload arrival", || {
+                    fixture.stats.reserved_request_body_bytes() == 6
+                });
+                let mut refused = Peer::connect(fixture.address);
+                refused.fixed("/never", 3, true);
+                refused.refusal(503);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 6);
+                chunks.send(b"123456\r\n2\r\n");
+                observe("second chunk declaration reaches exact global cap", || {
+                    fixture.stats.reserved_request_body_bytes() == 8
+                });
+                Peer::bodyless(fixture.address);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 1);
+                chunks.send(b"78\r\n0\r\nx-budget: complete\r\n\r\n");
+                chunks.response(b"12345678");
+                observe("trailer-completed request and response retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+
+                let mut overflow = Peer::connect(fixture.address);
+                overflow.chunked("/never");
+                overflow.send(b"6\r\n123456\r\n3\r\n");
+                overflow.refusal(503);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 0);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 2);
+
+                let mut abandoned = Peer::connect(fixture.address);
+                abandoned.chunked("/never");
+                abandoned.send(b"4\r\n");
+                observe("truncated chunk retains its declared reservation", || {
+                    fixture.stats.reserved_request_body_bytes() == 4
+                });
+                drop(abandoned);
+                observe("truncated chunk release", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+                // Reuse the trailer-completed connection to exercise codec
+                // reservation transfer/reset across keep-alive requests.
+                chunks.fixed("/echo", 8, true);
+                chunks.continued();
+                chunks.send(b"reusable");
+                chunks.response(b"reusable");
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 2);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+            });
+        }
+    }
+
+    #[test]
+    fn completed_body_stays_reserved_through_handler_and_cancellation_cleanup() {
+        for workers in [1, 2] {
+            for cancel in [false, true] {
+                exercise(workers, NonZeroUsize::new(8), move |fixture| {
+                    let mut first = Peer::connect(fixture.address);
+                    first.fixed(if cancel { "/cancel" } else { "/park" }, 8, true);
+                    first.continued();
+                    first.send(b"retained");
+                    let (length, cx) = fixture.parked.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert_eq!(length, 8);
+                    assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+                    assert_eq!(fixture.state.body_drops.load(Ordering::SeqCst), 0);
+
+                    let mut refused = Peer::connect(fixture.address);
+                    refused.fixed("/never", 1, true);
+                    refused.refusal(503);
+                    Peer::bodyless(fixture.address);
+                    if cancel {
+                        cx.cancel_with(CancelKind::User, Some("body-budget cleanup witness"));
+                        assert_eq!(
+                            fixture
+                                .cleaning
+                                .recv_timeout(Duration::from_secs(5))
+                                .unwrap(),
+                            8,
+                        );
+                        assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+                        assert_eq!(fixture.state.body_drops.load(Ordering::SeqCst), 0);
+                        let mut during_cleanup = Peer::connect(fixture.address);
+                        during_cleanup.fixed("/never", 1, true);
+                        during_cleanup.refusal(503);
+                    }
+                    fixture.state.released.store(true, Ordering::Release);
+                    fixture.state.release.notify_waiters();
+                    if !cancel {
+                        first.response(b"retained");
+                    }
+                    observe("actual handler cleanup and response retirement", || {
+                        fixture.stats.reserved_request_body_bytes() == 0
+                    });
+                    assert_eq!(fixture.state.body_drops.load(Ordering::SeqCst), 1);
+                    assert_eq!(fixture.state.body_verified.load(Ordering::SeqCst), 1);
+                    drop(first);
+                    Peer::echo(fixture.address, b"reusable");
+                    assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+                    assert_eq!(
+                        fixture.stats.body_budget_refusals_total(),
+                        if cancel { 2 } else { 1 },
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn owned_descendant_keeps_original_body_reserved_after_handler_returns() {
+        for workers in [1, 2] {
+            exercise(workers, NonZeroUsize::new(8), |fixture| {
+                let mut first = Peer::connect(fixture.address);
+                first.fixed("/descendant", 8, true);
+                first.continued();
+                first.send(b"retained");
+                assert_eq!(
+                    fixture
+                        .cleaning
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap(),
+                    8,
+                );
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 8);
+                assert_eq!(fixture.state.body_drops.load(Ordering::SeqCst), 0);
+                let mut refused = Peer::connect(fixture.address);
+                refused.fixed("/never", 1, true);
+                refused.refusal(503);
+                Peer::bodyless(fixture.address);
+
+                fixture.state.released.store(true, Ordering::Release);
+                fixture.state.release.notify_waiters();
+                first.response(b"");
+                observe("owned descendant and region cleanup retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+                assert_eq!(fixture.state.body_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(fixture.state.body_verified.load(Ordering::SeqCst), 1);
+                Peer::echo(fixture.address, b"reusable");
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn unlimited_default_still_enforces_per_request_limit_without_global_refusals() {
+        for workers in [1, 2] {
+            exercise(workers, None, |fixture| {
+                let mut first = Peer::connect(fixture.address);
+                first.fixed("/echo", 16, true);
+                first.continued();
+                let mut second = Peer::connect(fixture.address);
+                second.fixed("/echo", 16, true);
+                second.continued();
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 32);
+
+                let mut too_large = Peer::connect(fixture.address);
+                too_large.fixed("/never", 17, true);
+                too_large.refusal(413);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 32);
+                let mut large_chunk = Peer::connect(fixture.address);
+                large_chunk.chunked("/never");
+                large_chunk.send(b"11\r\n");
+                large_chunk.refusal(413);
+                assert_eq!(fixture.stats.reserved_request_body_bytes(), 32);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 0);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+
+                drop(first);
+                observe("unlimited partial body retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 16
+                });
+                second.send(b"0123456789abcdef");
+                second.response(b"0123456789abcdef");
+                observe("unlimited completed body retired", || {
+                    fixture.stats.reserved_request_body_bytes() == 0
+                });
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 0);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 1);
+            });
+        }
+    }
+}
