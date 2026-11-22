@@ -127,6 +127,14 @@ struct Member<T, E> {
     waker: Option<Waker>,
 }
 
+/// A retired member with its original identity, before a collector chooses
+/// whether to retain that identity in its public result.
+pub(in crate::combinator) struct CollectedMember<T, E> {
+    pub(in crate::combinator) index: u64,
+    pub(in crate::combinator) task_id: TaskId,
+    pub(in crate::combinator) outcome: Outcome<T, E>,
+}
+
 /// Candidate members plus the waker of the task waiting in `join_next`.
 #[derive(Default)]
 struct ReadyMembers {
@@ -337,10 +345,17 @@ where
     /// Poll one candidate and arm its persistent member registration if pending.
     /// Both synchronous and asynchronous collection use this readiness boundary.
     fn poll_candidate(&mut self, member_index: u64) -> Option<Outcome<T, E>> {
+        self.poll_candidate_member(member_index)
+            .map(|member| member.outcome)
+    }
+
+    /// Keep the identity captured before removal for evidence-preserving
+    /// collectors. This uses the same readiness and retirement boundary.
+    fn poll_candidate_member(&mut self, member_index: u64) -> Option<CollectedMember<T, E>> {
         // Remove BEFORE polling: a completion or a permitted spurious wake
         // during poll_join puts the member back, and must not be erased afterward.
         self.ready.candidates.lock().remove(&member_index);
-        let outcome = self.members.get_mut(&member_index).and_then(|member| {
+        let (task_id, outcome) = self.members.get_mut(&member_index).and_then(|member| {
             let Member { handle, waker } = member;
             let waker = waker.get_or_insert_with(|| {
                 Waker::from(Arc::new(MemberWake {
@@ -349,12 +364,18 @@ where
                 }))
             });
             match handle.poll_join(&mut Context::from_waker(waker)) {
-                Poll::Ready(joined) => try_join_to_outcome(joined.map(Some)),
+                Poll::Ready(joined) => {
+                    try_join_to_outcome(joined.map(Some)).map(|outcome| (handle.task_id(), outcome))
+                }
                 Poll::Pending => None,
             }
         })?;
         self.take_member(member_index, &outcome);
-        Some(outcome)
+        Some(CollectedMember {
+            index: member_index,
+            task_id,
+            outcome,
+        })
     }
 
     /// Waits for every member to complete and returns their outcomes in spawn

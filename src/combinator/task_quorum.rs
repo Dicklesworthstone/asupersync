@@ -6,17 +6,90 @@
 
 use super::{JoinSet, QuorumError};
 use crate::cx::Cx;
-use crate::types::{CancelReason, Outcome, Policy};
+use crate::types::{CancelReason, Outcome, Policy, TaskId};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::task::Poll;
 
-enum Decision {
+/// The event that ended task-quorum selection, before the remaining members
+/// were drained. Later outcomes and owner cancellation do not rewrite it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum TaskQuorumDecision {
+    /// Exactly the requested number of successful task outcomes were observed.
+    /// Inspect the report's remaining outcomes for cleanup failures.
     Satisfied,
+    /// Too few unfinished members remained to reach the requested count.
     Impossible,
+    /// The requested count was zero or greater than the remaining member count.
+    /// The admitted members were still cancelled and drained.
     Invalid,
+    /// A member panic was observed before selection stopped.
     Panicked,
+    /// The explicit owner was cancelled before selection stopped.
     OwnerCancelled(CancelReason),
+}
+
+type Decision = TaskQuorumDecision;
+
+/// When a member's terminal outcome was observed by the quorum collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TaskQuorumPhase {
+    /// Observed while selecting, including the member that ended selection.
+    Selection,
+    /// Observed while draining after the selection decision was fixed.
+    /// A member may have published its outcome earlier; this records collection
+    /// order, not the instant that the task physically completed.
+    Cleanup,
+}
+
+/// A remaining member's identity and actual terminal outcome.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct TaskQuorumMember<T, E> {
+    /// Original insertion index in the set, which is not renumbered when an
+    /// earlier member has already been collected.
+    pub index: u64,
+    /// Canonical runtime identity of an admitted task. A member refused before
+    /// admission retains its provisional mailbox identity.
+    pub task_id: TaskId,
+    /// Whether collection occurred before or after selection stopped.
+    pub phase: TaskQuorumPhase,
+    /// Actual terminal outcome from the task handle. JoinSet's existing
+    /// cancellation-dominant spawn policy still applies: a value erased by
+    /// that policy cannot be recovered by this report.
+    pub outcome: Outcome<T, E>,
+}
+
+/// An immutable selection decision together with every drained task outcome.
+///
+/// A satisfied selection does not certify successful loser cleanup. Inspect
+/// `members` and `owner_cancellation` as independent evidence before deciding
+/// how the surrounding operation should proceed.
+#[must_use = "inspect the selection decision, every task outcome, and owner cancellation"]
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct TaskQuorumReport<T, E> {
+    /// Requested number of successful remaining members.
+    pub required: usize,
+    /// Number of members still owned by the set when selection began.
+    pub total: usize,
+    /// Why selection stopped; never replaced by events observed during drain.
+    pub decision: TaskQuorumDecision,
+    /// Successful task identities counted during selection, in observation
+    /// order. These are partial progress unless `decision` is `Satisfied`.
+    /// Cleanup outcomes never add votes or change the selected identities.
+    pub selected: Vec<TaskId>,
+    /// Every member remaining at entry, with no successful values or errors
+    /// discarded. Selection observations come first in observation order;
+    /// cleanup observations follow in original insertion order.
+    pub members: Vec<TaskQuorumMember<T, E>>,
+    /// First explicit-owner cancellation observed before final publication.
+    /// For `OwnerCancelled` it also caused selection to stop. For any other
+    /// decision it was observed during cleanup and leaves that decision intact.
+    /// Invalid requests also observe the owner while draining their members.
+    pub owner_cancellation: Option<CancelReason>,
 }
 
 struct Selection<T, E> {
@@ -119,6 +192,60 @@ impl<T, E> Selection<T, E> {
     }
 }
 
+/// Both public policies use one selection and retirement engine. The legacy
+/// result keeps its cancellation/panic precedence; the additive report keeps
+/// the decision and task evidence separately (asupersync-v8rp1h).
+struct QuorumCollection<T, E> {
+    selection: Selection<T, E>,
+    decision: Decision,
+    owner_cancelled: Option<CancelReason>,
+    identities: Vec<(u64, TaskId)>,
+    selection_len: usize,
+}
+
+impl<T, E> QuorumCollection<T, E> {
+    fn into_report(self) -> TaskQuorumReport<T, E> {
+        let Selection {
+            required,
+            total,
+            outcomes,
+            ..
+        } = self.selection;
+        debug_assert_eq!(outcomes.len(), self.identities.len());
+        debug_assert_eq!(outcomes.len(), total);
+        let mut selected = Vec::with_capacity(required.min(total));
+        let members = outcomes
+            .into_iter()
+            .zip(self.identities)
+            .enumerate()
+            .map(|(observed, (outcome, (index, task_id)))| {
+                let phase = if observed < self.selection_len {
+                    if matches!(&outcome, Outcome::Ok(_)) {
+                        selected.push(task_id);
+                    }
+                    TaskQuorumPhase::Selection
+                } else {
+                    TaskQuorumPhase::Cleanup
+                };
+                TaskQuorumMember {
+                    index,
+                    task_id,
+                    phase,
+                    outcome,
+                }
+            })
+            .collect();
+        TaskQuorumReport {
+            required,
+            total,
+            decision: self.decision,
+            selected,
+            members,
+            owner_cancellation: self.owner_cancelled,
+        }
+    }
+}
+
 fn owner_reason(cx: &Cx) -> CancelReason {
     let reason = cx
         .cancel_reason()
@@ -183,8 +310,71 @@ where
     /// insufficient-success error. A spontaneous member cancellation only
     /// selects `Cancelled` if the quorum becomes impossible.
     pub async fn join_quorum(self, cx: &Cx, required: usize) -> Result<Vec<T>, QuorumError<E>> {
+        let collected = self.collect_quorum(cx, required, false).await;
+        collected
+            .selection
+            .finish(collected.decision, collected.owner_cancelled)
+    }
+
+    /// Select successful remaining tasks and retain all selection and cleanup
+    /// evidence after every member retires.
+    ///
+    /// This consumes the same already-admitted group as [`Self::join_quorum`],
+    /// uses the same bounded candidate scan and cancellation drain, and never
+    /// spawns or retries work. Successful votes fix the selection decision as
+    /// soon as `required` have been observed. A later owner cancellation or
+    /// loser panic is recorded separately instead of erasing that decision.
+    /// A success observed during cleanup is retained but is never a new vote.
+    ///
+    /// Every member still owned at entry appears exactly once in the report,
+    /// including errors, spontaneous cancellations, cleanup cancellations, and
+    /// panics. Previously collected members are excluded. Member identities and
+    /// original insertion indices are retained, and values and errors need not
+    /// implement `Clone`. The phase marks when collection observed an outcome,
+    /// not when its task physically completed.
+    ///
+    /// These are the actual handle outcomes under JoinSet's existing
+    /// cancellation-dominant spawn policy. A task that returns a value after
+    /// acknowledging cancellation can still have `Outcome::Cancelled`; this
+    /// report does not recover values already discarded by that policy.
+    /// Already-published successful outcomes remain available during drain.
+    /// This is a task-completion quorum, not agreement on returned data or a
+    /// guarantee about descendants beyond the owning region's guarantees.
+    ///
+    /// `required == 0` or `required > self.len()` records `Invalid` and still
+    /// cancels and drains all existing members. The report observes the explicit
+    /// owner even during this invalid-input drain. Once selected, no decision
+    /// is replaced by a later event; callers must inspect member outcomes and
+    /// owner cancellation alongside the decision.
+    ///
+    /// Every remaining member receives cancellation before collected user
+    /// values or errors are destroyed if this future is dropped. Region close
+    /// remains the asynchronous drain backstop for a dropped future. Otherwise
+    /// publication waits for every member's retirement, even after owner
+    /// cancellation. Non-cooperative work can delay completion indefinitely.
+    pub async fn join_quorum_report(self, cx: &Cx, required: usize) -> TaskQuorumReport<T, E> {
+        self.collect_quorum(cx, required, true).await.into_report()
+    }
+
+    /// Select the first successful remaining member and retain every task
+    /// outcome after draining its siblings.
+    ///
+    /// This is [`Self::join_quorum_report`] with `required = 1`. An empty set
+    /// records `Invalid`. Errors do not win selection while a success remains
+    /// possible, and late cleanup outcomes never replace the selected task.
+    pub async fn join_first_ok_report(self, cx: &Cx) -> TaskQuorumReport<T, E> {
+        self.join_quorum_report(cx, 1).await
+    }
+
+    async fn collect_quorum(
+        self,
+        cx: &Cx,
+        required: usize,
+        observe_invalid_owner: bool,
+    ) -> QuorumCollection<T, E> {
         let total = self.len();
         let mut selection = Selection::new(required, total);
+        let mut identities = Vec::with_capacity(total);
         // Local bindings drop in reverse declaration order. Move the member
         // owner out of the function argument AFTER the collected outcomes, so
         // dropping a parked quorum first requests every remaining cancellation.
@@ -202,7 +392,7 @@ where
                 // ready. Dropping a borrowing join wait does not cancel or lose
                 // a member; its persistent registration lives on the handle.
                 let next = {
-                    let mut waiting = pin!(members.next_outcome_bounded(&mut remaining_candidates));
+                    let mut waiting = pin!(members.next_member_bounded(&mut remaining_candidates));
                     poll_fn(|task| {
                         if cancelled.as_mut().poll(task).is_ready() {
                             return Poll::Ready(Err(owner_reason(cx)));
@@ -213,8 +403,9 @@ where
                 };
                 match next {
                     Err(reason) => break Decision::OwnerCancelled(reason),
-                    Ok(Some(outcome)) => {
-                        if let Some(decision) = selection.record(outcome) {
+                    Ok(Some(member)) => {
+                        identities.push((member.index, member.task_id));
+                        if let Some(decision) = selection.record(member.outcome) {
                             break decision;
                         }
                     }
@@ -234,11 +425,15 @@ where
             Decision::OwnerCancelled(reason) => Some(reason.clone()),
             _ => None,
         };
-        let mut drain = pin!(members.cancel_remaining_for_selection(reason));
+        let selection_len = selection.outcomes.len();
+        let mut drain = pin!(members.cancel_members_for_selection(reason));
         let remainder = poll_fn(|task| {
             // Never drop/recreate the drain when the owner aborts. Observe once,
             // then continue polling the same uninterruptible retirement barrier.
-            if !invalid && owner_cancelled.is_none() && cancelled.as_mut().poll(task).is_ready() {
+            if (!invalid || observe_invalid_owner)
+                && owner_cancelled.is_none()
+                && cancelled.as_mut().poll(task).is_ready()
+            {
                 owner_cancelled = Some(owner_reason(cx));
             }
             drain.as_mut().poll(task)
@@ -247,8 +442,17 @@ where
         // Deliberately do not call record: these are cleanup outcomes, not new
         // votes or spontaneous cancellations. They still participate in panic
         // precedence and are kept alive until the entire group is retired.
-        selection.outcomes.extend(remainder);
-        selection.finish(decision, owner_cancelled)
+        for member in remainder {
+            identities.push((member.index, member.task_id));
+            selection.outcomes.push(member.outcome);
+        }
+        QuorumCollection {
+            selection,
+            decision,
+            owner_cancelled,
+            identities,
+            selection_len,
+        }
     }
 
     /// Return the first successful remaining member after all siblings retire.

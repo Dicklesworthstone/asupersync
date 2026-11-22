@@ -3,9 +3,10 @@
 #![cfg(not(target_arch = "wasm32"))]
 use asupersync::Cx;
 use asupersync::channel::oneshot;
-use asupersync::combinator::{JoinSet, QuorumError};
+use asupersync::combinator::{JoinSet, QuorumError, TaskQuorumDecision, TaskQuorumPhase};
+use asupersync::observability::diagnostics::BlockReason;
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
-use asupersync::types::{CancelKind, CancelReason};
+use asupersync::types::{CancelKind, CancelReason, Outcome, TaskId};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -430,6 +431,362 @@ fn worker_pinned_non_send_futures_participate_in_a_success_quorum() {
                 let mut values = set.join_quorum(&cx, 3).await.unwrap();
                 values.sort_unstable();
                 assert_eq!(values, [0, 1, 2]);
+            });
+        }
+    });
+}
+
+#[test]
+fn quorum_report_preserves_selected_values_and_records_owner_cancel_during_cleanup() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let cleaned = Arc::new(AtomicUsize::new(0));
+                let dropped = Arc::new(AtomicUsize::new(0));
+                let count = Arc::clone(&cleaned);
+                let (ready, mut witness) = oneshot::channel();
+                let (draining, mut drain_witness) = oneshot::channel();
+                let (release_cleanup, mut cleanup_gate) = oneshot::channel();
+                let cleanup_cx = cx.clone();
+                let mut releases = Vec::new();
+                let mut winners = Vec::new();
+                for _ in 0..2 {
+                    let (release, gate) = oneshot::channel();
+                    releases.push(release);
+                    winners.push((
+                        gate,
+                        DropAfterCleanup {
+                            cleaned: Arc::clone(&cleaned),
+                            dropped: Arc::clone(&dropped),
+                        },
+                    ));
+                }
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let mut set =
+                            JoinSet::<(TaskId, DropAfterCleanup), &'static str, _>::in_cx(&owner);
+                        set.spawn(&owner, move |child| async move {
+                            parked(&child, ready).await;
+                            assert_eq!(child.cancel_reason().unwrap().kind, CancelKind::RaceLost);
+                            let mut draining = Some(draining);
+                            let mut cleanup = pin!(cleanup_gate.recv(&cleanup_cx));
+                            poll_fn(|task| match cleanup.as_mut().poll(task) {
+                                Poll::Ready(result) => Poll::Ready(result),
+                                Poll::Pending => {
+                                    if let Some(draining) = draining.take() {
+                                        // Witness the actual parked cleanup future, not
+                                        // merely the start of the loser's cleanup body.
+                                        draining.send_blocking(child.task_id()).unwrap();
+                                    }
+                                    Poll::Pending
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Err("cleanup finished")
+                        })
+                        .unwrap();
+                        for (mut gate, value) in winners {
+                            set.spawn(&owner, move |child| async move {
+                                gate.recv(&child).await.unwrap();
+                                Ok((child.task_id(), value))
+                            })
+                            .unwrap();
+                        }
+                        set.join_quorum_report(&owner, 2).await
+                    })
+                    .unwrap();
+                witness.recv(&cx).await.unwrap();
+                for release in releases {
+                    release.send_blocking(()).unwrap();
+                }
+                let loser_id = drain_witness.recv(&cx).await.unwrap();
+                assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+                assert_eq!(dropped.load(Ordering::SeqCst), 0);
+                assert!(matches!(owner.try_join(), Ok(None)));
+                owner.abort_with_reason(CancelReason::shutdown());
+                assert!(matches!(owner.try_join(), Ok(None)));
+                release_cleanup.send_blocking(()).unwrap();
+
+                let report = owner.join(&cx).await.unwrap();
+                assert!(matches!(&report.decision, TaskQuorumDecision::Satisfied));
+                assert_eq!(report.required, 2);
+                assert_eq!(report.total, 3);
+                assert_eq!(report.selected.len(), 2);
+                assert_eq!(report.members.len(), 3);
+                assert_eq!(
+                    report.owner_cancellation.as_ref().unwrap().kind,
+                    CancelKind::Shutdown
+                );
+                for member in &report.members[..2] {
+                    assert!(matches!(member.index, 1 | 2));
+                    assert_eq!(member.phase, TaskQuorumPhase::Selection);
+                    assert!(report.selected.contains(&member.task_id));
+                    match &member.outcome {
+                        Outcome::Ok((id, _)) => assert_eq!(member.task_id, *id),
+                        other => panic!("selected value was erased: {other:?}"),
+                    }
+                }
+                let loser = &report.members[2];
+                assert_eq!(loser.index, 0);
+                assert_eq!(loser.task_id, loser_id);
+                assert_eq!(loser.phase, TaskQuorumPhase::Cleanup);
+                assert!(matches!(&loser.outcome,
+                    Outcome::Cancelled(reason) if reason.kind == CancelKind::RaceLost));
+                assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+                assert_eq!(dropped.load(Ordering::SeqCst), 0);
+                drop(report);
+                assert_eq!(dropped.load(Ordering::SeqCst), 2);
+            });
+        }
+    });
+}
+
+#[test]
+fn quorum_report_retains_published_extra_successes_and_original_member_indices() {
+    #[derive(Debug)]
+    struct Value {
+        task_id: TaskId,
+        number: u8,
+    }
+
+    bounded(|| {
+        for workers in [1, 2] {
+            let builder = if workers == 1 {
+                RuntimeBuilder::current_thread()
+            } else {
+                RuntimeBuilder::new().worker_threads(workers)
+            };
+            let runtime = builder.build().unwrap();
+            let diagnostics = runtime.diagnostics();
+            runtime.block_on(async {
+                let cx = Cx::current().expect("native root context");
+                let mut set = JoinSet::<Value, (), _>::in_cx(&cx);
+                set.spawn(&cx, |child| async move {
+                    Ok(Value {
+                        task_id: child.task_id(),
+                        number: 0,
+                    })
+                })
+                .unwrap();
+                let previous = set.join_next(&cx).await.unwrap().expect("earlier member");
+                let mut ids = Vec::new();
+                for number in 1..=3 {
+                    let (admitted, mut receive_id) = oneshot::channel();
+                    set.spawn(&cx, move |child| async move {
+                        let task_id = child.task_id();
+                        admitted.send_blocking(task_id).unwrap();
+                        Ok(Value { task_id, number })
+                    })
+                    .unwrap();
+                    ids.push(receive_id.recv(&cx).await.unwrap());
+                }
+                // Every terminal must already be published before the quorum
+                // cancels siblings. Body-return signals alone would race the
+                // cancellation-dominant task wrapper and could erase values.
+                while ids.iter().any(|id| {
+                    !matches!(
+                        diagnostics.explain_task_blocked(*id).block_reason,
+                        BlockReason::TaskNotFound
+                    )
+                }) {
+                    asupersync::runtime::yield_now().await;
+                }
+                let report = set.join_first_ok_report(&cx).await;
+                assert!(matches!(&report.decision, TaskQuorumDecision::Satisfied));
+                assert_eq!(report.required, 1);
+                assert_eq!(report.total, 3);
+                assert_eq!(report.selected, [ids[0]]);
+                assert!(!report.selected.contains(&previous.task_id));
+                assert!(report.owner_cancellation.is_none());
+                assert_eq!(report.members.len(), 3);
+                for (offset, member) in report.members.iter().enumerate() {
+                    assert_eq!(member.index, (offset + 1) as u64);
+                    assert_eq!(member.task_id, ids[offset]);
+                    assert_eq!(
+                        member.phase,
+                        if offset == 0 {
+                            TaskQuorumPhase::Selection
+                        } else {
+                            TaskQuorumPhase::Cleanup
+                        }
+                    );
+                    match &member.outcome {
+                        Outcome::Ok(value) => {
+                            assert_eq!(value.task_id, member.task_id);
+                            assert_eq!(usize::from(value.number), offset + 1);
+                        }
+                        other => panic!("published success was lost: {other:?}"),
+                    }
+                }
+            });
+            let report = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+            assert_eq!(report.live_tasks, 0);
+            assert_eq!(report.pending_spawns, 0);
+            assert_eq!(report.pending_obligations, 0);
+        }
+    });
+}
+
+#[test]
+fn quorum_report_keeps_cleanup_panic_separate_from_the_selected_success() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let (ready, mut witness) = oneshot::channel();
+                let mut set = JoinSet::<u8, (), _>::in_cx(&cx);
+                set.spawn(&cx, move |child| async move {
+                    parked(&child, ready).await;
+                    panic!("intentional quorum report cleanup panic");
+                })
+                .unwrap();
+                witness.recv(&cx).await.unwrap();
+                set.spawn(&cx, |_| async { Ok(7) }).unwrap();
+                let report = set.join_first_ok_report(&cx).await;
+                assert!(matches!(&report.decision, TaskQuorumDecision::Satisfied));
+                assert_eq!(report.total, 2);
+                assert_eq!(report.selected, [report.members[0].task_id]);
+                assert_eq!(report.members[0].index, 1);
+                assert_eq!(report.members[0].phase, TaskQuorumPhase::Selection);
+                assert!(matches!(&report.members[0].outcome, Outcome::Ok(7)));
+                assert_eq!(report.members[1].index, 0);
+                assert_eq!(report.members[1].phase, TaskQuorumPhase::Cleanup);
+                assert!(matches!(&report.members[1].outcome, Outcome::Panicked(_)));
+                assert!(report.owner_cancellation.is_none());
+            });
+        }
+    });
+}
+
+#[test]
+fn quorum_report_owner_cancel_before_selection_drains_every_member() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let (ready, mut witness) = oneshot::channel();
+                let cleaned = Arc::new(AtomicUsize::new(0));
+                let count = Arc::clone(&cleaned);
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let mut set = JoinSet::<u8, (), _>::in_cx(&owner);
+                        set.spawn(&owner, move |child| async move {
+                            parked(&child, ready).await;
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Ok(9)
+                        })
+                        .unwrap();
+                        set.join_first_ok_report(&owner).await
+                    })
+                    .unwrap();
+                witness.recv(&cx).await.unwrap();
+                owner.abort_with_reason(CancelReason::shutdown());
+                let report = owner.join(&cx).await.unwrap();
+                assert!(matches!(&report.decision,
+                    TaskQuorumDecision::OwnerCancelled(reason)
+                        if reason.kind == CancelKind::Shutdown));
+                assert!(report.selected.is_empty());
+                assert_eq!(report.total, 1);
+                assert_eq!(report.members.len(), 1);
+                assert_eq!(report.members[0].phase, TaskQuorumPhase::Cleanup);
+                assert!(matches!(&report.members[0].outcome,
+                    Outcome::Cancelled(reason) if reason.kind == CancelKind::Shutdown));
+                assert_eq!(
+                    report.owner_cancellation.as_ref().unwrap().kind,
+                    CancelKind::Shutdown
+                );
+                assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+            });
+        }
+    });
+}
+
+#[test]
+fn quorum_reports_preserve_impossibility_errors_and_drain_invalid_requests() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let (ready, mut witness) = oneshot::channel();
+                let mut set = JoinSet::<u8, &'static str, _>::in_cx(&cx);
+                set.spawn(&cx, move |child| async move {
+                    parked(&child, ready).await;
+                    Ok(99)
+                })
+                .unwrap();
+                witness.recv(&cx).await.unwrap();
+                set.spawn(&cx, |_| async { Err("backend unavailable") })
+                    .unwrap();
+                let report = set.join_quorum_report(&cx, 2).await;
+                assert!(matches!(&report.decision, TaskQuorumDecision::Impossible));
+                assert!(report.selected.is_empty());
+                assert_eq!(report.members.len(), 2);
+                assert_eq!(report.members[0].index, 1);
+                assert_eq!(report.members[0].phase, TaskQuorumPhase::Selection);
+                assert!(matches!(
+                    &report.members[0].outcome,
+                    Outcome::Err("backend unavailable")
+                ));
+                assert_eq!(report.members[1].phase, TaskQuorumPhase::Cleanup);
+                assert!(matches!(&report.members[1].outcome, Outcome::Cancelled(_)));
+
+                for required in [0, 2, usize::MAX] {
+                    let (ready, mut witness) = oneshot::channel();
+                    let mut set = JoinSet::<u8, (), _>::in_cx(&cx);
+                    set.spawn(&cx, move |child| async move {
+                        parked(&child, ready).await;
+                        Ok(99)
+                    })
+                    .unwrap();
+                    witness.recv(&cx).await.unwrap();
+                    let report = set.join_quorum_report(&cx, required).await;
+                    assert!(matches!(&report.decision, TaskQuorumDecision::Invalid));
+                    assert_eq!(report.required, required);
+                    assert_eq!(report.total, 1);
+                    assert!(report.selected.is_empty());
+                    assert_eq!(report.members.len(), 1);
+                    assert_eq!(report.members[0].phase, TaskQuorumPhase::Cleanup);
+                    assert!(matches!(&report.members[0].outcome, Outcome::Cancelled(_)));
+                }
+                let report = JoinSet::<u8, (), _>::in_cx(&cx)
+                    .join_first_ok_report(&cx)
+                    .await;
+                assert!(matches!(&report.decision, TaskQuorumDecision::Invalid));
+                assert_eq!(report.total, 0);
+                assert!(report.members.is_empty());
+                assert!(report.selected.is_empty());
+            });
+        }
+    });
+}
+
+#[test]
+fn dropping_a_quorum_report_future_cancels_owned_members_before_region_close() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                for poll_once in [false, true] {
+                    let (ready, mut witness) = oneshot::channel();
+                    let (cleaned, mut cleanup) = oneshot::channel();
+                    let mut set = JoinSet::<u8, (), _>::in_cx(&cx);
+                    set.spawn(&cx, move |child| async move {
+                        parked(&child, ready).await;
+                        cleaned.send_blocking(()).unwrap();
+                        Ok(1)
+                    })
+                    .unwrap();
+                    witness.recv(&cx).await.unwrap();
+                    let mut report = Box::pin(set.join_first_ok_report(&cx));
+                    if poll_once {
+                        poll_fn(|task| {
+                            assert!(report.as_mut().poll(task).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                    }
+                    drop(report);
+                    cleanup.recv(&cx).await.unwrap();
+                }
             });
         }
     });
