@@ -12,8 +12,12 @@
 //! - [`with_pg_transaction`]: Run a closure inside a PostgreSQL transaction
 //! - [`with_sqlite_transaction`]: Run a closure inside a SQLite transaction
 //! - [`with_mysql_transaction`]: Run a closure inside a MySQL transaction
+//! - [`with_pg_transaction_borrowed`] / [`with_mysql_transaction_borrowed`]:
+//!   Borrow the transaction and caller data across awaits
 //! - [`with_pg_transaction_retry`]: PostgreSQL retry on serialization failure (40001)
 //! - [`with_mysql_transaction_retry`]: MySQL retry on deadlock (1213/1205)
+//! - [`with_pg_transaction_retry_borrowed`] / [`with_mysql_transaction_retry_borrowed`]:
+//!   Retry borrowing callbacks with explicit replay safety
 //! - [`with_sqlite_transaction_retry`]: SQLite retry on SQLITE_BUSY/SQLITE_LOCKED
 //! - [`PgSavepoint`] / [`SqliteSavepoint`] / [`MySqlSavepoint`]: Nested savepoints
 //! - [`RetryPolicy`]: Configurable retry with exponential backoff
@@ -25,16 +29,23 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use asupersync::database::transaction::{with_pg_transaction, RetryPolicy};
+//! ```no_run
+//! # #[cfg(feature = "postgres")]
+//! # async fn example(
+//! #     conn: &mut asupersync::database::PgConnection,
+//! #     cx: &asupersync::Cx,
+//! # ) -> asupersync::Outcome<u64, asupersync::database::PgError> {
+//! use asupersync::database::transaction::{TransactionFuture, with_pg_transaction_borrowed};
 //!
-//! async fn transfer(conn: &mut PgConnection, cx: &Cx) -> Outcome<(), PgError> {
-//!     with_pg_transaction(conn, cx, |tx, cx| async move {
-//!         tx.execute(cx, "UPDATE accounts SET balance = balance - 100 WHERE id = 1").await?;
-//!         tx.execute(cx, "UPDATE accounts SET balance = balance + 100 WHERE id = 2").await?;
-//!         Outcome::Ok(())
-//!     }).await
-//! }
+//! let sql = String::from("UPDATE accounts SET balance = balance + 100 WHERE id = 2");
+//! with_pg_transaction_borrowed(conn, cx, |tx, cx| {
+//!     let sql = &sql;
+//!     TransactionFuture::new(async move {
+//!         // The transaction and caller-owned SQL are borrowed across await.
+//!         tx.execute_unchecked(cx, sql).await
+//!     })
+//! }).await
+//! # }
 //! ```
 //!
 //! [`Cx`]: crate::cx::Cx
@@ -46,9 +57,54 @@ use crate::cx::Cx;
 use crate::time::{sleep, wall_now};
 use crate::types::{CancelReason, Outcome};
 use std::future::{Future, poll_fn};
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
+
+/// A transaction callback future that can borrow caller-owned data.
+///
+/// Construct this with [`TransactionFuture::new`] around an `async move`
+/// block. `'borrow` is the current transaction borrow; `'env` bounds how long
+/// the callback's captured data lives. Encoding both lifetimes lets borrowing
+/// transaction helpers accept non-`'static` SQL and parameters while calling
+/// the callback with a fresh, shorter transaction borrow on every attempt.
+/// The boxed future is always `Send`.
+#[must_use = "transaction callback futures do nothing unless polled"]
+pub struct TransactionFuture<'env, 'borrow, T, E> {
+    future: Pin<Box<dyn Future<Output = Outcome<T, E>> + Send + 'borrow>>,
+    // This nested reference implies 'env: 'borrow in the callback's return
+    // type. A plain BoxFuture<'borrow, _> would quantify over 'static too,
+    // incorrectly requiring independently captured references to be 'static.
+    _capture_lifetime: PhantomData<&'borrow &'env ()>,
+}
+
+impl<T, E> std::fmt::Debug for TransactionFuture<'_, '_, T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransactionFuture").finish_non_exhaustive()
+    }
+}
+
+impl<'env, 'borrow, T, E> TransactionFuture<'env, 'borrow, T, E> {
+    /// Box a callback future without requiring its captures to be `'static`.
+    pub fn new<F>(future: F) -> Self
+    where
+        F: Future<Output = Outcome<T, E>> + Send + 'borrow,
+    {
+        Self {
+            future: Box::pin(future),
+            _capture_lifetime: PhantomData,
+        }
+    }
+}
+
+impl<T, E> Future for TransactionFuture<'_, '_, T, E> {
+    type Output = Outcome<T, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().future.as_mut().poll(cx)
+    }
+}
 
 // ─── RetryPolicy ─────────────────────────────────────────────────────────────
 
@@ -175,6 +231,31 @@ async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> 
     .await
 }
 
+/// Apply the same replay gate and backoff to both callback forms. Taking the
+/// error classification rather than an outcome avoids retaining a shared
+/// reference to the caller's result across the delay.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn retry_after_error(
+    cx: &Cx,
+    policy: &RetryPolicy,
+    replay_safety: TransactionReplaySafety,
+    body_started: bool,
+    is_retryable: bool,
+    attempt: &mut u32,
+) -> Result<bool, CancelReason> {
+    if !is_retryable
+        || (body_started && replay_safety == TransactionReplaySafety::ReplayUnsafe)
+        || *attempt >= policy.max_retries
+    {
+        return Ok(false);
+    }
+
+    let delay = policy.delay_for(*attempt);
+    *attempt += 1;
+    wait_retry_delay(cx, delay).await?;
+    Ok(true)
+}
+
 // Test-only helper: every caller drives this to completion with
 // `futures_lite::future::block_on` on a single thread, so the future is never
 // sent anywhere. Adding `Send` bounds to `Op`/`OpFut`/`Pred` would constrain
@@ -215,8 +296,8 @@ where
 #[cfg(feature = "postgres")]
 mod pg {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, validate_savepoint_name,
-        wait_retry_delay,
+        Cx, Future, Outcome, RetryPolicy, TransactionFuture, TransactionReplaySafety,
+        retry_after_error, validate_savepoint_name,
     };
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::{
@@ -241,35 +322,13 @@ mod pg {
                 .await;
     }
 
-    /// Run a closure inside a PostgreSQL transaction.
-    ///
-    /// The closure receives a mutable reference to the active transaction and
-    /// a `&Cx`. If the closure returns `Outcome::Ok(value)`, the transaction
-    /// is committed and the value is returned. On `Outcome::Err` or
-    /// `Outcome::Cancelled`, the transaction is rolled back.
-    ///
-    /// # Panics
-    ///
-    /// If the closure panics (via `Outcome::Panicked`), the transaction is
-    /// rolled back before propagating the panic payload.
-    pub async fn with_pg_transaction<T, F, Fut>(
-        conn: &mut PgConnection,
+    /// All callback forms use this finalizer so cancellation, poisoned
+    /// savepoints, and rollback preserve exactly the same outcome semantics.
+    async fn finish_transaction<T>(
+        tx: PgTransaction<'_>,
         cx: &Cx,
-        f: F,
-    ) -> Outcome<T, PgError>
-    where
-        F: FnOnce(&mut PgTransaction<'_>, &Cx) -> Fut,
-        Fut: Future<Output = Outcome<T, PgError>>,
-    {
-        let mut tx = match conn.begin(cx).await {
-            Outcome::Ok(tx) => tx,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
-
-        let result = f(&mut tx, cx).await;
-
+        result: Outcome<T, PgError>,
+    ) -> Outcome<T, PgError> {
         match result {
             Outcome::Ok(value) => {
                 let rollback_required = tx.requires_rollback_before_commit();
@@ -299,6 +358,80 @@ mod pg {
         }
     }
 
+    /// Run a closure inside a PostgreSQL transaction.
+    ///
+    /// The closure receives a mutable reference to the active transaction and
+    /// a `&Cx`. If the closure returns `Outcome::Ok(value)`, the transaction
+    /// is committed and the value is returned. On `Outcome::Err` or
+    /// `Outcome::Cancelled`, the transaction is rolled back.
+    ///
+    /// Use [`with_pg_transaction_borrowed`] when the callback awaits operations
+    /// that borrow the transaction or its context.
+    ///
+    /// # Panics
+    ///
+    /// If the closure panics (via `Outcome::Panicked`), the transaction is
+    /// rolled back before propagating the panic payload.
+    pub async fn with_pg_transaction<T, F, Fut>(
+        conn: &mut PgConnection,
+        cx: &Cx,
+        f: F,
+    ) -> Outcome<T, PgError>
+    where
+        F: FnOnce(&mut PgTransaction<'_>, &Cx) -> Fut,
+        Fut: Future<Output = Outcome<T, PgError>>,
+    {
+        let mut tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&mut tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
+
+    /// Run a borrowing callback inside a PostgreSQL transaction.
+    ///
+    /// Return [`TransactionFuture::new`] around an `async move` block to await
+    /// queries using the supplied transaction and context. The future may
+    /// also borrow caller-owned SQL, parameters, and other data; neither the
+    /// callback nor its captures need to be `'static`.
+    ///
+    /// Commit, cancellation, rollback, and `Outcome::Panicked` propagation
+    /// have the same semantics as [`with_pg_transaction`]. The callback runs
+    /// only after `BEGIN` succeeds. A successful body is committed only if
+    /// the context is still active and the transaction does not require
+    /// rollback.
+    ///
+    /// Both callback and future are `Send`, so the helper can be awaited by
+    /// tasks running on native worker threads.
+    pub async fn with_pg_transaction_borrowed<'env, T, F>(
+        conn: &mut PgConnection,
+        cx: &Cx,
+        f: F,
+    ) -> Outcome<T, PgError>
+    where
+        T: Send + 'env,
+        F: for<'a, 'tx> FnOnce(
+                &'a mut PgTransaction<'tx>,
+                &'a Cx,
+            ) -> TransactionFuture<'env, 'a, T, PgError>
+            + Send
+            + 'env,
+    {
+        let mut tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&mut tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
+
     /// Run a closure inside a PostgreSQL transaction with retry on
     /// serialization failure.
     ///
@@ -306,6 +439,8 @@ mod pg {
     /// given [`RetryPolicy`]. Pass [`TransactionReplaySafety::ReplaySafe`] only
     /// when rerunning the closure cannot duplicate externally visible side
     /// effects. Other errors are returned immediately.
+    ///
+    /// Use [`with_pg_transaction_retry_borrowed`] for a borrowing callback.
     pub async fn with_pg_transaction_retry<T, F, MkFut>(
         conn: &mut PgConnection,
         cx: &Cx,
@@ -329,20 +464,90 @@ mod pg {
             })
             .await;
 
-            match &result {
-                Outcome::Err(err)
-                    if err.is_serialization_failure()
-                        && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.load(Ordering::Relaxed))
-                        && attempt < policy.max_retries =>
-                {
-                    let delay = policy.delay_for(attempt);
-                    attempt += 1;
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
+            let is_retryable =
+                matches!(&result, Outcome::Err(err) if err.is_serialization_failure());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started.load(Ordering::Relaxed),
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
+            }
+        }
+    }
+
+    /// Run a borrowing callback with retry on PostgreSQL serialization
+    /// failures (SQLSTATE `40001`).
+    ///
+    /// Return [`TransactionFuture::new`] around each attempt's `async move`
+    /// block. The future may borrow caller-owned data across awaits, and each
+    /// attempt receives a fresh transaction. Failed attempts complete the
+    /// helper's rollback handling before the next `BEGIN`.
+    ///
+    /// The callback is `FnMut`: it may update a captured attempt counter
+    /// before returning its future, but that future cannot borrow mutable
+    /// captures from the callback itself. Copy shared references to SQL or
+    /// parameters into the per-attempt `async move` block instead.
+    ///
+    /// [`TransactionReplaySafety::ReplayUnsafe`] permits retry only when
+    /// `BEGIN` failed before the callback started. Opt into
+    /// [`TransactionReplaySafety::ReplaySafe`] only if repeating the body,
+    /// including its captured-state changes, cannot duplicate externally
+    /// visible effects. Commit-time serialization failures can also replay
+    /// the body. Other outcomes return immediately, and backoff observes
+    /// cancellation through the supplied context.
+    pub async fn with_pg_transaction_retry_borrowed<'env, T, F>(
+        conn: &mut PgConnection,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
+        mut f: F,
+    ) -> Outcome<T, PgError>
+    where
+        T: Send + 'env,
+        F: for<'a, 'tx> FnMut(
+                &'a mut PgTransaction<'tx>,
+                &'a Cx,
+            ) -> TransactionFuture<'env, 'a, T, PgError>
+            + Send
+            + 'env,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let mut body_started = false;
+            let result = match conn.begin(cx).await {
+                Outcome::Ok(mut tx) => {
+                    body_started = true;
+                    let result = f(&mut tx, cx).await;
+                    finish_transaction(tx, cx, result).await
                 }
-                _ => return result,
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            };
+
+            let is_retryable =
+                matches!(&result, Outcome::Err(err) if err.is_serialization_failure());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started,
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
             }
         }
     }
@@ -463,7 +668,10 @@ mod pg {
 }
 
 #[cfg(feature = "postgres")]
-pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
+pub use pg::{
+    PgSavepoint, with_pg_transaction, with_pg_transaction_borrowed, with_pg_transaction_retry,
+    with_pg_transaction_retry_borrowed,
+};
 
 // ─── SQLite helpers ──────────────────────────────────────────────────────────
 
@@ -783,8 +991,8 @@ pub use sqlite::{
 #[cfg(feature = "mysql")]
 mod mysql {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, validate_savepoint_name,
-        wait_retry_delay,
+        Cx, Future, Outcome, RetryPolicy, TransactionFuture, TransactionReplaySafety,
+        retry_after_error, validate_savepoint_name,
     };
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::{
@@ -806,27 +1014,12 @@ mod mysql {
                 .await;
     }
 
-    /// Run a closure inside a MySQL transaction.
-    ///
-    /// See [`with_pg_transaction`](super::with_pg_transaction) for semantics.
-    pub async fn with_mysql_transaction<T, F, Fut>(
-        conn: &mut MySqlConnection,
+    /// Keep both callback forms on the same commit and rollback path.
+    async fn finish_transaction<T>(
+        tx: MySqlTransaction<'_>,
         cx: &Cx,
-        f: F,
-    ) -> Outcome<T, MySqlError>
-    where
-        F: FnOnce(&mut MySqlTransaction<'_>, &Cx) -> Fut,
-        Fut: Future<Output = Outcome<T, MySqlError>>,
-    {
-        let mut tx = match conn.begin(cx).await {
-            Outcome::Ok(tx) => tx,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
-
-        let result = f(&mut tx, cx).await;
-
+        result: Outcome<T, MySqlError>,
+    ) -> Outcome<T, MySqlError> {
         match result {
             Outcome::Ok(value) => {
                 let rollback_required = tx.requires_rollback_before_commit();
@@ -855,6 +1048,68 @@ mod mysql {
         }
     }
 
+    /// Run a closure inside a MySQL transaction.
+    ///
+    /// See [`with_pg_transaction`](super::with_pg_transaction) for semantics.
+    /// Use [`with_mysql_transaction_borrowed`] to await operations that borrow
+    /// the transaction or its context.
+    pub async fn with_mysql_transaction<T, F, Fut>(
+        conn: &mut MySqlConnection,
+        cx: &Cx,
+        f: F,
+    ) -> Outcome<T, MySqlError>
+    where
+        F: FnOnce(&mut MySqlTransaction<'_>, &Cx) -> Fut,
+        Fut: Future<Output = Outcome<T, MySqlError>>,
+    {
+        let mut tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&mut tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
+
+    /// Run a borrowing callback inside a MySQL transaction.
+    ///
+    /// Return [`TransactionFuture::new`] around an `async move` block to await
+    /// queries while borrowing the transaction, its context, and caller-owned
+    /// SQL or parameters. The callback and its captures need not be `'static`.
+    ///
+    /// This uses the same commit, cancellation, and rollback semantics as
+    /// [`with_mysql_transaction`], including rollback before propagating an
+    /// error, cancellation, or `Outcome::Panicked` value. A successful body
+    /// commits only while the context is active and rollback is not required.
+    /// The callback and its future are `Send`, so the helper can be awaited
+    /// by tasks running on native worker threads.
+    pub async fn with_mysql_transaction_borrowed<'env, T, F>(
+        conn: &mut MySqlConnection,
+        cx: &Cx,
+        f: F,
+    ) -> Outcome<T, MySqlError>
+    where
+        T: Send + 'env,
+        F: for<'a, 'tx> FnOnce(
+                &'a mut MySqlTransaction<'tx>,
+                &'a Cx,
+            ) -> TransactionFuture<'env, 'a, T, MySqlError>
+            + Send
+            + 'env,
+    {
+        let mut tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&mut tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
+
     /// Run a closure inside a MySQL transaction with retry on deadlock.
     ///
     /// Deadlocks (error 1213) and lock wait timeouts (error 1205) are retried
@@ -862,6 +1117,8 @@ mod mysql {
     /// [`TransactionReplaySafety::ReplaySafe`] only when rerunning the closure
     /// cannot duplicate externally visible side effects. Other errors are
     /// returned immediately.
+    ///
+    /// Use [`with_mysql_transaction_retry_borrowed`] for a borrowing callback.
     pub async fn with_mysql_transaction_retry<T, F, MkFut>(
         conn: &mut MySqlConnection,
         cx: &Cx,
@@ -885,20 +1142,87 @@ mod mysql {
             })
             .await;
 
-            match &result {
-                Outcome::Err(err)
-                    if err.is_deadlock()
-                        && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.load(Ordering::Relaxed))
-                        && attempt < policy.max_retries =>
-                {
-                    let delay = policy.delay_for(attempt);
-                    attempt += 1;
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
+            let is_retryable = matches!(&result, Outcome::Err(err) if err.is_deadlock());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started.load(Ordering::Relaxed),
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
+            }
+        }
+    }
+
+    /// Run a borrowing callback with retry on MySQL deadlock (1213) or
+    /// lock wait timeout (1205).
+    ///
+    /// Return [`TransactionFuture::new`] around each attempt's `async move`
+    /// block to borrow caller-owned data across awaits. Each attempt starts
+    /// a fresh transaction after the preceding attempt has completed the
+    /// helper's rollback handling.
+    ///
+    /// The `FnMut` callback may change captured state before returning the
+    /// future. That future cannot borrow mutable captures from the callback
+    /// itself; copy shared references to SQL or parameters into each
+    /// per-attempt `async move` block instead.
+    ///
+    /// [`TransactionReplaySafety::ReplayUnsafe`] permits retries only before
+    /// the body starts. Choose [`TransactionReplaySafety::ReplaySafe`] only
+    /// when repeating the complete callback, including its captured-state
+    /// changes, cannot duplicate externally visible effects. A retryable
+    /// commit error may also replay the body. Other outcomes return
+    /// immediately, and the context can cancel the retry backoff.
+    pub async fn with_mysql_transaction_retry_borrowed<'env, T, F>(
+        conn: &mut MySqlConnection,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
+        mut f: F,
+    ) -> Outcome<T, MySqlError>
+    where
+        T: Send + 'env,
+        F: for<'a, 'tx> FnMut(
+                &'a mut MySqlTransaction<'tx>,
+                &'a Cx,
+            ) -> TransactionFuture<'env, 'a, T, MySqlError>
+            + Send
+            + 'env,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let mut body_started = false;
+            let result = match conn.begin(cx).await {
+                Outcome::Ok(mut tx) => {
+                    body_started = true;
+                    let result = f(&mut tx, cx).await;
+                    finish_transaction(tx, cx, result).await
                 }
-                _ => return result,
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            };
+
+            let is_retryable = matches!(&result, Outcome::Err(err) if err.is_deadlock());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started,
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
             }
         }
     }
@@ -1015,7 +1339,10 @@ mod mysql {
 }
 
 #[cfg(feature = "mysql")]
-pub use mysql::{MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_retry};
+pub use mysql::{
+    MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_borrowed,
+    with_mysql_transaction_retry, with_mysql_transaction_retry_borrowed,
+};
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 

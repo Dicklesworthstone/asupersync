@@ -1,6 +1,8 @@
 //! Lifetime of the task waiting for a member, separate from member readiness.
 
-use super::{JoinSet, Outcome, Policy, ReadyMembers, join_to_outcome};
+#[cfg(test)]
+use super::Outcome;
+use super::{CollectedMember, JoinSet, Policy, ReadyMembers, join_to_outcome};
 use crate::types::CancelReason;
 use std::future::poll_fn;
 use std::sync::Arc;
@@ -17,10 +19,10 @@ where
     /// A selection scan shares its quantum across consecutive ready outcomes.
     /// Pending candidates count too. Keep the cursor while this wait is pending
     /// so a repeatedly woken prefix cannot hide an unexamined suffix forever.
-    pub(in crate::combinator) async fn next_outcome_bounded(
+    pub(in crate::combinator) async fn next_member_bounded(
         &mut self,
         remaining: &mut usize,
-    ) -> Option<Outcome<T, E>> {
+    ) -> Option<CollectedMember<T, E>> {
         let mut collector = CollectorWait::new(Arc::clone(&self.ready));
         let mut scan_from = 0;
         poll_fn(|task| {
@@ -35,8 +37,8 @@ where
                 };
                 *remaining -= 1;
                 from = index.checked_add(1);
-                if let Some(outcome) = self.poll_candidate(index) {
-                    return Poll::Ready(Some(outcome));
+                if let Some(member) = self.poll_candidate_member(index) {
+                    return Poll::Ready(Some(member));
                 }
             }
             let more_forward = from.is_some_and(|start| self.ready.next_candidate(start).is_some());
@@ -58,14 +60,21 @@ where
         .await
     }
 
+    #[cfg(test)]
+    async fn next_outcome_bounded(&mut self, remaining: &mut usize) -> Option<Outcome<T, E>> {
+        self.next_member_bounded(remaining)
+            .await
+            .map(|member| member.outcome)
+    }
+
     /// Cancel every unfinished member before awaiting any retirement, then
     /// collect in bounded spawn-order batches. Published outcomes are immutable
     /// even while their retirement barrier is closed. Legacy explicit-abort
     /// APIs retain their separate reason-strengthening behavior.
-    pub(in crate::combinator) async fn cancel_remaining_for_selection(
+    pub(in crate::combinator) async fn cancel_members_for_selection(
         self,
         reason: CancelReason,
-    ) -> Vec<Outcome<T, E>> {
+    ) -> Vec<CollectedMember<T, E>> {
         let mut outcomes = Vec::with_capacity(self.members.len());
         // On drop or unwind, request the remaining cancellations before user
         // values in the collected prefix are destroyed (v8rp1h L6).
@@ -89,18 +98,25 @@ where
                 let Some((&index, _)) = members.members.first_key_value() else {
                     return Poll::Ready(std::mem::take(&mut outcomes));
                 };
-                let joined = members
+                let member = members
                     .members
                     .get_mut(&index)
-                    .expect("first member remains owned")
-                    .handle
-                    .poll_join(task);
+                    .expect("first member remains owned");
+                let joined = member.handle.poll_join(task);
                 let Poll::Ready(joined) = joined else {
                     return Poll::Pending;
                 };
+                // Admission can replace a provisional mailbox identity while
+                // the join is pending. Capture the published identity only
+                // after the outcome and retirement barrier are ready.
+                let task_id = member.handle.task_id();
                 let outcome = join_to_outcome(joined);
                 members.take_member(index, &outcome);
-                outcomes.push(outcome);
+                outcomes.push(CollectedMember {
+                    index,
+                    task_id,
+                    outcome,
+                });
             }
             if members.members.is_empty() {
                 Poll::Ready(std::mem::take(&mut outcomes))
@@ -110,6 +126,15 @@ where
             }
         })
         .await
+    }
+
+    #[cfg(test)]
+    async fn cancel_remaining_for_selection(self, reason: CancelReason) -> Vec<Outcome<T, E>> {
+        self.cancel_members_for_selection(reason)
+            .await
+            .into_iter()
+            .map(|member| member.outcome)
+            .collect()
     }
 }
 

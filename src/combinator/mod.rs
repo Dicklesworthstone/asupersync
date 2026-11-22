@@ -224,6 +224,7 @@ pub use select::{
 pub use stream_collect::{map_collect_concurrent, try_map_collect_concurrent};
 pub use stream_control::try_for_each_concurrent_scoped_until;
 pub use stream_send::{StreamSendError, try_map_send_concurrent_scoped};
+pub use task_quorum::{TaskQuorumDecision, TaskQuorumMember, TaskQuorumPhase, TaskQuorumReport};
 pub use timeout::{
     TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,
     make_timed_result,
