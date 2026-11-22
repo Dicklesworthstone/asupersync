@@ -9,6 +9,7 @@ use crate::bytes::{Buf, BytesMut};
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
 use crate::http::body::Frame;
+use crate::http::body::admission::{BodyBudget, BodyBudgetExceeded, BodyReservation};
 use crate::http::h1::codec::{
     Http1Codec, HttpError, decode_streaming_request_head, for_each_header_value_token,
     preview_request_head, require_transfer_encoding_chunked, trim_ows, trim_ows_bytes,
@@ -62,6 +63,7 @@ pub(super) struct RequestExecutionConfig {
     drain_grace: Duration,
     connection: Option<Cx>,
     shutdown: Option<ShutdownSignal>,
+    body_reservation: Option<Arc<BodyReservation>>,
 }
 
 /// Legacy dispatch retains borrowed handlers and response conversion timing.
@@ -314,6 +316,7 @@ pub struct Http1StreamingConfig {
     /// Maximum time spent synchronizing unread request-body EOF.
     pub unread_body_drain_timeout: Duration,
     request_body_policy: Option<Http1RequestBodyPolicy>,
+    streaming_body_budget: Option<Arc<BodyBudget>>,
 }
 
 #[derive(Clone)]
@@ -343,6 +346,7 @@ impl From<Http1Config> for Http1StreamingConfig {
             unread_body_drain_bytes: 512 * 1024,
             unread_body_drain_timeout: Duration::from_millis(500),
             request_body_policy: None,
+            streaming_body_budget: None,
         }
     }
 }
@@ -356,6 +360,13 @@ impl std::ops::Deref for Http1StreamingConfig {
 }
 
 impl Http1StreamingConfig {
+    /// Listener-owned capacity is attached after the caller's configuration so
+    /// route-policy clones and every transport retain the same admission pool.
+    pub(crate) fn with_streaming_body_budget(mut self, budget: Arc<BodyBudget>) -> Self {
+        self.streaming_body_budget = Some(budget);
+        self
+    }
+
     /// Resolve static request-body policy from a validated head, before body
     /// allocation, checked obligation admission, or `100 Continue`.
     ///
@@ -473,6 +484,43 @@ fn streaming_admission_refusal(head: &RequestHead, mut response: Response) -> Re
         suppress_response_body_for_head(&mut response);
     }
     response
+}
+
+/// Reserve the complete live-body envelope before publishing Continue or
+/// creating any request task, body channel, or checked body obligation.
+fn reserve_streaming_request_body(
+    config: &Http1StreamingConfig,
+    head: &RequestHead,
+) -> Result<Option<Arc<BodyReservation>>, Response> {
+    let Some(budget) = &config.streaming_body_budget else {
+        return Ok(None);
+    };
+    let Some(bytes) =
+        IncomingRequestBodyWriter::streaming_request_reservation(config.incoming_body_queued_bytes)
+    else {
+        // An unrepresentable envelope is invalid configuration, rather than
+        // shared-capacity pressure, so it does not increment budget refusals.
+        return Err(streaming_admission_refusal(
+            head,
+            hop_error_response(
+                head.version,
+                503,
+                "invalid request body buffering configuration",
+            ),
+        ));
+    };
+    let mut reservation = BodyReservation::new(Arc::clone(budget));
+    reservation.try_grow(bytes).map_err(|BodyBudgetExceeded| {
+        streaming_admission_refusal(
+            head,
+            hop_error_response(
+                head.version,
+                503,
+                "request body admission capacity exhausted",
+            ),
+        )
+    })?;
+    Ok(Some(Arc::new(reservation)))
 }
 
 /// Parses the client `Request-Timeout` header into a duration.
@@ -1107,6 +1155,7 @@ pub struct Http1Server<F> {
     config: Http1Config,
     shutdown_signal: Option<ShutdownSignal>,
     in_flight_requests: Option<Arc<AtomicUsize>>,
+    body_budget: Option<Arc<BodyBudget>>,
 }
 
 impl<F, Fut> Http1Server<F>
@@ -1140,6 +1189,7 @@ where
             config: Http1Config::default(),
             shutdown_signal: None,
             in_flight_requests: None,
+            body_budget: None,
         }
     }
 
@@ -1150,6 +1200,7 @@ where
             config,
             shutdown_signal: None,
             in_flight_requests: None,
+            body_budget: None,
         }
     }
 
@@ -1173,6 +1224,11 @@ where
     #[must_use]
     pub fn with_in_flight_requests(mut self, counter: Arc<AtomicUsize>) -> Self {
         self.in_flight_requests = Some(counter);
+        self
+    }
+
+    pub(super) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> Self {
+        self.body_budget = Some(budget);
         self
     }
 
@@ -1368,7 +1424,8 @@ where
     {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
-            .max_body_size(self.config.max_body_size);
+            .max_body_size(self.config.max_body_size)
+            .with_body_budget(self.body_budget.clone());
         // The codec assembles a whole Content-Length body (or chunk) in the
         // read buffer, so the buffer must admit max_headers_size +
         // max_body_size; Framed's default 8 MiB cap would otherwise drop the
@@ -1486,6 +1543,10 @@ where
             // is loop-iteration scoped so every exit path (including early
             // breaks and error returns) releases it via Drop.
             let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
+            // The codec's reservation includes incomplete framing-admitted
+            // bodies. Transfer it only after a complete body and trailers, and
+            // retain it through response retirement and owned subtree cleanup.
+            let body_reservation = framed.codec_mut().take_request_body_reservation();
 
             // br-asupersync-t9yqht: enforce the allowed-hosts allow-list
             // BEFORE the handler runs. A request whose well-formed Host
@@ -1594,6 +1655,7 @@ where
                     drain_grace: self.config.request_drain_grace,
                     connection: conn_cx,
                     shutdown: self.shutdown_signal.clone(),
+                    body_reservation: body_reservation.clone(),
                 },
             )
             .await?;
@@ -2175,6 +2237,18 @@ where
                         break;
                     }
                 };
+            let body_reservation = match reserve_streaming_request_body(&request_config, &head) {
+                Ok(reservation) => reservation,
+                Err(response) => {
+                    state.phase = ConnectionPhase::Writing;
+                    response_write
+                        .write_streaming_response(cx, &mut io, response)
+                        .await?;
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            };
             if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
                 let response = expectation_response(head.version, expectation)
                     .expect("100-continue expectation must have a response");
@@ -2213,6 +2287,7 @@ where
                         drain_grace: self.config.request_drain_grace,
                         connection: Some(cx.clone()),
                         shutdown: self.shutdown_signal.clone(),
+                        body_reservation: body_reservation.clone(),
                     },
                 },
             )
@@ -2843,6 +2918,19 @@ where
                 return Ok(state);
             }
         };
+    let body_reservation = match reserve_streaming_request_body(&request_config, &head) {
+        Ok(reservation) => reservation,
+        Err(response) => {
+            state.phase = ConnectionPhase::Writing;
+            response_write
+                .write_streaming_response(cx, &mut io, response)
+                .await?;
+            state.requests_served = 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = response_write.close_transport(&mut io).await;
+            return Ok(state);
+        }
+    };
     if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
         let response = expectation_response(head.version, expectation)
             .expect("100-continue expectation must have a response");
@@ -2881,6 +2969,7 @@ where
                     drain_grace: config.request_drain_grace,
                     connection: Some(cx.clone()),
                     shutdown: shutdown_signal.clone(),
+                    body_reservation: body_reservation.clone(),
                 },
             },
             policy,
@@ -4168,6 +4257,13 @@ where
 /// classification decision here instead of silently defaulting.
 fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
     let (status, message): (u16, &str) = match error {
+        HttpError::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<BodyBudgetExceeded>()) =>
+        {
+            (503, "listener request-body admission capacity exhausted")
+        }
         HttpError::HeadersTooLarge | HttpError::TooManyHeaders => {
             (431, "request header fields exceed the configured limit")
         }

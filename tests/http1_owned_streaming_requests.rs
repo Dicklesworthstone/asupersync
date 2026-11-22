@@ -1228,3 +1228,276 @@ async fn streaming_body_credit_aborts_on_force_close(cx: Cx, runtime: RuntimeHan
 fn owned_streaming_force_close_aborts_one_body_credit_before_task_retirement() {
     native_with_trace(streaming_body_credit_aborts_on_force_close);
 }
+
+mod listener_body_budget {
+    use super::*;
+    use asupersync::bytes::Buf;
+    use asupersync::http::h1::listener::Http1ListenerStats;
+    use asupersync::runtime::yield_now;
+    use asupersync::server::ConnectionManager;
+    use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
+
+    // One 64-byte body queue plus the production parser and trailer bounds.
+    const RESERVATION: usize = 64 + 256 * 1024 + 16 * 1024;
+
+    struct StopOnDrop(ConnectionManager);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.force_close();
+        }
+    }
+
+    async fn bounded<F: Future>(future: F) -> F::Output {
+        asupersync::time::timeout(Cx::current().unwrap().now(), Duration::from_secs(5), future)
+            .await
+            .expect("HTTP/1 streaming-capacity watchdog")
+    }
+
+    async fn head(peer: &mut TcpStream) -> String {
+        bounded(async {
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).await.unwrap();
+                bytes.push(byte[0]);
+                assert!(bytes.len() <= 16 * 1024, "bounded response head");
+            }
+            String::from_utf8(bytes).unwrap()
+        })
+        .await
+    }
+
+    async fn post(address: SocketAddr, path: &str, length: usize) -> TcpStream {
+        let mut peer = bounded(TcpStream::connect(address)).await.unwrap();
+        bounded(peer.write_all(
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        ))
+        .await
+        .unwrap();
+        peer
+    }
+
+    async fn refused(address: SocketAddr) {
+        let mut peer = post(address, "/never", 1).await;
+        // Reading the first head catches a premature 100 Continue as well as
+        // accidental admission of a handler on this other connection.
+        let first = head(&mut peer).await;
+        assert!(first.starts_with("HTTP/1.1 503 "), "{first}");
+        assert!(
+            first
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "{first}"
+        );
+        bounded(peer.read_to_end(&mut Vec::new())).await.unwrap();
+    }
+
+    async fn completed(peer: &mut TcpStream, expected: &[u8]) {
+        let response = head(peer).await;
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        let mut body = Vec::new();
+        bounded(peer.read_to_end(&mut body)).await.unwrap();
+        assert_eq!(body, expected);
+    }
+
+    async fn reserved(stats: &Http1ListenerStats, expected: usize) {
+        bounded(async {
+            while stats.reserved_streaming_request_bytes() != expected {
+                yield_now().await;
+            }
+        })
+        .await;
+    }
+
+    async fn buffered_response_capacity_waits_for_descendant(cx: Cx) {
+        let (body_ready, mut body_parked) = oneshot::channel();
+        let (cleanup_ready, mut cleanup_parked) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let signals = Arc::new(Mutex::new(Some((body_ready, cleanup_ready, released))));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let verified = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let handler_verified = Arc::clone(&verified);
+        let handler_retired = Arc::clone(&retired);
+        let cleanup_owner = cx.clone();
+        let mut settings = config();
+        settings.connection.request_drain_grace = Duration::from_secs(10);
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            move |request_cx: Cx, mut request: StreamingServerRequest| {
+                assert_eq!(Cx::current().unwrap().task_id(), request_cx.task_id());
+                handler_calls.fetch_add(1, Ordering::SeqCst);
+                let signals = if request.head.uri == "/held" {
+                    signals.lock().unwrap().take()
+                } else {
+                    None
+                };
+                let verified = Arc::clone(&handler_verified);
+                let retired = Arc::clone(&handler_retired);
+                let cleanup_owner = cleanup_owner.clone();
+                async move {
+                    let (mut body_ready, cleanup) = match signals {
+                        Some((body_ready, cleanup_ready, released)) => {
+                            (Some(body_ready), Some((cleanup_ready, released)))
+                        }
+                        None => (None, None),
+                    };
+                    // Retain every original delivered frame: a real TCP read
+                    // may split the payload even when the peer writes once.
+                    let mut frames = Vec::new();
+                    loop {
+                        let frame = poll_fn(|task| {
+                            let frame = Pin::new(&mut request.body).poll_frame(task);
+                            if frame.is_pending()
+                                && let Some(ready) = body_ready.take()
+                            {
+                                ready.send_blocking(request_cx.clone()).unwrap();
+                            }
+                            frame
+                        })
+                        .await;
+                        match frame {
+                            Some(Ok(Frame::Data(bytes))) => frames.push(bytes),
+                            None => break,
+                            other => panic!("valid Content-Length body: {other:?}"),
+                        }
+                    }
+                    if let Some((cleanup_ready, mut released)) = cleanup {
+                        let (child_ready, mut child_parked) = oneshot::channel();
+                        request_cx
+                            .spawn(move |child_cx| async move {
+                                let _retirement = Dropped(retired);
+                                parked_until_cancelled(&child_cx, child_ready).await;
+                                let mut cleanup_ready = Some(cleanup_ready);
+                                // The outer workflow remains uncancelled. A
+                                // dropped release sender also unblocks this
+                                // gate if an assertion fails in that workflow.
+                                let mut gate = pin!(released.recv(&cleanup_owner));
+                                let released = poll_fn(|task| {
+                                    let result = gate.as_mut().poll(task);
+                                    if result.is_pending()
+                                        && let Some(ready) = cleanup_ready.take()
+                                    {
+                                        ready.send_blocking(child_cx.clone()).unwrap();
+                                    }
+                                    result
+                                })
+                                .await;
+                                if released.is_ok() {
+                                    let mut retained = Vec::new();
+                                    for frame in &frames {
+                                        retained.extend_from_slice(frame.chunk());
+                                    }
+                                    assert_eq!(retained, b"retained");
+                                    verified.fetch_add(1, Ordering::SeqCst);
+                                }
+                            })
+                            .unwrap();
+                        let child = child_parked.recv(&request_cx).await.unwrap();
+                        assert_eq!(child.region_id(), request_cx.region_id());
+                        Response::new(200, "OK", b"retired".to_vec())
+                    } else {
+                        assert_eq!(request.head.uri, "/reuse");
+                        let mut received = Vec::new();
+                        for frame in &frames {
+                            received.extend_from_slice(frame.chunk());
+                        }
+                        assert_eq!(received, b"new");
+                        Response::new(200, "OK", b"reused".to_vec())
+                    }
+                }
+            },
+            Http1ListenerConfig::default()
+                .drain_timeout(Duration::from_secs(5))
+                .hard_drain_timeout(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap()
+        .with_streaming_config(settings)
+        .max_streaming_request_bytes(NonZeroUsize::new(RESERVATION).unwrap())
+        // Streaming ingress must not spend the buffered-body pool, even
+        // though this serving mode returns buffered responses.
+        .max_buffered_request_bytes(NonZeroUsize::new(1).unwrap());
+        let address = listener.local_addr().unwrap();
+        let stats = listener.stats_handle();
+        let manager = listener.connection_manager().clone();
+        let _stop = StopOnDrop(manager.clone());
+        let in_flight = listener.in_flight_requests();
+        let mut serving = cx
+            .spawn(move |listener_cx| {
+                let serving: Pin<Box<dyn Future<Output = _> + Send>> =
+                    Box::pin(async move { listener.run_streaming_owned_in(&listener_cx).await });
+                serving
+            })
+            .unwrap();
+
+        let mut first = post(address, "/held", 8).await;
+        let continued = head(&mut first).await;
+        assert!(continued.starts_with("HTTP/1.1 100 "), "{continued}");
+        let request = bounded(body_parked.recv(&cx)).await.unwrap();
+        assert_ne!(request.task_id(), serving.task_id());
+        assert_ne!(request.region_id(), cx.region_id());
+        assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+        refused(address).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.streaming_body_budget_refusals_total(), 1);
+        assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+
+        bounded(first.write_all(b"retained")).await.unwrap();
+        let descendant = bounded(cleanup_parked.recv(&cx)).await.unwrap();
+        assert_eq!(descendant.region_id(), request.region_id());
+        assert!(descendant.checkpoint().is_err());
+        assert_eq!(verified.load(Ordering::SeqCst), 0);
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        refused(address).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+        {
+            let mut byte = [0];
+            let mut read = pin!(first.read(&mut byte));
+            poll_fn(|task| {
+                assert!(
+                    read.as_mut().poll(task).is_pending(),
+                    "buffered response waits for the request descendant"
+                );
+                Poll::Ready(())
+            })
+            .await;
+        }
+        release.send_blocking(()).unwrap();
+        completed(&mut first, b"retired").await;
+        reserved(&stats, 0).await;
+        assert_eq!(verified.load(Ordering::SeqCst), 1);
+        assert_eq!(retired.load(Ordering::SeqCst), 1);
+
+        let mut reuse = post(address, "/reuse", 3).await;
+        let continued = head(&mut reuse).await;
+        assert!(continued.starts_with("HTTP/1.1 100 "), "{continued}");
+        bounded(reuse.write_all(b"new")).await.unwrap();
+        completed(&mut reuse, b"reused").await;
+        reserved(&stats, 0).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+        assert_eq!(stats.reserved_request_body_bytes(), 0);
+        assert_eq!(stats.body_budget_refusals_total(), 0);
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let report = bounded(serving.join(&cx)).await.unwrap().unwrap();
+        assert!(report.drain_report.unwrap().reached_quiescence);
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+    }
+
+    #[test]
+    fn owned_buffered_response_streaming_capacity_precedes_continue_and_survives_cleanup() {
+        native(buffered_response_capacity_waits_for_descendant);
+    }
+}

@@ -427,6 +427,7 @@ impl Drop for LiveRequest {
 
 pub(super) struct StreamingRequests {
     dispatch: StreamingDispatch,
+    body_budget: Arc<BodyBudget>,
     entries: BTreeMap<u32, LiveRequest>,
     early_response_stops: HashSet<u32>,
     reserved_bytes: usize,
@@ -440,9 +441,10 @@ impl StreamingRequests {
         self.dispatch.config.extended_connect_max_bytes.is_some()
     }
 
-    pub(super) fn new(dispatch: StreamingDispatch) -> Self {
+    pub(super) fn new(dispatch: StreamingDispatch, body_budget: Arc<BodyBudget>) -> Self {
         Self {
             dispatch,
+            body_budget,
             entries: BTreeMap::new(),
             early_response_stops: HashSet::new(),
             credit_released: Vec::new(),
@@ -616,6 +618,11 @@ impl StreamingRequests {
             conn.reset_stream(stream_id, ErrorCode::RefusedStream);
             return false;
         };
+        let mut body_reservation = BodyReservation::new(Arc::clone(&self.body_budget));
+        if body_reservation.try_grow(reservation).is_err() {
+            conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+            return false;
+        }
         let (publisher, publication) = oneshot::channel();
         let failure = Arc::new(parking_lot::Mutex::new(None));
         let source_failure = Arc::clone(&failure);
@@ -628,11 +635,12 @@ impl StreamingRequests {
         let handler = Arc::clone(&self.dispatch.handler);
         let response_sender = resp_tx.clone();
         let signal = signal.clone();
-        let Some(guard) = InFlightRequestGuard::try_acquire(in_flight, request_limits.global)
+        let Some(mut guard) = InFlightRequestGuard::try_acquire(in_flight, request_limits.global)
         else {
             conn.reset_stream(stream_id, ErrorCode::RefusedStream);
             return false;
         };
+        guard.request_body = Some(body_reservation);
         let guard = Arc::new(guard);
         let coordinator = move |cx: Cx| async move {
             let now = cx.now();
@@ -657,6 +665,7 @@ impl StreamingRequests {
                     drain_grace,
                     idle_timeout: None,
                 },
+                Arc::clone(&guard),
                 move |request_cx| async move {
                     let (writer, body, ownership) =
                         match IncomingRequestBody::framed_channel_with_limits_checked(

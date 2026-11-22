@@ -18,6 +18,7 @@ use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::cx::child_region::{ChildRegion, ChildRegionSpec};
+use crate::http::body::admission::{BodyBudget, BodyReservation};
 use crate::http::body::{Frame as BodyFrame, HeaderMap};
 use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
@@ -461,6 +462,9 @@ pub struct Http2ListenerStats {
     last_drain_requests_stranded: AtomicU64,
     last_drain_duration_ms: AtomicU64,
     tls_handshake_rejections_total: AtomicU64,
+    body_budget: Arc<BodyBudget>,
+    #[cfg(feature = "http2-streaming")]
+    streaming_body_budget: Arc<BodyBudget>,
     time_getter: fn() -> Time,
 }
 
@@ -557,6 +561,9 @@ impl Http2ListenerStats {
             last_drain_requests_stranded: AtomicU64::new(0),
             last_drain_duration_ms: AtomicU64::new(0),
             tls_handshake_rejections_total: AtomicU64::new(0),
+            body_budget: Arc::new(BodyBudget::default()),
+            #[cfg(feature = "http2-streaming")]
+            streaming_body_budget: Arc::new(BodyBudget::default()),
             time_getter,
         }
     }
@@ -586,6 +593,48 @@ impl Http2ListenerStats {
     #[must_use]
     pub fn tls_handshake_rejections_total(&self) -> u64 {
         self.tls_handshake_rejections_total.load(Ordering::Relaxed)
+    }
+
+    /// Original buffered request-body payload bytes still charged to this
+    /// listener, including requests executing in handlers or draining responses.
+    ///
+    /// This is admission accounting, not a measurement of allocated memory.
+    /// Streaming request bodies, headers, responses, and application copies are
+    /// outside this counter. It is maintained even without an aggregate limit.
+    #[must_use]
+    pub fn buffered_request_body_bytes(&self) -> usize {
+        self.body_budget.reserved_bytes()
+    }
+
+    /// DATA appends refused by the listener-wide buffered request-body limit.
+    ///
+    /// Existing per-stream and per-connection body refusals are not counted.
+    #[must_use]
+    pub fn body_budget_refusals_total(&self) -> u64 {
+        self.body_budget.refusals()
+    }
+
+    /// Live request-body capacity reserved across all streaming connections.
+    ///
+    /// Each admitted stream reserves its body queue, outstanding receive
+    /// credit and bounded trailer allowance, including an empty request. The
+    /// reservation survives request-subtree cleanup and response retirement.
+    /// This is capacity admission accounting, not resident-memory measurement,
+    /// and remains active when no aggregate streaming limit is configured.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn reserved_streaming_request_bytes(&self) -> usize {
+        self.streaming_body_budget.reserved_bytes()
+    }
+
+    /// Streaming HEADERS admissions refused by the listener-wide body budget.
+    ///
+    /// Per-request body limits, per-connection reservations and request-count
+    /// limits are independent and do not increment this counter.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn streaming_body_budget_refusals_total(&self) -> u64 {
+        self.streaming_body_budget.refusals()
     }
 
     fn record_drain_started(&self, in_flight: usize) {
@@ -1522,11 +1571,51 @@ fn classify_push_rejection(err: &H2Error) -> Http2PushRejection {
     }
 }
 
+/// Keep assembly storage and its reservation together on every refusal path.
+/// Field order drops the `Vec` before making its admission credit reusable.
+struct BufferedRequestBody {
+    data: Vec<u8>,
+    charge: Option<BodyReservation>,
+}
+
+impl BufferedRequestBody {
+    fn new(budget: Arc<BodyBudget>) -> Self {
+        Self {
+            data: Vec::new(),
+            charge: Some(BodyReservation::new(budget)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn try_extend_from_slice(&mut self, data: &[u8]) -> bool {
+        if let Some(charge) = &mut self.charge
+            && charge.try_grow(data.len()).is_err()
+        {
+            return false;
+        }
+        self.data.extend_from_slice(data);
+        true
+    }
+}
+
+// Existing dispatch unit fixtures construct complete bodies directly, without
+// a listener or network admission. Production assembly always uses new().
+#[cfg(test)]
+impl From<Vec<u8>> for BufferedRequestBody {
+    fn from(data: Vec<u8>) -> Self {
+        Self { data, charge: None }
+    }
+}
+
 /// RAII in-flight request counter guard (mirrors the HTTP/1.1 server's
-/// guard): acquired when a complete request is dispatched to its handler,
-/// released after the stream's response frames have left the connection queue.
+/// guard): acquired at buffered dispatch or live-body HEADERS admission,
+/// released after request ownership and queued response frames have retired.
 struct InFlightRequestGuard {
     counter: Option<Arc<AtomicUsize>>,
+    request_body: Option<BodyReservation>,
 }
 
 impl InFlightRequestGuard {
@@ -1538,6 +1627,7 @@ impl InFlightRequestGuard {
             .ok()
             .map(|_| Self {
                 counter: Some(Arc::clone(counter)),
+                request_body: None,
             })
     }
 
@@ -1548,12 +1638,15 @@ impl InFlightRequestGuard {
         }
         Self {
             counter: counter.cloned(),
+            request_body: None,
         }
     }
 }
 
 impl Drop for InFlightRequestGuard {
     fn drop(&mut self) {
+        // A zero in-flight count also observes released request-body credit.
+        drop(self.request_body.take());
         if let Some(counter) = &self.counter {
             counter.fetch_sub(1, Ordering::AcqRel);
         }
@@ -1805,6 +1898,7 @@ async fn run_owned_h2_hop_with_cx<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
+    retained_guard: Arc<InFlightRequestGuard>,
     factory: F,
 ) -> Result<OwnedH2HopCompletion<T>, String>
 where
@@ -1812,15 +1906,14 @@ where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    run_owned_h2_hop(cx, signal, config, move || {
-        // This factory is invoked by execute_owned_h2_body inside the actual
-        // admitted child task. Its installed context is the body's own Cx.
+    run_owned_h2_hop_observing_handler(cx, signal, config, None, Some(retained_guard), move || {
+        // This factory runs inside the actual admitted child task.
         factory(Cx::current().expect("owned HTTP/2 request task context"))
     })
     .await
 }
 
-#[cfg(any(test, feature = "http2-streaming"))]
+#[cfg(test)]
 async fn run_owned_h2_hop<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
@@ -1832,7 +1925,7 @@ where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    run_owned_h2_hop_observing_handler(cx, signal, config, None, factory).await
+    run_owned_h2_hop_observing_handler(cx, signal, config, None, None, factory).await
 }
 
 async fn run_owned_h2_hop_observing_handler<F, Fut, T>(
@@ -1840,6 +1933,7 @@ async fn run_owned_h2_hop_observing_handler<F, Fut, T>(
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     handler_finished_at: Option<Arc<parking_lot::Mutex<Option<Time>>>>,
+    retained_request_guard: Option<Arc<InFlightRequestGuard>>,
     factory: F,
 ) -> Result<OwnedH2HopCompletion<T>, String>
 where
@@ -1860,6 +1954,27 @@ where
         region: Some(region),
         body: None,
     };
+    if let Some(guard) = retained_request_guard {
+        // A coordinator can be abandoned while its child is still cleaning
+        // up. Enroll the charge before user work, so the region's acknowledged
+        // LIFO finalizer retains it through descendants and user finalizers.
+        if let Err(error) = owner
+            .region
+            .as_ref()
+            .expect("owned region")
+            .retain_until_finalized(guard)
+            .await
+        {
+            owner
+                .region
+                .take()
+                .expect("owned region")
+                .close()
+                .await
+                .map_err(|close_error| close_error.to_string())?;
+            return Err(error.to_string());
+        }
+    }
     let idle_expired = config
         .idle_timeout
         .is_some_and(|timeout| timer.now() > config.started_at + timeout);
@@ -3021,7 +3136,7 @@ async fn pump_writes(
 async fn pump_writes_with_body_diagnostics(
     conn: &mut Connection,
     framed: &mut Framed<H2Transport, ListenerFrameCodec>,
-    pending_requests: &HashMap<u32, (Vec<Header>, Vec<u8>)>,
+    pending_requests: &HashMap<u32, (Vec<Header>, BufferedRequestBody)>,
     dispatched_streams: &HashSet<u32>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
@@ -3283,11 +3398,17 @@ async fn dispatch_owned_h2_response<F, Fut>(
     let started_by_body = Arc::clone(&produced_started);
     let handler_finished_at = Arc::new(parking_lot::Mutex::new(None));
     let finished_by_body = Arc::clone(&handler_finished_at);
+    let retained_body_guard = guard
+        .request_body
+        .as_ref()
+        .filter(|charge| charge.bytes() != 0)
+        .map(|_| Arc::clone(&guard));
     let completion = run_owned_h2_hop_observing_handler(
         cx,
         signal,
         config,
         Some(handler_finished_at),
+        retained_body_guard,
         move || async move {
             let request_cx = Cx::current().expect("owned HTTP/2 request task context");
             let plan = match handler(request).await {
@@ -3457,7 +3578,7 @@ fn dispatch_h2_request<F, Fut>(
     conn: &mut Connection,
     stream_id: u32,
     headers: Vec<Header>,
-    body: Vec<u8>,
+    body: impl Into<BufferedRequestBody>,
     trailers: Vec<Header>,
     peer_addr: Option<SocketAddr>,
     handler: &Arc<F>,
@@ -3477,7 +3598,8 @@ where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
-    let request = match request_from_h2_parts(headers, body, trailers, peer_addr) {
+    let BufferedRequestBody { data, charge } = body.into();
+    let request = match request_from_h2_parts(headers, data, trailers, peer_addr) {
         Ok(request) => request,
         Err(_) => {
             conn.reset_stream(stream_id, ErrorCode::ProtocolError);
@@ -3485,11 +3607,16 @@ where
         }
     };
     let suppress_response_body = request.method == Method::Head;
-    let Some(guard) = InFlightRequestGuard::try_acquire(in_flight_requests, global_request_limit)
+    let Some(mut guard) =
+        InFlightRequestGuard::try_acquire(in_flight_requests, global_request_limit)
     else {
         conn.reset_stream(stream_id, ErrorCode::RefusedStream);
         return None;
     };
+    // Owned dispatch clones this guard into the real body task and retains
+    // it through subtree cleanup and response flushing. Do not keep the byte
+    // token only in the coordinator: cancellation can outlive that future.
+    guard.request_body = charge;
     let handler = Arc::clone(handler);
     let resp_tx = resp_tx.clone();
     let signal = shutdown_signal.clone();
@@ -3968,7 +4095,8 @@ where
     };
     let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
-    let mut incoming = streaming.map(StreamingRequests::new);
+    let mut incoming = streaming
+        .map(|dispatch| StreamingRequests::new(dispatch, Arc::clone(&stats.streaming_body_budget)));
     let result = async {
         let mut preface = [0u8; CLIENT_PREFACE.len()];
         let preface_read = crate::time::timeout(
@@ -4024,7 +4152,7 @@ where
         let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
         // Per-stream request assembly: headers arrive first, DATA accumulates
         // until END_STREAM completes the request.
-        let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
+        let mut pending_requests: HashMap<u32, (Vec<Header>, BufferedRequestBody)> = HashMap::new();
         // Absolute inactivity deadlines for partially received request streams.
         // A deadline is replaced only by actual HEADERS/DATA progress, never by
         // unrelated connection wake-ups.
@@ -4651,7 +4779,7 @@ where
                                 &mut conn,
                                 stream_id,
                                 headers,
-                                Vec::new(),
+                                BufferedRequestBody::new(Arc::clone(&stats.body_budget)),
                                 Vec::new(),
                                 peer_addr,
                                 &handler,
@@ -4672,7 +4800,13 @@ where
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
                         } else {
-                            pending_requests.insert(stream_id, (headers, Vec::new()));
+                            pending_requests.insert(
+                                stream_id,
+                                (
+                                    headers,
+                                    BufferedRequestBody::new(Arc::clone(&stats.body_budget)),
+                                ),
+                            );
                             // Stream reclamation is opt-in. The connection idle
                             // budget applies only once all streams are quiescent;
                             // it must not override an explicitly disabled stream timer.
@@ -4713,6 +4847,7 @@ where
                             if body.len().saturating_add(data.len()) > max_body_size
                                 || pending_body_total.saturating_add(data.len())
                                     > connection_pending_body_cap(max_body_size)
+                                || !body.try_extend_from_slice(&data)
                             {
                                 // Bound request buffering per stream AND per
                                 // connection: HTTP/2 flow control auto-replenishes
@@ -4721,44 +4856,44 @@ where
                                 // the connection cap one peer could park
                                 // max_concurrent_streams bodies just under the
                                 // stream cap (256 x 16 MiB by default) for as
-                                // long as it keeps the connection open. Refuse
-                                // the stream and drop its partial body.
+                                // long as it keeps the connection open. The shared
+                                // listener charge additionally spans connections
+                                // and executing handlers. Acquire it before Vec
+                                // growth; refuse only this stream and release its
+                                // partial body's charge on any admission failure.
                                 conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
                                 pending_requests.remove(&stream_id);
                                 pending_stream_idle_deadlines.remove(&stream_id);
-                            } else {
-                                body.extend_from_slice(&data);
-                                if end_stream {
-                                    let (headers, body) = pending_requests
-                                        .remove(&stream_id)
-                                        .expect("pending request present");
-                                    pending_stream_idle_deadlines.remove(&stream_id);
-                                    if request_owners.len() >= request_limits.connection {
-                                        conn.reset_stream(stream_id, ErrorCode::RefusedStream);
-                                    } else if let Some(task) = dispatch_h2_request(
-                                        &mut conn,
-                                        stream_id,
-                                        headers,
-                                        body,
-                                        Vec::new(),
-                                        peer_addr,
-                                        &handler,
-                                        &resp_tx,
-                                        &shutdown_signal,
-                                        &in_flight_requests,
-                                        request_owners.cx(),
-                                        &host_policy,
-                                        request_timeout,
-                                        request_timeout_header_cap,
-                                        request_drain_grace,
-                                        stream_idle_timeout,
-                                        owned_request,
-                                        request_limits.global,
-                                    ) {
-                                        request_owners.insert(stream_id, task);
-                                        dispatched_streams.insert(stream_id);
-                                        requests_dispatched = requests_dispatched.saturating_add(1);
-                                    }
+                            } else if end_stream {
+                                let (headers, body) = pending_requests
+                                    .remove(&stream_id)
+                                    .expect("pending request present");
+                                pending_stream_idle_deadlines.remove(&stream_id);
+                                if request_owners.len() >= request_limits.connection {
+                                    conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                                } else if let Some(task) = dispatch_h2_request(
+                                    &mut conn,
+                                    stream_id,
+                                    headers,
+                                    body,
+                                    Vec::new(),
+                                    peer_addr,
+                                    &handler,
+                                    &resp_tx,
+                                    &shutdown_signal,
+                                    &in_flight_requests,
+                                    request_owners.cx(),
+                                    &host_policy,
+                                    request_timeout,
+                                    request_timeout_header_cap,
+                                    request_drain_grace,
+                                    stream_idle_timeout,
+                                    owned_request,
+                                    request_limits.global,
+                                ) {
+                                    request_owners.insert(stream_id, task);
+                                    dispatched_streams.insert(stream_id);
+                                    requests_dispatched = requests_dispatched.saturating_add(1);
                                 }
                             }
                         }
@@ -6055,6 +6190,85 @@ impl<F> Http2Listener<F> {
     pub fn max_connection_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
         self.request_limits.connection = max.get();
         self
+    }
+
+    /// Limits original buffered request-body payload bytes across all
+    /// connections served by this listener. No aggregate limit is set by default.
+    ///
+    /// DATA must reserve credit before it grows a request's body buffer. When
+    /// credit is unavailable, only that stream is reset with `ENHANCE_YOUR_CALM`;
+    /// its partial body is discarded and its previous credit becomes reusable.
+    /// Existing per-stream and per-connection limits still apply independently.
+    ///
+    /// Completed bodies stay charged through handler/producer execution and
+    /// response retirement, including peer reset and disconnect. Owned serving
+    /// also retains credit through actual request-subtree cleanup. This
+    /// conservative lifetime can outlast the body `Vec`. Inspect the charge
+    /// with [`Http2ListenerStats::buffered_request_body_bytes`].
+    ///
+    /// This is a payload admission limit, not a total memory bound: headers,
+    /// decoder buffers, spare `Vec` capacity, response bodies, and application
+    /// copies or bodies retained outside the request are excluded. Live request
+    /// bodies selected by the `http2-streaming` serving APIs use their own queue
+    /// limits and are not charged here. Buffered requests with produced responses
+    /// are covered.
+    #[must_use]
+    pub fn max_buffered_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.body_budget.set_limit(max);
+        self
+    }
+
+    /// Limits live request-body capacity across all streaming connections.
+    ///
+    /// Each validated HEADERS admission reserves the configured body queue,
+    /// the larger of the protocol's initial 65,535-byte receive credit and the
+    /// configured initial stream window, and a 16 KiB trailer/chunk allowance.
+    /// Empty requests reserve the same capacity. Exhaustion resets only the
+    /// new stream with `REFUSED_STREAM`, before its handler, body channel or
+    /// request region is admitted. The default has no aggregate streaming cap.
+    ///
+    /// Credit remains reserved through handlers, producers, actual descendant
+    /// and finalizer cleanup, and response retirement, including reset,
+    /// disconnect and coordinator abandonment. Existing per-connection byte
+    /// and global request-count limits continue to apply independently.
+    ///
+    /// This covers `http2-streaming` serving modes on TCP, TLS, Unix and handed-
+    /// off transports. It is separate from buffered request-body accounting.
+    /// Headers, decoder buffers, spare capacity, response bytes, and application-
+    /// retained frames or copies are excluded; this is not a process-memory cap.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn max_streaming_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.streaming_body_budget.set_limit(max);
+        self
+    }
+
+    /// Attach the one-port streaming allowance before sharing statistics.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn with_streaming_body_budget(
+        mut self,
+        budget: Arc<BodyBudget>,
+    ) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/2 streaming budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.streaming_body_budget = budget;
+        Ok(self)
+    }
+
+    /// Attach a shared protocol budget before publishing the statistics handle.
+    pub(crate) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/2 body budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.body_budget = budget;
+        Ok(self)
     }
 
     /// Begins graceful shutdown using the listener's configured drain timeout.

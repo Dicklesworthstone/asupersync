@@ -1055,3 +1055,693 @@ fn tls_auto_listener_refuses_an_acceptor_without_alpn() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }));
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod shared_body_budget {
+    use super::{H2Peer, bounded, config, http1_get, native_runtime, run_lifecycle};
+    use asupersync::bytes::{Bytes, BytesMut};
+    use asupersync::cx::Cx;
+    use asupersync::http::HttpAutoListener;
+    use asupersync::http::h1::types::{Request, Response};
+    use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, PingFrame, RstStreamFrame};
+    use asupersync::http::h2::{ErrorCode, Header, HpackEncoder};
+    use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+    use asupersync::net::TcpStream;
+    use asupersync::runtime::yield_now;
+    use asupersync::server::shutdown::{ShutdownPhase, ShutdownSignal};
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct StopOnDrop(ShutdownSignal);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.trigger_immediate();
+        }
+    }
+
+    async fn http1_head(stream: &mut TcpStream) -> String {
+        bounded(async {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                assert!(head.len() < 16_384, "bounded response head");
+                let mut byte = [0u8; 1];
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("complete HTTP/1 response head");
+                head.push(byte[0]);
+            }
+            String::from_utf8(head).unwrap()
+        })
+        .await
+    }
+
+    async fn declare_http1_body(
+        address: SocketAddr,
+        path: &str,
+        length: usize,
+    ) -> (TcpStream, String) {
+        let mut stream = bounded(TcpStream::connect(address)).await.unwrap();
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\n\
+             Expect: 100-continue\r\nConnection: close\r\n\r\n"
+        );
+        bounded(stream.write_all(head.as_bytes())).await.unwrap();
+        let response = http1_head(&mut stream).await;
+        (stream, response)
+    }
+
+    async fn http1_rest(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        bounded(stream.read_to_end(&mut bytes)).await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    async fn open_http2_body(peer: &mut H2Peer, stream_id: u32, path: &str) {
+        let mut block = BytesMut::new();
+        HpackEncoder::new().encode(
+            &[
+                Header::new(":method", "POST"),
+                Header::new(":scheme", "http"),
+                Header::new(":path", path),
+                Header::new(":authority", "localhost"),
+            ],
+            &mut block,
+        );
+        peer.send(Frame::Headers(HeadersFrame::new(
+            stream_id,
+            block.freeze(),
+            false,
+            true,
+        )))
+        .await;
+    }
+
+    async fn http2_data(peer: &mut H2Peer, stream_id: u32, body: &'static [u8], end_stream: bool) {
+        peer.send(Frame::Data(DataFrame::new(
+            stream_id,
+            Bytes::from_static(body),
+            end_stream,
+        )))
+        .await;
+    }
+
+    /// A matching ACK follows ingestion of all earlier frames on this peer.
+    /// A delay would not prove that the pending DATA was actually charged.
+    async fn http2_barrier(peer: &mut H2Peer, token: [u8; 8]) {
+        peer.send(Frame::Ping(PingFrame::new(token))).await;
+        bounded(async {
+            loop {
+                match peer.next().await.expect("HTTP/2 peer remains open") {
+                    Frame::Ping(ping) if ping.ack && ping.opaque_data == token => break,
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    frame => panic!("unexpected frame before the body barrier: {frame:?}"),
+                }
+            }
+        })
+        .await;
+    }
+
+    async fn http2_body_refused(peer: &mut H2Peer, stream_id: u32) {
+        bounded(async {
+            loop {
+                match peer.next_for(stream_id).await {
+                    Frame::RstStream(reset) => {
+                        assert_eq!(reset.error_code, ErrorCode::EnhanceYourCalm);
+                        break;
+                    }
+                    Frame::WindowUpdate(_) => {}
+                    frame => panic!("body quota must reset this stream before dispatch: {frame:?}"),
+                }
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn one_body_budget_spans_both_protocols_and_releases_capacity_in_both_directions() {
+        for workers in [1, 2] {
+            run_lifecycle(
+                native_runtime(workers).build().unwrap(),
+                |handle| async move {
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let handler_calls = Arc::clone(&calls);
+                    let listener = HttpAutoListener::bind(
+                        "127.0.0.1:0",
+                        move |request: Request| {
+                            handler_calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                let mut body =
+                                    format!("{:?} {}:", request.version, request.uri).into_bytes();
+                                body.extend_from_slice(&request.body);
+                                Response::new(200, "OK", body)
+                            }
+                        },
+                        config(),
+                    )
+                    .await
+                    .unwrap()
+                    .max_buffered_request_bytes(NonZeroUsize::new(8).unwrap());
+                    let address = listener.local_addr().unwrap();
+                    let stats = listener.stats_handle();
+                    let shutdown = listener.shutdown_signal();
+                    let _stop_on_drop = StopOnDrop(shutdown.clone());
+                    let serving: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
+                        let cx = Cx::current().unwrap();
+                        listener.run_in(&cx).await
+                    });
+                    let run = handle.spawn(serving);
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                    assert_eq!(stats.body_budget_refusals_total(), 0);
+
+                    // No HTTP/1 payload has been sent: 100 proves that the full
+                    // declaration was reserved before inviting the upload.
+                    let (mut held_http1, head) =
+                        declare_http1_body(address, "/held-http1", 6).await;
+                    assert!(head.starts_with("HTTP/1.1 100 "), "{head}");
+                    assert_eq!(stats.reserved_request_body_bytes(), 6);
+                    let mut http2 = H2Peer::connect(address, Vec::new()).await;
+                    open_http2_body(&mut http2, 1, "/refused-http2").await;
+                    http2_data(&mut http2, 1, b"ab", false).await;
+                    http2_barrier(&mut http2, *b"mixed001").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+                    // Empty requests need no body credit on either protocol.
+                    http2.request(3, "/http2-at-cap").await;
+                    assert_eq!(http2.response_body(3).await, b"Http2 /http2-at-cap:");
+                    let mut healthy_http1 = bounded(TcpStream::connect(address)).await.unwrap();
+                    let response = bounded(http1_get(&mut healthy_http1, "/http1-at-cap")).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(response.ends_with("Http11 /http1-at-cap:"), "{response}");
+                    drop(healthy_http1);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+
+                    // HTTP/2 still has room under a hypothetical separate 8-byte cap.
+                    // Only the shared HTTP/1 reservation makes this byte excessive.
+                    http2_data(&mut http2, 1, b"c", false).await;
+                    http2_body_refused(&mut http2, 1).await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 6);
+                    assert_eq!(stats.body_budget_refusals_total(), 1);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+                    // The admitted HTTP/1 connection survives the HTTP/2 refusal.
+                    // Its completed body refunds all 6 bytes for the same HTTP/2 peer.
+                    bounded(held_http1.write_all(b"123456")).await.unwrap();
+                    let response = http1_rest(&mut held_http1).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(
+                        response.ends_with("Http11 /held-http1:123456"),
+                        "{response}"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 3);
+                    drop(held_http1);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+                    open_http2_body(&mut http2, 5, "/held-http2").await;
+                    http2_data(&mut http2, 5, b"12345678", false).await;
+                    http2_barrier(&mut http2, *b"mixed002").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+
+                    let (mut refused_http1, head) =
+                        declare_http1_body(address, "/refused-http1", 1).await;
+                    // This is the first response head: no 100 came before the 503.
+                    assert!(head.starts_with("HTTP/1.1 503 "), "{head}");
+                    assert!(
+                        head.lines()
+                            .any(|line| line.eq_ignore_ascii_case("connection: close")),
+                        "{head}"
+                    );
+                    let _ = http1_rest(&mut refused_http1).await;
+                    drop(refused_http1);
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    assert_eq!(stats.body_budget_refusals_total(), 2);
+                    assert_eq!(calls.load(Ordering::SeqCst), 3);
+                    http2.request(7, "/after-http1-refusal").await;
+                    assert_eq!(http2.response_body(7).await, b"Http2 /after-http1-refusal:");
+                    assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+                    // A peer reset refunds the buffered HTTP/2 bytes. HTTP/1 can
+                    // immediately reserve exactly the whole budget and finish.
+                    http2
+                        .send(Frame::RstStream(RstStreamFrame::new(5, ErrorCode::Cancel)))
+                        .await;
+                    http2_barrier(&mut http2, *b"mixed003").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                    let (mut http1, head) =
+                        declare_http1_body(address, "/after-http2-reset", 8).await;
+                    assert!(head.starts_with("HTTP/1.1 100 "), "{head}");
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    bounded(http1.write_all(b"abcdefgh")).await.unwrap();
+                    let response = http1_rest(&mut http1).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(
+                        response.ends_with("Http11 /after-http2-reset:abcdefgh"),
+                        "{response}"
+                    );
+                    drop(http1);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+
+                    open_http2_body(&mut http2, 9, "/after-http1-completion").await;
+                    http2_data(&mut http2, 9, b"ABCDEFGH", true).await;
+                    assert_eq!(
+                        http2.response_body(9).await,
+                        b"Http2 /after-http1-completion:ABCDEFGH"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 6);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+                    assert_eq!(stats.body_budget_refusals_total(), 2);
+                    drop(http2);
+                    assert!(shutdown.begin_drain(Duration::from_secs(5)));
+                    let drained = bounded(run).await.unwrap();
+                    assert!(drained.http1.drain_report.unwrap().reached_quiescence);
+                    assert!(drained.http2.drain_report.unwrap().reached_quiescence);
+                    assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                },
+            );
+        }
+    }
+
+    mod owned_requests {
+        use super::super::{HandlerRelease, ReleaseHandlersOnDrop, report};
+        use super::{
+            H2Peer, StopOnDrop, bounded, config, http1_head, http2_body_refused, http2_data,
+            native_runtime, open_http2_body, run_lifecycle,
+        };
+        use asupersync::cx::{ChildRegionSpec, Cx};
+        use asupersync::http::HttpAutoListener;
+        use asupersync::http::h1::types::{Request, Response};
+        use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+        use asupersync::net::TcpStream;
+        use asupersync::runtime::{RuntimeHandle, yield_now};
+        #[cfg(feature = "test-internals")]
+        use asupersync::server::shutdown::ShutdownPhase;
+        use asupersync::sync::Notify;
+        use asupersync::trace::{TraceData, TraceEventKind};
+        use asupersync::types::{RegionId, TaskId};
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::future::{Future, poll_fn};
+        use std::num::NonZeroUsize;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::task::Poll;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct Invocation {
+            path: String,
+            task: TaskId,
+            region: RegionId,
+            registered: bool,
+        }
+
+        struct State {
+            invocations: Mutex<Vec<Invocation>>,
+            child_started: Notify,
+            child_pending: AtomicBool,
+            cleanup_started: Notify,
+            cleanup_pending: AtomicBool,
+            verified: AtomicUsize,
+            release: Arc<HandlerRelease>,
+        }
+
+        impl State {
+            fn capture_factory(&self, handle: &RuntimeHandle, path: &str) -> Cx {
+                let cx = Cx::current().expect("handler factory has an actual request context");
+                let registered = handle
+                    .task_inspector(Default::default())
+                    .unwrap()
+                    .by_region(cx.region_id())
+                    .into_iter()
+                    .any(|task| task.id == cx.task_id() && !task.is_terminal());
+                self.invocations.lock().unwrap().push(Invocation {
+                    path: path.to_owned(),
+                    task: cx.task_id(),
+                    region: cx.region_id(),
+                    registered,
+                });
+                cx
+            }
+        }
+
+        async fn answer(mut request: Request, state: Arc<State>, cx: Cx) -> Response {
+            let polled = Cx::current().unwrap();
+            assert_eq!(polled.task_id(), cx.task_id());
+            assert_eq!(polled.region_id(), cx.region_id());
+            if request.uri == "/owned-first" {
+                let body = std::mem::take(&mut request.body);
+                let child_state = Arc::clone(&state);
+                let request_region = cx.region_id();
+                let request_task = cx.task_id();
+                let _child = cx
+                    .spawn(move |child| async move {
+                        assert_eq!(child.region_id(), request_region);
+                        assert_ne!(child.task_id(), request_task);
+                        let mut cancelled = std::pin::pin!(child.cancelled());
+                        let mut witnessed = false;
+                        poll_fn(|task| {
+                            let result = cancelled.as_mut().poll(task);
+                            if result.is_pending() && !witnessed {
+                                child_state.child_pending.store(true, Ordering::Release);
+                                child_state.child_started.notify_waiters();
+                                witnessed = true;
+                            }
+                            result
+                        })
+                        .await;
+                        assert!(child.checkpoint().is_err());
+                        let mut release =
+                            std::pin::pin!(child_state.release.changed.wait_until(|| {
+                                child_state.release.released.load(Ordering::Acquire)
+                            }));
+                        let mut witnessed = false;
+                        poll_fn(|task| {
+                            let result = release.as_mut().poll(task);
+                            if result.is_pending() && !witnessed {
+                                child_state.cleanup_pending.store(true, Ordering::Release);
+                                child_state.cleanup_started.notify_waiters();
+                                witnessed = true;
+                            }
+                            result
+                        })
+                        .await;
+                        assert_eq!(body.as_slice(), b"retained");
+                        child_state.verified.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .unwrap();
+                state
+                    .child_started
+                    .wait_until(|| state.child_pending.load(Ordering::Acquire))
+                    .await;
+            } else if request.uri == "/reused-http2" {
+                assert_eq!(request.body.as_slice(), b"reusable");
+            }
+            report(request).await
+        }
+
+        async fn http1_response(stream: &mut TcpStream, expected: &[u8]) {
+            let head = http1_head(stream).await;
+            assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+            let length = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .expect("response body is framed")
+                .1
+                .trim()
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(length, expected.len());
+            let mut body = vec![0; length];
+            bounded(stream.read_exact(&mut body)).await.unwrap();
+            assert_eq!(body, expected);
+        }
+
+        #[test]
+        fn owned_handoff_waits_for_original_body_descendants_before_response_and_keepalive() {
+            for workers in [1, 2] {
+                run_lifecycle(
+                    native_runtime(workers).build().unwrap(),
+                    |handle| async move {
+                        let parent = Cx::current().unwrap();
+                        let service = parent
+                            .open_child_region(ChildRegionSpec::inherit())
+                            .await
+                            .unwrap();
+                        let service_id = service.region_id();
+                        let release = Arc::new(HandlerRelease::default());
+                        let _release_on_drop = ReleaseHandlersOnDrop(Arc::clone(&release));
+                        let state = Arc::new(State {
+                            invocations: Mutex::new(Vec::new()),
+                            child_started: Notify::new(),
+                            child_pending: AtomicBool::new(false),
+                            cleanup_started: Notify::new(),
+                            cleanup_pending: AtomicBool::new(false),
+                            verified: AtomicUsize::new(0),
+                            release,
+                        });
+                        let handler_state = Arc::clone(&state);
+                        let observer = handle.clone();
+                        let listener = HttpAutoListener::bind(
+                            "127.0.0.1:0",
+                            move |request: Request| {
+                                let cx = handler_state.capture_factory(&observer, &request.uri);
+                                answer(request, Arc::clone(&handler_state), cx)
+                            },
+                            config(),
+                        )
+                        .await
+                        .unwrap()
+                        .max_buffered_request_bytes(NonZeroUsize::new(8).unwrap());
+                        let address = listener.local_addr().unwrap();
+                        let stats = listener.stats_handle();
+                        let shutdown = listener.shutdown_signal();
+                        let _stop_on_drop = StopOnDrop(shutdown.clone());
+                        let owner = service.cx().clone();
+                        let serving: Pin<Box<dyn Future<Output = _> + Send>> =
+                            Box::pin(async move { listener.run_owned_in(&owner).await });
+                        let mut run = service.cx().spawn(move |_| serving).unwrap();
+
+                        let mut http1 = bounded(TcpStream::connect(address)).await.unwrap();
+                        bounded(http1.write_all(
+                        b"POST /owned-first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\n\
+                          retainedGET /owned-next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    ))
+                    .await
+                    .unwrap();
+                        // The handler waited for its child's actual Pending poll, then
+                        // returned. Only request-region close can now cancel that child.
+                        bounded(
+                            state
+                                .cleanup_started
+                                .wait_until(|| state.cleanup_pending.load(Ordering::Acquire)),
+                        )
+                        .await;
+                        assert_eq!(stats.reserved_request_body_bytes(), 8);
+                        assert_eq!(state.verified.load(Ordering::SeqCst), 0);
+                        {
+                            let observed = state.invocations.lock().unwrap();
+                            assert_eq!(observed.len(), 1);
+                            assert_eq!(observed[0].path, "/owned-first");
+                            assert!(observed[0].registered);
+                            assert_ne!(observed[0].region, service_id);
+                        }
+
+                        let mut http2 = H2Peer::connect(address, Vec::new()).await;
+                        http2.request(1, "/owned-http2").await;
+                        assert_eq!(
+                            http2.response_body(1).await,
+                            b"Http2 /owned-http2 peer=true"
+                        );
+                        open_http2_body(&mut http2, 3, "/blocked-by-owned-child").await;
+                        http2_data(&mut http2, 3, b"x", true).await;
+                        http2_body_refused(&mut http2, 3).await;
+                        assert_eq!(stats.body_budget_refusals_total(), 1);
+                        assert_eq!(stats.reserved_request_body_bytes(), 8);
+                        assert_eq!(state.invocations.lock().unwrap().len(), 2);
+                        // A real read must park while the child holds cleanup. The
+                        // pipelined next request has not reached its handler either.
+                        {
+                            let mut byte = [0u8; 1];
+                            let mut reading = std::pin::pin!(http1.read(&mut byte));
+                            poll_fn(|task| {
+                                assert!(
+                                    reading.as_mut().poll(task).is_pending(),
+                                    "HTTP/1 response escaped the request subtree"
+                                );
+                                Poll::Ready(())
+                            })
+                            .await;
+                        }
+
+                        state.release.release();
+                        http1_response(&mut http1, b"Http11 /owned-first peer=true").await;
+                        http1_response(&mut http1, b"Http11 /owned-next peer=true").await;
+                        let mut rest = Vec::new();
+                        bounded(http1.read_to_end(&mut rest)).await.unwrap();
+                        assert!(rest.is_empty());
+                        drop(http1);
+                        assert_eq!(state.verified.load(Ordering::SeqCst), 1);
+                        bounded(async {
+                            while stats.reserved_request_body_bytes() != 0 {
+                                yield_now().await;
+                            }
+                        })
+                        .await;
+
+                        open_http2_body(&mut http2, 5, "/reused-http2").await;
+                        http2_data(&mut http2, 5, b"reusable", true).await;
+                        assert_eq!(
+                            http2.response_body(5).await,
+                            b"Http2 /reused-http2 peer=true"
+                        );
+                        let observed = state.invocations.lock().unwrap().clone();
+                        assert_eq!(observed.len(), 4);
+                        assert!(observed.iter().all(|request| request.registered));
+                        assert_eq!(
+                            observed
+                                .iter()
+                                .map(|request| request.task)
+                                .collect::<BTreeSet<_>>()
+                                .len(),
+                            4
+                        );
+                        assert_eq!(
+                            observed
+                                .iter()
+                                .map(|request| request.region)
+                                .collect::<BTreeSet<_>>()
+                                .len(),
+                            4
+                        );
+                        let parents: BTreeMap<_, _> = handle
+                            .trace_snapshot()
+                            .unwrap()
+                            .into_iter()
+                            .filter_map(|event| match (event.kind, event.data) {
+                                (
+                                    TraceEventKind::RegionCreated,
+                                    TraceData::Region {
+                                        region,
+                                        parent: Some(parent),
+                                    },
+                                ) => Some((region, parent)),
+                                _ => None,
+                            })
+                            .collect();
+                        for request in observed {
+                            assert_ne!(request.region, service_id);
+                            let mut region = request.region;
+                            let mut visited = BTreeSet::new();
+                            while region != service_id {
+                                assert!(visited.insert(region), "cyclic request ancestry");
+                                region = *parents.get(&region).unwrap_or_else(|| {
+                                    panic!("{} escaped the service region", request.path)
+                                });
+                            }
+                        }
+                        drop(http2);
+                        assert!(shutdown.begin_drain(Duration::from_secs(5)));
+                        let drained = bounded(run.join(&parent)).await.unwrap().unwrap();
+                        assert!(drained.http1.drain_report.unwrap().reached_quiescence);
+                        assert!(drained.http2.drain_report.unwrap().reached_quiescence);
+                        bounded(service.close()).await.unwrap();
+                        assert!(
+                            handle
+                                .task_inspector(Default::default())
+                                .unwrap()
+                                .by_region(service_id)
+                                .is_empty()
+                        );
+                        assert_eq!(stats.reserved_request_body_bytes(), 0);
+                        assert_eq!(stats.body_budget_refusals_total(), 1);
+                        assert!(!parent.is_cancel_requested());
+                    },
+                );
+            }
+        }
+
+        #[cfg(feature = "test-internals")]
+        #[test]
+        fn owned_handoff_refuses_detached_contexts_before_protocol_admission() {
+            for workers in [1, 2] {
+                run_lifecycle(
+                    native_runtime(workers).build().unwrap(),
+                    |handle| async move {
+                        let current = Cx::current().unwrap();
+                        let timer = current.timer_driver().expect("native runtime timer");
+                        for (missing, timer) in [("timer", None), ("gateway", Some(timer))] {
+                            let detached = Cx::new_with_drivers(
+                                current.region_id(),
+                                current.task_id(),
+                                asupersync::types::Budget::INFINITE,
+                                None,
+                                None,
+                                None,
+                                timer,
+                                None,
+                            );
+                            let listener = HttpAutoListener::bind("127.0.0.1:0", report, config())
+                                .await
+                                .unwrap();
+                            let address = listener.local_addr().unwrap();
+                            let shutdown = listener.shutdown_signal();
+                            let stats = listener.stats_handle();
+                            // A real connection is queued before run is called. A
+                            // rejected owner must never admit it into either protocol.
+                            let mut peer = bounded(TcpStream::connect(address)).await.unwrap();
+                            bounded(peer.write_all(
+                            b"GET /must-not-dispatch HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )).await.unwrap();
+                            let admissions = || {
+                                handle
+                                    .trace_snapshot()
+                                    .unwrap()
+                                    .into_iter()
+                                    .filter(|event| {
+                                        matches!(
+                                            event.kind,
+                                            TraceEventKind::Spawn
+                                                | TraceEventKind::TaskSpawnEnqueued
+                                                | TraceEventKind::TaskAdmitted
+                                                | TraceEventKind::RegionCreated
+                                        )
+                                    })
+                                    .count()
+                            };
+                            let before = admissions();
+                            let error =
+                                bounded(listener.run_owned_in(&detached)).await.unwrap_err();
+                            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                            assert!(
+                                error.to_string().contains(&format!(
+                                    "owned HTTP/1 serving requires a runtime {missing}"
+                                )),
+                                "{error}"
+                            );
+                            assert_eq!(admissions(), before, "preflight spawned a service child");
+                            assert_eq!(shutdown.phase(), ShutdownPhase::Running);
+                            assert_eq!(stats.reserved_request_body_bytes(), 0);
+                            let mut response = Vec::new();
+                            let closed = bounded(peer.read_to_end(&mut response)).await;
+                            assert!(
+                                closed.is_ok()
+                                    || closed.is_err_and(|error| {
+                                        matches!(
+                                            error.kind(),
+                                            std::io::ErrorKind::ConnectionReset
+                                                | std::io::ErrorKind::ConnectionAborted
+                                        )
+                                    })
+                            );
+                            assert!(response.is_empty(), "preflight admitted the queued request");
+                        }
+                    },
+                );
+            }
+        }
+    }
+}

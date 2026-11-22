@@ -793,3 +793,530 @@ fn owned_producer_finalizer_failure_resets_instead_of_completing_the_response() 
         assert_eq!(runtime.draining_region_count(), 0);
     }
 }
+
+mod body_budget {
+    use super::*;
+    use asupersync::http::h2::HpackDecoder;
+    use asupersync::http::h2::frame::DataFrame;
+    use asupersync::http::h2::listener::Http2ListenerStats;
+    use asupersync::server::connection::ConnectionManager;
+
+    struct BudgetPeer {
+        wire: Peer,
+        decoder: HpackDecoder,
+        ping_sequence: u64,
+    }
+
+    impl BudgetPeer {
+        fn connect(address: SocketAddr) -> Self {
+            Self {
+                wire: Peer::connect(address, false, false),
+                decoder: HpackDecoder::new(),
+                ping_sequence: 0,
+            }
+        }
+
+        fn upload(&mut self, stream_id: u32, path: &str) {
+            let mut headers = BytesMut::new();
+            self.wire.encoder.encode(
+                &[
+                    Header::new(":method", "POST"),
+                    Header::new(":scheme", "http"),
+                    Header::new(":path", path),
+                    Header::new(":authority", "localhost"),
+                ],
+                &mut headers,
+            );
+            self.wire.send(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                headers.freeze(),
+                false,
+                true,
+            )));
+        }
+
+        fn data(&mut self, stream_id: u32, bytes: &[u8], end_stream: bool) {
+            self.wire.send(Frame::Data(DataFrame::new(
+                stream_id,
+                Bytes::from(bytes.to_vec()),
+                end_stream,
+            )));
+        }
+
+        fn trailers(&mut self, stream_id: u32) {
+            let mut headers = BytesMut::new();
+            self.wire
+                .encoder
+                .encode(&[Header::new("x-budget", "complete")], &mut headers);
+            self.wire.send(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                headers.freeze(),
+                true,
+                true,
+            )));
+        }
+
+        // A matching PING ACK proves that every preceding frame on this
+        // connection reached the listener before its byte counter is read.
+        fn barrier(&mut self) {
+            self.ping_sequence += 1;
+            let payload = self.ping_sequence.to_be_bytes();
+            self.wire.send(Frame::Ping(PingFrame::new(payload)));
+            loop {
+                match self.wire.receive() {
+                    Frame::Ping(ping) if ping.ack && ping.opaque_data == payload => return,
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    frame => panic!("unexpected frame before budget barrier: {frame:?}"),
+                }
+            }
+        }
+
+        fn reset(&mut self, stream_id: u32) {
+            self.wire.send(Frame::RstStream(RstStreamFrame::new(
+                stream_id,
+                ErrorCode::Cancel,
+            )));
+            self.barrier();
+        }
+
+        fn refused(&mut self, stream_id: u32) {
+            loop {
+                match self.wire.receive() {
+                    Frame::RstStream(reset) => {
+                        assert_eq!(reset.stream_id, stream_id);
+                        assert_eq!(reset.error_code, ErrorCode::EnhanceYourCalm);
+                        return;
+                    }
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    frame => panic!("budget refusal must reset only its stream: {frame:?}"),
+                }
+            }
+        }
+
+        fn response(&mut self, stream_id: u32, expected: &[u8]) {
+            let mut status = None;
+            let mut body = Vec::new();
+            loop {
+                match self.wire.receive() {
+                    Frame::Headers(headers) => {
+                        assert_eq!(headers.stream_id, stream_id);
+                        assert!(headers.end_headers);
+                        assert!(status.is_none(), "unexpected response trailers");
+                        let mut block = headers.header_block;
+                        let decoded = self.decoder.decode(&mut block).unwrap();
+                        status = decoded
+                            .into_iter()
+                            .find(|header| header.name == ":status")
+                            .map(|header| header.value);
+                        if headers.end_stream {
+                            break;
+                        }
+                    }
+                    Frame::Data(data) => {
+                        assert_eq!(data.stream_id, stream_id);
+                        assert!(status.is_some(), "response DATA needs HEADERS");
+                        body.extend_from_slice(&data.data);
+                        if data.end_stream {
+                            break;
+                        }
+                    }
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    frame => panic!("admitted request must complete normally: {frame:?}"),
+                }
+            }
+            assert_eq!(status.as_deref(), Some("200"));
+            assert_eq!(body, expected);
+        }
+
+        fn sibling(&mut self, stream_id: u32) {
+            self.wire.request(stream_id, "/sibling");
+            self.response(stream_id, b"");
+        }
+    }
+
+    struct HandlerState {
+        parked: std::sync::mpsc::Sender<usize>,
+        cleaning: std::sync::mpsc::Sender<Cx>,
+        release: Notify,
+        released: AtomicBool,
+        calls: AtomicUsize,
+        parked_drops: AtomicUsize,
+    }
+
+    struct ParkedHandlerDrop(Arc<HandlerState>);
+
+    impl Drop for ParkedHandlerDrop {
+        fn drop(&mut self) {
+            self.0.parked_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn answer(request: Request, state: Arc<HandlerState>) -> Response {
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        if request.uri == "/park" || request.uri == "/cancel" {
+            let _drop = ParkedHandlerDrop(Arc::clone(&state));
+            let cx = Cx::current().expect("request context installed while polling handler");
+            if request.uri == "/cancel" {
+                let mut cancelled = std::pin::pin!(cx.cancelled());
+                let mut witnessed = false;
+                poll_fn(|task| {
+                    let result = cancelled.as_mut().poll(task);
+                    if result.is_pending() && !witnessed {
+                        state.parked.send(request.body.len()).unwrap();
+                        witnessed = true;
+                    }
+                    result
+                })
+                .await;
+                assert!(cx.is_cancel_requested());
+            }
+            let mut release = std::pin::pin!(
+                state
+                    .release
+                    .wait_until(|| state.released.load(Ordering::Acquire))
+            );
+            let mut witnessed = false;
+            poll_fn(|task| {
+                let result = release.as_mut().poll(task);
+                if result.is_pending() && !witnessed {
+                    if request.uri == "/cancel" {
+                        state.cleaning.send(cx.clone()).unwrap();
+                    } else {
+                        state.parked.send(request.body.len()).unwrap();
+                    }
+                    witnessed = true;
+                }
+                result
+            })
+            .await;
+        }
+        if request.uri == "/trailers" {
+            assert_eq!(
+                request.trailers,
+                vec![("x-budget".to_owned(), "complete".to_owned())],
+            );
+        }
+        // Consuming the actual body after the gate keeps its Vec alive while
+        // the parked witness is observed; END_STREAM alone cannot free credit.
+        Response::new(200, "OK", request.body)
+    }
+
+    struct Fixture {
+        address: SocketAddr,
+        stats: Arc<Http2ListenerStats>,
+        state: Arc<HandlerState>,
+        parked: std::sync::mpsc::Receiver<usize>,
+        cleaning: std::sync::mpsc::Receiver<Cx>,
+        manager: ConnectionManager,
+    }
+
+    fn observe(label: &str, condition: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "budget cleanup watchdog: {label}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn exercise(workers: usize, limit: Option<NonZeroUsize>, workflow: impl FnOnce(&Fixture)) {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .with_sharded_state(workers == 2)
+            .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        let (parked, pending) = std::sync::mpsc::channel();
+        let (cleaning, cleanup) = std::sync::mpsc::channel();
+        let state = Arc::new(HandlerState {
+            parked,
+            cleaning,
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+            parked_drops: AtomicUsize::new(0),
+        });
+        let handler_state = Arc::clone(&state);
+        let listener = runtime
+            .block_on(Http2Listener::bind_with_config(
+                "127.0.0.1:0",
+                move |request| answer(request, Arc::clone(&handler_state)),
+                Http2ListenerConfig::default()
+                    .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                    .max_body_size(16)
+                    .request_drain_grace(Duration::from_secs(10))
+                    .drain_timeout(Duration::from_secs(2))
+                    .hard_drain_timeout(Duration::from_secs(5)),
+            ))
+            .unwrap();
+        let listener = if let Some(limit) = limit {
+            listener.max_buffered_request_bytes(limit)
+        } else {
+            listener
+        };
+        let fixture = Fixture {
+            address: listener.local_addr().unwrap(),
+            stats: listener.stats_handle(),
+            state,
+            parked: pending,
+            cleaning: cleanup,
+            manager: listener.connection_manager().clone(),
+        };
+        let in_flight = listener.in_flight_requests();
+        let handle = runtime.handle();
+        let serving: Pin<Box<dyn Future<Output = _> + Send>> =
+            Box::pin(async move { listener.run(&handle).await });
+        let run = runtime.handle().spawn(serving);
+
+        workflow(&fixture);
+
+        assert!(fixture.manager.begin_drain(Duration::from_secs(2)));
+        assert!(
+            runtime
+                .block_on(run)
+                .unwrap()
+                .drain_report
+                .unwrap()
+                .reached_quiescence
+        );
+        observe("all native HTTP/2 tasks retired", || runtime.is_quiescent());
+        assert_eq!(fixture.stats.buffered_request_body_bytes(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.manager.active_count(), 0);
+        assert!(
+            runtime
+                .task_inspector(Default::default())
+                .list_tasks()
+                .is_empty()
+        );
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
+    #[test]
+    fn aggregate_limit_is_shared_and_pending_credit_survives_only_live_bodies() {
+        for workers in [1, 2] {
+            exercise(workers, NonZeroUsize::new(8), |fixture| {
+                let mut first = BudgetPeer::connect(fixture.address);
+                let mut second = BudgetPeer::connect(fixture.address);
+                first.upload(1, "/echo");
+                first.data(1, b"aaaaaa", false);
+                first.barrier();
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 6);
+
+                // Two individually valid bodies on different connections reach
+                // the exact global boundary without invoking either handler.
+                second.upload(1, "/rejected");
+                second.data(1, b"bb", false);
+                second.barrier();
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 8);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 0);
+
+                second.data(1, b"x", false);
+                second.refused(1);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 6);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+                second.sibling(3);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 6);
+
+                second.upload(5, "/echo");
+                second.data(5, b"cc", true);
+                second.response(5, b"cc");
+                observe("replacement body's handler retired", || {
+                    fixture.stats.buffered_request_body_bytes() == 6
+                });
+
+                first.reset(1);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 0);
+                second.upload(7, "/echo");
+                second.data(7, b"12345678", true);
+                second.response(7, b"12345678");
+                observe("exact-limit completed body retired", || {
+                    fixture.stats.buffered_request_body_bytes() == 0
+                });
+
+                // Trailing HEADERS use a separate buffered-dispatch path.
+                first.upload(3, "/trailers");
+                first.data(3, b"trail!", false);
+                first.barrier();
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 6);
+                first.trailers(3);
+                first.response(3, b"trail!");
+                observe("trailer-completed body retired", || {
+                    fixture.stats.buffered_request_body_bytes() == 0
+                });
+
+                first.upload(5, "/echo");
+                first.data(5, b"closed", false);
+                first.barrier();
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 6);
+                drop(first);
+                observe("disconnected connection retired", || {
+                    fixture.manager.active_count() == 1
+                        && fixture.stats.buffered_request_body_bytes() == 0
+                });
+
+                second.upload(9, "/echo");
+                second.data(9, b"reusable", true);
+                second.response(9, b"reusable");
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 5);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn dispatched_body_stays_charged_until_parked_handler_retires() {
+        for workers in [1, 2] {
+            exercise(workers, NonZeroUsize::new(8), |fixture| {
+                let mut first = BudgetPeer::connect(fixture.address);
+                let mut second = BudgetPeer::connect(fixture.address);
+                first.upload(1, "/park");
+                first.data(1, b"retained", true);
+                assert_eq!(
+                    fixture.parked.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    8,
+                );
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 8);
+                assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 0);
+
+                second.upload(1, "/rejected");
+                second.data(1, b"x", true);
+                second.refused(1);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+                second.sibling(3);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 8);
+                assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 0);
+
+                fixture.state.released.store(true, Ordering::Release);
+                fixture.state.release.notify_waiters();
+                first.response(1, b"retained");
+                observe("parked handler actually retired", || {
+                    fixture.stats.buffered_request_body_bytes() == 0
+                });
+                assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 1);
+
+                second.upload(5, "/echo");
+                second.data(5, b"reusable", true);
+                second.response(5, b"reusable");
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 3);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn reset_and_disconnect_keep_credit_until_handler_cleanup_retires() {
+        for workers in [1, 2] {
+            for disconnect in [false, true] {
+                exercise(workers, NonZeroUsize::new(8), |fixture| {
+                    let mut first = BudgetPeer::connect(fixture.address);
+                    let mut second = BudgetPeer::connect(fixture.address);
+                    first.upload(1, "/cancel");
+                    first.data(1, b"retained", true);
+                    assert_eq!(
+                        fixture.parked.recv_timeout(Duration::from_secs(5)).unwrap(),
+                        8,
+                    );
+                    if disconnect {
+                        first
+                            .wire
+                            .socket
+                            .shutdown(std::net::Shutdown::Both)
+                            .unwrap();
+                    } else {
+                        first.reset(1);
+                    }
+                    let cx = fixture
+                        .cleaning
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    assert!(cx.is_cancel_requested());
+                    assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 0);
+                    assert_eq!(fixture.stats.buffered_request_body_bytes(), 8);
+
+                    second.upload(1, "/rejected");
+                    second.data(1, b"x", true);
+                    second.refused(1);
+                    second.sibling(3);
+                    assert_eq!(fixture.stats.buffered_request_body_bytes(), 8);
+                    assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 0);
+                    assert_eq!(fixture.stats.body_budget_refusals_total(), 1);
+
+                    fixture.state.released.store(true, Ordering::Release);
+                    fixture.state.release.notify_waiters();
+                    observe("cancelled handler body actually retired", || {
+                        fixture.stats.buffered_request_body_bytes() == 0
+                    });
+                    assert_eq!(fixture.state.parked_drops.load(Ordering::SeqCst), 1);
+                    second.upload(5, "/echo");
+                    second.data(5, b"reusable", true);
+                    second.response(5, b"reusable");
+                    if !disconnect {
+                        first.sibling(3);
+                    }
+                    assert_eq!(
+                        fixture.state.calls.load(Ordering::SeqCst),
+                        if disconnect { 3 } else { 4 },
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn unlimited_default_preserves_stream_and_connection_body_limits() {
+        for workers in [1, 2] {
+            exercise(workers, None, |fixture| {
+                let mut first = BudgetPeer::connect(fixture.address);
+                let mut second = BudgetPeer::connect(fixture.address);
+                for stream_id in [1, 3, 5, 7] {
+                    first.upload(stream_id, "/echo");
+                    first.data(stream_id, b"0123456789abcdef", false);
+                    second.upload(stream_id, "/echo");
+                    second.data(stream_id, b"0123456789abcdef", false);
+                }
+                first.barrier();
+                second.barrier();
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 128);
+
+                // The existing four-body connection cap still refuses excess
+                // buffering even though no listener-wide cap was configured.
+                first.upload(9, "/connection-limit");
+                first.data(9, b"x", false);
+                first.refused(9);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 128);
+
+                // Leave room under the connection cap before violating only
+                // stream 1's individual body limit.
+                second.reset(7);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 112);
+                second.data(1, b"x", false);
+                second.refused(1);
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 96);
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 0);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 0);
+                first.sibling(11);
+
+                for stream_id in [1, 3, 5, 7] {
+                    first.reset(stream_id);
+                }
+                assert_eq!(fixture.stats.buffered_request_body_bytes(), 32);
+                drop(second);
+                observe("unlimited pending bodies reclaimed on disconnect", || {
+                    fixture.manager.active_count() == 1
+                        && fixture.stats.buffered_request_body_bytes() == 0
+                });
+
+                first.upload(13, "/echo");
+                first.data(13, b"0123456789abcdef", true);
+                first.response(13, b"0123456789abcdef");
+                assert_eq!(fixture.stats.body_budget_refusals_total(), 0);
+                assert_eq!(fixture.state.calls.load(Ordering::SeqCst), 2);
+            });
+        }
+    }
+}

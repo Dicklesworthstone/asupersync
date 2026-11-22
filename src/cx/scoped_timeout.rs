@@ -301,7 +301,18 @@ where
                     .expect("operation submitted")
                     .poll_join(task)
                 {
-                    return Poll::Ready((ScopedTimeoutStop::TaskFinished, Some(result)));
+                    // Joining can run foreign waker callbacks while crossing
+                    // the retirement barrier. Recheck the selection boundary,
+                    // retaining the exact result even when a stop won meanwhile.
+                    let expired = driver.now() >= deadline;
+                    let stop = if self.is_cancel_requested() {
+                        ScopedTimeoutStop::Cancelled(owner_cancel_reason(self))
+                    } else if expired {
+                        ScopedTimeoutStop::TimedOut
+                    } else {
+                        ScopedTimeoutStop::TaskFinished
+                    };
+                    return Poll::Ready((stop, Some(result)));
                 }
                 if timer.as_mut().poll_deadline(task).is_ready() {
                     // A coalesced timer wake can precede its exact deadline.

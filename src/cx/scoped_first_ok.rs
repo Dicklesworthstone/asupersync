@@ -299,7 +299,22 @@ where
             });
         }
         let mut factories = Some(factories.into_iter());
-        let Some(mut factory) = factories.as_mut().expect("input retained").next() else {
+        // Converting or advancing a lazy input is caller code. Cancellation
+        // published by either callback precedes empty-input or runtime refusal.
+        if self.is_cancel_requested() {
+            return Ok(ScopedFirstOkReport {
+                stop: ScopedFirstOkStop::Cancelled(owner_cancel_reason(self)),
+                attempts,
+            });
+        }
+        let next = factories.as_mut().expect("input retained").next();
+        if self.is_cancel_requested() {
+            return Ok(ScopedFirstOkReport {
+                stop: ScopedFirstOkStop::Cancelled(owner_cancel_reason(self)),
+                attempts,
+            });
+        }
+        let Some(mut factory) = next else {
             return Ok(ScopedFirstOkReport {
                 stop: ScopedFirstOkStop::Empty,
                 attempts,
@@ -402,6 +417,14 @@ where
                     .await,
                 );
             }
+            // Joining and requesting subtree close can invoke foreign callbacks.
+            // Observe cancellation once more before freezing the selection, and
+            // forward it without discarding the task's exact terminal result.
+            if stop.is_none() && self.is_cancel_requested() {
+                let reason = owner_cancel_reason(self);
+                stop = Some(ScopedFirstOkStop::Cancelled(reason.clone()));
+                owned.request_stop(reason);
+            }
             let task = match joined.expect("attempt joined") {
                 Ok(BodyResult::Value(value)) => ScopedFirstOkTask::Joined(Ok(value)),
                 Ok(BodyResult::NotStarted(reason)) => {
@@ -465,7 +488,16 @@ where
                     });
                 }
             }
-            factory = match factories.as_mut().expect("fallback input retained").next() {
+            let next = factories.as_mut().expect("fallback input retained").next();
+            // A generator may request cancellation while reporting exhaustion.
+            // That observation must not be mislabeled as an all-failed chain.
+            if self.is_cancel_requested() {
+                return Ok(ScopedFirstOkReport {
+                    stop: ScopedFirstOkStop::Cancelled(owner_cancel_reason(self)),
+                    attempts,
+                });
+            }
+            factory = match next {
                 Some(next) => next,
                 None => {
                     return Ok(ScopedFirstOkReport {

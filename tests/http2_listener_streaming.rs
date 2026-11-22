@@ -1957,3 +1957,388 @@ fn h2_router_late_request_trailers_preserve_response_after_handler_retirement() 
         });
     }
 }
+
+mod listener_body_budget {
+    use super::*;
+    use asupersync::http::h2::listener::Http2ListenerStats;
+    use asupersync::server::ConnectionManager;
+
+    // One queue, outstanding stream receive credit, and one bounded trailer
+    // block are reserved at HEADERS admission, before any DATA is received.
+    const RESERVATION: usize = 2 * INITIAL_WINDOW + 16 * 1024;
+
+    struct StopOnDrop(ConnectionManager);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.force_close();
+        }
+    }
+
+    fn listener_config() -> Http2StreamingListenerConfig {
+        let mut config = config();
+        // Neither connection's own budget can explain a listener-wide refusal.
+        config.connection_request_body_buffer_bytes = NonZeroUsize::new(3 * RESERVATION).unwrap();
+        config
+    }
+
+    async fn wait_reserved(stats: &Http2ListenerStats, expected: usize) {
+        poll_fn(|cx| {
+            if stats.reserved_streaming_request_bytes() == expected {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn h2_streaming_listener_budget_spans_connections_before_data() {
+        for workers in [1, 2] {
+            run(workers, async {
+                let cx = Cx::current().unwrap();
+                let (first_tx, mut first_rx) = oneshot::channel();
+                let (second_tx, mut second_rx) = oneshot::channel();
+                let parked = Arc::new(Mutex::new([Some(first_tx), Some(second_tx)]));
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let handler = move |mut request: StreamingServerRequest| {
+                    handler_calls.fetch_add(1, Ordering::SeqCst);
+                    let parked = match request.head.uri.as_str() {
+                        "/first" => Some(parked.lock().unwrap()[0].take().unwrap()),
+                        "/second" => Some(parked.lock().unwrap()[1].take().unwrap()),
+                        "/probe" => None,
+                        path => panic!("unexpected request: {path}"),
+                    };
+                    async move {
+                        let Some(parked) = parked else {
+                            return H1Response::new(200, "OK", b"slot reused".to_vec());
+                        };
+                        let request_cx = Cx::current().unwrap();
+                        let mut parked = Some(parked);
+                        let mut payload = Vec::new();
+                        loop {
+                            let frame = poll_fn(|cx| {
+                                let frame = Pin::new(&mut request.body).poll_frame(cx);
+                                if frame.is_pending()
+                                    && let Some(parked) = parked.take()
+                                {
+                                    parked.send_blocking(request_cx.clone()).unwrap();
+                                }
+                                frame
+                            })
+                            .await;
+                            match frame {
+                                Some(Ok(BodyFrame::Data(data))) => {
+                                    payload.extend_from_slice(data.chunk());
+                                }
+                                None => break,
+                                frame => panic!("upload must finish successfully: {frame:?}"),
+                            }
+                        }
+                        assert!(parked.is_none(), "HEADERS must admit a live empty queue");
+                        H1Response::new(200, "OK", payload)
+                    }
+                };
+                let runtime = Runtime::current_handle().unwrap();
+                let listener = Http2Listener::bind_streaming_with_config(
+                    "127.0.0.1:0",
+                    handler,
+                    listener_config(),
+                )
+                .await
+                .unwrap()
+                .max_streaming_request_bytes(NonZeroUsize::new(2 * RESERVATION).unwrap())
+                .max_buffered_request_bytes(NonZeroUsize::new(1).unwrap());
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let _stop = StopOnDrop(manager.clone());
+                let in_flight = listener.in_flight_requests();
+                let stats = listener.stats_handle();
+                let serving = listener.run_streaming(&runtime);
+                let workflow = async {
+                    let mut first = Client::connect(address, Settings::client()).await;
+                    let mut second = Client::connect(address, Settings::client()).await;
+                    let first_stream = first.open("POST", "/first", None, false).await;
+                    let first_cx = first_rx.recv(&cx).await.unwrap();
+                    assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+                    let second_stream = second.open("POST", "/second", None, false).await;
+                    let second_cx = second_rx.recv(&cx).await.unwrap();
+                    assert_ne!(first_cx.region_id(), second_cx.region_id());
+                    assert_eq!(stats.reserved_streaming_request_bytes(), 2 * RESERVATION);
+                    assert_eq!(in_flight.load(Ordering::SeqCst), 2);
+
+                    // The first peer has sent no DATA. The second connection
+                    // must nevertheless see its full capacity reservation.
+                    let refused = second.open("GET", "/probe", None, true).await;
+                    second.reset(refused, ErrorCode::RefusedStream).await;
+                    let refused = first.open("POST", "/probe", None, false).await;
+                    first.reset(refused, ErrorCode::RefusedStream).await;
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+                    assert_eq!(stats.reserved_streaming_request_bytes(), 2 * RESERVATION);
+                    assert_eq!(stats.buffered_request_body_bytes(), 0);
+                    assert!(!first_cx.is_cancel_requested());
+                    assert!(!second_cx.is_cancel_requested());
+
+                    first
+                        .data(first_stream, b"first admitted upload".as_slice(), true)
+                        .await;
+                    first
+                        .response(first_stream, "200", b"first admitted upload")
+                        .await;
+                    wait_reserved(&stats, RESERVATION).await;
+                    assert!(!second_cx.is_cancel_requested());
+
+                    // A bodyless request also reserves a complete queue, but
+                    // can reuse the slot freed on the other connection.
+                    let probe = second.open("GET", "/probe", None, true).await;
+                    second.response(probe, "200", b"slot reused").await;
+                    wait_reserved(&stats, RESERVATION).await;
+                    assert_eq!(calls.load(Ordering::SeqCst), 3);
+                    second
+                        .data(second_stream, b"second admitted upload".as_slice(), true)
+                        .await;
+                    second
+                        .response(second_stream, "200", b"second admitted upload")
+                        .await;
+                    wait_reserved(&stats, 0).await;
+
+                    let probe = first.open("GET", "/probe", None, true).await;
+                    first.response(probe, "200", b"slot reused").await;
+                    wait_reserved(&stats, 0).await;
+                    assert_eq!(calls.load(Ordering::SeqCst), 4);
+                    assert_eq!(stats.streaming_body_budget_refusals_total(), 2);
+                    assert_eq!(stats.body_budget_refusals_total(), 0);
+                    drop((first, second));
+                    assert!(manager.begin_drain(Duration::from_secs(2)));
+                };
+                let (result, ()) = zip(serving, workflow).await;
+                let report = result.unwrap().drain_report.unwrap();
+                assert!(report.reached_quiescence, "{report}");
+                assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+                assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+                assert_eq!(manager.active_count(), 0);
+            });
+        }
+    }
+
+    #[test]
+    fn h2_streaming_listener_budget_waits_for_descendants_after_return_or_reset() {
+        for workers in [1, 2] {
+            for peer_reset in [false, true] {
+                descendant_retention_case(workers, peer_reset);
+            }
+        }
+    }
+
+    fn descendant_retention_case(workers: usize, peer_reset: bool) {
+        run(workers, async move {
+            const PAYLOAD: &[u8] = b"original streamed body retained by a descendant";
+            let cx = Cx::current().unwrap();
+            let cleanup_wait_cx = cx.clone();
+            let (ready_tx, mut ready_rx) = oneshot::channel();
+            let ready = Arc::new(Mutex::new(Some(ready_tx)));
+            let (cleanup_tx, mut cleanup_rx) = oneshot::channel();
+            let cleanup = Arc::new(Mutex::new(Some(cleanup_tx)));
+            // Dropping the sender on assertion failure releases the child;
+            // the child tolerates that cleanup-only error.
+            let (release_tx, release_rx) = oneshot::channel();
+            let release = Arc::new(Mutex::new(Some(release_rx)));
+            let verified = Arc::new(AtomicUsize::new(0));
+            let handler_verified = Arc::clone(&verified);
+            let retired = Arc::new(AtomicUsize::new(0));
+            let handler_retired = Arc::clone(&retired);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let handler_calls = Arc::clone(&calls);
+            let handler = move |mut request: StreamingServerRequest| {
+                handler_calls.fetch_add(1, Ordering::SeqCst);
+                let ready = Arc::clone(&ready);
+                let cleanup = Arc::clone(&cleanup);
+                let release = Arc::clone(&release);
+                let verified = Arc::clone(&handler_verified);
+                let retired = Arc::clone(&handler_retired);
+                let cleanup_wait_cx = cleanup_wait_cx.clone();
+                async move {
+                    if request.head.uri == "/probe" {
+                        return Http2ProducedResponse::buffered(H1Response::new(
+                            200,
+                            "OK",
+                            b"slot reused".to_vec(),
+                        ));
+                    }
+                    assert_eq!(request.head.uri, "/held");
+                    let request_cx = Cx::current().unwrap();
+                    let original =
+                        match poll_fn(|cx| Pin::new(&mut request.body).poll_frame(cx)).await {
+                            Some(Ok(BodyFrame::Data(bytes))) => bytes,
+                            frame => panic!("expected original request DATA: {frame:?}"),
+                        };
+                    assert_eq!(original.chunk(), PAYLOAD);
+                    assert!(
+                        poll_fn(|cx| Pin::new(&mut request.body).poll_frame(cx))
+                            .await
+                            .is_none(),
+                        "the incoming body must be fully consumed"
+                    );
+                    let ready = ready.lock().unwrap().take().unwrap();
+                    let cleanup = cleanup.lock().unwrap().take().unwrap();
+                    let mut release = release.lock().unwrap().take().unwrap();
+                    let owner_cx = request_cx.clone();
+                    let (parked_tx, mut parked_rx) = oneshot::channel();
+                    let _descendant = request_cx
+                        .spawn(move |child_cx| async move {
+                            let _retired = Retired(retired);
+                            let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                            let mut waiting = std::pin::pin!(receiver.recv(&child_cx));
+                            let mut parked = Some(parked_tx);
+                            let cancelled = poll_fn(|cx| {
+                                let result = waiting.as_mut().poll(cx);
+                                if result.is_pending()
+                                    && let Some(parked) = parked.take()
+                                {
+                                    parked.send_blocking(()).unwrap();
+                                }
+                                result
+                            })
+                            .await;
+                            assert_eq!(cancelled, Err(mpsc::RecvError::Cancelled));
+                            assert!(
+                                parked.is_none(),
+                                "child must park before request retirement"
+                            );
+
+                            let mut cleanup = Some(cleanup);
+                            let mut release = std::pin::pin!(release.recv(&cleanup_wait_cx));
+                            let released = poll_fn(|cx| {
+                                let result = release.as_mut().poll(cx);
+                                if result.is_pending()
+                                    && let Some(cleanup) = cleanup.take()
+                                {
+                                    cleanup.send_blocking(owner_cx.clone()).unwrap();
+                                }
+                                result
+                            })
+                            .await;
+                            if released.is_err() {
+                                return;
+                            }
+                            assert!(cleanup.is_none(), "cleanup must actually park");
+                            assert_eq!(original.chunk(), PAYLOAD);
+                            // Positive evidence survives contained child panics:
+                            // dropping the child alone cannot satisfy the test.
+                            verified.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .unwrap();
+                    parked_rx.recv(&request_cx).await.unwrap();
+                    if peer_reset {
+                        let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                        let mut waiting = std::pin::pin!(receiver.recv(&request_cx));
+                        let mut ready = Some(ready);
+                        let result = poll_fn(|cx| {
+                            let result = waiting.as_mut().poll(cx);
+                            if result.is_pending()
+                                && let Some(ready) = ready.take()
+                            {
+                                ready.send_blocking(request_cx.clone()).unwrap();
+                            }
+                            result
+                        })
+                        .await;
+                        assert_eq!(result, Err(mpsc::RecvError::Cancelled));
+                    } else {
+                        ready.send_blocking(request_cx.clone()).unwrap();
+                    }
+                    Http2ProducedResponse::buffered(H1Response::new(
+                        200,
+                        "OK",
+                        b"response after cleanup".to_vec(),
+                    ))
+                }
+            };
+            let runtime = Runtime::current_handle().unwrap();
+            let listener = Http2Listener::bind_streaming_produced_with_config(
+                "127.0.0.1:0",
+                handler,
+                listener_config(),
+            )
+            .await
+            .unwrap()
+            .max_streaming_request_bytes(NonZeroUsize::new(RESERVATION).unwrap());
+            let address = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let _stop = StopOnDrop(manager.clone());
+            let in_flight = listener.in_flight_requests();
+            let stats = listener.stats_handle();
+            let serving = listener.run_streaming_produced(&runtime);
+            let workflow = async {
+                let mut owner = Client::connect(address, Settings::client()).await;
+                let mut other = Client::connect(address, Settings::client()).await;
+                let held = owner
+                    .open("POST", "/held", Some(PAYLOAD.len()), false)
+                    .await;
+                owner.data(held, PAYLOAD, true).await;
+                let request_cx = ready_rx.recv(&cx).await.unwrap();
+                assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+                let refused = other.open("GET", "/probe", None, true).await;
+                other.reset(refused, ErrorCode::RefusedStream).await;
+                if peer_reset {
+                    owner.connection.reset_stream(held, ErrorCode::Cancel);
+                    owner.flush().await;
+                }
+                let cleanup_cx = cleanup_rx.recv(&cx).await.unwrap();
+                assert_eq!(cleanup_cx.region_id(), request_cx.region_id());
+                assert_eq!(verified.load(Ordering::SeqCst), 0);
+                assert_eq!(retired.load(Ordering::SeqCst), 0);
+                assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+                assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+                assert!(
+                    runtime
+                        .diagnostics()
+                        .unwrap()
+                        .explain_region_open(request_cx.region_id())
+                        .region_state
+                        .is_some()
+                );
+
+                let refused = other.open("GET", "/probe", None, true).await;
+                other.reset(refused, ErrorCode::RefusedStream).await;
+                // The owner connection also makes progress while cleanup is
+                // parked. Its next application frame must be this refusal,
+                // not a prematurely published buffered response.
+                let refused = owner.open("GET", "/probe", None, true).await;
+                owner.reset(refused, ErrorCode::RefusedStream).await;
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(stats.streaming_body_budget_refusals_total(), 3);
+                assert_eq!(stats.reserved_streaming_request_bytes(), RESERVATION);
+
+                release_tx.send(&cx, ()).unwrap();
+                wait_region_closed(&request_cx).await;
+                assert_eq!(verified.load(Ordering::SeqCst), 1);
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                if !peer_reset {
+                    owner.response(held, "200", b"response after cleanup").await;
+                }
+                wait_reserved(&stats, 0).await;
+                let probe = other.open("GET", "/probe", None, true).await;
+                other.response(probe, "200", b"slot reused").await;
+                wait_reserved(&stats, 0).await;
+                let probe = owner.open("GET", "/probe", None, true).await;
+                owner.response(probe, "200", b"slot reused").await;
+                wait_reserved(&stats, 0).await;
+                assert_eq!(calls.load(Ordering::SeqCst), 3);
+                assert_eq!(stats.streaming_body_budget_refusals_total(), 3);
+                drop((owner, other));
+                assert!(manager.begin_drain(Duration::from_secs(2)));
+            };
+            let (result, ()) = zip(serving, workflow).await;
+            let report = result.unwrap().drain_report.unwrap();
+            assert!(report.reached_quiescence, "{report}");
+            assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+            assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+            assert_eq!(manager.active_count(), 0);
+        });
+    }
+}
