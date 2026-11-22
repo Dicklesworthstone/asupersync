@@ -3842,3 +3842,169 @@ fn buffered_h2_body_charge_survives_abandoned_producer_and_descendant_cleanup() 
         finish_owned_h2_lab(&mut lab, root);
     }
 }
+
+#[cfg(feature = "http2-streaming")]
+#[test]
+fn streaming_h2_capacity_survives_abandoned_coordinator_until_subtree_retirement() {
+    use crate::channel::oneshot;
+    use crate::lab::{LabConfig, LabRuntime};
+
+    async fn wait_for_cancel(cx: &Cx, pending: &AtomicUsize) {
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut witnessed = false;
+        std::future::poll_fn(|task| {
+            let result = cancelled.as_mut().poll(task);
+            if result.is_pending() && !witnessed {
+                pending.fetch_add(1, Ordering::SeqCst);
+                witnessed = true;
+            }
+            result
+        })
+        .await;
+        assert!(cx.checkpoint().is_err());
+    }
+
+    async fn wait_for_cleanup(mut release: oneshot::Receiver<()>, pending: &AtomicUsize) {
+        let mut witnessed = false;
+        std::future::poll_fn(|task| {
+            let result = release.poll_recv_uninterruptible(task);
+            if result.is_pending() && !witnessed {
+                pending.fetch_add(1, Ordering::SeqCst);
+                witnessed = true;
+            }
+            result
+        })
+        .await
+        .unwrap();
+    }
+
+    const CAPACITY: usize = 8;
+    for seed in [0x36_701, 0x36_702] {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(2048));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let stats = Arc::new(Http2ListenerStats::default());
+        stats
+            .streaming_body_budget
+            .set_limit(NonZeroUsize::new(CAPACITY).unwrap());
+        let mut reservation = BodyReservation::new(Arc::clone(&stats.streaming_body_budget));
+        reservation.try_grow(CAPACITY).unwrap();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let mut guard = InFlightRequestGuard::try_acquire(&in_flight, 1).unwrap();
+        guard.request_body = Some(reservation);
+        let guard = Arc::new(guard);
+        let pending = Arc::new(AtomicUsize::new(0));
+        let body_pending = Arc::clone(&pending);
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let body_cleanup_pending = Arc::clone(&cleanup);
+        let body_dropped = Arc::new(AtomicUsize::new(0));
+        let body_retired = Arc::clone(&body_dropped);
+        let child_dropped = Arc::new(AtomicUsize::new(0));
+        let child_retired = Arc::clone(&child_dropped);
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let body_cancelled = Arc::clone(&cancelled);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let body_completed = Arc::clone(&completed);
+        let verified = Arc::new(AtomicUsize::new(0));
+        let child_verified = Arc::clone(&verified);
+        let (release_body, body_cleanup) = oneshot::channel();
+        let (release_child, child_cleanup) = oneshot::channel();
+        let (abandon_owner, mut abandon) = oneshot::channel();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let signal = ShutdownSignal::new();
+                let mut hop = Box::pin(run_owned_h2_hop_with_cx(
+                    &cx,
+                    &signal,
+                    owned_hop_config(),
+                    guard,
+                    move |body| async move {
+                        let _body_drop = OwnedBodyDrop {
+                            cx: body.clone(),
+                            dropped: body_retired,
+                            cancelled: Arc::clone(&body_cancelled),
+                        };
+                        let child_pending = Arc::clone(&body_pending);
+                        let child_cleanup_pending = Arc::clone(&body_cleanup_pending);
+                        let payload = b"retained".to_vec();
+                        let _descendant = body
+                            .spawn(move |child| async move {
+                                let _child_drop = OwnedBodyDrop {
+                                    cx: child.clone(),
+                                    dropped: child_retired,
+                                    cancelled: body_cancelled,
+                                };
+                                wait_for_cancel(&child, &child_pending).await;
+                                wait_for_cleanup(child_cleanup, &child_cleanup_pending).await;
+                                assert_eq!(payload.as_slice(), b"retained");
+                                child_verified.fetch_add(1, Ordering::SeqCst);
+                            })
+                            .unwrap();
+                        wait_for_cancel(&body, &body_pending).await;
+                        wait_for_cleanup(body_cleanup, &body_cleanup_pending).await;
+                        body_completed.fetch_add(1, Ordering::SeqCst);
+                    },
+                ));
+                std::future::poll_fn(|task| {
+                    if abandon.poll_recv_uninterruptible(task).is_ready() {
+                        return Poll::Ready(());
+                    }
+                    assert!(hop.as_mut().poll(task).is_pending());
+                    Poll::Pending
+                })
+                .await;
+                // This was the last coordinator-owned reference to admission.
+                // Only the acknowledged request finalizer can now retain it.
+                drop(hop);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(pending.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.reserved_streaming_request_bytes(), CAPACITY);
+        assert_eq!(stats.buffered_request_body_bytes(), 0);
+
+        abandon_owner.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(join.try_join(), Ok(Some(())));
+        assert_eq!(cleanup.load(Ordering::SeqCst), 2);
+        assert_eq!(body_dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(child_dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.reserved_streaming_request_bytes(), CAPACITY);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(lab.run_until_idle(), 0, "abandoned cleanup must park");
+
+        release_body.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert_eq!(body_dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(child_dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(verified.load(Ordering::SeqCst), 0);
+        assert_eq!(stats.reserved_streaming_request_bytes(), CAPACITY);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert!(InFlightRequestGuard::try_acquire(&in_flight, 1).is_none());
+        let mut replacement = BodyReservation::new(Arc::clone(&stats.streaming_body_budget));
+        assert!(replacement.try_grow(1).is_err());
+        assert_eq!(
+            lab.run_until_idle(),
+            0,
+            "descendant cleanup must still park"
+        );
+
+        release_child.send_blocking(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(child_dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(verified.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+        assert_eq!(stats.streaming_body_budget_refusals_total(), 1);
+        assert_eq!(stats.body_budget_refusals_total(), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        replacement.try_grow(CAPACITY).unwrap();
+        assert_eq!(stats.reserved_streaming_request_bytes(), CAPACITY);
+        drop(replacement);
+        assert_eq!(stats.reserved_streaming_request_bytes(), 0);
+        finish_owned_h2_lab(&mut lab, root);
+    }
+}

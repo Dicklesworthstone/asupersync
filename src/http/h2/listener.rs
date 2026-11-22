@@ -463,6 +463,8 @@ pub struct Http2ListenerStats {
     last_drain_duration_ms: AtomicU64,
     tls_handshake_rejections_total: AtomicU64,
     body_budget: Arc<BodyBudget>,
+    #[cfg(feature = "http2-streaming")]
+    streaming_body_budget: Arc<BodyBudget>,
     time_getter: fn() -> Time,
 }
 
@@ -560,6 +562,8 @@ impl Http2ListenerStats {
             last_drain_duration_ms: AtomicU64::new(0),
             tls_handshake_rejections_total: AtomicU64::new(0),
             body_budget: Arc::new(BodyBudget::default()),
+            #[cfg(feature = "http2-streaming")]
+            streaming_body_budget: Arc::new(BodyBudget::default()),
             time_getter,
         }
     }
@@ -608,6 +612,29 @@ impl Http2ListenerStats {
     #[must_use]
     pub fn body_budget_refusals_total(&self) -> u64 {
         self.body_budget.refusals()
+    }
+
+    /// Live request-body capacity reserved across all streaming connections.
+    ///
+    /// Each admitted stream reserves its body queue, outstanding receive
+    /// credit and bounded trailer allowance, including an empty request. The
+    /// reservation survives request-subtree cleanup and response retirement.
+    /// This is capacity admission accounting, not resident-memory measurement,
+    /// and remains active when no aggregate streaming limit is configured.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn reserved_streaming_request_bytes(&self) -> usize {
+        self.streaming_body_budget.reserved_bytes()
+    }
+
+    /// Streaming HEADERS admissions refused by the listener-wide body budget.
+    ///
+    /// Per-request body limits, per-connection reservations and request-count
+    /// limits are independent and do not increment this counter.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn streaming_body_budget_refusals_total(&self) -> u64 {
+        self.streaming_body_budget.refusals()
     }
 
     fn record_drain_started(&self, in_flight: usize) {
@@ -1584,8 +1611,8 @@ impl From<Vec<u8>> for BufferedRequestBody {
 }
 
 /// RAII in-flight request counter guard (mirrors the HTTP/1.1 server's
-/// guard): acquired when a complete request is dispatched to its handler,
-/// released after the stream's response frames have left the connection queue.
+/// guard): acquired at buffered dispatch or live-body HEADERS admission,
+/// released after request ownership and queued response frames have retired.
 struct InFlightRequestGuard {
     counter: Option<Arc<AtomicUsize>>,
     request_body: Option<BodyReservation>,
@@ -1871,6 +1898,7 @@ async fn run_owned_h2_hop_with_cx<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
+    retained_guard: Arc<InFlightRequestGuard>,
     factory: F,
 ) -> Result<OwnedH2HopCompletion<T>, String>
 where
@@ -1878,15 +1906,14 @@ where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    run_owned_h2_hop(cx, signal, config, move || {
-        // This factory is invoked by execute_owned_h2_body inside the actual
-        // admitted child task. Its installed context is the body's own Cx.
+    run_owned_h2_hop_observing_handler(cx, signal, config, None, Some(retained_guard), move || {
+        // This factory runs inside the actual admitted child task.
         factory(Cx::current().expect("owned HTTP/2 request task context"))
     })
     .await
 }
 
-#[cfg(any(test, feature = "http2-streaming"))]
+#[cfg(test)]
 async fn run_owned_h2_hop<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
@@ -1906,7 +1933,7 @@ async fn run_owned_h2_hop_observing_handler<F, Fut, T>(
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     handler_finished_at: Option<Arc<parking_lot::Mutex<Option<Time>>>>,
-    retained_body_guard: Option<Arc<InFlightRequestGuard>>,
+    retained_request_guard: Option<Arc<InFlightRequestGuard>>,
     factory: F,
 ) -> Result<OwnedH2HopCompletion<T>, String>
 where
@@ -1927,7 +1954,7 @@ where
         region: Some(region),
         body: None,
     };
-    if let Some(guard) = retained_body_guard {
+    if let Some(guard) = retained_request_guard {
         // A coordinator can be abandoned while its child is still cleaning
         // up. Enroll the charge before user work, so the region's acknowledged
         // LIFO finalizer retains it through descendants and user finalizers.
@@ -4068,7 +4095,8 @@ where
     };
     let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
-    let mut incoming = streaming.map(StreamingRequests::new);
+    let mut incoming = streaming
+        .map(|dispatch| StreamingRequests::new(dispatch, Arc::clone(&stats.streaming_body_budget)));
     let result = async {
         let mut preface = [0u8; CLIENT_PREFACE.len()];
         let preface_read = crate::time::timeout(
@@ -6187,6 +6215,31 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn max_buffered_request_bytes(self, max: NonZeroUsize) -> Self {
         self.stats.body_budget.set_limit(max);
+        self
+    }
+
+    /// Limits live request-body capacity across all streaming connections.
+    ///
+    /// Each validated HEADERS admission reserves the configured body queue,
+    /// the larger of the protocol's initial 65,535-byte receive credit and the
+    /// configured initial stream window, and a 16 KiB trailer/chunk allowance.
+    /// Empty requests reserve the same capacity. Exhaustion resets only the
+    /// new stream with `REFUSED_STREAM`, before its handler, body channel or
+    /// request region is admitted. The default has no aggregate streaming cap.
+    ///
+    /// Credit remains reserved through handlers, producers, actual descendant
+    /// and finalizer cleanup, and response retirement, including reset,
+    /// disconnect and coordinator abandonment. Existing per-connection byte
+    /// and global request-count limits continue to apply independently.
+    ///
+    /// This covers `http2-streaming` serving modes on TCP, TLS, Unix and handed-
+    /// off transports. It is separate from buffered request-body accounting.
+    /// Headers, decoder buffers, spare capacity, response bytes, and application-
+    /// retained frames or copies are excluded; this is not a process-memory cap.
+    #[cfg(feature = "http2-streaming")]
+    #[must_use]
+    pub fn max_streaming_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.streaming_body_budget.set_limit(max);
         self
     }
 
