@@ -918,6 +918,18 @@ impl<F> Http1Listener<F> {
         self
     }
 
+    /// Attach a shared protocol budget before publishing the statistics handle.
+    pub(crate) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/1 body budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.body_budget = budget;
+        Ok(self)
+    }
+
     /// Returns a clone of the shutdown signal for external phase observation.
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {

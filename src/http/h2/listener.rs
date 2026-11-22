@@ -18,6 +18,7 @@ use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::cx::child_region::{ChildRegion, ChildRegionSpec};
+use crate::http::body::admission::{BodyBudget, BodyReservation};
 use crate::http::body::{Frame as BodyFrame, HeaderMap};
 use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
@@ -461,8 +462,7 @@ pub struct Http2ListenerStats {
     last_drain_requests_stranded: AtomicU64,
     last_drain_duration_ms: AtomicU64,
     tls_handshake_rejections_total: AtomicU64,
-    buffered_request_body_bytes: AtomicUsize,
-    body_budget_refusals_total: AtomicU64,
+    body_budget: Arc<BodyBudget>,
     time_getter: fn() -> Time,
 }
 
@@ -559,8 +559,7 @@ impl Http2ListenerStats {
             last_drain_requests_stranded: AtomicU64::new(0),
             last_drain_duration_ms: AtomicU64::new(0),
             tls_handshake_rejections_total: AtomicU64::new(0),
-            buffered_request_body_bytes: AtomicUsize::new(0),
-            body_budget_refusals_total: AtomicU64::new(0),
+            body_budget: Arc::new(BodyBudget::default()),
             time_getter,
         }
     }
@@ -600,7 +599,7 @@ impl Http2ListenerStats {
     /// outside this counter. It is maintained even without an aggregate limit.
     #[must_use]
     pub fn buffered_request_body_bytes(&self) -> usize {
-        self.buffered_request_body_bytes.load(Ordering::Acquire)
+        self.body_budget.reserved_bytes()
     }
 
     /// DATA appends refused by the listener-wide buffered request-body limit.
@@ -608,7 +607,7 @@ impl Http2ListenerStats {
     /// Existing per-stream and per-connection body refusals are not counted.
     #[must_use]
     pub fn body_budget_refusals_total(&self) -> u64 {
-        self.body_budget_refusals_total.load(Ordering::Relaxed)
+        self.body_budget.refusals()
     }
 
     fn record_drain_started(&self, in_flight: usize) {
@@ -1545,74 +1544,18 @@ fn classify_push_rejection(err: &H2Error) -> Http2PushRejection {
     }
 }
 
-/// One request's share of the listener-wide buffered payload allowance.
-///
-/// The same stats atomics are shared by every connection. The token moves
-/// from assembly into the existing request-retirement guard; resetting a
-/// stream cannot release another task's still-owned payload allowance.
-struct BufferedRequestBodyCharge {
-    stats: Arc<Http2ListenerStats>,
-    limit: Option<NonZeroUsize>,
-    bytes: usize,
-}
-
-impl BufferedRequestBodyCharge {
-    fn try_grow(&mut self, additional: usize) -> bool {
-        if additional == 0 {
-            return true;
-        }
-        let reserved = self.stats.buffered_request_body_bytes.try_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |used| {
-                used.checked_add(additional)
-                    .filter(|&next| self.limit.is_none_or(|limit| next <= limit.get()))
-            },
-        );
-        if reserved.is_err() {
-            self.stats
-                .body_budget_refusals_total
-                .fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        // Our existing charge is part of the shared total whose checked
-        // addition succeeded, so this request's addition cannot overflow.
-        self.bytes += additional;
-        true
-    }
-}
-
-impl Drop for BufferedRequestBodyCharge {
-    fn drop(&mut self) {
-        if self.bytes != 0 {
-            let previous = self
-                .stats
-                .buffered_request_body_bytes
-                .fetch_sub(self.bytes, Ordering::AcqRel);
-            debug_assert!(
-                previous >= self.bytes,
-                "buffered request-body charge underflow"
-            );
-        }
-    }
-}
-
 /// Keep assembly storage and its reservation together on every refusal path.
 /// Field order drops the `Vec` before making its admission credit reusable.
 struct BufferedRequestBody {
     data: Vec<u8>,
-    charge: Option<BufferedRequestBodyCharge>,
+    charge: Option<BodyReservation>,
 }
 
 impl BufferedRequestBody {
-    fn new(stats: Arc<Http2ListenerStats>, limit: Option<NonZeroUsize>) -> Self {
+    fn new(budget: Arc<BodyBudget>) -> Self {
         Self {
             data: Vec::new(),
-            charge: Some(BufferedRequestBodyCharge {
-                stats,
-                limit,
-                bytes: 0,
-            }),
+            charge: Some(BodyReservation::new(budget)),
         }
     }
 
@@ -1622,7 +1565,7 @@ impl BufferedRequestBody {
 
     fn try_extend_from_slice(&mut self, data: &[u8]) -> bool {
         if let Some(charge) = &mut self.charge
-            && !charge.try_grow(data.len())
+            && charge.try_grow(data.len()).is_err()
         {
             return false;
         }
@@ -1645,7 +1588,7 @@ impl From<Vec<u8>> for BufferedRequestBody {
 /// released after the stream's response frames have left the connection queue.
 struct InFlightRequestGuard {
     counter: Option<Arc<AtomicUsize>>,
-    request_body: Option<BufferedRequestBodyCharge>,
+    request_body: Option<BodyReservation>,
 }
 
 impl InFlightRequestGuard {
@@ -3431,7 +3374,7 @@ async fn dispatch_owned_h2_response<F, Fut>(
     let retained_body_guard = guard
         .request_body
         .as_ref()
-        .filter(|charge| charge.bytes != 0)
+        .filter(|charge| charge.bytes() != 0)
         .map(|_| Arc::clone(&guard));
     let completion = run_owned_h2_hop_observing_handler(
         cx,
@@ -4068,7 +4011,6 @@ async fn serve_h2_connection<F, Fut>(
     in_flight_requests: Arc<AtomicUsize>,
     _runtime: RuntimeHandle,
     max_body_size: usize,
-    max_buffered_request_bytes: Option<NonZeroUsize>,
     host_policy: HostPolicy,
     request_timeout: Option<Duration>,
     request_timeout_header_cap: Option<Duration>,
@@ -4809,10 +4751,7 @@ where
                                 &mut conn,
                                 stream_id,
                                 headers,
-                                BufferedRequestBody::new(
-                                    Arc::clone(&stats),
-                                    max_buffered_request_bytes,
-                                ),
+                                BufferedRequestBody::new(Arc::clone(&stats.body_budget)),
                                 Vec::new(),
                                 peer_addr,
                                 &handler,
@@ -4837,10 +4776,7 @@ where
                                 stream_id,
                                 (
                                     headers,
-                                    BufferedRequestBody::new(
-                                        Arc::clone(&stats),
-                                        max_buffered_request_bytes,
-                                    ),
+                                    BufferedRequestBody::new(Arc::clone(&stats.body_budget)),
                                 ),
                             );
                             // Stream reclamation is opt-in. The connection idle
@@ -5660,7 +5596,6 @@ pub struct Http2Listener<F> {
     connection_manager: ConnectionManager,
     stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
-    max_buffered_request_bytes: Option<NonZeroUsize>,
     transport_timeouts: H2TransportTimeouts,
     request_limits: H2RequestLimits,
     malformed_header_isolation: bool,
@@ -6113,7 +6048,6 @@ impl<F> Http2Listener<F> {
             connection_manager,
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
-            max_buffered_request_bytes: None,
             transport_timeouts: H2TransportTimeouts::default(),
             request_limits: H2RequestLimits::default(),
             malformed_header_isolation: false,
@@ -6251,9 +6185,21 @@ impl<F> Http2Listener<F> {
     /// limits and are not charged here. Buffered requests with produced responses
     /// are covered.
     #[must_use]
-    pub fn max_buffered_request_bytes(mut self, max: NonZeroUsize) -> Self {
-        self.max_buffered_request_bytes = Some(max);
+    pub fn max_buffered_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.body_budget.set_limit(max);
         self
+    }
+
+    /// Attach a shared protocol budget before publishing the statistics handle.
+    pub(crate) fn with_body_budget(mut self, budget: Arc<BodyBudget>) -> io::Result<Self> {
+        let stats = Arc::get_mut(&mut self.stats).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP/2 body budget must be attached before statistics are shared",
+            )
+        })?;
+        stats.body_budget = budget;
+        Ok(self)
     }
 
     /// Begins graceful shutdown using the listener's configured drain timeout.
@@ -6508,7 +6454,6 @@ impl<F> Http2Listener<F> {
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let runtime_for_conn = runtime.clone();
             let max_body_size = self.config.max_body_size;
-            let max_buffered_request_bytes = self.max_buffered_request_bytes;
             let host_policy = self.config.allowed_hosts.clone();
             let request_timeout = self.config.request_timeout;
             let request_timeout_header_cap = self.config.request_timeout_header_cap;
@@ -6541,7 +6486,6 @@ impl<F> Http2Listener<F> {
                     in_flight_requests,
                     runtime_for_conn,
                     max_body_size,
-                    max_buffered_request_bytes,
                     host_policy,
                     request_timeout,
                     request_timeout_header_cap,

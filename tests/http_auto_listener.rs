@@ -1055,3 +1055,292 @@ fn tls_auto_listener_refuses_an_acceptor_without_alpn() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }));
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod shared_body_budget {
+    use super::{H2Peer, bounded, config, http1_get, native_runtime, run_lifecycle};
+    use asupersync::bytes::{Bytes, BytesMut};
+    use asupersync::cx::Cx;
+    use asupersync::http::HttpAutoListener;
+    use asupersync::http::h1::types::{Request, Response};
+    use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, PingFrame, RstStreamFrame};
+    use asupersync::http::h2::{ErrorCode, Header, HpackEncoder};
+    use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+    use asupersync::net::TcpStream;
+    use asupersync::runtime::yield_now;
+    use asupersync::server::shutdown::{ShutdownPhase, ShutdownSignal};
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct StopOnDrop(ShutdownSignal);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.trigger_immediate();
+        }
+    }
+
+    async fn http1_head(stream: &mut TcpStream) -> String {
+        bounded(async {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                assert!(head.len() < 16_384, "bounded response head");
+                let mut byte = [0u8; 1];
+                stream
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("complete HTTP/1 response head");
+                head.push(byte[0]);
+            }
+            String::from_utf8(head).unwrap()
+        })
+        .await
+    }
+
+    async fn declare_http1_body(
+        address: SocketAddr,
+        path: &str,
+        length: usize,
+    ) -> (TcpStream, String) {
+        let mut stream = bounded(TcpStream::connect(address)).await.unwrap();
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\n\
+             Expect: 100-continue\r\nConnection: close\r\n\r\n"
+        );
+        bounded(stream.write_all(head.as_bytes())).await.unwrap();
+        let response = http1_head(&mut stream).await;
+        (stream, response)
+    }
+
+    async fn http1_rest(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        bounded(stream.read_to_end(&mut bytes)).await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    async fn open_http2_body(peer: &mut H2Peer, stream_id: u32, path: &str) {
+        let mut block = BytesMut::new();
+        HpackEncoder::new().encode(
+            &[
+                Header::new(":method", "POST"),
+                Header::new(":scheme", "http"),
+                Header::new(":path", path),
+                Header::new(":authority", "localhost"),
+            ],
+            &mut block,
+        );
+        peer.send(Frame::Headers(HeadersFrame::new(
+            stream_id,
+            block.freeze(),
+            false,
+            true,
+        )))
+        .await;
+    }
+
+    async fn http2_data(peer: &mut H2Peer, stream_id: u32, body: &'static [u8], end_stream: bool) {
+        peer.send(Frame::Data(DataFrame::new(
+            stream_id,
+            Bytes::from_static(body),
+            end_stream,
+        )))
+        .await;
+    }
+
+    /// A matching ACK follows ingestion of all earlier frames on this peer.
+    /// A delay would not prove that the pending DATA was actually charged.
+    async fn http2_barrier(peer: &mut H2Peer, token: [u8; 8]) {
+        peer.send(Frame::Ping(PingFrame::new(token))).await;
+        bounded(async {
+            loop {
+                match peer.next().await.expect("HTTP/2 peer remains open") {
+                    Frame::Ping(ping) if ping.ack && ping.opaque_data == token => break,
+                    Frame::Settings(_) | Frame::WindowUpdate(_) => {}
+                    frame => panic!("unexpected frame before the body barrier: {frame:?}"),
+                }
+            }
+        })
+        .await;
+    }
+
+    async fn http2_body_refused(peer: &mut H2Peer, stream_id: u32) {
+        bounded(async {
+            loop {
+                match peer.next_for(stream_id).await {
+                    Frame::RstStream(reset) => {
+                        assert_eq!(reset.error_code, ErrorCode::EnhanceYourCalm);
+                        break;
+                    }
+                    Frame::WindowUpdate(_) => {}
+                    frame => panic!("body quota must reset this stream before dispatch: {frame:?}"),
+                }
+            }
+        })
+        .await;
+    }
+
+    #[test]
+    fn one_body_budget_spans_both_protocols_and_releases_capacity_in_both_directions() {
+        for workers in [1, 2] {
+            run_lifecycle(
+                native_runtime(workers).build().unwrap(),
+                |handle| async move {
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let handler_calls = Arc::clone(&calls);
+                    let listener = HttpAutoListener::bind(
+                        "127.0.0.1:0",
+                        move |request: Request| {
+                            handler_calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                let mut body =
+                                    format!("{:?} {}:", request.version, request.uri).into_bytes();
+                                body.extend_from_slice(&request.body);
+                                Response::new(200, "OK", body)
+                            }
+                        },
+                        config(),
+                    )
+                    .await
+                    .unwrap()
+                    .max_buffered_request_bytes(NonZeroUsize::new(8).unwrap());
+                    let address = listener.local_addr().unwrap();
+                    let stats = listener.stats_handle();
+                    let shutdown = listener.shutdown_signal();
+                    let _stop_on_drop = StopOnDrop(shutdown.clone());
+                    let serving: Pin<Box<dyn Future<Output = _> + Send>> = Box::pin(async move {
+                        let cx = Cx::current().unwrap();
+                        listener.run_in(&cx).await
+                    });
+                    let run = handle.spawn(serving);
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                    assert_eq!(stats.body_budget_refusals_total(), 0);
+
+                    // No HTTP/1 payload has been sent: 100 proves that the full
+                    // declaration was reserved before inviting the upload.
+                    let (mut held_http1, head) =
+                        declare_http1_body(address, "/held-http1", 6).await;
+                    assert!(head.starts_with("HTTP/1.1 100 "), "{head}");
+                    assert_eq!(stats.reserved_request_body_bytes(), 6);
+                    let mut http2 = H2Peer::connect(address, Vec::new()).await;
+                    open_http2_body(&mut http2, 1, "/refused-http2").await;
+                    http2_data(&mut http2, 1, b"ab", false).await;
+                    http2_barrier(&mut http2, *b"mixed001").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+                    // Empty requests need no body credit on either protocol.
+                    http2.request(3, "/http2-at-cap").await;
+                    assert_eq!(http2.response_body(3).await, b"Http2 /http2-at-cap:");
+                    let mut healthy_http1 = bounded(TcpStream::connect(address)).await.unwrap();
+                    let response = bounded(http1_get(&mut healthy_http1, "/http1-at-cap")).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(response.ends_with("Http11 /http1-at-cap:"), "{response}");
+                    drop(healthy_http1);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+
+                    // HTTP/2 still has room under a hypothetical separate 8-byte cap.
+                    // Only the shared HTTP/1 reservation makes this byte excessive.
+                    http2_data(&mut http2, 1, b"c", false).await;
+                    http2_body_refused(&mut http2, 1).await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 6);
+                    assert_eq!(stats.body_budget_refusals_total(), 1);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+                    // The admitted HTTP/1 connection survives the HTTP/2 refusal.
+                    // Its completed body refunds all 6 bytes for the same HTTP/2 peer.
+                    bounded(held_http1.write_all(b"123456")).await.unwrap();
+                    let response = http1_rest(&mut held_http1).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(
+                        response.ends_with("Http11 /held-http1:123456"),
+                        "{response}"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 3);
+                    drop(held_http1);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+                    open_http2_body(&mut http2, 5, "/held-http2").await;
+                    http2_data(&mut http2, 5, b"12345678", false).await;
+                    http2_barrier(&mut http2, *b"mixed002").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+
+                    let (mut refused_http1, head) =
+                        declare_http1_body(address, "/refused-http1", 1).await;
+                    // This is the first response head: no 100 came before the 503.
+                    assert!(head.starts_with("HTTP/1.1 503 "), "{head}");
+                    assert!(
+                        head.lines()
+                            .any(|line| line.eq_ignore_ascii_case("connection: close")),
+                        "{head}"
+                    );
+                    let _ = http1_rest(&mut refused_http1).await;
+                    drop(refused_http1);
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    assert_eq!(stats.body_budget_refusals_total(), 2);
+                    assert_eq!(calls.load(Ordering::SeqCst), 3);
+                    http2.request(7, "/after-http1-refusal").await;
+                    assert_eq!(http2.response_body(7).await, b"Http2 /after-http1-refusal:");
+                    assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+                    // A peer reset refunds the buffered HTTP/2 bytes. HTTP/1 can
+                    // immediately reserve exactly the whole budget and finish.
+                    http2
+                        .send(Frame::RstStream(RstStreamFrame::new(5, ErrorCode::Cancel)))
+                        .await;
+                    http2_barrier(&mut http2, *b"mixed003").await;
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                    let (mut http1, head) =
+                        declare_http1_body(address, "/after-http2-reset", 8).await;
+                    assert!(head.starts_with("HTTP/1.1 100 "), "{head}");
+                    assert_eq!(stats.reserved_request_body_bytes(), 8);
+                    bounded(http1.write_all(b"abcdefgh")).await.unwrap();
+                    let response = http1_rest(&mut http1).await;
+                    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+                    assert!(
+                        response.ends_with("Http11 /after-http2-reset:abcdefgh"),
+                        "{response}"
+                    );
+                    drop(http1);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+
+                    open_http2_body(&mut http2, 9, "/after-http1-completion").await;
+                    http2_data(&mut http2, 9, b"ABCDEFGH", true).await;
+                    assert_eq!(
+                        http2.response_body(9).await,
+                        b"Http2 /after-http1-completion:ABCDEFGH"
+                    );
+                    assert_eq!(calls.load(Ordering::SeqCst), 6);
+                    bounded(async {
+                        while stats.reserved_request_body_bytes() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await;
+                    assert_eq!(stats.body_budget_refusals_total(), 2);
+                    drop(http2);
+                    assert!(shutdown.begin_drain(Duration::from_secs(5)));
+                    let drained = bounded(run).await.unwrap();
+                    assert!(drained.http1.drain_report.unwrap().reached_quiescence);
+                    assert!(drained.http2.drain_report.unwrap().reached_quiescence);
+                    assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+                    assert_eq!(stats.reserved_request_body_bytes(), 0);
+                },
+            );
+        }
+    }
+}

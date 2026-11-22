@@ -3664,9 +3664,9 @@ fn fatal_connection_spawn_error_drains_native_http2_requests() {
 #[test]
 fn buffered_h2_body_budget_refusal_preserves_existing_bytes_and_reuses_credit() {
     let stats = Arc::new(Http2ListenerStats::default());
-    let limit = NonZeroUsize::new(8);
-    let mut first = BufferedRequestBody::new(Arc::clone(&stats), limit);
-    let mut second = BufferedRequestBody::new(Arc::clone(&stats), limit);
+    stats.body_budget.set_limit(NonZeroUsize::new(8).unwrap());
+    let mut first = BufferedRequestBody::new(Arc::clone(&stats.body_budget));
+    let mut second = BufferedRequestBody::new(Arc::clone(&stats.body_budget));
     assert!(first.try_extend_from_slice(b"first!"));
     assert!(second.try_extend_from_slice(b"ok"));
     assert_eq!(stats.buffered_request_body_bytes(), 8);
@@ -3687,18 +3687,14 @@ fn buffered_h2_body_budget_refusal_preserves_existing_bytes_and_reuses_credit() 
 #[test]
 fn unlimited_buffered_h2_body_accounting_refuses_overflow_without_allocating() {
     let stats = Arc::new(Http2ListenerStats::default());
-    let mut charge = BufferedRequestBodyCharge {
-        stats: Arc::clone(&stats),
-        limit: None,
-        bytes: 0,
-    };
-    assert!(charge.try_grow(usize::MAX));
+    let mut charge = BodyReservation::new(Arc::clone(&stats.body_budget));
+    assert!(charge.try_grow(usize::MAX).is_ok());
     assert_eq!(stats.buffered_request_body_bytes(), usize::MAX);
-    assert!(!charge.try_grow(1));
-    assert_eq!(charge.bytes, usize::MAX);
+    assert!(charge.try_grow(1).is_err());
+    assert_eq!(charge.bytes(), usize::MAX);
     assert_eq!(stats.buffered_request_body_bytes(), usize::MAX);
     assert_eq!(stats.body_budget_refusals_total(), 1);
-    assert!(charge.try_grow(0));
+    assert!(charge.try_grow(0).is_ok());
     drop(charge);
     assert_eq!(stats.buffered_request_body_bytes(), 0);
 }
@@ -3713,8 +3709,10 @@ fn buffered_h2_body_charge_survives_abandoned_producer_and_descendant_cleanup() 
         let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(2048));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let stats = Arc::new(Http2ListenerStats::default());
-        let mut buffered =
-            BufferedRequestBody::new(Arc::clone(&stats), NonZeroUsize::new(PAYLOAD.len()));
+        stats
+            .body_budget
+            .set_limit(NonZeroUsize::new(PAYLOAD.len()).unwrap());
+        let mut buffered = BufferedRequestBody::new(Arc::clone(&stats.body_budget));
         assert!(buffered.try_extend_from_slice(PAYLOAD));
         let BufferedRequestBody { data, charge } = buffered;
         let request = request_from_h2_parts(request_block(&[]), data, Vec::new(), None).unwrap();

@@ -14,6 +14,11 @@
 //!   HTTP/2 with prior knowledge, anything else HTTP/1.1. The bytes read to
 //!   decide are replayed to the chosen protocol.
 //!
+//! [`HttpAutoListener::max_buffered_request_bytes`] optionally shares one
+//! request-body admission allowance across both protocols and all connections.
+//! [`HttpAutoListener::stats_handle`] observes that same shared reservation
+//! count, including HTTP/1 body lengths admitted before payload arrival.
+//!
 //! ```ignore
 //! let app = Router::new().route("/", get(FnHandler::new(index))).into_http_handler();
 //! let listener = HttpAutoListener::bind("0.0.0.0:8443", app, config).await?
@@ -28,6 +33,7 @@ pub use streaming::HttpAutoStreamingListener;
 
 use super::handoff::{HandoffQueue, Prefixed};
 use crate::cx::{CancelWakerToken, Cx};
+use crate::http::body::admission::BodyBudget;
 use crate::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use crate::http::h1::server::IntoHttp1Response;
 use crate::http::h1::types::Request;
@@ -120,6 +126,36 @@ pub struct HttpAutoShutdownStats {
     pub http2: ShutdownStats,
 }
 
+/// Buffered request-body admission shared by both protocols on one listener.
+///
+/// Obtain a live handle with [`HttpAutoListener::stats_handle`] before starting
+/// the listener. These counters remain readable while it runs and after drain.
+#[derive(Debug, Default)]
+pub struct HttpAutoListenerStats {
+    body_budget: Arc<BodyBudget>,
+}
+
+impl HttpAutoListenerStats {
+    /// Payload bytes currently reserved across HTTP/1 and HTTP/2 connections.
+    ///
+    /// HTTP/1 reserves validated Content-Length and chunk declarations before
+    /// receiving their payload; HTTP/2 reserves DATA payload on arrival. This
+    /// includes incomplete requests and retained handler/response reservations,
+    /// so it is an admission count rather than a measurement of resident memory.
+    #[must_use]
+    pub fn reserved_request_body_bytes(&self) -> usize {
+        self.body_budget.reserved_bytes()
+    }
+
+    /// Requests or streams refused because the shared body budget was full.
+    ///
+    /// Per-request size violations and other admission limits are not counted.
+    #[must_use]
+    pub fn body_budget_refusals_total(&self) -> u64 {
+        self.body_budget.refusals()
+    }
+}
+
 /// Optional overrides keep the inner listener's defaults authoritative.
 /// These cannot be fields of the exhaustively constructible public config.
 #[derive(Clone, Copy, Debug, Default)]
@@ -160,7 +196,7 @@ impl Http2Options {
 /// [module documentation](self).
 ///
 /// Each protocol's listener applies its own configuration: its host policy,
-/// `max_connections` (so the port admits up to the sum), body limits and
+/// `max_connections` (so the port admits up to the sum), per-request body limits and
 /// drain timeouts. HTTP/1.1 upgrade actions made with `Http1Upgrade::new_any`
 /// (`WebSocketUpgrade::on_upgrade_any`) run on these connections, so a Router
 /// built with `into_http1_handler()` serves WebSockets next to HTTP/2;
@@ -168,12 +204,14 @@ impl Http2Options {
 /// HTTP/2 keepalive, transport progress deadlines and request admission limits
 /// can be set with this listener's `http2_*` builders, for both cleartext and
 /// TLS connections. Other per-protocol settings live in
-/// [`HttpAutoListenerConfig`].
+/// [`HttpAutoListenerConfig`]. [`Self::max_buffered_request_bytes`] adds one
+/// shared body admission limit across both protocols.
 pub struct HttpAutoListener<F> {
     listener: TcpListener,
     handler: Arc<F>,
     config: HttpAutoListenerConfig,
     http2_options: Http2Options,
+    stats: Arc<HttpAutoListenerStats>,
     shutdown_signal: ShutdownSignal,
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
@@ -210,6 +248,7 @@ where
             handler: Arc::new(handler),
             config,
             http2_options: Http2Options::default(),
+            stats: Arc::new(HttpAutoListenerStats::default()),
             shutdown_signal: ShutdownSignal::new(),
             #[cfg(feature = "tls")]
             tls_acceptor: None,
@@ -290,6 +329,35 @@ where
         self
     }
 
+    /// Limits buffered request-body reservations across both protocols.
+    ///
+    /// There is one allowance for the entire port, including cleartext and TLS
+    /// handoff. HTTP/1 reserves validated Content-Length and chunk declarations
+    /// before payload growth and returns 503 with connection close on exhaustion
+    /// (before 100 Continue for Content-Length). HTTP/2 reserves received DATA
+    /// before growing the request body and resets only the excess stream with
+    /// `ENHANCE_YOUR_CALM`. Bodyless requests remain admissible at capacity.
+    ///
+    /// Reservations survive admitted handler and response processing; owned
+    /// HTTP/2 requests also retain them through actual request-subtree cleanup.
+    /// Incomplete uploads release their reservations when discarded. Per-request
+    /// size limits still apply independently. The default has no aggregate cap.
+    ///
+    /// This payload allowance excludes headers, protocol buffers, read-ahead,
+    /// spare allocation capacity, response bytes and application-owned copies.
+    /// It is not a total memory bound or a streaming request-body queue limit.
+    #[must_use]
+    pub fn max_buffered_request_bytes(self, max: NonZeroUsize) -> Self {
+        self.stats.body_budget.set_limit(max);
+        self
+    }
+
+    /// Observes the one body budget shared by both protocol listeners.
+    #[must_use]
+    pub fn stats_handle(&self) -> Arc<HttpAutoListenerStats> {
+        Arc::clone(&self.stats)
+    }
+
     /// The bound address.
     ///
     /// # Errors
@@ -360,13 +428,17 @@ where
             Arc::clone(&http1_queue),
             move |request: Request| (*handler)(request),
             self.config.http1.clone(),
-        );
+        )
+        .with_body_budget(Arc::clone(&self.stats.body_budget))?;
         let handler = Arc::clone(&self.handler);
-        let http2 = self.http2_options.apply(Http2Listener::from_handoff(
-            Arc::clone(&http2_queue),
-            move |request: Request| (*handler)(request),
-            self.config.http2.clone(),
-        ));
+        let http2 = self
+            .http2_options
+            .apply(Http2Listener::from_handoff(
+                Arc::clone(&http2_queue),
+                move |request: Request| (*handler)(request),
+                self.config.http2.clone(),
+            ))
+            .with_body_budget(Arc::clone(&self.stats.body_budget))?;
         let http1 = ProtocolService {
             queue: http1_queue,
             manager: http1.connection_manager().clone(),
