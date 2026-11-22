@@ -2427,7 +2427,7 @@ mod tests {
     fn sqlite_paused_streams_do_not_starve_cross_connection_execute() {
         use std::future::Future;
         use std::pin::Pin;
-        use std::task::{Context, Waker};
+        use std::task::{Context, Poll, Waker};
         use std::time::Instant;
 
         // Deliberate bounded polling also works when no executor or timer can
@@ -2565,7 +2565,7 @@ mod tests {
     fn sqlite_paused_streams_do_not_starve_nested_producer_stream() {
         use std::future::Future;
         use std::pin::Pin;
-        use std::task::{Context, Waker};
+        use std::task::{Context, Poll, Waker};
         use std::time::Instant;
 
         fn poll_bounded<F: Future>(future: &mut Pin<Box<F>>) -> Option<F::Output> {
