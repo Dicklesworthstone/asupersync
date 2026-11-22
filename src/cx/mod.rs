@@ -177,3 +177,6 @@ pub use wrappers::{
 
 mod race_factory;
 pub use race_factory::RaceFactory;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scoped_selection_tests;
