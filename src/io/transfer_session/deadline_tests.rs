@@ -34,7 +34,7 @@ fn registrations(cx: &Cx) -> usize {
 #[derive(Default)]
 struct Probe {
     read: AtomicUsize,
-    written: parking_lot::Mutex<Vec<u8>>,
+    written: crate::sync::pl::Mutex<Vec<u8>>,
     polls: AtomicUsize,
     pending: AtomicUsize,
     flushes: AtomicUsize,
@@ -421,7 +421,7 @@ mod native {
     struct Controls {
         release: Arc<AtomicBool>,
         parked: AtomicBool,
-        waker: parking_lot::Mutex<Option<Waker>>,
+        waker: crate::sync::pl::Mutex<Option<Waker>>,
     }
 
     impl Controls {

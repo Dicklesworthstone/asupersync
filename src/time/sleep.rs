@@ -13,7 +13,7 @@ use crate::cx::Cx;
 use crate::time::{TimerDriverHandle, TimerHandle};
 use crate::trace::TraceEvent;
 use crate::types::{CancelKind, Time};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use crate::sync::atomic::{AtomicBool, Ordering};

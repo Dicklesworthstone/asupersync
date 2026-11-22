@@ -7,7 +7,7 @@ use std::task::{Context, Wake, Waker};
 
 fn fixture() -> (FactoryOwner, WorkerReadiness, Cx) {
     let shared = Arc::new(Shared {
-        state: parking_lot::Mutex::new(State {
+        state: crate::sync::pl::Mutex::new(State {
             snapshot: WorkerReadinessState {
                 generation: None, phase: WorkerReadinessPhase::NotStarted,
             },

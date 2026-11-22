@@ -13,7 +13,7 @@ use crate::runtime::scheduler::{InvariantCategory, SchedulerInvariant};
 use crate::time::{TimerDriverHandle, VirtualClock};
 use crate::types::task_context::CxCancellationState;
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;

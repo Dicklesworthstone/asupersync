@@ -17,7 +17,7 @@
 // do).
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use parking_lot::Condvar;
+use crate::sync::pl::Condvar;
 use std::sync::OnceLock;
 
 #[path = "poll_gate.rs"]

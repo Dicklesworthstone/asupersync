@@ -57,7 +57,7 @@ use crate::observability::metrics::{MetricsProvider, OutcomeKind};
 use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
-use parking_lot::{Mutex, RwLock};
+use crate::sync::pl::{Mutex, RwLock};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;

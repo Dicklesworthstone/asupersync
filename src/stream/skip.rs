@@ -1,7 +1,6 @@
 //! Skip combinator.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -13,17 +12,32 @@ use std::task::{Context, Poll};
 const SKIP_COOPERATIVE_BUDGET: usize = 1024;
 
 /// Stream for the [`skip`](super::StreamExt::skip) method.
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Skip<S> {
-    #[pin]
     stream: S,
     remaining: usize,
     exhausted: bool,
 }
 
+struct SkipProj<'a, S> {
+    stream: Pin<&'a mut S>,
+    remaining: &'a mut usize,
+    exhausted: &'a mut bool,
+}
+
 impl<S> Skip<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> SkipProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; `remaining` and `exhausted` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        SkipProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            remaining: &mut this.remaining,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
         Self {
@@ -87,18 +101,35 @@ impl<S: Stream> Stream for Skip<S> {
 }
 
 /// Stream for the [`skip_while`](super::StreamExt::skip_while) method.
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct SkipWhile<S, F> {
-    #[pin]
     stream: S,
     predicate: F,
     done: bool,
     exhausted: bool,
 }
 
+struct SkipWhileProj<'a, S, F> {
+    stream: Pin<&'a mut S>,
+    predicate: &'a mut F,
+    done: &'a mut bool,
+    exhausted: &'a mut bool,
+}
+
 impl<S, F> SkipWhile<S, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> SkipWhileProj<'_, S, F> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        SkipWhileProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            predicate: &mut this.predicate,
+            done: &mut this.done,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, predicate: F) -> Self {
         Self {

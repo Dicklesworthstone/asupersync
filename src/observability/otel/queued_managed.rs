@@ -9,7 +9,7 @@ use crate::record::region::RegionCloseOutcome;
 use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::types::{CancelKind, CancelReason, PanicPayload, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;

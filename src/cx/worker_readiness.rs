@@ -19,7 +19,7 @@ use super::{
 use crate::supervision::{ChildName, ManagedChildFactory, ManagedChildFuture, ManagedGeneration};
 use crate::sync::Notify;
 use crate::types::{CancelReason, Outcome, PanicPayload};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;

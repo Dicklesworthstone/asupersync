@@ -8,7 +8,7 @@
 use crate::tracing_compat::trace;
 use crate::types::TaskId;
 use crate::util::{DetHashMap, DetHashSet};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::{Arc, Weak};
 use std::task::{Wake, Waker};
 

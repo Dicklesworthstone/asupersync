@@ -89,16 +89,23 @@
 //! - [`broadcast`]: Multi-producer, multi-consumer broadcast channel
 //! - [`watch`]: Single-producer, multi-consumer state observation
 
+#[cfg(feature = "full-runtime")]
 pub mod ack;
 pub mod broadcast;
+#[cfg(feature = "full-runtime")]
 pub mod clock_skew;
+#[cfg(feature = "full-runtime")]
 pub mod crash;
+#[cfg(feature = "full-runtime")]
 pub mod erasure;
+#[cfg(feature = "full-runtime")]
 pub mod fault;
 pub mod flow_control_monitor;
 pub mod mpsc;
 pub mod oneshot;
+#[cfg(feature = "full-runtime")]
 pub mod partition;
+#[cfg(feature = "full-runtime")]
 pub mod session;
 pub mod watch;
 
@@ -210,4 +217,5 @@ pub use mpsc::{
     Receiver, SendPermit, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded,
     unbounded_channel,
 };
+#[cfg(feature = "full-runtime")]
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};

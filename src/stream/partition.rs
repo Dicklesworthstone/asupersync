@@ -6,7 +6,7 @@
 //! duplicated and the predicate runs once per item.
 
 use super::Stream;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;

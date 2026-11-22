@@ -567,7 +567,7 @@ fn mr_task_ordering_fifo() {
         let pool_options = config.to_options();
         let pool = BlockingPool::new(pool_options);
 
-        let execution_order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let execution_order = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
         // Submit tasks that record their execution order
         for i in 0..task_count {

@@ -3,15 +3,42 @@
 //! This module provides a capability-friendly entropy interface with
 //! deterministic and OS-backed implementations.
 
+use crate::sync::pl::Mutex;
 use crate::types::TaskId;
 use crate::util::DetRng;
-use parking_lot::Mutex;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 
-// Note: Using getrandom for OS entropy (rand::rngs::OsRng not available as dependency)
+/// Fill a buffer with OS entropy, using `getrandom` when enabled and falling
+/// back to `/dev/urandom` on Unix (works on Linux 2.6.x where `getrandom(2)`
+/// returns `-ENOSYS`).
+pub(crate) fn fill_os_entropy(dest: &mut [u8]) {
+    if dest.is_empty() {
+        return;
+    }
+    #[cfg(feature = "full-crypto")]
+    {
+        getrandom::fill(dest).expect("OS entropy failed");
+    }
+    #[cfg(all(unix, not(feature = "full-crypto")))]
+    {
+        use std::io::Read;
+        let mut file = std::fs::File::open("/dev/urandom").expect("open /dev/urandom for OS entropy");
+        file.read_exact(dest)
+            .expect("read OS entropy from /dev/urandom");
+    }
+    #[cfg(all(not(unix), not(feature = "full-crypto")))]
+    {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        for chunk in dest.chunks_mut(8) {
+            let word = RandomState::new().build_hasher().finish().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+    }
+}
 
 /// Core trait for entropy providers.
 pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
@@ -105,7 +132,7 @@ impl EntropySource for OsEntropy {
     #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("os");
-        getrandom::fill(dest).expect("OS entropy failed");
+        fill_os_entropy(dest);
     }
 
     #[inline]
@@ -231,7 +258,7 @@ impl EntropySource for BrowserEntropy {
     #[inline]
     fn fill_bytes(&self, dest: &mut [u8]) {
         check_ambient_entropy("browser");
-        getrandom::fill(dest).expect("browser entropy failed");
+        fill_os_entropy(dest);
     }
 
     #[inline]
@@ -431,12 +458,12 @@ impl CryptoSalt {
         check_ambient_entropy("crypto-salt");
         let mut salt_bytes = [0u8; 32];
 
-        // Primary entropy from OS random number generator (same security as rand::rngs::OsRng)
-        getrandom::fill(&mut salt_bytes).expect("crypto salt generation failed");
+        // Primary entropy from OS random number generator
+        fill_os_entropy(&mut salt_bytes);
 
         // Domain separation via HMAC-like construction
         let mut domain_mixed = [0u8; 32];
-        getrandom::fill(&mut domain_mixed).expect("crypto salt domain mixing failed");
+        fill_os_entropy(&mut domain_mixed);
 
         // Mix domain into salt to prevent cross-system reuse
         let domain_bytes = domain.as_bytes();

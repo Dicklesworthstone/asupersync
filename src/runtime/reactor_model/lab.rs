@@ -3,7 +3,7 @@
 use super::{Event, Interest, LabReactorModel, ModelState, ReadinessMode, Token};
 use crate::lab::{LabConfig, LabRuntime};
 use crate::runtime::IoDriverHandle;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 

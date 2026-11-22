@@ -55,9 +55,11 @@
 //! - All capabilities flow through the wrapped Cx
 
 use super::cap;
+#[cfg(feature = "full-runtime")]
 use super::macaroon::{MacaroonToken, VerificationContext, VerificationError};
 use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
+#[cfg(feature = "full-runtime")]
 use crate::evidence_sink::EvidenceSink;
 #[cfg(feature = "messaging-fabric")]
 use crate::messaging::capability::{
@@ -74,6 +76,7 @@ use crate::messaging::subject::SubjectPattern;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
 };
+#[cfg(feature = "full-runtime")]
 use crate::remote::RemoteCap;
 use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::IoDriverHandle;
@@ -86,7 +89,9 @@ use crate::runtime::task_handle::JoinError;
 use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, error, info, trace, warn};
+#[cfg(feature = "full-runtime")]
+use crate::tracing_compat::error;
+use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::task_context::{CancelWaker, CancelWakerRegistration, CxCancellationState};
 use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
@@ -145,12 +150,18 @@ fn noop_waker() -> Waker {
 /// (`Cx: Send`) stop at `dyn DefaultHttpClient`: the concrete client's pool
 /// holds rustls connection types under `tls`, and walking them from deep inside
 /// a downstream future overflowed stable rustc's default recursion limit (#86).
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 trait DefaultHttpClient: Send + Sync {
     fn client(&self) -> crate::http::h1::HttpClient;
 }
 
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 impl DefaultHttpClient for crate::http::h1::HttpClient {
     fn client(&self) -> crate::http::h1::HttpClient {
         self.clone()
@@ -160,12 +171,18 @@ impl DefaultHttpClient for crate::http::h1::HttpClient {
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
 /// refcount operations from ~13 to 1 for this bundle.
 #[derive(Clone)]
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 struct DefaultHttpClientSlot {
     inner: Arc<std::sync::OnceLock<Box<dyn DefaultHttpClient>>>,
 }
 
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 impl Default for DefaultHttpClientSlot {
     fn default() -> Self {
         Self {
@@ -174,7 +191,10 @@ impl Default for DefaultHttpClientSlot {
     }
 }
 
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 impl std::fmt::Debug for DefaultHttpClientSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultHttpClientSlot")
@@ -183,7 +203,10 @@ impl std::fmt::Debug for DefaultHttpClientSlot {
     }
 }
 
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 impl DefaultHttpClientSlot {
     fn get_or_init(&self) -> crate::http::h1::HttpClient {
         self.inner
@@ -203,10 +226,13 @@ struct CxHandles {
     /// Runtime identity for the opt-in lab task-causality producer. Kept out
     /// of clock component names so identical lab workloads remain replayable.
     task_causality_runtime: Option<u64>,
+    #[cfg(feature = "full-runtime")]
     remote_cap: Option<Arc<RemoteCap>>,
     registry: Option<RegistryHandle>,
     pressure: Option<Arc<SystemPressure>>,
+    #[cfg(feature = "full-runtime")]
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
+    #[cfg(feature = "full-runtime")]
     macaroon: Option<Arc<MacaroonToken>>,
     /// Producer-side spawn gateway (br-asupersync-hwjqyo / A2.2): lets
     /// `Cx::spawn` enqueue without the RuntimeState lock.
@@ -236,7 +262,10 @@ struct CxHandles {
     pending_obligation_posts: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Runtime-scoped default HTTP client slot. It is lazy so Cx creation does
     /// not allocate a pool unless the high-level HTTP facade is used.
-    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg(all(
+        feature = "full-runtime",
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
     default_http_client: DefaultHttpClientSlot,
     #[cfg(feature = "messaging-fabric")]
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
@@ -254,11 +283,17 @@ pub(crate) struct InheritedHandles {
     entropy: Option<Arc<dyn EntropySource>>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
     registry: Option<RegistryHandle>,
+    #[cfg(feature = "full-runtime")]
     remote_cap: Option<Arc<RemoteCap>>,
     blocking_pool: Option<BlockingPoolHandle>,
+    #[cfg(feature = "full-runtime")]
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
+    #[cfg(feature = "full-runtime")]
     macaroon: Option<Arc<MacaroonToken>>,
-    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg(all(
+        feature = "full-runtime",
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
     default_http_client: DefaultHttpClientSlot,
     pressure: Option<Arc<SystemPressure>>,
     /// Captured when the spawn is requested, not when its mailbox is drained.
@@ -304,7 +339,7 @@ pub(crate) struct CancelWakerToken {
 ///
 /// [`BudgetDeadlineTimer`]: crate::types::task_context::BudgetDeadlineTimer
 struct BudgetDeadlineWake {
-    inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    inner: std::sync::Weak<crate::sync::pl::RwLock<CxInner>>,
     deadline: Time,
     /// A timer can fire between registration and publication of its handle.
     /// Each registration owns its publication state: a losing concurrent arm
@@ -431,7 +466,7 @@ impl std::task::Wake for BudgetDeadlineWake {
 /// to all clones.
 #[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
-    pub(crate) inner: Arc<parking_lot::RwLock<CxInner>>,
+    pub(crate) inner: Arc<crate::sync::pl::RwLock<CxInner>>,
     /// Shared cancellation publication envelope from [`CxInner`].
     ///
     /// This `Arc` is cloned from the inner's private, stable envelope at
@@ -441,7 +476,7 @@ pub struct Cx<Caps = cap::All> {
     /// direct legacy field mutation remains observable with its original
     /// semantics.
     cancellation: Arc<CxCancellationState>,
-    observability: Arc<parking_lot::RwLock<ObservabilityState>>,
+    observability: Arc<crate::sync::pl::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
     /// br-asupersync-5ckssb: runtime capability mask. Mirrors the
     /// type-level `Caps` parameter for cx instances obtained the
@@ -743,7 +778,7 @@ impl ObservabilityState {
 
 /// Guard that restores the cancellation mask on drop.
 struct MaskGuard<'a> {
-    inner: &'a Arc<parking_lot::RwLock<CxInner>>,
+    inner: &'a Arc<crate::sync::pl::RwLock<CxInner>>,
 }
 
 impl Drop for MaskGuard<'_> {
@@ -1225,7 +1260,7 @@ impl<Caps> Cx<Caps> {
 
     /// Creates a new capability context from shared state (internal use).
     #[allow(dead_code)] // Internal construction path for runtime integration
-    pub(crate) fn from_inner(inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
+    pub(crate) fn from_inner(inner: Arc<crate::sync::pl::RwLock<CxInner>>) -> Self {
         let (region, task, cancellation) = {
             let guard = inner.read();
             (guard.region, guard.task, guard.cancellation_state())
@@ -1233,7 +1268,7 @@ impl<Caps> Cx<Caps> {
         Self {
             inner,
             cancellation,
-            observability: Arc::new(parking_lot::RwLock::new(ObservabilityState::new(
+            observability: Arc::new(crate::sync::pl::RwLock::new(ObservabilityState::new(
                 region, task,
             ))),
             handles: Arc::new(CxHandles {
@@ -1244,10 +1279,13 @@ impl<Caps> Cx<Caps> {
                 entropy: Arc::new(OsEntropy),
                 logical_clock: LogicalClockHandle::default(),
                 task_causality_runtime: None,
+                #[cfg(feature = "full-runtime")]
                 remote_cap: None,
                 registry: None,
                 pressure: None,
+                #[cfg(feature = "full-runtime")]
                 evidence_sink: None,
+                #[cfg(feature = "full-runtime")]
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
@@ -1258,7 +1296,10 @@ impl<Caps> Cx<Caps> {
                 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 request_runtime: None,
                 pending_obligation_posts: None,
-                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+                #[cfg(all(
+                    feature = "full-runtime",
+                    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+                ))]
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1356,11 +1397,11 @@ impl<Caps> Cx<Caps> {
         entropy: Option<Arc<dyn EntropySource>>,
         logical_clock: LogicalClockHandle,
     ) -> Self {
-        let inner = Arc::new(parking_lot::RwLock::new(CxInner::new(region, task, budget)));
+        let inner = Arc::new(crate::sync::pl::RwLock::new(CxInner::new(region, task, budget)));
         let cancellation = inner.read().cancellation_state();
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
-        let observability = Arc::new(parking_lot::RwLock::new(observability_state));
+        let observability = Arc::new(crate::sync::pl::RwLock::new(observability_state));
         let entropy = entropy.unwrap_or_else(|| Arc::new(OsEntropy));
 
         debug!(
@@ -1386,10 +1427,13 @@ impl<Caps> Cx<Caps> {
                 entropy,
                 logical_clock,
                 task_causality_runtime: None,
+                #[cfg(feature = "full-runtime")]
                 remote_cap: None,
                 registry: None,
                 pressure: None,
+                #[cfg(feature = "full-runtime")]
                 evidence_sink: None,
+                #[cfg(feature = "full-runtime")]
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
@@ -1400,7 +1444,10 @@ impl<Caps> Cx<Caps> {
                 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
                 request_runtime: None,
                 pending_obligation_posts: None,
-                #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+                #[cfg(all(
+                    feature = "full-runtime",
+                    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+                ))]
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1565,6 +1612,7 @@ impl<Caps> Cx<Caps> {
     /// Attaches a remote capability to this context.
     ///
     /// This allows the context to perform remote operations like `spawn_remote`.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn with_remote_cap(mut self, cap: RemoteCap) -> Self {
         Arc::make_mut(&mut self.handles).remote_cap = Some(Arc::new(cap));
@@ -1606,6 +1654,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is `pub(crate)` so internal wiring (e.g. spawning child tasks) can
     /// inherit remote capability without requiring `Caps: HasRemote` bounds.
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     pub(crate) fn remote_cap_handle(&self) -> Option<Arc<RemoteCap>> {
@@ -1616,6 +1665,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is the internal counterpart to [`Cx::with_remote_cap`] used for
     /// capability propagation to child contexts.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub(crate) fn with_remote_cap_handle(mut self, cap: Option<Arc<RemoteCap>>) -> Self {
         Arc::make_mut(&mut self.handles).remote_cap = cap;
@@ -1707,6 +1757,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Attaches an evidence sink for runtime decision tracing.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn with_evidence_sink(mut self, sink: Option<Arc<dyn EvidenceSink>>) -> Self {
         Arc::make_mut(&mut self.handles).evidence_sink = sink;
@@ -1714,6 +1765,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a cloned handle to the evidence sink, if attached.
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     pub(crate) fn evidence_sink_handle(&self) -> Option<Arc<dyn EvidenceSink>> {
@@ -1724,6 +1776,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is a no-op if no evidence sink is configured. Errors during
     /// emission are handled internally by the sink (logged and dropped).
+    #[cfg(feature = "full-runtime")]
     pub fn emit_evidence(&self, entry: &franken_evidence::EvidenceLedger) {
         if let Some(ref sink) = self.handles.evidence_sink {
             sink.emit(entry);
@@ -1739,6 +1792,7 @@ impl<Caps> Cx<Caps> {
     /// The token is stored in an `Arc` for cheap cloning. Child contexts
     /// created via [`restrict`](Self::restrict) or `retype`
     /// inherit the macaroon.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn with_macaroon(mut self, token: MacaroonToken) -> Self {
         Arc::make_mut(&mut self.handles).macaroon = Some(Arc::new(token));
@@ -1746,6 +1800,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Attaches a pre-shared Macaroon handle to this context (internal use).
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     #[allow(dead_code)] // Macaroon integration API
     pub(crate) fn with_macaroon_handle(mut self, handle: Option<Arc<MacaroonToken>>) -> Self {
@@ -1753,6 +1808,7 @@ impl<Caps> Cx<Caps> {
         self
     }
 
+    #[cfg(feature = "full-runtime")]
     pub(crate) fn spawn_authority_snapshot(&self) -> crate::runtime::spawn_mailbox::SpawnAuthority {
         crate::runtime::spawn_mailbox::SpawnAuthority::new(
             self.task_id(),
@@ -1814,6 +1870,7 @@ impl<Caps> Cx<Caps> {
     }
 
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn request_obligation_owner(
         &self,
     ) -> Result<
@@ -1962,7 +2019,10 @@ impl<Caps> Cx<Caps> {
     /// `Client::default_for_runtime(cx)` remains runtime-scoped while still
     /// constructing the actual pooled client only on first use.
     #[must_use]
-    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg(all(
+        feature = "full-runtime",
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
     pub(crate) fn with_default_http_client_slot_from<ParentCaps>(
         mut self,
         parent: &Cx<ParentCaps>,
@@ -1975,7 +2035,10 @@ impl<Caps> Cx<Caps> {
     /// Return the runtime's lazily initialized default HTTP client.
     #[inline]
     #[must_use]
-    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg(all(
+        feature = "full-runtime",
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
     pub(crate) fn default_http_client(&self) -> crate::http::h1::HttpClient
     where
         Caps: cap::HasIo,
@@ -1998,6 +2061,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a reference to the attached Macaroon token, if any.
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     pub fn macaroon(&self) -> Option<&MacaroonToken> {
@@ -2005,6 +2069,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Returns a cloned `Arc` handle to the macaroon, if any.
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     #[allow(dead_code)] // Macaroon integration API
@@ -2021,6 +2086,7 @@ impl<Caps> Cx<Caps> {
     /// Returns `None` if no macaroon is attached, the token is a bound
     /// discharge, or the resulting token exceeds the macaroon wire format's
     /// field lengths or 64-caveat limit.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
         let token = self.handles.macaroon.as_ref()?;
@@ -2069,6 +2135,7 @@ impl<Caps> Cx<Caps> {
     /// [`CaveatPredicate::TimeBefore`](crate::cx::CaveatPredicate::TimeBefore).
     ///
     /// Returns `None` if no macaroon is attached.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn attenuate_time_limit(&self, deadline_ms: u64) -> Option<Self> {
         self.attenuate(super::macaroon::CaveatPredicate::TimeBefore(deadline_ms))
@@ -2081,6 +2148,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// Returns `None` if no macaroon is attached or `pattern` exceeds the
     /// macaroon wire-format length cap.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn attenuate_scope(&self, pattern: impl Into<String>) -> Option<Self> {
         self.attenuate(super::macaroon::CaveatPredicate::ResourceScope(
@@ -2096,6 +2164,7 @@ impl<Caps> Cx<Caps> {
     /// [`VerificationContext`].
     ///
     /// Returns `None` if no macaroon is attached.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn attenuate_rate_limit(&self, max_count: u32, window_secs: u32) -> Option<Self> {
         self.attenuate(super::macaroon::CaveatPredicate::RateLimit {
@@ -2110,6 +2179,7 @@ impl<Caps> Cx<Caps> {
     /// If no deadline is set, the macaroon is returned unchanged.
     ///
     /// Returns `None` if no macaroon is attached.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn attenuate_from_budget(&self) -> Option<Self> {
         let _ = self.handles.macaroon.as_ref()?;
@@ -2133,6 +2203,7 @@ impl<Caps> Cx<Caps> {
     /// Returns `VerificationError` if verification fails (bad signature or
     /// failed caveat). Returns `Err(VerificationError::InvalidSignature)` if
     /// no macaroon is attached.
+    #[cfg(feature = "full-runtime")]
     pub fn verify_capability(
         &self,
         root_key: &crate::security::key::AuthKey,
@@ -2229,6 +2300,7 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Emit evidence for a macaroon verification decision.
+    #[cfg(feature = "full-runtime")]
     fn emit_macaroon_evidence(
         &self,
         token: &MacaroonToken,
@@ -2456,6 +2528,7 @@ impl<Caps> Cx<Caps> {
     /// - Production runtime configures remote capability with transport config
     /// - Lab runtime can configure it for deterministic distributed testing
     /// - Code that needs remote spawning must check for this capability
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     pub fn remote(&self) -> Option<&RemoteCap>
@@ -2476,6 +2549,7 @@ impl<Caps> Cx<Caps> {
     /// Returns true if the remote capability is available.
     ///
     /// Convenience method to check if remote task operations can be performed.
+    #[cfg(feature = "full-runtime")]
     #[inline]
     #[must_use]
     pub fn has_remote(&self) -> bool
@@ -3016,6 +3090,7 @@ impl<Caps> Cx<Caps> {
             )
         };
 
+        #[cfg(feature = "full-runtime")]
         if let Some((exhaustion_kind, deadline_remaining_ms)) = budget_exhaustion {
             if let Some(ref sink) = self.handles.evidence_sink {
                 crate::evidence_sink::emit_budget_evidence(
@@ -3026,8 +3101,11 @@ impl<Caps> Cx<Caps> {
                 );
             }
         }
+        #[cfg(not(feature = "full-runtime"))]
+        let _ = budget_exhaustion;
 
         // Emit evidence for cancellation decisions observed at checkpoint.
+        #[cfg(feature = "full-runtime")]
         if cancel_requested && mask_depth == 0 {
             if let Some(ref sink) = self.handles.evidence_sink {
                 let kind_str = cancel_reason
@@ -3150,6 +3228,7 @@ impl<Caps> Cx<Caps> {
             )
         };
 
+        #[cfg(feature = "full-runtime")]
         if let Some((exhaustion_kind, deadline_remaining_ms)) = budget_exhaustion {
             if let Some(ref sink) = self.handles.evidence_sink {
                 crate::evidence_sink::emit_budget_evidence(
@@ -3160,8 +3239,11 @@ impl<Caps> Cx<Caps> {
                 );
             }
         }
+        #[cfg(not(feature = "full-runtime"))]
+        let _ = budget_exhaustion;
 
         // Emit evidence for cancellation decisions observed at checkpoint.
+        #[cfg(feature = "full-runtime")]
         if cancel_requested && mask_depth == 0 {
             if let Some(ref sink) = self.handles.evidence_sink {
                 let kind_str = cancel_reason
@@ -4283,7 +4365,7 @@ impl<Caps> Cx<Caps> {
             child.cleanup_phase = parent.cleanup_phase;
             child
         };
-        let inner = Arc::new(parking_lot::RwLock::new(child));
+        let inner = Arc::new(crate::sync::pl::RwLock::new(child));
         let cancellation = inner.read().cancellation_state();
         Self {
             inner,
@@ -4309,7 +4391,7 @@ impl<Caps> Cx<Caps> {
         let mut request = self.derive_cancel_scope();
         let region = request.region_id();
         let task = request.task_id();
-        request.observability = Arc::new(parking_lot::RwLock::new(
+        request.observability = Arc::new(crate::sync::pl::RwLock::new(
             self.child_observability(region, task),
         ));
         // User entropy forks are contained by child_entropy and run without
@@ -4825,6 +4907,7 @@ impl<Caps> Cx<Caps> {
             slot,
             gateway.runtime_liveness_weak(),
             self.runtime_mask,
+            #[cfg(feature = "full-runtime")]
             self.remote_cap_handle(),
             self.blocking_pool_handle_for_inheritance(),
         )
@@ -6642,11 +6725,17 @@ where
             entropy: Some(self.handles.entropy.clone()),
             io_cap: self.io_cap_handle(),
             registry: self.registry_handle(),
+            #[cfg(feature = "full-runtime")]
             remote_cap: self.remote_cap_handle(),
             blocking_pool: self.blocking_pool_handle_for_inheritance(),
+            #[cfg(feature = "full-runtime")]
             evidence_sink: self.evidence_sink_handle(),
+            #[cfg(feature = "full-runtime")]
             macaroon: self.macaroon_handle(),
-            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+            #[cfg(all(
+                feature = "full-runtime",
+                any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+            ))]
             default_http_client: self.handles.default_http_client.clone(),
             pressure: self.pressure_handle(),
             task_causality: self.task_causality_snapshot(),
@@ -6664,11 +6753,17 @@ where
             entropy: _,
             io_cap,
             registry,
+            #[cfg(feature = "full-runtime")]
             remote_cap,
             blocking_pool,
+            #[cfg(feature = "full-runtime")]
             evidence_sink,
+            #[cfg(feature = "full-runtime")]
             macaroon,
-            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+            #[cfg(all(
+                feature = "full-runtime",
+                any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+            ))]
             default_http_client,
             pressure,
             task_causality: _,
@@ -6676,11 +6771,17 @@ where
         let handles = Arc::make_mut(&mut self.handles);
         handles.io_cap = io_cap;
         handles.registry = registry;
-        handles.remote_cap = remote_cap;
+        #[cfg(feature = "full-runtime")]
+        {
+            handles.remote_cap = remote_cap;
+            handles.evidence_sink = evidence_sink;
+            handles.macaroon = macaroon;
+        }
         handles.blocking_pool = blocking_pool;
-        handles.evidence_sink = evidence_sink;
-        handles.macaroon = macaroon;
-        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+        #[cfg(all(
+            feature = "full-runtime",
+            any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+        ))]
         {
             handles.default_http_client = default_http_client;
         }

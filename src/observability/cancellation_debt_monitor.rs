@@ -5,7 +5,8 @@
 //! early warning and debt management capabilities.
 
 use crate::types::{CancelKind, CancelReason};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -101,7 +102,8 @@ impl Default for CancellationDebtConfig {
 }
 
 /// Types of cancellation work that can accumulate debt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum WorkType {
     /// Task cancellation cleanup.
     TaskCleanup,
@@ -146,7 +148,8 @@ pub struct PendingWork {
 }
 
 /// Snapshot of debt accumulation state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct DebtSnapshot {
     /// Current time of snapshot.
     pub snapshot_time: SystemTime,
@@ -169,7 +172,8 @@ pub struct DebtSnapshot {
 }
 
 /// Alert levels for debt accumulation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum DebtAlertLevel {
     /// Normal operation, no issues.
     Normal,
@@ -213,7 +217,8 @@ impl DebtAlertLevel {
 }
 
 /// A debt alert notification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct DebtAlert {
     /// Alert level.
     pub level: DebtAlertLevel,

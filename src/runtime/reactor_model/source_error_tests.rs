@@ -13,7 +13,7 @@ use crate::runtime::IoDriverHandle;
 use crate::runtime::reactor::{Interest, Reactor, Token};
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use crate::types::{Budget, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::{Future, poll_fn};
 use std::io::{self, Write};
 use std::net;

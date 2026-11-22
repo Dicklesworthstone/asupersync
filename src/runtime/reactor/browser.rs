@@ -39,7 +39,7 @@
 //!   satisfied for API compatibility
 
 use super::{Events, Interest, Reactor, Source, Token};
-use parking_lot::{Mutex, MutexGuard};
+use crate::sync::pl::{Mutex, MutexGuard};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 use std::collections::BTreeMap;

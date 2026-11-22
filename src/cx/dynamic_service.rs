@@ -26,7 +26,7 @@ use crate::supervision::{
     ChildName, ManagedChildFactory, ManagedSupervisor, UnstartedManagedSupervisor,
 };
 use crate::types::{CancelReason, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};

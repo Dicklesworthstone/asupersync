@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::{Runtime, RuntimeBuilder};
 use crate::types::{Budget, CancelReason, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::net::{TcpListener, UdpSocket as PeerUdp};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;

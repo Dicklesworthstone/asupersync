@@ -4647,7 +4647,7 @@ mod tests {
         println!("    • WaiterEntry contains Option<Waker>");
         println!("    • std::task::Waker is !Send");
         println!("    • WaiterSlab contains Vec<WaiterEntry> → !Send");
-        println!("    • parking_lot::Mutex<WaiterSlab> → !Sync (requires T: Send)");
+        println!("    • crate::sync::pl::Mutex<WaiterSlab> → !Sync (requires T: Send)");
         println!("    • Notify contains Mutex<WaiterSlab> → !Sync");
         println!("    • Notified<'_> contains &Notify → !Send (requires Notify: Sync)");
         println!();
@@ -5624,7 +5624,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
 
         // Shared latency collection (lock-free for measurement accuracy)
-        let latencies = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(
+        let latencies = Arc::new(crate::sync::pl::Mutex::new(Vec::with_capacity(
             TOTAL_MEASUREMENTS,
         )));
 
@@ -5810,7 +5810,7 @@ mod tests {
                 "  - WaiterSlab contention: likely high under {} tasks",
                 NUM_TASKS
             );
-            println!("  - parking_lot::Mutex overhead: may be significant");
+            println!("  - crate::sync::pl::Mutex overhead: may be significant");
             println!("  - Atomic stored_notifications: contention possible");
             println!("  - Waker allocation: potential bottleneck");
         } else if p99_us < 10.0 {
@@ -5844,7 +5844,7 @@ mod tests {
             println!("    * Memory allocation: May need optimization ⚠️");
         }
 
-        println!("  - parking_lot::Mutex performance:");
+        println!("  - crate::sync::pl::Mutex performance:");
         if p95_us < 20.0 {
             println!("    * Lock acquisition: Fast under load ✅");
             println!("    * Fairness: Good balance ✅");

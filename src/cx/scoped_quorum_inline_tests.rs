@@ -7,7 +7,7 @@ use crate::runtime::spawn_mailbox::SpawnRequestParts;
 use crate::runtime::state::SpawnAdmission;
 use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
 use crate::types::{Budget, Outcome};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;

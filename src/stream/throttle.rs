@@ -6,7 +6,6 @@
 
 use super::Stream;
 use crate::types::Time;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -28,11 +27,9 @@ const MAX_SUPPRESSED_DRAIN_PER_POLL: usize = 64;
 /// The first item from the underlying stream passes through immediately.
 /// Subsequent items are suppressed until `period` has elapsed since
 /// the last yielded item.
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Throttle<S> {
-    #[pin]
     stream: S,
     period: Duration,
     last_yield: Option<Time>,
@@ -40,7 +37,28 @@ pub struct Throttle<S> {
     time_getter: fn() -> Time,
 }
 
+struct ThrottleProj<'a, S> {
+    stream: Pin<&'a mut S>,
+    period: &'a mut Duration,
+    last_yield: &'a mut Option<Time>,
+    done: &'a mut bool,
+    time_getter: &'a mut fn() -> Time,
+}
+
 impl<S> Throttle<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ThrottleProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        ThrottleProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            period: &mut this.period,
+            last_yield: &mut this.last_yield,
+            done: &mut this.done,
+            time_getter: &mut this.time_getter,
+        }
+    }
+
     /// Creates a new `Throttle` stream.
     #[inline]
     pub(crate) fn new(stream: S, period: Duration) -> Self {

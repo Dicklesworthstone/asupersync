@@ -38,12 +38,16 @@ use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
 use crate::util::Arena;
+#[cfg(feature = "full-runtime")]
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+#[cfg(feature = "full-runtime")]
 use nkeys::KeyPair;
+#[cfg(feature = "full-runtime")]
 use sha2::{Digest, Sha256};
 use std::fmt;
 
 // Security imports for spawn authorization
+#[cfg(feature = "full-runtime")]
 use crate::security::key::AuthKey;
 use std::path::Path;
 use std::str::FromStr;
@@ -1956,6 +1960,7 @@ pub enum RuntimeStateShape {
 pub struct SecurityConfig {
     /// Root authorization key for spawn capabilities.
     /// When None, authorization is disabled (fail-open for testing).
+    #[cfg(feature = "full-runtime")]
     pub spawn_authorization_key: Option<AuthKey>,
 }
 
@@ -4606,6 +4611,64 @@ impl CapacityEnvelopeCertificate {
         self.selected_profile == self.fallback_profile && !self.refusal_reasons.is_empty()
     }
 }
+
+fn is_hex_digest(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if !has_json_artifact_extension(value) {
+        return Err(format!("{label} must end with .json"));
+    }
+    if value.contains("..") {
+        return Err(format!(
+            "{label} must not contain parent-directory traversals"
+        ));
+    }
+    if value
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')))
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn has_json_artifact_extension(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
+fn validate_hashish(value: &str, label: &str) -> Result<(), String> {
+    if is_hex_digest(value) {
+        return Ok(());
+    }
+    let Some(suffix) = value.strip_prefix("sha256:") else {
+        return Err(format!("{label} must be a sha256 digest"));
+    };
+    validate_slug_like(suffix, label)
+}
+
+fn validate_slug_like(value: &str, label: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "full-runtime")]
+mod planner_and_bundles {
+    use super::*;
 
 /// Schema version for mean-field capacity planner reports.
 pub const MEAN_FIELD_CAPACITY_PLANNER_REPORT_SCHEMA_VERSION: &str =
@@ -8384,7 +8447,7 @@ fn normalize_capacity_metric_basis_points(numerator: u128, denominator: u128) ->
     saturating_mul_div(numerator, 10_000, denominator.max(1)) as u64
 }
 
-fn signed_profile_bundle_shadow_run_regret_margin_basis_points(
+pub(super) fn signed_profile_bundle_shadow_run_regret_margin_basis_points(
     baseline_loss_basis_points: u64,
     candidate_loss_basis_points: u64,
 ) -> i64 {
@@ -8695,10 +8758,6 @@ fn stable_sha256_hex(fields: &[(&str, String)]) -> String {
         .collect::<String>()
 }
 
-fn is_hex_digest(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 fn tamper_hex_digest(value: &str) -> String {
     if !is_hex_digest(value) {
         return stable_sha256_hex(&[("tampered", value.to_string())]);
@@ -8706,56 +8765,6 @@ fn tamper_hex_digest(value: &str) -> String {
     let mut chars = value.chars().collect::<Vec<_>>();
     chars[0] = if chars[0] == '0' { '1' } else { '0' };
     chars.into_iter().collect()
-}
-
-fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-    if !has_json_artifact_extension(value) {
-        return Err(format!("{label} must end with .json"));
-    }
-    if value.contains("..") {
-        return Err(format!(
-            "{label} must not contain parent-directory traversals"
-        ));
-    }
-    if value
-        .chars()
-        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')))
-    {
-        return Err(format!("{label} contains unsupported characters"));
-    }
-    Ok(())
-}
-
-fn has_json_artifact_extension(value: &str) -> bool {
-    Path::new(value)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-}
-
-fn validate_hashish(value: &str, label: &str) -> Result<(), String> {
-    if is_hex_digest(value) {
-        return Ok(());
-    }
-    let Some(suffix) = value.strip_prefix("sha256:") else {
-        return Err(format!("{label} must be a sha256 digest"));
-    };
-    validate_slug_like(suffix, label)
-}
-
-fn validate_slug_like(value: &str, label: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-    if value
-        .chars()
-        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
-    {
-        return Err(format!("{label} contains unsupported characters"));
-    }
-    Ok(())
 }
 
 fn validate_token_list(values: &[String], label: &str, allow_empty: bool) -> Result<(), String> {
@@ -8814,6 +8823,10 @@ fn duplicate_child_evidence_controller(
     }
     None
 }
+}
+
+#[cfg(feature = "full-runtime")]
+pub use planner_and_bundles::*;
 
 fn dedup_preserving_order(values: &mut Vec<String>) {
     let mut deduped = Vec::with_capacity(values.len());

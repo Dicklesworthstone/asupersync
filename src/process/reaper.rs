@@ -6,7 +6,7 @@
 //! thread, waits for process exit, or signals the process. The worker polls each
 //! owned handle independently and sleeps when there is no useful work.
 
-use parking_lot::{Condvar, Mutex};
+use crate::sync::pl::{Condvar, Mutex};
 use std::io;
 use std::process::Child;
 use std::sync::{Arc, LazyLock};

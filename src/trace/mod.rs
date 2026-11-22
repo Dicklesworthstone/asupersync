@@ -45,27 +45,35 @@
 pub mod boundary;
 pub mod buffer;
 pub mod canonicalize;
+#[cfg(feature = "full-runtime")]
 pub mod capture;
 pub mod causality;
 pub mod certificate;
+#[cfg(feature = "full-runtime")]
 pub mod compat;
 pub mod compression;
+#[cfg(feature = "full-runtime")]
 pub mod crashpack;
+#[cfg(feature = "full-runtime")]
 pub mod delta_debug;
 pub mod distributed;
+#[cfg(feature = "full-runtime")]
 pub mod divergence;
 pub mod dpor;
 #[cfg(test)]
 mod dpor_metamorphic_tests;
 pub mod event;
 pub mod event_structure;
+#[cfg(feature = "full-runtime")]
 pub mod file;
 pub mod filter;
 pub mod format;
 pub mod geodesic;
 pub mod gf2;
+#[cfg(feature = "full-runtime")]
 pub mod incident;
 pub mod independence;
+#[cfg(feature = "full-runtime")]
 pub mod integrity;
 #[allow(
     dead_code,
@@ -76,16 +84,24 @@ mod lz4_block;
 #[doc(hidden)]
 pub use lz4_block::harness as lz4_harness;
 pub mod minimizer;
+#[cfg(feature = "full-runtime")]
 pub mod raptorq_journal;
+#[cfg(feature = "full-runtime")]
 pub mod raptorq_journal_writer;
+#[cfg(feature = "full-runtime")]
 pub mod recorder;
+#[cfg(feature = "full-runtime")]
 pub mod recovery;
 pub mod refinement_firewall;
+#[cfg(feature = "full-runtime")]
 pub mod replay;
+#[cfg(feature = "full-runtime")]
 pub mod replayer;
 pub mod scoring;
+#[cfg(feature = "full-runtime")]
 pub mod streaming;
 pub mod tla_export;
+#[cfg(feature = "full-runtime")]
 pub mod verified;
 
 pub use boundary::{SquareComplex, matmul_gf2};
@@ -93,24 +109,29 @@ pub use buffer::{TraceBuffer, TraceBufferHandle};
 pub use canonicalize::{
     FoataTrace, TraceEventKey, TraceMonoid, canonicalize, trace_event_key, trace_fingerprint,
 };
+#[cfg(feature = "full-runtime")]
 pub use capture::{ScheduleCaptureError, ScheduleCaptureSnapshot, SchedulerEventContext};
 pub use causality::{CausalOrderVerifier, CausalityViolation, CausalityViolationKind};
 pub use certificate::{
     CertificateVerifier, TraceCertificate, VerificationResult as CertificateVerificationResult,
 };
+#[cfg(feature = "full-runtime")]
 pub use compat::{
     CompatEvent, CompatEventIterator, CompatReader, CompatStats, CompatibilityResult,
     MIN_SUPPORTED_SCHEMA_VERSION, TraceMigration, TraceMigrator, check_schema_compatibility,
 };
 pub use compression::{CompressedTrace, Level as CompressionLevel, compress as compress_trace};
+#[cfg(feature = "full-runtime")]
 pub use crashpack::{
     CRASHPACK_SCHEMA_VERSION, CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest,
     EvidenceEntrySnapshot, FailureInfo, FailureOutcome, SupervisionSnapshot,
 };
+#[cfg(feature = "full-runtime")]
 pub use delta_debug::{
     DeltaDebugConfig, DeltaDebugResult, MinimizationStats, generate_narrative,
     minimize as delta_debug_minimize,
 };
+#[cfg(feature = "full-runtime")]
 pub use divergence::{
     AffectedEntities, DiagnosticConfig, DivergenceCategory, DivergenceReport, EventSummary,
     MinimizationConfig, MinimizationResult, diagnose_divergence, diagnose_replay_trace_divergence,
@@ -121,17 +142,20 @@ pub use dpor::{
     RaceReport, ResourceRaceDistribution, SleepSet, TraceCoverageAnalysis, detect_hb_races,
     detect_races, estimated_classes, racing_events, trace_coverage_analysis,
 };
+#[cfg(feature = "full-serialization")]
+pub use event::decode_browser_trace_schema;
 pub use event::{
     BROWSER_TRACE_SCHEMA_VERSION, BrowserCaptureMetadata, BrowserCaptureSource,
     BrowserTraceCategory, BrowserTraceCompatibility, BrowserTraceEventSpec, BrowserTraceSchema,
     TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind,
     browser_trace_category_for_kind, browser_trace_category_name, browser_trace_log_fields,
-    browser_trace_log_fields_with_capture, browser_trace_schema_v1, decode_browser_trace_schema,
+    browser_trace_log_fields_with_capture, browser_trace_schema_v1,
     redact_browser_trace_event, validate_browser_trace_schema,
 };
 pub use event_structure::{
     Event, EventId, EventStructure, HdaCell, HdaComplex, OwnerKey, TracePoset,
 };
+#[cfg(feature = "full-runtime")]
 pub use file::{
     CompressionMode, FLAG_CHECKSUMMED, TRACE_CHECKSUM_LEN, TRACE_FILE_VERSION, TRACE_MAGIC,
     TraceContainerLimits, TraceEventIterator, TraceFileConfig, TraceFileError,
@@ -146,6 +170,7 @@ pub use geodesic::{
     normalize as geodesic_normalize,
 };
 pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
+#[cfg(feature = "full-runtime")]
 pub use incident::{
     INCIDENT_BUNDLE_SCHEMA_VERSION, INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION,
     INCIDENT_PROOF_REPORT_SCHEMA_VERSION, INCIDENT_REGRESSION_PROOF_SCHEMA_VERSION,
@@ -174,6 +199,7 @@ pub use incident::{
 pub use independence::{
     AccessMode, Resource, ResourceAccess, accesses_conflict, independent, resource_footprint,
 };
+#[cfg(feature = "full-runtime")]
 pub use integrity::{
     IntegrityIssue, IssueSeverity, VerificationOptions, VerificationResult, find_first_corruption,
     is_trace_valid_quick, verify_trace,
@@ -182,10 +208,12 @@ pub use minimizer::{
     MinimizationReport, MinimizationStep, ScenarioElement, StepKind, TraceMinimizer,
     generate_narrative as generate_scenario_narrative,
 };
+#[cfg(feature = "full-runtime")]
 pub use recorder::{
     DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_MEMORY, LimitAction, LimitKind, LimitReached,
     RecorderConfig, TraceRecorder, TraceRecording, TraceRecordingError, TraceRecordingStatus,
 };
+#[cfg(feature = "full-runtime")]
 pub use recovery::{
     CrashRecovery, CrashRecoveryLimits, CrashRecoveryStop, recover_crashed_trace_prefix,
 };
@@ -193,11 +221,13 @@ pub use refinement_firewall::{
     RefinementFirewallReport, RefinementViolation, check_refinement_firewall,
     first_counterexample_prefix, first_refinement_violation, verify_refinement_firewall,
 };
+#[cfg(feature = "full-runtime")]
 pub use replay::{
     CompactRegionId, CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions,
     ProjectionSummary, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, ReplayTraceError,
     TraceMetadata,
 };
+#[cfg(feature = "full-runtime")]
 pub use replayer::{
     Breakpoint, BrowserReplayReport, DivergenceError, ReplayError, ReplayMode, TraceReplayer,
 };
@@ -205,12 +235,14 @@ pub use scoring::{
     ClassId, EvidenceEntry, EvidenceLedger, TopologicalScore, score_boundary_matrix,
     score_persistence, seed_fingerprint,
 };
+#[cfg(feature = "full-runtime")]
 pub use streaming::{
     EvidenceOverflowPolicy, EvidenceSinkDecision, ReplayCheckpoint, ReplayProgress,
     StreamingReplayError, StreamingReplayResult, StreamingReplayer, TraceEvidenceChunk,
     TraceEvidenceSink, TraceEvidenceStreamConfig, TraceEvidenceStreamStats, TraceEvidenceStreamer,
 };
 pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};
+#[cfg(feature = "full-runtime")]
 pub use verified::{
     TraceReadLimits, VerifiedReplayCheckpoint, VerifiedReplayPrefixCheckpoint, VerifiedTraceError,
     VerifiedTraceReader,

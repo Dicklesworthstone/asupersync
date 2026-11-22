@@ -103,12 +103,14 @@ use core::convert::Infallible;
 use core::fmt;
 #[cfg(all(feature = "nightly-outcome-try", asupersync_try_trait))]
 use core::ops::{ControlFlow, FromResidual, Residual, Try};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 
 /// Payload from a caught panic.
 ///
 /// This wraps the panic value for safe transport across task boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct PanicPayload {
     message: String,
 }
@@ -214,7 +216,8 @@ impl fmt::Display for Severity {
 ///
 /// Forms a severity lattice where worse outcomes dominate:
 /// `Ok < Err < Cancelled < Panicked`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum Outcome<T, E> {
     /// Success with a value.
     Ok(T),
@@ -744,7 +747,8 @@ impl<T, E> FromResidual<Result<Infallible, E>> for Outcome<T, E> {
 }
 
 /// Error type for converting Outcome to Result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum OutcomeError<E> {
     /// Application error.
     Err(E),

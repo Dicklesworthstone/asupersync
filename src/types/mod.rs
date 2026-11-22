@@ -51,11 +51,14 @@ pub mod policy;
 pub mod pressure;
 pub mod resource;
 pub mod rref;
+#[cfg(feature = "full-runtime")]
 pub mod slo_policy;
 pub mod symbol;
 pub mod symbol_set;
 pub mod task_context;
+#[cfg(feature = "full-runtime")]
 pub mod typed_symbol;
+#[cfg(feature = "full-runtime")]
 pub mod wasm_abi;
 
 pub use budget::{
@@ -97,11 +100,13 @@ pub use id::{ObligationId, RegionId, TaskId, Time};
 // of the two purpose-specific types is tracked under follow-up beads
 // rather than a single sweeping rename, because their field shapes and
 // serialization semantics differ in ways that golden tests pin in place.
+#[cfg(feature = "full-governance")]
 pub use franken_kernel::{DecisionId, PolicyId, SchemaVersion, TraceId};
 pub use outcome::{Outcome, OutcomeError, PanicPayload, Severity, join_outcomes};
 pub use policy::Policy;
 pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
+#[cfg(feature = "full-runtime")]
 pub use slo_policy::{
     SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
     SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION,
@@ -127,12 +132,14 @@ pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
 };
 pub use task_context::{CheckpointHistoryEntry, CheckpointState, CxInner, MAX_MASK_DEPTH};
+#[cfg(feature = "full-runtime")]
 pub use typed_symbol::{
     DeserializationError, Deserializer, LegacyTypedSymbolIdentity, SerdeCodec, SerializationError,
     SerializationFormat, Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC,
     TYPED_SYMBOL_VERSION, TypeDescriptor, TypeMismatchError, TypeRegistry, TypedDecoder,
     TypedEncoder, TypedSymbol,
 };
+#[cfg(feature = "full-runtime")]
 pub use wasm_abi::{
     NextjsAntiPattern, NextjsBootstrapPhase, NextjsBootstrapState, NextjsBootstrapTransitionError,
     NextjsBootstrapTransitionRecord, NextjsBootstrapTrigger, NextjsBoundaryMode, NextjsCapability,

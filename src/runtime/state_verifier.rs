@@ -18,6 +18,7 @@
 
 use crate::record::{ObligationState, region::RegionState, task::TaskPhase};
 use crate::types::{ObligationId, RegionId, TaskId};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,7 +52,8 @@ impl Default for StateVerifierConfig {
 }
 
 /// Type of entity undergoing state transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum StateEntityType {
     /// Task state transition.
     Task,
@@ -62,7 +64,8 @@ pub enum StateEntityType {
 }
 
 /// Details of a state transition violation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct StateViolation {
     /// Type of entity with invalid transition.
     pub entity_type: StateEntityType,
@@ -127,7 +130,8 @@ impl StateVerifierStats {
 }
 
 /// Snapshot of state verifier statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct StateVerifierStatsSnapshot {
     /// Total number of state transitions verified.
     pub total_transitions: u64,

@@ -10,7 +10,7 @@ use crate::record::region::RegionState;
 use crate::runtime::JoinError;
 use crate::runtime::state::{SpawnAdmission, SpawnError};
 use crate::types::{Budget, CancelKind, CancelReason, RegionId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::{Future, poll_fn, ready};
 use std::pin::{Pin, pin};
 use std::sync::Arc;

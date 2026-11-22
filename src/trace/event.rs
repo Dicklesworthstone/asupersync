@@ -8,6 +8,7 @@ use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::trace::distributed::LogicalTime;
 use crate::types::{CancelReason, ObligationId, PanicPayload, RegionId, TaskId, Time};
 use core::fmt;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,8 +20,9 @@ const MAX_BROWSER_TRACE_ATTRIBUTE_BYTES: usize = 128;
 
 /// Private versioned ownership record carried inside the existing UserTrace
 /// envelope. IDs use their maintained serde representation, never Debug text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(deny_unknown_fields))]
 pub(crate) struct ObligationHandoff {
     pub(crate) id: ObligationId,
     pub(crate) source_ticket: u64,
@@ -36,11 +38,101 @@ const MAX_OBLIGATION_HANDOFF_MESSAGE_BYTES: usize = 2048;
 
 impl ObligationHandoff {
     pub(crate) fn to_message(&self) -> String {
-        format!(
-            "{OBLIGATION_HANDOFF_PREFIX}{}",
-            serde_json::to_string(self).expect("fixed scalar handoff fields serialize")
-        )
+        #[cfg(feature = "full-serialization")]
+        {
+            format!(
+                "{OBLIGATION_HANDOFF_PREFIX}{}",
+                serde_json::to_string(self).expect("fixed scalar handoff fields serialize")
+            )
+        }
+        #[cfg(not(feature = "full-serialization"))]
+        {
+            let id = self.id.arena_index();
+            let sh = self.source_holder.arena_index();
+            let dh = self.destination_holder.arena_index();
+            let sr = self.source_region.arena_index();
+            let dr = self.destination_region.arena_index();
+            format!(
+                "{OBLIGATION_HANDOFF_PREFIX}{}:{};{};{};{}:{};{}:{};{}:{};{}:{}",
+                id.index(),
+                id.generation(),
+                self.source_ticket,
+                self.destination_ticket,
+                sh.index(),
+                sh.generation(),
+                dh.index(),
+                dh.generation(),
+                sr.index(),
+                sr.generation(),
+                dr.index(),
+                dr.generation(),
+            )
+        }
     }
+}
+
+#[cfg(not(feature = "full-serialization"))]
+fn parse_arena_pair(part: &str) -> Result<crate::util::ArenaIndex, String> {
+    let (idx_s, gen_s) = part
+        .split_once(':')
+        .ok_or_else(|| "invalid arena pair".to_owned())?;
+    let idx = idx_s
+        .parse::<u32>()
+        .map_err(|err| format!("invalid index: {err}"))?;
+    let gen_v = gen_s
+        .parse::<u32>()
+        .map_err(|err| format!("invalid generation: {err}"))?;
+    Ok(crate::util::ArenaIndex::new(idx, gen_v))
+}
+
+#[cfg(not(feature = "full-serialization"))]
+fn parse_obligation_handoff_payload(payload: &str) -> Result<ObligationHandoff, String> {
+    let mut parts = payload.split(';');
+    let id = ObligationId::from_arena(parse_arena_pair(
+        parts.next().ok_or_else(|| "missing id".to_owned())?,
+    )?);
+    let source_ticket = parts
+        .next()
+        .ok_or_else(|| "missing source_ticket".to_owned())?
+        .parse::<u64>()
+        .map_err(|err| format!("invalid source_ticket: {err}"))?;
+    let destination_ticket = parts
+        .next()
+        .ok_or_else(|| "missing destination_ticket".to_owned())?
+        .parse::<u64>()
+        .map_err(|err| format!("invalid destination_ticket: {err}"))?;
+    let source_holder = TaskId::from_arena(parse_arena_pair(
+        parts
+            .next()
+            .ok_or_else(|| "missing source_holder".to_owned())?,
+    )?);
+    let destination_holder = TaskId::from_arena(parse_arena_pair(
+        parts
+            .next()
+            .ok_or_else(|| "missing destination_holder".to_owned())?,
+    )?);
+    let source_region = RegionId::from_arena(parse_arena_pair(
+        parts
+            .next()
+            .ok_or_else(|| "missing source_region".to_owned())?,
+    )?);
+    let destination_region = RegionId::from_arena(parse_arena_pair(
+        parts
+            .next()
+            .ok_or_else(|| "missing destination_region".to_owned())?,
+    )?);
+    if parts.next().is_some() {
+        return Err("unexpected trailing fields in obligation handoff".to_owned());
+    }
+    Ok(ObligationHandoff {
+        id,
+        source_ticket,
+        destination_ticket,
+        source_holder,
+        destination_holder,
+        source_region,
+        destination_region,
+    })
 }
 
 /// Decode the reserved ownership-message namespace; unrelated annotations are
@@ -64,8 +156,11 @@ pub(crate) fn decode_obligation_handoff(
     let payload = message
         .strip_prefix(OBLIGATION_HANDOFF_PREFIX)
         .ok_or_else(|| "unsupported handoff message version".to_owned())?;
+    #[cfg(feature = "full-serialization")]
     let handoff: ObligationHandoff = serde_json::from_str(payload)
         .map_err(|error| format!("invalid handoff fields: {error}"))?;
+    #[cfg(not(feature = "full-serialization"))]
+    let handoff: ObligationHandoff = parse_obligation_handoff_payload(payload)?;
     if handoff.source_holder == handoff.destination_holder {
         return Err("handoff requires distinct holder generations".to_owned());
     }
@@ -76,8 +171,9 @@ pub(crate) fn decode_obligation_handoff(
 }
 
 /// Browser trace event category for deterministic diagnostics.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum BrowserTraceCategory {
     /// Scheduler decisions and task lifecycle.
     Scheduler,
@@ -92,7 +188,8 @@ pub enum BrowserTraceCategory {
 }
 
 /// One browser-trace event taxonomy entry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct BrowserTraceEventSpec {
     /// Stable event-kind identifier.
     pub event_kind: String,
@@ -105,7 +202,8 @@ pub struct BrowserTraceEventSpec {
 }
 
 /// Browser trace schema compatibility policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct BrowserTraceCompatibility {
     /// Oldest reader version that must be supported.
     pub minimum_reader_version: String,
@@ -116,7 +214,8 @@ pub struct BrowserTraceCompatibility {
 }
 
 /// Browser trace schema v1 contract for deterministic diagnostics and replay.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct BrowserTraceSchema {
     /// Contract version identifier.
     pub schema_version: String,
@@ -135,8 +234,9 @@ pub struct BrowserTraceSchema {
 }
 
 /// Browser capture source for deterministic replay reconstruction.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum BrowserCaptureSource {
     /// Runtime-originated event without explicit host sample metadata.
     Runtime,
@@ -149,7 +249,8 @@ pub enum BrowserCaptureSource {
 }
 
 /// Deterministic capture metadata for browser trace events.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct BrowserCaptureMetadata {
     /// Monotonic host turn sequence provided by the browser adapter.
     pub host_turn_seq: u64,
@@ -162,8 +263,9 @@ pub struct BrowserCaptureMetadata {
 }
 
 /// The kind of trace event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum TraceEventKind {
     /// A task was spawned.
     Spawn,
@@ -730,6 +832,7 @@ pub fn validate_browser_trace_schema(schema: &BrowserTraceSchema) -> Result<(), 
     Ok(())
 }
 
+#[cfg(feature = "full-serialization")]
 #[derive(Debug, Deserialize)]
 struct BrowserTraceSchemaLegacyV0 {
     schema_version: String,
@@ -738,6 +841,7 @@ struct BrowserTraceSchemaLegacyV0 {
     event_specs: Vec<BrowserTraceEventSpecLegacyV0>,
 }
 
+#[cfg(feature = "full-serialization")]
 #[derive(Debug, Deserialize)]
 struct BrowserTraceEventSpecLegacyV0 {
     event_kind: String,
@@ -746,6 +850,7 @@ struct BrowserTraceEventSpecLegacyV0 {
     redacted_fields: Option<Vec<String>>,
 }
 
+#[cfg(feature = "full-serialization")]
 fn upgrade_legacy_event_specs(
     legacy_specs: Vec<BrowserTraceEventSpecLegacyV0>,
 ) -> Result<Vec<BrowserTraceEventSpec>, String> {
@@ -782,6 +887,7 @@ fn upgrade_legacy_event_specs(
 /// # Errors
 ///
 /// Returns `Err` when JSON decoding fails or schema version is unsupported.
+#[cfg(feature = "full-serialization")]
 pub fn decode_browser_trace_schema(payload: &str) -> Result<BrowserTraceSchema, String> {
     let value: serde_json::Value =
         serde_json::from_str(payload).map_err(|err| format!("invalid schema JSON: {err}"))?;
@@ -1146,11 +1252,34 @@ fn optional_display_field<T: fmt::Display>(value: Option<T>) -> String {
 }
 
 fn futurelock_held_field(held: &[(ObligationId, ObligationKind)]) -> String {
-    let held = held
-        .iter()
-        .map(|(obligation, kind)| format!("{obligation}:{kind}"))
-        .collect::<Vec<_>>();
-    serde_json::to_string(&held).expect("futurelock held obligations serialize")
+    #[cfg(feature = "full-serialization")]
+    {
+        let held = held
+            .iter()
+            .map(|(obligation, kind)| format!("{obligation}:{kind}"))
+            .collect::<Vec<_>>();
+        serde_json::to_string(&held).expect("futurelock held obligations serialize")
+    }
+    #[cfg(not(feature = "full-serialization"))]
+    {
+        let mut out = String::from("[");
+        for (idx, (obligation, kind)) in held.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            for ch in format!("{obligation}:{kind}").chars() {
+                match ch {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    _ => out.push(ch),
+                }
+            }
+            out.push('"');
+        }
+        out.push(']');
+        out
+    }
 }
 
 fn insert_browser_trace_payload_fields(fields: &mut BTreeMap<String, String>, event: &TraceEvent) {
@@ -1541,7 +1670,8 @@ impl fmt::Display for TraceEventKind {
 }
 
 /// Additional data carried by a trace event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum TraceData {
     /// No additional data.
     None,
@@ -1775,7 +1905,8 @@ pub enum TraceData {
 }
 
 /// A trace event in the runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TraceEvent {
     /// Event schema version.
     pub version: u32,

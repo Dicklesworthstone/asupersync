@@ -173,7 +173,7 @@ pub struct LockInfo {
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[derive(Clone)]
 enum LockOrderOwner {
-    Task(Arc<parking_lot::RwLock<crate::types::CxInner>>),
+    Task(Arc<crate::sync::pl::RwLock<crate::types::CxInner>>),
     Thread(std::thread::ThreadId),
 }
 

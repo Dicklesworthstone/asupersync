@@ -10,7 +10,7 @@
     use crate::cx::cap;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use std::cell::Cell;
     use std::future::Future;
     use std::rc::Rc;
@@ -1105,7 +1105,7 @@
         }
 
         struct GuardedTerminalUse<'a> {
-            _guard: parking_lot::MutexGuard<'a, ()>,
+            _guard: crate::sync::pl::MutexGuard<'a, ()>,
             exit: UseExit,
             panic_on_drop: bool,
             drops: Arc<AtomicUsize>,
@@ -1324,7 +1324,7 @@
 
         struct GuardedAcquire<'a> {
             resource: &'a Mutex<()>,
-            _guard: parking_lot::MutexGuard<'a, ()>,
+            _guard: crate::sync::pl::MutexGuard<'a, ()>,
             drops: Arc<AtomicUsize>,
         }
 
@@ -1509,7 +1509,7 @@
         use super::*;
 
         struct InterruptedUse<'a> {
-            _guard: parking_lot::MutexGuard<'a, ()>,
+            _guard: crate::sync::pl::MutexGuard<'a, ()>,
             drops: Arc<AtomicUsize>,
             panic_on_poll: bool,
             panic_on_drop: bool,
@@ -1545,7 +1545,7 @@
         }
 
         struct ObservedRelease<'a> {
-            _guard: parking_lot::MutexGuard<'a, ()>,
+            _guard: crate::sync::pl::MutexGuard<'a, ()>,
             observations: Arc<ReleaseObservations>,
             panic_on_poll: bool,
             panic_on_drop: bool,

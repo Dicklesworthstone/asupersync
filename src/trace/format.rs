@@ -5,6 +5,7 @@
 use super::buffer::TraceBuffer;
 use super::canonicalize::{TraceEventKey, canonicalize, trace_event_key, trace_fingerprint};
 use super::event::TraceEvent;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 
@@ -12,7 +13,8 @@ use std::io::{self, Write};
 pub const GOLDEN_TRACE_SCHEMA_VERSION: u32 = 1;
 
 /// Minimal configuration snapshot for golden trace fixtures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct GoldenTraceConfig {
     /// Deterministic seed used to run the workload.
     pub seed: u64,
@@ -31,14 +33,16 @@ pub struct GoldenTraceConfig {
 }
 
 /// Summary of oracle results for a golden trace run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct GoldenTraceOracleSummary {
     /// Sorted list of oracle violation tags (empty if all invariants held).
     pub violations: Vec<String>,
 }
 
 /// Golden trace fixture for deterministic verification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct GoldenTraceFixture {
     /// Fixture schema version.
     pub schema_version: u32,
@@ -94,8 +98,9 @@ impl GoldenTraceFixture {
 }
 
 /// Category of replay-delta mismatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum GoldenTraceDeltaClass {
     /// Runtime configuration or schema changed.
     Config,
@@ -108,8 +113,9 @@ pub enum GoldenTraceDeltaClass {
 }
 
 /// Severity for replay-delta mismatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum GoldenTraceDeltaSeverity {
     /// Informational drift that does not typically fail a gate.
     Info,
@@ -120,7 +126,8 @@ pub enum GoldenTraceDeltaSeverity {
 }
 
 /// Single replay-delta mismatch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct GoldenTraceDelta {
     /// Logical drift class for this mismatch.
     pub class: GoldenTraceDeltaClass,
@@ -133,7 +140,8 @@ pub struct GoldenTraceDelta {
 }
 
 /// Structured replay-delta report between two fixtures.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[allow(clippy::struct_excessive_bools)]
 pub struct GoldenTraceDeltaReport {
     /// Fingerprint recorded in the baseline fixture.
@@ -168,6 +176,7 @@ impl GoldenTraceDeltaReport {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
+    #[cfg(feature = "full-serialization")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }

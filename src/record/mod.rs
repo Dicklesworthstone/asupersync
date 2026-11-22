@@ -5,6 +5,7 @@
 //!
 //! These are internal implementation details and not part of the public API.
 
+#[cfg(feature = "full-runtime")]
 pub mod distributed_region;
 pub mod finalizer;
 pub mod obligation;
@@ -13,6 +14,7 @@ pub mod symbol_obligation_tracker;
 pub mod symbolic_obligation;
 pub mod task;
 
+#[cfg(feature = "full-runtime")]
 pub use distributed_region::{
     ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,
     ReplicaInfo, ReplicaStatus, StateTransition, TransitionReason,

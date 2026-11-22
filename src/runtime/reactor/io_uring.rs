@@ -27,7 +27,7 @@ mod imp {
         Reactor, Source, Token,
     };
     use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use smallvec::SmallVec;
     use std::collections::{HashMap, VecDeque};
     use std::io::{self, Write};

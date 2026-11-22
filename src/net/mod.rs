@@ -6,10 +6,10 @@
 #![allow(clippy::unused_async)]
 
 /// ATP (Asupersync Transfer Protocol) - Self-contained data movement layer.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod atp;
 /// ATP UDP socket capability boundary.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 #[path = "atp/udp/mod.rs"]
 pub mod atp_udp;
 /// DNS resolution with caching and Happy Eyeballs support.
@@ -17,12 +17,13 @@ pub mod dns;
 /// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
 pub mod happy_eyeballs;
 /// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
+#[cfg(feature = "full-runtime")]
 pub mod quic_core;
 /// Native QUIC transport state machines (TLS, recovery, streams).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod quic_native;
 /// STUN protocol for NAT traversal and ICE candidate gathering.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod stun;
 /// Native QUIC API surface (T4.1).
 ///
@@ -57,20 +58,24 @@ pub(crate) use udp::Armed;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use udp::ReactorRegistration;
 /// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).
-#[cfg(unix)]
+#[cfg(all(feature = "full-runtime", unix))]
 pub mod unix;
 /// WebSocket protocol implementation (RFC 6455).
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub mod websocket;
 /// MessagePort-based coordination utilities for browser worker runtimes.
+#[cfg(feature = "full-runtime")]
 pub mod worker_channel;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub use atp::protocol::{
     AtpFrameCodec, Frame as AtpFrame, FrameError, FrameHeader, FrameType, ProtocolVersion,
     SessionTranscript, TranscriptHash, TranscriptHasher, VarInt, VarIntError,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub use atp_udp::{
     ATP_UDP_DEFAULT_BATCH_SIZE, ATP_UDP_DEFAULT_MAX_PACKET_SIZE, AtpUdpPacket, AtpUdpPressure,
     AtpUdpReceivedPacket, AtpUdpRecvBatch, AtpUdpSocket, AtpUdpSocketConfig, AtpUdpSocketProfile,
@@ -83,7 +88,7 @@ pub use quic::{
     QuicConfig, QuicConnection, QuicError, RecvStream as QuicRecvStream,
     SendStream as QuicSendStream,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub use quic_native::{
     AckEvent, AckRange, CryptoLevel, FlowControlError, FlowCredit, KeyUpdateEvent,
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
@@ -92,7 +97,7 @@ pub use quic_native::{
     StreamTable, StreamTableError, TransportError,
 };
 pub use resolve::{lookup_all, lookup_one};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub use stun::{IceCandidate, IceCandidateType, StunClient, StunError, StunMessageType};
 #[cfg(target_os = "windows")]
 pub use sys::windows::{NamedPipeClient, NamedPipeClientOptions};
@@ -117,18 +122,21 @@ pub use udp::{
     classify_udp_nat, validate_udp_rendezvous_candidates,
 };
 /// Linux-only UDP launch-time (`SO_TXTIME`) and error-queue types (GH #73).
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "full-platform", target_os = "linux"))]
 pub use udp::{
     UdpErrorOrigin, UdpErrorReport, UdpTxTimeClock, UdpTxTimeConfig, UdpTxTimeError,
     UdpTxTimeErrorKind,
 };
-#[cfg(unix)]
+#[cfg(all(feature = "full-runtime", unix))]
 pub use unix::{
     Incoming as UnixIncoming, OwnedReadHalf as UnixOwnedReadHalf,
     OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf,
     ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub use websocket::{
     ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Message, Opcode, Role as WsRole,
     ServerHandshake, ServerWebSocket, WebSocket, WebSocketAcceptor, WebSocketConfig, WebSocketRead,

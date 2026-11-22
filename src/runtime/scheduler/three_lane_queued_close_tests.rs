@@ -51,7 +51,7 @@ enum ObligationDrain {
     Completion,
 }
 
-type CompletionPost = Arc<parking_lot::Mutex<Option<(ObligationToken, ObligationTerminal)>>>;
+type CompletionPost = Arc<crate::sync::pl::Mutex<Option<(ObligationToken, ObligationTerminal)>>>;
 
 struct Fixture {
     state: Arc<ContendedMutex<RuntimeState>>,
@@ -652,7 +652,7 @@ fn native_async_finalizer_checked_permits_obey_quota_and_retirement() {
             let child_id = child.region_id();
             let semaphore = Arc::new(Semaphore::new(limit + 1));
             let cleanup_semaphore = Arc::clone(&semaphore);
-            let retained = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+            let retained = Arc::new(crate::sync::pl::Mutex::new(None::<Cx>));
             let cleanup_retained = Arc::clone(&retained);
             let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cleanup_started = Arc::clone(&started);
@@ -789,7 +789,7 @@ fn native_async_finalizer_handoff_preserves_identity_and_rejects_retired_destina
         let mut fixture = Fixture::new(layout);
         let child = fixture.open_child();
         let child_id = child.region_id();
-        let retained = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+        let retained = Arc::new(crate::sync::pl::Mutex::new(None::<Cx>));
         let cleanup_retained = Arc::clone(&retained);
         let received = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cleanup_received = Arc::clone(&received);

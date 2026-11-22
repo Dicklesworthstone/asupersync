@@ -57,14 +57,17 @@
 //! # fn main() {}
 //! ```
 
-use super::reactor::{Event, Events, Interest, LabReactor, Reactor, Source, Token};
+#[cfg(feature = "full-runtime")]
+use super::reactor::{Events, LabReactor};
+use super::reactor::{Event, Interest, Reactor, Source, Token};
+use crate::sync::pl::Mutex;
 use crate::types::Time;
-use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "full-runtime")]
 mod lab;
 
 #[cfg(test)]

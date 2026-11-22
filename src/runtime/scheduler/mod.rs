@@ -12,6 +12,7 @@ pub mod autotuner;
 pub mod content;
 #[cfg(test)]
 pub mod content_tests;
+#[cfg(feature = "full-runtime")]
 pub mod decision_contract;
 #[cfg(test)]
 pub mod edf_priority_metamorphic;

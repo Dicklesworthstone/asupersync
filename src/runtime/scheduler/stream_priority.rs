@@ -7,13 +7,15 @@
 use crate::runtime::scheduler::content::{ContentItem, PriorityClass};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 
 /// QUIC stream priority levels mapped from content priority classes.
 ///
 /// Higher values = higher priority in QUIC stream scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[repr(u8)]
 pub enum StreamPriority {
     /// Background/bulk data transfers

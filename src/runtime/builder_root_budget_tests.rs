@@ -298,7 +298,7 @@ fn shutdown_root_loop_keeps_charging_and_flushing_checkpoint_wakes() {
 #[test]
 fn ready_checkpoint_delivers_auxiliary_cancel_wakes_outside_the_context_lock() {
     struct Observer {
-        inner: Weak<parking_lot::RwLock<crate::types::CxInner>>,
+        inner: Weak<crate::sync::pl::RwLock<crate::types::CxInner>>,
         wakes: Arc<AtomicUsize>,
         unlocked: Arc<AtomicUsize>,
     }

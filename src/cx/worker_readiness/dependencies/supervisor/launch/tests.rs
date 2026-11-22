@@ -226,7 +226,7 @@ fn dropped_shutdown_wait_retains_the_same_pending_cleanup_and_report() {
     run_case(|cx| async move {
         let (release, gate) = oneshot::channel::<()>();
         let (parked, mut witness) = oneshot::channel();
-        let cleanup = Arc::new(parking_lot::Mutex::new(Some((gate, parked))));
+        let cleanup = Arc::new(crate::sync::pl::Mutex::new(Some((gate, parked))));
         let binding = InitializedChildBinding::new("cleanup", ManagedRestartMode::Temporary,
             |_, _| async { Outcome::<(), &'static str>::Ok(()) },
             move |worker, _: ManagedGeneration, ()| {

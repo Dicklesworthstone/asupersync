@@ -4,7 +4,6 @@
 //! consuming it, similar to [`std::iter::Peekable`].
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -13,11 +12,14 @@ use std::task::{Context, Poll};
 /// Created by [`StreamExt::peekable`](super::StreamExt::peekable).
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Peekable<S: Stream> {
-    #[pin]
     stream: S,
     peeked: PeekSlot<S::Item>,
+}
+
+struct PeekableProj<'a, S: Stream> {
+    stream: Pin<&'a mut S>,
+    peeked: &'a mut PeekSlot<S::Item>,
 }
 
 #[derive(Debug)]
@@ -28,6 +30,16 @@ enum PeekSlot<T> {
 }
 
 impl<S: Stream> Peekable<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> PeekableProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; `peeked` is not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        PeekableProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            peeked: &mut this.peeked,
+        }
+    }
+
     /// Creates a new `Peekable` stream.
     #[inline]
     pub(crate) fn new(stream: S) -> Self {

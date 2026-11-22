@@ -78,7 +78,7 @@
 //! its lock-protected atomicity to chase synthetic-benchmark
 //! throughput is a bad trade for the asupersync use-case.
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;

@@ -21,7 +21,7 @@
 use crate::cx::Cx;
 use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::trace::distributed::LogicalTime;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -760,7 +760,7 @@ impl Notify {
     /// This must be called with the waiters lock held.
     fn pass_baton(
         &self,
-        mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
+        mut waiters: crate::sync::pl::MutexGuard<'_, WaiterSlab>,
         mut publication: Option<Arc<NotifyPublication>>,
     ) {
         if let Some(waker) = waiters.take_next_active_waker(&mut publication) {
@@ -784,7 +784,7 @@ impl Notify {
     #[inline]
     fn pass_baton_after_broadcast(
         &self,
-        mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
+        mut waiters: crate::sync::pl::MutexGuard<'_, WaiterSlab>,
         store_if_absent: bool,
         mut publication: Option<Arc<NotifyPublication>>,
     ) {

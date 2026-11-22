@@ -27,14 +27,13 @@
 //! ```
 
 use crate::cx::Cx;
+use crate::sync::pl::Mutex;
 use crate::time::Sleep;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, Time};
 use crate::util::det_rng::DetRng;
 use core::fmt;
-use parking_lot::Mutex;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -880,22 +879,41 @@ impl<E, F: Fn(&E, u32) -> bool> RetryPredicate<E> for RetryIf<F> {
 }
 
 /// Internal state machine for the retry future.
-#[pin_project(project = RetryInnerProj)]
 enum RetryInner<F> {
     /// No operation in progress, ready to start next attempt.
     Idle,
     /// Polling the inner future.
-    Polling(#[pin] F),
+    Polling(F),
     /// Sleeping before the next attempt.
-    Sleeping(#[pin] Sleep),
+    Sleeping(Sleep),
     /// Finished executing.
     Completed,
+}
+
+enum RetryInnerProj<'a, F> {
+    Idle,
+    Polling(Pin<&'a mut F>),
+    Sleeping(Pin<&'a mut Sleep>),
+    Completed,
+}
+
+impl<F> RetryInner<F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> RetryInnerProj<'_, F> {
+        // SAFETY: `Polling(F)` and `Sleeping(Sleep)` payloads are structurally pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            Self::Idle => RetryInnerProj::Idle,
+            Self::Polling(fut) => RetryInnerProj::Polling(unsafe { Pin::new_unchecked(fut) }),
+            Self::Sleeping(sleep) => RetryInnerProj::Sleeping(unsafe { Pin::new_unchecked(sleep) }),
+            Self::Completed => RetryInnerProj::Completed,
+        }
+    }
 }
 
 /// A future that executes a retry loop.
 ///
 /// This struct is created by the [`retry`] function.
-#[pin_project]
 pub struct Retry<F, Fut, P, Pred> {
     factory: F,
     policy: P,
@@ -903,8 +921,35 @@ pub struct Retry<F, Fut, P, Pred> {
     state: RetryState,
     budget: Option<RetryBudget>,
     admitted: Option<AdmittedRetryToken>,
-    #[pin]
     inner: RetryInner<Fut>,
+}
+
+struct RetryProj<'a, F, Fut, P, Pred> {
+    factory: &'a mut F,
+    #[allow(dead_code)]
+    policy: &'a mut P,
+    predicate: &'a mut Pred,
+    state: &'a mut RetryState,
+    budget: &'a mut Option<RetryBudget>,
+    admitted: &'a mut Option<AdmittedRetryToken>,
+    inner: Pin<&'a mut RetryInner<Fut>>,
+}
+
+impl<F, Fut, P, Pred> Retry<F, Fut, P, Pred> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> RetryProj<'_, F, Fut, P, Pred> {
+        // SAFETY: `inner` is structurally pinned; all remaining fields are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        RetryProj {
+            factory: &mut this.factory,
+            policy: &mut this.policy,
+            predicate: &mut this.predicate,
+            state: &mut this.state,
+            budget: &mut this.budget,
+            admitted: &mut this.admitted,
+            inner: unsafe { Pin::new_unchecked(&mut this.inner) },
+        }
+    }
 }
 
 impl<F, Fut, P, Pred> Retry<F, Fut, P, Pred>

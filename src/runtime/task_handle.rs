@@ -7,7 +7,7 @@ use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::{CancelReason, CxInner, PanicPayload, TaskId};
-use parking_lot::{Mutex, RwLock};
+use crate::sync::pl::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -431,14 +431,35 @@ where
 // structure instead of adding an async witness, PollFn closure, and borrowed
 // pin at every nested spawn boundary. Pin projection needs no allocation and
 // also supports the non-Send futures accepted by local spawn APIs.
-#[pin_project::pin_project]
 pub(crate) struct SpawnCompletionObserver<F> {
-    #[pin]
     future: Option<F>,
     completion_cx: Cx,
     policy: SpawnCompletionPolicy,
     cancelled_before_first_poll: Option<bool>,
     cancellation_acknowledged: bool,
+}
+
+struct SpawnCompletionObserverProj<'a, F> {
+    future: std::pin::Pin<&'a mut Option<F>>,
+    completion_cx: &'a mut Cx,
+    policy: &'a mut SpawnCompletionPolicy,
+    cancelled_before_first_poll: &'a mut Option<bool>,
+    cancellation_acknowledged: &'a mut bool,
+}
+
+impl<F> SpawnCompletionObserver<F> {
+    #[allow(unsafe_code)]
+    fn project(self: std::pin::Pin<&mut Self>) -> SpawnCompletionObserverProj<'_, F> {
+        // SAFETY: `future` is structurally pinned; all remaining fields are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        SpawnCompletionObserverProj {
+            future: unsafe { std::pin::Pin::new_unchecked(&mut this.future) },
+            completion_cx: &mut this.completion_cx,
+            policy: &mut this.policy,
+            cancelled_before_first_poll: &mut this.cancelled_before_first_poll,
+            cancellation_acknowledged: &mut this.cancellation_acknowledged,
+        }
+    }
 }
 
 impl<F: std::future::Future> std::future::Future for SpawnCompletionObserver<F> {

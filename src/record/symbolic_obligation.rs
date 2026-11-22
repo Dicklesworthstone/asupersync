@@ -14,7 +14,7 @@
 
 use crate::util::DetHashMap;
 use core::fmt;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU32, AtomicU64, Ordering};

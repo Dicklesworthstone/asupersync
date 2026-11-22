@@ -38,7 +38,7 @@
 //! let fault_tx = FaultSender::new(tx, config, sink);
 //! ```
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
 
@@ -311,7 +311,7 @@ impl<T: Clone> FaultSender<T> {
         }
 
         struct AutoFlushGuard<'a, T> {
-            buffer: &'a parking_lot::Mutex<Vec<T>>,
+            buffer: &'a crate::sync::pl::Mutex<Vec<T>>,
             pending: std::collections::VecDeque<AutoFlushItem<T>>,
             current: Option<AutoFlushItem<T>>,
             /// Counter incremented by Drop with the number of items that
@@ -492,7 +492,7 @@ impl<T: Clone> FaultSender<T> {
     #[allow(clippy::significant_drop_tightening)]
     pub async fn flush(&self, cx: &Cx) -> Result<(), SendError<()>> {
         struct FlushGuard<'a, T> {
-            buffer: &'a parking_lot::Mutex<Vec<T>>,
+            buffer: &'a crate::sync::pl::Mutex<Vec<T>>,
             pending: Option<std::vec::IntoIter<T>>,
             current: Option<T>,
         }

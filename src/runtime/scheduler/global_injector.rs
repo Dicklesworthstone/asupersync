@@ -5,7 +5,7 @@
 
 use crate::types::{TaskId, Time};
 use crate::util::CachePadded;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
 use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

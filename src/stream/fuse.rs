@@ -1,20 +1,30 @@
 //! Fuse combinator.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`fuse`](super::StreamExt::fuse) method.
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Fuse<S> {
-    #[pin]
     stream: Option<S>,
 }
 
+struct FuseProj<'a, S> {
+    stream: Pin<&'a mut Option<S>>,
+}
+
 impl<S> Fuse<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> FuseProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        FuseProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {

@@ -6,7 +6,6 @@
 use super::Stream;
 use crate::time::Sleep;
 use crate::types::Time;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -40,10 +39,8 @@ const DEBOUNCE_READY_DRAIN_BUDGET: usize = 1024;
 /// [`Debounce::with_time_getter`]. The combinator still arms an internal
 /// [`Sleep`] so the executor gets a real wakeup when the quiet period expires,
 /// while readiness decisions continue to use the configured time getter.
-#[pin_project]
 #[must_use = "streams do nothing unless polled"]
 pub struct Debounce<S: Stream> {
-    #[pin]
     stream: S,
     period: Duration,
     /// The most recently received item and when it was received.
@@ -59,6 +56,15 @@ pub struct Debounce<S: Stream> {
     time_getter: fn() -> Time,
 }
 
+struct DebounceProj<'a, S: Stream> {
+    stream: Pin<&'a mut S>,
+    period: &'a mut Duration,
+    pending: &'a mut Option<(S::Item, Time)>,
+    done: &'a mut bool,
+    timer: &'a mut Option<Pin<Box<Sleep>>>,
+    time_getter: &'a mut fn() -> Time,
+}
+
 impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Debounce")
@@ -70,6 +76,20 @@ impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S> {
 }
 
 impl<S: Stream> Debounce<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> DebounceProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        DebounceProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            period: &mut this.period,
+            pending: &mut this.pending,
+            done: &mut this.done,
+            timer: &mut this.timer,
+            time_getter: &mut this.time_getter,
+        }
+    }
+
     /// Creates a new `Debounce` stream.
     #[inline]
     pub(crate) fn new(stream: S, period: Duration) -> Self {

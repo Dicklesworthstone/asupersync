@@ -9,7 +9,7 @@
     use super::*;
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
-    use parking_lot::{Mutex, RwLock};
+    use crate::sync::pl::{Mutex, RwLock};
     use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
 

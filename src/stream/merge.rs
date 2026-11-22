@@ -94,7 +94,7 @@ impl<S: Unpin> Unpin for Merge<S> {}
 #[derive(Debug, Default)]
 struct ChildWake {
     woken: AtomicBool,
-    task: parking_lot::Mutex<Option<Waker>>,
+    task: crate::sync::pl::Mutex<Option<Waker>>,
 }
 
 impl ChildWake {

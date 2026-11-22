@@ -63,23 +63,18 @@ use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// Refusal before a checked obligation token becomes observable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObligationAdmissionError {
     /// The runtime no longer accepts effects.
-    #[error("obligation runtime is unavailable")]
     RuntimeUnavailable,
     /// The region was closed or removed.
-    #[error("obligation region is closed")]
     RegionClosed,
     /// The original task generation no longer accepts new obligations.
-    #[error("obligation holder is no longer live")]
     HolderNotLive,
     /// The requested holder is not the task represented by the context.
-    #[error("obligation holder does not match the context")]
     HolderMismatch,
     /// Live direct and checked reservations exhausted the same region quota.
-    #[error("obligation limit {limit} reached with {live} live obligations")]
     LimitReached {
         /// Configured region quota.
         limit: usize,
@@ -87,42 +82,69 @@ pub enum ObligationAdmissionError {
         live: usize,
     },
     /// An identity or accounting counter cannot grow without wrapping.
-    #[error("obligation admission capacity exhausted")]
     CapacityExhausted,
 }
 
+impl std::fmt::Display for ObligationAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RuntimeUnavailable => f.write_str("obligation runtime is unavailable"),
+            Self::RegionClosed => f.write_str("obligation region is closed"),
+            Self::HolderNotLive => f.write_str("obligation holder is no longer live"),
+            Self::HolderMismatch => f.write_str("obligation holder does not match the context"),
+            Self::LimitReached { limit, live } => {
+                write!(f, "obligation limit {limit} reached with {live} live obligations")
+            }
+            Self::CapacityExhausted => f.write_str("obligation admission capacity exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for ObligationAdmissionError {}
+
 /// Why an explicit consuming handoff did not acquire destination ownership.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ObligationTransferError {
     /// Legacy tokens retain their original holder's liability.
-    #[error("only checked obligation tokens can be transferred")]
     SourceNotChecked,
     /// A terminal outcome already won the source credit.
-    #[error("source obligation is already resolved")]
     SourceResolved,
     /// Direct-ID settlement closed admission before choosing its terminal.
-    #[error("source obligation settlement has started")]
     SourceSettlementStarted,
     /// Completion revoked the source generation.
-    #[error("source obligation holder is no longer live")]
     SourceHolderNotLive,
     /// Either runtime gateway is unavailable.
-    #[error("obligation transfer runtime is unavailable")]
     RuntimeUnavailable,
     /// A handoff cannot cross runtime arenas.
-    #[error("obligation transfer requires the same runtime")]
     DifferentRuntime,
     /// Ownership already belongs to this holder.
-    #[error("obligation transfer requires a different holder")]
     SameHolder,
     /// The destination context has a cancellation request.
-    #[error("obligation transfer destination is cancelled")]
     DestinationCancelled,
     /// Destination admission refused before either credit changed.
-    #[error("obligation transfer destination refused admission: {0}")]
     Destination(ObligationAdmissionError),
 }
+
+impl std::fmt::Display for ObligationTransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceNotChecked => f.write_str("only checked obligation tokens can be transferred"),
+            Self::SourceResolved => f.write_str("source obligation is already resolved"),
+            Self::SourceSettlementStarted => f.write_str("source obligation settlement has started"),
+            Self::SourceHolderNotLive => f.write_str("source obligation holder is no longer live"),
+            Self::RuntimeUnavailable => f.write_str("obligation transfer runtime is unavailable"),
+            Self::DifferentRuntime => f.write_str("obligation transfer requires the same runtime"),
+            Self::SameHolder => f.write_str("obligation transfer requires a different holder"),
+            Self::DestinationCancelled => f.write_str("obligation transfer destination is cancelled"),
+            Self::Destination(err) => {
+                write!(f, "obligation transfer destination refused admission: {err}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ObligationTransferError {}
 
 /// A refused handoff retaining the original token for explicit recovery.
 /// Dropping the failure retains the token's ordinary unresolved-drop behavior.

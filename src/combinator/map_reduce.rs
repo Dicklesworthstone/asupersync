@@ -659,7 +659,7 @@ impl std::error::Error for ScopedMapReduceError {
 struct ExecutingMapSlot<T, E> {
     index: usize,
     handle: Option<TaskHandle<()>>,
-    returned: Arc<parking_lot::Mutex<Option<Outcome<T, E>>>>,
+    returned: Arc<crate::sync::pl::Mutex<Option<Outcome<T, E>>>>,
     value: Option<T>,
     drain_reason: Option<CancelReason>,
 }
@@ -1542,7 +1542,7 @@ where
                 break;
             }
             let mapper = Arc::clone(&map);
-            let returned = Arc::new(parking_lot::Mutex::new(None));
+            let returned = Arc::new(crate::sync::pl::Mutex::new(None));
             let child_returned = Arc::clone(&returned);
             // Moved into the future at spawn so it fires on every terminal
             // path, including cancellation before the first poll.

@@ -57,6 +57,7 @@ mod driver;
 mod elapsed;
 mod interval;
 pub mod intrusive_wheel;
+#[cfg(feature = "full-runtime")]
 pub mod replay;
 mod sleep;
 mod sleep_cx;

@@ -96,7 +96,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct Diagnostics {
     state: RuntimeStateSource,
-    spectral_monitor: parking_lot::Mutex<SpectralHealthMonitor>,
+    spectral_monitor: crate::sync::pl::Mutex<SpectralHealthMonitor>,
 }
 
 impl Diagnostics {
@@ -118,7 +118,7 @@ impl Diagnostics {
     pub(crate) fn from_source(state: RuntimeStateSource) -> Self {
         Self {
             state,
-            spectral_monitor: parking_lot::Mutex::new(SpectralHealthMonitor::new(
+            spectral_monitor: crate::sync::pl::Mutex::new(SpectralHealthMonitor::new(
                 SpectralThresholds::default(),
             )),
         }

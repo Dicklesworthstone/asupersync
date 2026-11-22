@@ -33,7 +33,7 @@ use super::{
     BlockingPool, BlockingPoolHandle, BlockingPoolInner, BlockingTask, BlockingTaskCompletion,
     BlockingTaskHandle, enqueue_task_locked, maybe_spawn_thread_on_inner,
 };
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;

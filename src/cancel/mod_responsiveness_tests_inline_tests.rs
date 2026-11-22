@@ -603,12 +603,12 @@
 
     struct ControlledIo {
         input: &'static [u8],
-        writes: Arc<parking_lot::Mutex<WriteState>>,
+        writes: Arc<crate::sync::pl::Mutex<WriteState>>,
     }
 
     impl ControlledIo {
-        fn new() -> (Self, Arc<parking_lot::Mutex<WriteState>>) {
-            let writes = Arc::new(parking_lot::Mutex::new(WriteState::default()));
+        fn new() -> (Self, Arc<crate::sync::pl::Mutex<WriteState>>) {
+            let writes = Arc::new(crate::sync::pl::Mutex::new(WriteState::default()));
             (
                 Self {
                     input: b"0123456789abcdef",
@@ -653,7 +653,7 @@
         }
     }
 
-    fn release_writes(state: &parking_lot::Mutex<WriteState>) {
+    fn release_writes(state: &crate::sync::pl::Mutex<WriteState>) {
         let waiter = {
             let mut state = state.lock();
             state.released = true;
@@ -668,7 +668,7 @@
         cx: &Cx,
         id: &str,
         mut copy: Pin<&mut F>,
-        writers: &[Arc<parking_lot::Mutex<WriteState>>],
+        writers: &[Arc<crate::sync::pl::Mutex<WriteState>>],
         expected_attempts: usize,
     ) {
         assert!(poll(copy.as_mut()).is_pending());

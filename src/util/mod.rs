@@ -8,7 +8,9 @@ pub mod cache;
 pub mod det_hash;
 pub mod det_rng;
 pub mod entropy;
+#[cfg(feature = "full-runtime")]
 pub mod entropy_replay;
+#[cfg(feature = "full-runtime")]
 pub mod path_security;
 pub mod pool;
 pub mod resource;
@@ -23,6 +25,7 @@ pub use entropy::{
     ThreadLocalEntropy, check_ambient_entropy, disable_strict_entropy, enable_strict_entropy,
     strict_entropy_enabled,
 };
+#[cfg(feature = "full-runtime")]
 pub use path_security::{PathSecurityError, SecurePath, ValidatedPath};
 pub use pool::{Pool, Recyclable, RecyclingPool};
 pub use resource::{

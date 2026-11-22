@@ -29,15 +29,44 @@
 //! assert!(merged.get(&node_b) == 1);
 //! ```
 
-use crate::remote::NodeId;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
+
+/// Identifier for a remote node in the cluster.
+///
+/// Nodes are opaque identifiers. The runtime does not interpret them beyond
+/// equality comparison and display. The transport layer maps `NodeId` to
+/// actual network addresses.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+pub struct NodeId(String);
+
+impl NodeId {
+    /// Creates a new node identifier from a string.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Returns the node identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Node({})", self.0)
+    }
+}
 
 /// Logical clock trait for causally ordering distributed events.
 ///
@@ -60,7 +89,8 @@ pub trait LogicalClock: Send + Sync {
 }
 
 /// Logical time for Lamport clocks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct LamportTime(u64);
 
 impl LamportTime {
@@ -171,7 +201,8 @@ impl LogicalClock for LamportClock {
 }
 
 /// Logical time for hybrid clocks (physical + logical).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct HybridTime {
     physical: Time,
     logical: u64,
@@ -375,8 +406,9 @@ impl LogicalClock for VectorClockHandle {
 }
 
 /// Logical time values for heterogeneous clock types.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum LogicalTime {
     /// Lamport clock time.
     Lamport(LamportTime),
@@ -585,7 +617,8 @@ impl TimeSource for TimerDriverSource {
 /// - `a ≤ b` iff `∀ node: a[node] ≤ b[node]`
 /// - `a < b` (happens-before) iff `a ≤ b` and `a ≠ b`
 /// - `a ∥ b` (concurrent) iff `¬(a ≤ b)` and `¬(b ≤ a)`
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct VectorClock {
     /// BTreeMap for deterministic iteration order.
     entries: BTreeMap<NodeId, u64>,

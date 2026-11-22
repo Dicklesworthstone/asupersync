@@ -106,6 +106,8 @@ mod notify_metamorphic;
 mod once_cell;
 #[cfg(test)]
 mod once_cell_metamorphic;
+#[doc(hidden)]
+pub mod pl;
 mod pool;
 #[cfg(test)]
 mod pool_metamorphic_tests;

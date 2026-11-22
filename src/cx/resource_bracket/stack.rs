@@ -21,7 +21,7 @@ use super::{
 };
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::{PanicPayload, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::any::Any;
 use std::fmt;
 use std::future::{Future, poll_fn};

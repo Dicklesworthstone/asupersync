@@ -68,11 +68,15 @@
 #![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
+use crate::sync::pl::Mutex;
+#[cfg(feature = "full-concurrency")]
 use hashbrown::HashMap;
+#[cfg(feature = "full-concurrency")]
 use hashbrown::hash_map::Entry;
-use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
 use std::collections::HashSet;
+#[cfg(not(feature = "full-concurrency"))]
+use std::collections::{HashMap, hash_map::Entry};
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;

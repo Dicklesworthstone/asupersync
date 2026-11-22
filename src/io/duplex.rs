@@ -16,7 +16,7 @@
 //!   fails with [`io::ErrorKind::BrokenPipe`].
 
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::pin::Pin;

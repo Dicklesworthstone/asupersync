@@ -417,7 +417,7 @@ fn native_foreign_owner_unmask_wakes_relative_and_absolute_sleeps() {
                 let reason = CancelReason::timeout()
                     .with_message("masked native sleep")
                     .with_cause(CancelReason::user("foreign owner cancelled"));
-                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
                 let (parked_tx, parked_rx) = mpsc::channel();
                 let (done_tx, done_rx) = mpsc::channel();
 

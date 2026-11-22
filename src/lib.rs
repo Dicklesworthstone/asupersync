@@ -63,10 +63,14 @@
 // Cargo.toml so they propagate to integration tests and benches (crate-level
 // inner attributes don't reach `tests/*.rs`).
 // Phase 0 complete: dead code denied to prevent regressions.
-// Downgraded to warn on Windows: several signal/process/io_uring items are
-// platform-gated and appear dead on non-Unix targets.
-#![cfg_attr(not(target_family = "windows"), deny(dead_code))]
+// Downgraded on Windows and reduced feature profiles (`not(feature = "full-runtime")`),
+// where platform- or optional-subsystem-gated callers of internal helpers are absent.
+#![cfg_attr(
+    all(not(target_family = "windows"), feature = "full-runtime"),
+    deny(dead_code)
+)]
 #![cfg_attr(target_family = "windows", warn(dead_code))]
+#![cfg_attr(not(feature = "full-runtime"), allow(dead_code))]
 // Proving `Send` for a spawned deep chain of `async fn`s walks one solver
 // frame per link; past the default depth of 128 rustc raises the
 // future-incompatible `recursion_depth_exceeding_limit` lint (an error under
@@ -178,23 +182,33 @@ compile_error!("feature `mysql` is unsupported on wasm32 browser preview builds.
 compile_error!("feature `kafka` is unsupported on wasm32 browser preview builds.");
 
 // ── Portable modules (no platform assumptions) ──────────────────────────
+#[cfg(feature = "full-runtime")]
 pub mod actor;
+#[cfg(feature = "full-runtime")]
 pub mod adapter_certification;
+#[cfg(feature = "full-runtime")]
 pub mod agent_swarm;
+#[cfg(feature = "full-runtime")]
 pub mod app;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod atp;
+#[cfg(feature = "full-runtime")]
 pub mod audit;
 pub mod bytes;
 pub mod cancel;
 pub mod channel;
+#[cfg(feature = "full-runtime")]
 pub mod codec;
 pub mod combinator;
+#[cfg(feature = "full-runtime")]
 pub mod config;
+#[cfg(feature = "full-runtime")]
 pub mod conformance;
+#[cfg(feature = "full-runtime")]
 pub use conformance::traceability;
 pub mod console;
 pub mod cx;
+#[cfg(feature = "full-runtime")]
 pub mod decoding;
 #[cfg(feature = "desktop-runtime-profile")]
 #[path = "runtime/desktop_profile.rs"]
@@ -202,27 +216,40 @@ pub mod desktop_profile;
 #[cfg(feature = "desktop-runtime-profile")]
 #[path = "runtime/desktop_samples.rs"]
 pub mod desktop_samples;
+#[cfg(feature = "full-runtime")]
 pub mod distributed;
+#[cfg(feature = "full-runtime")]
 pub mod encoding;
 pub mod epoch;
 pub mod error;
+#[cfg(feature = "full-runtime")]
 pub mod evidence;
+#[cfg(feature = "full-runtime")]
 pub mod evidence_sink;
+#[cfg(feature = "full-runtime")]
 pub mod gen_server;
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub mod http;
 pub mod io;
+#[cfg(feature = "full-runtime")]
 pub mod lab;
+#[cfg(feature = "full-runtime")]
 pub mod link;
+#[cfg(feature = "full-runtime")]
 pub mod migration;
 pub mod monitor;
 pub mod net;
 pub mod obligation;
 pub mod observability;
+#[cfg(feature = "full-runtime")]
 pub mod plan;
 pub mod prelude;
 pub mod raptorq;
 pub mod record;
+#[cfg(feature = "full-runtime")]
 pub mod remote;
 /// Async future utilities.
 ///
@@ -235,23 +262,32 @@ pub mod future {
     pub use crate::runtime::yield_now;
 }
 pub mod runtime;
+#[cfg(feature = "full-runtime")]
 pub mod security;
+#[cfg(feature = "full-runtime")]
 pub mod service;
+#[cfg(feature = "full-runtime")]
 pub mod session;
+#[cfg(feature = "full-runtime")]
 pub mod spork;
 pub mod stream;
+#[cfg(feature = "full-runtime")]
 pub mod supervision;
 pub mod sync;
 pub mod time;
 pub mod trace;
 pub mod tracing_compat;
+#[cfg(feature = "full-runtime")]
 pub mod transport;
 pub mod types;
 pub mod util;
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub mod web;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-runtime"))]
 #[path = "../tests/conformance/task_inspector_wire.rs"]
 mod task_inspector_wire_conformance;
 
@@ -262,6 +298,7 @@ pub mod cli;
 pub mod compression;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub mod database;
+#[cfg(feature = "full-runtime")]
 pub mod tls;
 
 // ── Platform-specific modules (excluded from wasm32 browser builds) ─────
@@ -269,12 +306,15 @@ pub mod tls;
 // socket2) that are unavailable on wasm32-unknown-unknown. Browser adapters
 // for the portable modules above are provided via platform trait seams
 // (see docs/wasm_platform_trait_seams.md).
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod fs;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub mod grpc;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod messaging;
 // Retain the established API for existing native feature selections, including
 // bare no-default-features consumers. Only the explicit slim profile opts out;
@@ -285,9 +325,12 @@ pub mod messaging;
 ))]
 pub mod process;
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg(all(
+    feature = "full-runtime",
+    any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+))]
 pub mod server;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod signal;
 
 // ── Test-only modules ───────────────────────────────────────────────────
@@ -429,16 +472,19 @@ pub mod web_protocol_conformance_tests;
 pub mod web_tls_codec_raptorq_metamorphic_tests;
 
 // Re-exports for convenient access to core types
+#[cfg(feature = "full-runtime")]
 pub use config::{
     AdaptiveConfig, BackoffConfig, ConfigError, ConfigLoader, EncodingConfig,
     PathSelectionStrategy, RaptorQConfig, ResourceConfig, RuntimeProfile, SecurityConfig,
     TimeoutConfig, TransportConfig,
 };
 pub use cx::{Cx, Scope};
+#[cfg(feature = "full-runtime")]
 pub use decoding::{
     DecodingConfig, DecodingError, DecodingPipeline, DecodingProgress, RejectReason,
     SymbolAcceptResult,
 };
+#[cfg(feature = "full-runtime")]
 pub use encoding::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats};
 pub use epoch::{
     BarrierResult, BarrierTrigger, Epoch, EpochBarrier, EpochBulkheadError,
@@ -452,7 +498,9 @@ pub use error::{
     AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,
     RecvError, Result, ResultExt, SendError,
 };
+#[cfg(feature = "full-runtime")]
 pub use lab::{LabConfig, LabRuntime};
+#[cfg(feature = "full-runtime")]
 pub use remote::{
     CancelRequest, CompensationResult, ComputationName,
     DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION, DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES,
@@ -468,7 +516,7 @@ pub use remote::{
     SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
     spawn_remote,
 };
-#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "full-runtime", feature = "tls", not(target_arch = "wasm32")))]
 pub use remote::{
     DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES,
     DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL, DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF,
@@ -480,13 +528,13 @@ pub use remote::{
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
     RemoteComputationServiceReport,
 };
-#[cfg(all(feature = "remote-service", unix))]
+#[cfg(all(feature = "full-runtime", feature = "remote-service", unix))]
 pub use remote::{
     REMOTE_SERVICE_CONFIG_SCHEMA_VERSION, REMOTE_SERVICE_PROTOCOL_LABEL,
     RemoteComputationServiceBootstrap, RemoteComputationServiceBootstrapError,
     RemoteComputationServiceIdentity, RemoteComputationServiceListenScope,
 };
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "full-runtime", feature = "tls"))]
 pub use remote::{
     RemoteComputationSession, RemoteComputationSessionStart, RemoteServiceSessionCommand,
     RemoteServiceSessionError, RemoteServiceSessionEvent, call_tls_computation_once,
@@ -494,15 +542,19 @@ pub use remote::{
 };
 pub use types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
-    CapabilityBudgetRefusal, CapabilityBudgetRequirements, DeserializationError, Deserializer,
-    NextjsBootstrapPhase, NextjsIntegrationSnapshot, NextjsNavigationType, NextjsRenderEnvironment,
-    ObligationId, Outcome, OutcomeError, PanicPayload, Policy, ProgressiveLoadSlot,
-    ProgressiveLoadSnapshot, ReactProviderConfig, ReactProviderPhase, ReactProviderState, RegionId,
-    RemainingBudget, SerdeCodec, SerializationError, SerializationFormat, Serializer, Severity,
-    SuspenseBoundaryState, SuspenseDiagnosticEvent, SuspenseTaskConfig, SuspenseTaskSnapshot,
-    SystemPressure, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TYPED_SYMBOL_VERSION, TaskId,
-    Time, TransitionTaskState, TypeDescriptor, TypeMismatchError, TypeRegistry, TypedDecoder,
-    TypedEncoder, TypedSymbol, WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION,
+    CapabilityBudgetRefusal, CapabilityBudgetRequirements, ObligationId, Outcome, OutcomeError,
+    PanicPayload, Policy, RegionId, RemainingBudget, Severity, SystemPressure, TaskId, Time,
+    join_outcomes,
+};
+#[cfg(feature = "full-runtime")]
+pub use types::{
+    DeserializationError, Deserializer, NextjsBootstrapPhase, NextjsIntegrationSnapshot,
+    NextjsNavigationType, NextjsRenderEnvironment, ProgressiveLoadSlot, ProgressiveLoadSnapshot,
+    ReactProviderConfig, ReactProviderPhase, ReactProviderState, SerdeCodec, SerializationError,
+    SerializationFormat, Serializer, SuspenseBoundaryState, SuspenseDiagnosticEvent,
+    SuspenseTaskConfig, SuspenseTaskSnapshot, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC,
+    TYPED_SYMBOL_VERSION, TransitionTaskState, TypeDescriptor, TypeMismatchError, TypeRegistry,
+    TypedDecoder, TypedEncoder, TypedSymbol, WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION,
     WASM_ABI_SIGNATURE_FINGERPRINT_V1, WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent,
     WasmAbiCancellation, WasmAbiChangeClass, WasmAbiCompatibilityDecision, WasmAbiErrorCode,
     WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiPayloadShape, WasmAbiRecoverability,
@@ -511,7 +563,7 @@ pub use types::{
     WasmBoundaryTransitionError, WasmExportDispatcher, WasmHandleKind, WasmHandleRef,
     WasmOutcomeExt, WasmTaskCancelRequest, WasmTaskSpawnBuilder, apply_abort_signal_event,
     apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
-    is_valid_bootstrap_transition, is_valid_wasm_boundary_transition, join_outcomes,
+    is_valid_bootstrap_transition, is_valid_wasm_boundary_transition,
     outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     required_wasm_abi_bump, validate_wasm_boundary_transition, wasm_abi_signature_fingerprint,
     wasm_boundary_state_for_cancel_phase,

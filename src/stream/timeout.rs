@@ -4,7 +4,6 @@ use super::Stream;
 use crate::cx::{CancelWakerToken, Cx, cap};
 use crate::time::{Elapsed, Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Time};
-use pin_project::pin_project;
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -87,15 +86,21 @@ impl std::error::Error for StreamTimeoutError {
 /// cannot roll back effects of prior source polls, unregister a waker retained
 /// by that source, or cancel and drain tasks independently owned by the source.
 /// No source or item `Send`, `Sync`, `Unpin`, `Clone`, or `'static` bound is added.
-#[pin_project]
 #[must_use = "streams do nothing unless polled"]
 pub struct Timeout<'cx, S, Caps = cap::All> {
-    #[pin]
     stream: S,
     cx: &'cx Cx<Caps>,
     duration: Duration,
     waiting: Option<Waiting<'cx, Caps>>,
     done: bool,
+}
+
+struct TimeoutProj<'a, 'cx, S, Caps> {
+    stream: Pin<&'a mut S>,
+    cx: &'a mut &'cx Cx<Caps>,
+    duration: &'a mut Duration,
+    waiting: &'a mut Option<Waiting<'cx, Caps>>,
+    done: &'a mut bool,
 }
 
 impl<S: fmt::Debug, Caps> fmt::Debug for Timeout<'_, S, Caps> {
@@ -110,6 +115,19 @@ impl<S: fmt::Debug, Caps> fmt::Debug for Timeout<'_, S, Caps> {
 }
 
 impl<'cx, S, Caps> Timeout<'cx, S, Caps> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> TimeoutProj<'_, 'cx, S, Caps> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        TimeoutProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            cx: &mut this.cx,
+            duration: &mut this.duration,
+            waiting: &mut this.waiting,
+            done: &mut this.done,
+        }
+    }
+
     pub(crate) fn new(stream: S, cx: &'cx Cx<Caps>, duration: Duration) -> Self {
         Self {
             stream,

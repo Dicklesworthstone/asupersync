@@ -3,7 +3,6 @@
 //! The `Fold` future consumes a stream and folds all items into a single value.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,18 +16,35 @@ const FOLD_COOPERATIVE_BUDGET: usize = 1024;
 /// A future that folds all items from a stream into a single value.
 ///
 /// Created by [`StreamExt::fold`](super::StreamExt::fold).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Fold<S, F, Acc> {
-    #[pin]
     stream: S,
     f: F,
     acc: Option<Acc>,
     completed: bool,
 }
 
+struct FoldProj<'a, S, F, Acc> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    acc: &'a mut Option<Acc>,
+    completed: &'a mut bool,
+}
+
 impl<S, F, Acc> Fold<S, F, Acc> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> FoldProj<'_, S, F, Acc> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        FoldProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            acc: &mut this.acc,
+            completed: &mut this.completed,
+        }
+    }
+
     /// Creates a new `Fold` future.
     #[inline]
     pub(crate) fn new(stream: S, init: Acc, f: F) -> Self {

@@ -168,7 +168,7 @@ async fn slot_lasts_through_descendant_and_finalizer(owner: Cx) {
     let seen = Arc::new(Witness::default());
     let pulled = Arc::new(AtomicUsize::new(0));
     let finalized = Arc::new(AtomicUsize::new(0));
-    let retained = Arc::new(parking_lot::Mutex::new(
+    let retained = Arc::new(crate::sync::pl::Mutex::new(
         Vec::<TaskHandle<CancelReason>>::new(),
     ));
     let (sender, mut receiver) = mpsc::channel(1);

@@ -3372,7 +3372,7 @@ pub mod backpressure_metamorphic {
     ) {
         let (sender, mut receiver) = channel::<u32>(capacity);
         let shared = Arc::clone(&sender.shared);
-        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let received_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
         let start_barrier = Arc::new(std::sync::Barrier::new(sender_count + 1));
 
         let recv_ref = Arc::clone(&received_messages);
@@ -3798,8 +3798,8 @@ pub mod backpressure_metamorphic {
                             let cx = crate::cx::Cx::for_testing();
                             let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
             let (sender, mut receiver) = channel::<u32>(config.capacity);
-            let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
-            let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let sent_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+            let received_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
             // Single sender to ensure clear ordering
             let sent_ref = Arc::clone(&sent_messages);
@@ -4204,7 +4204,7 @@ pub mod backpressure_metamorphic {
                             let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         // Path 1: reserve then send
                         let (sender1, mut receiver1) = channel::<u32>(config.capacity);
-                        let received1 = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                        let received1 = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
                         let recv1_ref = Arc::clone(&received1);
                         let recv1_cx = cx.clone();
@@ -4232,7 +4232,7 @@ pub mod backpressure_metamorphic {
 
                         // Path 2: direct send
                         let (sender2, mut receiver2) = channel::<u32>(config.capacity);
-                        let received2 = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                        let received2 = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
                         let recv2_ref = Arc::clone(&received2);
                         let recv2_cx = cx.clone();
@@ -4956,7 +4956,7 @@ pub mod backpressure_metamorphic {
     ) -> DrainTestResult {
         let (sender, mut receiver) = channel::<u32>(capacity);
         let shared = Arc::clone(&sender.shared);
-        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let received_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
         // Start receiver thread
         let recv_messages_ref = Arc::clone(&received_messages);
@@ -5183,8 +5183,8 @@ pub mod backpressure_metamorphic {
                             let cx = crate::cx::Cx::for_testing();
                             let test_res: Result<(), proptest::test_runner::TestCaseError> = async {
                         let (sender, mut receiver) = channel::<u32>(config.capacity);
-                        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
-                        let sent_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                        let received_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+                        let sent_messages = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
                         // MR1 + MR2: Capacity conservation + FIFO under mixed load
                         let recv_ref = Arc::clone(&received_messages);

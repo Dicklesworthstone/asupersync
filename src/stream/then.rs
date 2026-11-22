@@ -1,7 +1,6 @@
 //! Then (async map) combinator.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -9,17 +8,33 @@ use std::task::{Context, Poll};
 /// Stream for the [`then`](super::StreamExt::then) method.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Then<S, Fut, F> {
-    #[pin]
     stream: S,
     f: F,
-    #[pin]
     pending: Option<Fut>,
     done: bool,
 }
 
+struct ThenProj<'a, S, Fut, F> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    pending: Pin<&'a mut Option<Fut>>,
+    done: &'a mut bool,
+}
+
 impl<S, Fut, F> Then<S, Fut, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ThenProj<'_, S, Fut, F> {
+        // SAFETY: `stream` and `pending` are structurally pinned; `f` and `done` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ThenProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            pending: unsafe { Pin::new_unchecked(&mut this.pending) },
+            done: &mut this.done,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {

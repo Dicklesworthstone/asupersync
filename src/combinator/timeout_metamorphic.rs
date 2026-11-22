@@ -128,11 +128,11 @@ struct TestOperation {
     /// Whether this operation has been cancelled.
     cancelled: AtomicBool,
     /// Cancel reason if cancelled.
-    cancel_reason: parking_lot::Mutex<Option<CancelReason>>,
+    cancel_reason: crate::sync::pl::Mutex<Option<CancelReason>>,
     /// Global state for cross-operation tracking.
     global_state: Arc<GlobalTimeoutState>,
     /// Start time for duration tracking.
-    start_time: parking_lot::Mutex<Option<Time>>,
+    start_time: crate::sync::pl::Mutex<Option<Time>>,
     /// Optional elapsed-time threshold for an externally requested cancellation.
     external_cancel_after_ms: Option<u64>,
 }
@@ -144,9 +144,9 @@ impl TestOperation {
             duration_ms,
             polls_completed: AtomicU32::new(0),
             cancelled: AtomicBool::new(false),
-            cancel_reason: parking_lot::Mutex::new(None),
+            cancel_reason: crate::sync::pl::Mutex::new(None),
             global_state,
-            start_time: parking_lot::Mutex::new(None),
+            start_time: crate::sync::pl::Mutex::new(None),
             external_cancel_after_ms: None,
         }
     }

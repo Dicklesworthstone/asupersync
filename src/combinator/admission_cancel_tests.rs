@@ -285,7 +285,7 @@ fn native_unmask_wakes_saturated_admission_without_capacity_or_clock_progress() 
                 let reason = CancelReason::timeout()
                     .with_message("native admission mask exited")
                     .with_cause(CancelReason::user("upstream cancelled"));
-                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
                 let (parked_tx, parked_rx) = mpsc::channel();
                 let (done_tx, done_rx) = mpsc::channel();
 

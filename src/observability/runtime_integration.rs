@@ -12,7 +12,7 @@ use crate::observability::cancellation_tracer::{
 };
 use crate::record::region::RegionState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 

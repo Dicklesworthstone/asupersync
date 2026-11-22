@@ -57,8 +57,10 @@
 //! ```
 
 pub mod calm;
+#[cfg(feature = "full-runtime")]
 pub mod choreography;
 pub mod conformance_runner;
+#[cfg(feature = "full-runtime")]
 pub mod crdt;
 pub mod dialectica;
 pub mod eprocess;
@@ -73,7 +75,9 @@ pub mod marking;
 pub mod metamorphic_tests;
 pub mod no_aliasing_proof;
 pub mod no_leak_proof;
+#[cfg(feature = "full-runtime")]
 pub mod recovery;
+#[cfg(feature = "full-runtime")]
 pub mod saga;
 pub mod separation_logic;
 pub mod session_types;

@@ -10,7 +10,7 @@ use crate::runtime::JoinError;
 use crate::runtime::state::SpawnAdmission;
 use crate::time::TimerDriverHandle;
 use crate::types::{Budget, CancelReason, RegionId, Time};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;

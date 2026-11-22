@@ -19,7 +19,7 @@ mod iocp_impl {
     #![allow(unsafe_code)]
 
     use super::{Event, Events, Interest, Reactor, Source, Token};
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use polling::{Event as PollEvent, Events as PollEvents, Poller};
     use std::collections::HashMap;
     use std::io;

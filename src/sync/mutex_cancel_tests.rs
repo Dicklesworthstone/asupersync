@@ -369,7 +369,7 @@ fn native_foreign_owner_unmask_wakes_locks_without_releasing_the_holder() {
                     .with_cause(CancelReason::user("native masked mutex owner"));
                 let mutex = Arc::new(Mutex::new(29));
                 let held = mutex.try_lock().unwrap();
-                let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+                let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
                 let (parked_tx, parked_rx) = mpsc::channel();
                 let (done_tx, done_rx) = mpsc::channel();
 

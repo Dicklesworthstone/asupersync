@@ -164,19 +164,19 @@ struct ChildRegionAdmission {
     priority: RegionPriority,
 }
 
-#[pin_project::pin_project]
 pub(crate) struct CatchUnwind<F> {
-    #[pin]
     pub(crate) inner: F,
 }
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
 
+    #[allow(unsafe_code)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
+        // SAFETY: `inner` is structurally pinned and never moved out.
+        let mut inner = unsafe { self.map_unchecked_mut(|this| &mut this.inner) };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            this.inner.as_mut().poll(cx)
+            inner.as_mut().poll(cx)
         }));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
@@ -230,7 +230,7 @@ impl<Fut> Drop for RegionRunner<'_, Fut> {
 }
 
 struct RegionCloseFuture {
-    state: Arc<parking_lot::Mutex<crate::record::region::RegionCloseState>>,
+    state: Arc<crate::sync::pl::Mutex<crate::record::region::RegionCloseState>>,
 }
 
 impl Future for RegionCloseFuture {
@@ -1559,9 +1559,12 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         // Batch parent handle retrieval to reduce method call overhead
         let io_cap = parent_cx.io_cap_handle();
         let registry = parent_cx.registry_handle();
+        #[cfg(feature = "full-runtime")]
         let remote_cap = parent_cx.remote_cap_handle();
         let blocking_pool = parent_cx.blocking_pool_handle_for_inheritance();
+        #[cfg(feature = "full-runtime")]
         let evidence_sink = parent_cx.evidence_sink_handle();
+        #[cfg(feature = "full-runtime")]
         let macaroon = parent_cx.macaroon_handle();
         // A parent without a pressure handle passes on the runtime's while
         // resource sampling runs (asupersync-1ir2em).
@@ -1570,6 +1573,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             .or_else(|| state.task_pressure());
 
         // Build context with cached handles - minimizes Arc clone operations
+        #[allow(unused_mut)]
         let mut child_cx = Cx::<Caps>::new_with_drivers(
             self.region,
             task_id,
@@ -1583,11 +1587,18 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         .with_logical_clock(logical_clock)
         .with_task_causality_runtime(state.task_causality_runtime())
         .with_registry_handle(registry)
-        .with_remote_cap_handle(remote_cap)
-        .with_blocking_pool_handle(blocking_pool)
-        .with_evidence_sink(evidence_sink)
-        .with_macaroon_handle(macaroon);
-        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+        .with_blocking_pool_handle(blocking_pool);
+        #[cfg(feature = "full-runtime")]
+        {
+            child_cx = child_cx
+                .with_remote_cap_handle(remote_cap)
+                .with_evidence_sink(evidence_sink)
+                .with_macaroon_handle(macaroon);
+        }
+        #[cfg(all(
+            feature = "full-runtime",
+            any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+        ))]
         {
             child_cx = child_cx.with_default_http_client_slot_from(parent_cx);
         }

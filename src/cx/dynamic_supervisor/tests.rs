@@ -235,9 +235,9 @@ fn dropping_an_owner_keeps_children_under_the_enclosing_region_barrier() {
 fn next_completed_reports_a_quarantined_child_once_then_moves_on() {
     let mut lab = LabRuntime::new(LabConfig::new(0xd1_0002).max_steps(16384));
     let root = lab.state.create_root_region(Budget::INFINITE);
-    let opened = Arc::new(parking_lot::Mutex::new(None));
+    let opened = Arc::new(crate::sync::pl::Mutex::new(None));
     let opened_slot = Arc::clone(&opened);
-    let observed = Arc::new(parking_lot::Mutex::new(None));
+    let observed = Arc::new(crate::sync::pl::Mutex::new(None));
     let observed_slot = Arc::clone(&observed);
     let (release, mut released) = crate::channel::oneshot::channel::<()>();
     let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async move {
@@ -289,9 +289,9 @@ fn next_completed_reports_a_quarantined_child_once_then_moves_on() {
 fn a_quarantined_child_reported_by_wait_child_is_not_reported_again() {
     let mut lab = LabRuntime::new(LabConfig::new(0xd1_0003).max_steps(16384));
     let root = lab.state.create_root_region(Budget::INFINITE);
-    let opened = Arc::new(parking_lot::Mutex::new(None));
+    let opened = Arc::new(crate::sync::pl::Mutex::new(None));
     let opened_slot = Arc::clone(&opened);
-    let observed = Arc::new(parking_lot::Mutex::new(None));
+    let observed = Arc::new(crate::sync::pl::Mutex::new(None));
     let observed_slot = Arc::clone(&observed);
     let (release, mut released) = crate::channel::oneshot::channel::<()>();
     let (task, mut join) = lab

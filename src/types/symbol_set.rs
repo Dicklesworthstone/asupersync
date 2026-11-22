@@ -5,7 +5,7 @@
 
 use crate::types::{Symbol, SymbolId, SymbolKind};
 use crate::util::DetHashMap;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 
 /// Estimated overhead per symbol for bookkeeping.
 const SYMBOL_OVERHEAD_BYTES: usize = 32;

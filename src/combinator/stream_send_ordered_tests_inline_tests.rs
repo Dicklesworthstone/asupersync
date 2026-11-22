@@ -191,7 +191,7 @@
         let at_return = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&at_return);
         let observed_cleaned = Arc::clone(&cleaned);
-        let handles = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let handles = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
         let retained = Arc::clone(&handles);
         let prepared = Arc::new(AtomicUsize::new(0));
         let mapped = Arc::clone(&prepared);

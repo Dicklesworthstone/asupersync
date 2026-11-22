@@ -21,7 +21,7 @@ use super::MessageCausality;
 use super::cancel_registration::CancelRegistration;
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;

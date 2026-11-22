@@ -163,7 +163,7 @@ use crate::cx::cx::LazyCurrentCx;
 use crate::runtime::JoinError;
 use crate::types::outcome::PanicPayload;
 use crate::types::{CancelKind, CancelReason};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};

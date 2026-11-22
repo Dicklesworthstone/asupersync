@@ -15,7 +15,7 @@ use crate::net::udp::ReactorRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use crate::types::Time;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::Future;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};

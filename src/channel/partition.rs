@@ -36,7 +36,7 @@ use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
 use crate::evidence_sink::EvidenceSink;
 use franken_evidence::EvidenceLedger;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 
 // ---------------------------------------------------------------------------
 // ActorId

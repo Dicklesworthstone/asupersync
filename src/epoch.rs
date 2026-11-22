@@ -16,7 +16,7 @@ use crate::observability::LogEntry;
 use crate::time::TimeSource;
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;

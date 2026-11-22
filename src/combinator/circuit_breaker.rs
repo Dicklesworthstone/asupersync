@@ -42,7 +42,7 @@
 //! }
 //! ```
 
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;

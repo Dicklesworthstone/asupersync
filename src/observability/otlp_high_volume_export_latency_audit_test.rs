@@ -29,7 +29,7 @@ mod tests {
         test_duration_secs: u64,
         batch_size: usize,
         start_barrier: Arc<Barrier>,
-        latency_measurements: Arc<parking_lot::Mutex<Vec<Duration>>>,
+        latency_measurements: Arc<crate::sync::pl::Mutex<Vec<Duration>>>,
     }
 
     impl ExportLatencyProfiler {
@@ -45,7 +45,7 @@ mod tests {
                 test_duration_secs,
                 batch_size,
                 start_barrier: Arc::new(Barrier::new(thread_count)),
-                latency_measurements: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                latency_measurements: Arc::new(crate::sync::pl::Mutex::new(Vec::new())),
             }
         }
 

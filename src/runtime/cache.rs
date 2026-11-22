@@ -10,6 +10,7 @@
 //! - NUMA-topology-independent pressure calculations
 //! - Deterministic cache behavior for reproducible lab runs
 
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -29,7 +30,8 @@ fn stable_artifact_id_hash(id: &str) -> u64 {
 ///
 /// Captures cache state at a specific point in time to enable reproducible
 /// memory pressure calculations across different host configurations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ArtifactMemoryPressureSnapshot {
     /// Total bytes currently cached in memory.
     pub resident_bytes: u64,
@@ -101,7 +103,8 @@ impl ArtifactMemoryPressureSnapshot {
 }
 
 /// Configuration for the artifact cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ArtifactCacheConfig {
     /// Maximum memory budget for cached artifacts.
     pub max_cache_size_bytes: u64,
@@ -131,7 +134,8 @@ impl Default for ArtifactCacheConfig {
 }
 
 /// Cache eviction policies for artifact management.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum EvictionPolicy {
     /// Least Recently Used with TTL expiration.
     LruWithTtl,
@@ -144,7 +148,8 @@ pub enum EvictionPolicy {
 }
 
 /// Metadata for a cached artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ArtifactMetadata {
     /// Unique identifier for the artifact.
     pub id: String,
@@ -165,7 +170,8 @@ pub struct ArtifactMetadata {
 }
 
 /// Statistics for cache performance monitoring.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CacheStatistics {
     /// Total cache hits since creation.
     pub total_hits: u64,

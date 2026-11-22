@@ -5773,7 +5773,7 @@ mod tests {
 
         println!();
         println!("🛡️  SYNCHRONIZATION VERIFICATION:");
-        println!("  - parking_lot::Mutex provides mutual exclusion ✅");
+        println!("  - crate::sync::pl::Mutex provides mutual exclusion ✅");
         println!("  - Receiver::drop() sets receiver_dropped under lock ✅");
         println!("  - SendPermit::send() checks receiver_dropped under lock ✅");
         println!("  - Lock acquisition serializes conflicting operations ✅");
@@ -6006,7 +6006,7 @@ mod tests {
 
         println!();
         println!("🛡️  SYNCHRONIZATION CORRECTNESS:");
-        println!("  - parking_lot::Mutex mutual exclusion ✅");
+        println!("  - crate::sync::pl::Mutex mutual exclusion ✅");
         println!("  - receiver_dropped flag atomically protected ✅");
         println!("  - No window for silent success under proper locking ✅");
 
@@ -6282,7 +6282,7 @@ mod tests {
         println!();
         println!("🛡️  SYNCHRONIZATION ANALYSIS:");
         println!("  - Both try_recv() and RecvFuture use same inner.value field ✅");
-        println!("  - inner.value.take() is atomic under parking_lot::Mutex ✅");
+        println!("  - inner.value.take() is atomic under crate::sync::pl::Mutex ✅");
         println!("  - Unpopulated future state doesn't interfere ✅");
         println!("  - No waker registration conflicts ✅");
 
@@ -6660,7 +6660,7 @@ mod tests {
         println!("🔬 Phase 4: Implementation Structure Analysis");
         println!("  - Sender<T> contains Arc<Mutex<OneShotInner<T>>>");
         println!("  - Arc<T>: Send + Sync when T: Send + Sync");
-        println!("  - parking_lot::Mutex<T>: Send + Sync when T: Send");
+        println!("  - crate::sync::pl::Mutex<T>: Send + Sync when T: Send");
         println!("  - OneShotInner<T> contains Option<Waker>");
         println!("  - Waker: Send + !Sync");
         println!("  - Therefore: OneShotInner<T>: Send when T: Send, but always !Sync");

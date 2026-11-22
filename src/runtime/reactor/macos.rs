@@ -72,7 +72,7 @@
 ))]
 mod kqueue_impl {
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use std::collections::HashMap;
     use std::io;
     use std::os::fd::RawFd;

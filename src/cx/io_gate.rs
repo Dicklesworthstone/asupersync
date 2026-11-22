@@ -153,12 +153,27 @@ impl<Caps: CapSetRuntimeMask> Cx<Caps> {
 }
 
 /// Future returned by [`Cx::with_ambient`] and [`Cx::with_ambient_fn`].
-#[pin_project::pin_project(PinnedDrop)]
 #[must_use = "futures do nothing unless polled"]
 pub struct WithAmbient<Caps, F> {
     cx: Cx<Caps>,
-    #[pin]
     future: Option<F>,
+}
+
+struct WithAmbientProj<'a, Caps, F> {
+    cx: &'a mut Cx<Caps>,
+    future: Pin<&'a mut Option<F>>,
+}
+
+impl<Caps, F> WithAmbient<Caps, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> WithAmbientProj<'_, Caps, F> {
+        // SAFETY: `future` is structurally pinned; `cx` is `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        WithAmbientProj {
+            cx: &mut this.cx,
+            future: unsafe { Pin::new_unchecked(&mut this.future) },
+        }
+    }
 }
 
 impl<Caps, F> std::fmt::Debug for WithAmbient<Caps, F> {
@@ -180,10 +195,11 @@ impl<Caps: CapSetRuntimeMask, F: Future> Future for WithAmbient<Caps, F> {
     }
 }
 
-#[pin_project::pinned_drop]
-impl<Caps, F> PinnedDrop for WithAmbient<Caps, F> {
-    fn drop(self: Pin<&mut Self>) {
-        let mut this = self.project();
+impl<Caps, F> Drop for WithAmbient<Caps, F> {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `WithAmbient` is either dropped in place while pinned or before being pinned.
+        let mut this = unsafe { Pin::new_unchecked(self) }.project();
         // with_ambient already intersected the static capability row into this
         // mask, so erasing the marker cannot restore authority during cleanup.
         let _ambient = this.cx.retype::<crate::cx::cap::All>().set_current_restricted();

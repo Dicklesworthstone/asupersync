@@ -36,7 +36,7 @@
 //! // skewed.now() returns base_clock.now() + 50ms
 //! ```
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
 

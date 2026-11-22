@@ -104,7 +104,7 @@ async fn busy_closure(cx: Cx, ordered: bool, owner_cancel: bool, panic_cleanup: 
     let child_cleaned = Arc::clone(&cleaned);
     let prepared = Arc::new(AtomicUsize::new(0));
     let child_prepared = Arc::clone(&prepared);
-    let handles = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let handles = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
     let child_handles = Arc::clone(&handles);
     let at_return = Arc::new(AtomicUsize::new(0));
     let recorded = Arc::clone(&at_return);
@@ -261,8 +261,8 @@ fn closure_during_region_mint_is_observed_before_source_admission() {
 
 /// A queue source whose items can become ready while the producer is parked.
 struct QueueSource {
-    queue: Arc<parking_lot::Mutex<std::collections::VecDeque<usize>>>,
-    waker: Arc<parking_lot::Mutex<Option<Waker>>>,
+    queue: Arc<crate::sync::pl::Mutex<std::collections::VecDeque<usize>>>,
+    waker: Arc<crate::sync::pl::Mutex<Option<Waker>>>,
     reads: Arc<AtomicUsize>,
 }
 
@@ -288,8 +288,8 @@ impl Stream for QueueSource {
 fn an_item_ready_when_the_receiver_closes_stays_in_the_source() {
     for ordered in [false, true] {
         let ((), report) = run_async_under_lab(0x5805, move |cx| async move {
-            let queue = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
-            let waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+            let queue = Arc::new(crate::sync::pl::Mutex::new(std::collections::VecDeque::new()));
+            let waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
             let reads = Arc::new(AtomicUsize::new(0));
             let mapped = Arc::new(AtomicUsize::new(0));
             let source = QueueSource {

@@ -19,27 +19,36 @@ use crate::runtime::reactor::Interest;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::reactor::create_reactor;
 use crate::stream::Stream;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 use smallvec::SmallVec;
 use std::io;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 use std::os::fd::AsRawFd;
 use std::pin::Pin;
@@ -49,9 +58,9 @@ use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 /// Linux launch-time sends and error-queue reads (GH #73).
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "full-platform", target_os = "linux"))]
 mod txtime;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "full-platform", target_os = "linux"))]
 pub use txtime::{
     UdpErrorOrigin, UdpErrorReport, UdpTxTimeClock, UdpTxTimeConfig, UdpTxTimeError,
     UdpTxTimeErrorKind,
@@ -1138,7 +1147,7 @@ fn div_ceil_usize(value: usize, divisor: usize) -> usize {
     value.div_ceil(divisor.max(1))
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "android")))]
 #[derive(Debug)]
 struct UdpGsoSuperPacket {
     dst_addr: SocketAddr,
@@ -1147,7 +1156,7 @@ struct UdpGsoSuperPacket {
     buffer: Vec<u8>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "android")))]
 impl UdpGsoSuperPacket {
     fn from_packets(packets: &[UdpOutboundDatagram<'_>]) -> Self {
         let first = packets
@@ -1186,11 +1195,14 @@ impl UdpGsoSuperPacket {
     }
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 fn native_sendmmsg_addrs_for_packets(
     packets: &[UdpOutboundDatagram<'_>],
@@ -1206,27 +1218,36 @@ fn native_sendmmsg_addrs_for_packets(
     }
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 type NativeSendmmsgAddrList = SmallVec<[Option<NativeSendmmsgAddr>; UDP_MAX_GSO_SEGMENTS]>;
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "netbsd"
+#[cfg(all(
+    feature = "full-platform",
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
 ))]
 fn native_sendmmsg_none_addrs(len: usize) -> NativeSendmmsgAddrList {
     std::iter::repeat_with(|| None).take(len).collect()
@@ -1234,17 +1255,19 @@ fn native_sendmmsg_none_addrs(len: usize) -> NativeSendmmsgAddrList {
 
 #[cfg(not(target_arch = "wasm32"))]
 // `Sent` and `WouldBlock` are only constructed on targets with a native
-// sendmmsg/GSO batch path; on other Unix targets (e.g. macOS) the batch send
-// falls back to `Unavailable`, so those variants are unconstructed there.
-// Without this the crate-level `deny(dead_code)` (non-Windows) turns that into
-// a hard error and breaks the apple-darwin build. Matches the existing
-// `cfg_attr(target_arch = "wasm32", allow(dead_code))` precedent in this file.
+// sendmmsg/GSO batch path; on other Unix targets (e.g. macOS) or when `nix`
+// is disabled, the batch send falls back to `Unavailable`, so those variants
+// are unconstructed there. Without this the crate-level `deny(dead_code)`
+// (non-Windows) turns that into a hard error.
 #[cfg_attr(
-    not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd",
-        target_os = "netbsd"
+    not(all(
+        feature = "full-platform",
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        )
     )),
     allow(dead_code)
 )]
@@ -1257,6 +1280,7 @@ enum NativeSendBatchAttempt {
 
 #[cfg(all(
     not(target_arch = "wasm32"),
+    feature = "full-platform",
     any(
         target_os = "linux",
         target_os = "android",
@@ -1279,6 +1303,7 @@ fn native_send_error_would_block(error: nix::errno::Errno) -> bool {
 /// falls back for that send only and GSO stays enabled.
 #[cfg(all(
     not(target_arch = "wasm32"),
+    feature = "full-platform",
     any(target_os = "linux", target_os = "android")
 ))]
 #[inline]
@@ -1294,7 +1319,7 @@ fn gso_send_error_disables_gso(error: nix::errno::Errno) -> bool {
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "android")))]
 fn native_sendmmsg_addrs_for_gso_packets(
     packets: &[UdpGsoSuperPacket],
     connected_peer: Option<SocketAddr>,
@@ -1458,7 +1483,7 @@ fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, buf: Vec
 /// association first.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn udp_already_connected(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(nix::errno::Errno::EISCONN as i32)
+    err.raw_os_error() == Some(libc::EISCONN)
 }
 
 /// Windows replaces the peer of a connected UDP socket directly; there is no
@@ -1583,7 +1608,7 @@ struct FallbackIoStarter {
     /// syscall is missing): no later start can succeed, so callers return
     /// `None` without taking the lock or counting.
     unsupported: crate::sync::atomic::AtomicBool,
-    state: parking_lot::Mutex<FallbackIoStart>,
+    state: crate::sync::pl::Mutex<FallbackIoStart>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1591,7 +1616,7 @@ impl FallbackIoStarter {
     const fn new() -> Self {
         Self {
             unsupported: crate::sync::atomic::AtomicBool::new(false),
-            state: parking_lot::Mutex::new(FallbackIoStart {
+            state: crate::sync::pl::Mutex::new(FallbackIoStart {
                 failures: 0,
                 calls_since_failure: 0,
             }),
@@ -1845,7 +1870,7 @@ pub struct ReactorRegistration {
 struct SharedWaiters {
     /// One entry per waiting call future, keyed by its owner id
     /// ([`next_shared_waiter_owner`]).
-    waiters: parking_lot::Mutex<Vec<SharedWaiter>>,
+    waiters: crate::sync::pl::Mutex<Vec<SharedWaiter>>,
 }
 
 #[cfg(unix)]
@@ -2461,10 +2486,10 @@ pub struct UdpSocket {
     inner: Arc<StdUdpSocket>,
     gso_demoted: bool,
     /// `SO_TXTIME` set through this handle: plain sends are refused (GH #73).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "full-platform", target_os = "linux"))]
     txtime: Option<UdpTxTimeConfig>,
     /// `IP_RECVERR` / `IPV6_RECVERR` set through this handle.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(feature = "full-platform", target_os = "linux"))]
     recverr: crate::sync::atomic::AtomicBool,
 }
 
@@ -2502,9 +2527,9 @@ impl UdpSocket {
                             inner: Arc::new(socket),
                             registration: ReactorRegistration::new(),
                             gso_demoted: false,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(all(feature = "full-platform", target_os = "linux"))]
                             txtime: None,
-                            #[cfg(target_os = "linux")]
+                            #[cfg(all(feature = "full-platform", target_os = "linux"))]
                             recverr: crate::sync::atomic::AtomicBool::new(false),
                         });
                     }
@@ -3342,6 +3367,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(
             target_os = "linux",
             target_os = "android",
@@ -3405,6 +3431,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(
             target_os = "linux",
             target_os = "android",
@@ -3467,6 +3494,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(target_os = "linux", target_os = "android")
     ))]
     fn try_send_gso_batch_to_native(
@@ -3564,6 +3592,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(target_os = "linux", target_os = "android")
     ))]
     fn try_send_connected_gso_batch_to_native(
@@ -3661,6 +3690,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(
             target_os = "linux",
             target_os = "android",
@@ -3731,6 +3761,7 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        feature = "full-platform",
         any(
             target_os = "linux",
             target_os = "android",
@@ -3800,11 +3831,14 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
-        not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd",
-            target_os = "netbsd"
+        not(all(
+            feature = "full-platform",
+            any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "freebsd",
+                target_os = "netbsd"
+            )
         ))
     ))]
     fn try_send_batch_to_native(
@@ -3819,11 +3853,14 @@ impl UdpSocket {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
-        not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd",
-            target_os = "netbsd"
+        not(all(
+            feature = "full-platform",
+            any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "freebsd",
+                target_os = "netbsd"
+            )
         ))
     ))]
     fn try_send_connected_batch_to_native(
@@ -4001,9 +4038,9 @@ impl UdpSocket {
             inner: Arc::new(self.inner.try_clone()?),
             registration: ReactorRegistration::new(),
             gso_demoted: self.gso_demoted,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(feature = "full-platform", target_os = "linux"))]
             txtime: self.txtime,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(feature = "full-platform", target_os = "linux"))]
             recverr: crate::sync::atomic::AtomicBool::new(
                 self.recverr.load(crate::sync::atomic::Ordering::Relaxed),
             ),
@@ -4048,9 +4085,9 @@ impl UdpSocket {
                 inner: Arc::new(socket),
                 registration: ReactorRegistration::new(),
                 gso_demoted: false,
-                #[cfg(target_os = "linux")]
+                #[cfg(all(feature = "full-platform", target_os = "linux"))]
                 txtime: None,
-                #[cfg(target_os = "linux")]
+                #[cfg(all(feature = "full-platform", target_os = "linux"))]
                 recverr: crate::sync::atomic::AtomicBool::new(false),
             })
         }
@@ -4068,11 +4105,11 @@ impl UdpSocket {
     #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     #[cfg_attr(
-        not(target_os = "linux"),
+        not(all(feature = "full-platform", target_os = "linux")),
         allow(clippy::unused_self, clippy::unnecessary_wraps)
     )]
     fn ensure_plain_send_allowed(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(feature = "full-platform", target_os = "linux"))]
         if self.txtime.is_some() {
             return Err(txtime::plain_send_refused());
         }

@@ -15,12 +15,14 @@ use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::linalg::{
     CoefficientRankBasis, GaussianRankProfile, coefficient_rank_profile_rows,
 };
+#[cfg(feature = "full-runtime")]
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
 };
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicParams};
+#[cfg(feature = "full-runtime")]
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
@@ -360,6 +362,7 @@ pub struct DecodeStats {
     /// Replay pointer for policy-decision forensics.
     pub policy_replay_ref: Option<&'static str>,
     /// Concrete G7 governance output for this decoder policy decision.
+    #[cfg(feature = "full-runtime")]
     pub governance: Option<decision_contract::GovernanceTelemetry>,
     /// Policy feature: matrix density in permille.
     pub policy_density_permille: usize,
@@ -430,6 +433,7 @@ pub struct RankStatus {
 }
 
 /// Result of decoding with proof artifact.
+#[cfg(feature = "full-runtime")]
 #[derive(Debug)]
 pub struct DecodeResultWithProof {
     /// The decode result (success case).
@@ -937,6 +941,7 @@ fn sparse_first_dense_columns(
     ordered.into_iter().map(|(col, _)| col).collect()
 }
 
+#[cfg(feature = "full-runtime")]
 fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
     match err {
         DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
@@ -983,6 +988,7 @@ struct DecoderPolicyDecision {
     high_support_loss: u32,
     block_schur_loss: u32,
     reason: &'static str,
+    #[cfg(feature = "full-runtime")]
     governance: Option<decision_contract::GovernanceTelemetry>,
 }
 
@@ -1000,6 +1006,7 @@ impl HardRegimePlan {
         }
     }
 
+    #[cfg(feature = "full-runtime")]
     const fn strategy(self) -> InactivationStrategy {
         match self {
             Self::Markowitz => InactivationStrategy::HighSupportFirst,
@@ -1113,37 +1120,41 @@ fn choose_runtime_decoder_policy(
         unsupported_cols,
         inactivation_pressure_permille,
     );
+    #[cfg_attr(not(feature = "full-runtime"), allow(unused_mut))]
     let mut decision = choose_low_level_decoder_policy(features, n_rows, n_cols);
-    let governance = decision_contract::evaluate_governance(&GovernanceSnapshot {
-        n_rows,
-        n_cols,
-        density_permille: features.density_permille,
-        rank_deficit_permille: features.rank_deficit_permille,
-        inactivation_pressure_permille: features.inactivation_pressure_permille,
-        overhead_ratio_permille: features.overhead_ratio_permille,
-        budget_exhausted: features.budget_exhausted,
-        baseline_loss: decision.baseline_loss,
-        high_support_loss: decision.high_support_loss,
-        block_schur_loss: decision.block_schur_loss,
-    });
-    if !bypass_governance() {
-        match governance.chosen_action {
-            "canary_hold" if matches!(decision.mode, DecoderPolicyMode::BlockSchurLowRank) => {
-                decision.mode = DecoderPolicyMode::HighSupportFirst;
-                decision.reason = "g7_expected_loss_canary_hold";
+    #[cfg(feature = "full-runtime")]
+    {
+        let governance = decision_contract::evaluate_governance(&GovernanceSnapshot {
+            n_rows,
+            n_cols,
+            density_permille: features.density_permille,
+            rank_deficit_permille: features.rank_deficit_permille,
+            inactivation_pressure_permille: features.inactivation_pressure_permille,
+            overhead_ratio_permille: features.overhead_ratio_permille,
+            budget_exhausted: features.budget_exhausted,
+            baseline_loss: decision.baseline_loss,
+            high_support_loss: decision.high_support_loss,
+            block_schur_loss: decision.block_schur_loss,
+        });
+        if !bypass_governance() {
+            match governance.chosen_action {
+                "canary_hold" if matches!(decision.mode, DecoderPolicyMode::BlockSchurLowRank) => {
+                    decision.mode = DecoderPolicyMode::HighSupportFirst;
+                    decision.reason = "g7_expected_loss_canary_hold";
+                }
+                "rollback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
+                    decision.mode = DecoderPolicyMode::ConservativeBaseline;
+                    decision.reason = "g7_expected_loss_rollback";
+                }
+                "fallback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
+                    decision.mode = DecoderPolicyMode::ConservativeBaseline;
+                    decision.reason = "g7_deterministic_fallback_trigger";
+                }
+                _ => {}
             }
-            "rollback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
-                decision.mode = DecoderPolicyMode::ConservativeBaseline;
-                decision.reason = "g7_expected_loss_rollback";
-            }
-            "fallback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
-                decision.mode = DecoderPolicyMode::ConservativeBaseline;
-                decision.reason = "g7_deterministic_fallback_trigger";
-            }
-            _ => {}
         }
+        decision.governance = Some(governance);
     }
-    decision.governance = Some(governance);
     decision
 }
 
@@ -1161,6 +1172,7 @@ fn choose_low_level_decoder_policy(
             high_support_loss,
             block_schur_loss,
             reason: "policy_budget_exhausted_conservative",
+            #[cfg(feature = "full-runtime")]
             governance: None,
         };
     }
@@ -1176,6 +1188,7 @@ fn choose_low_level_decoder_policy(
             high_support_loss,
             block_schur_loss,
             reason: "expected_loss_conservative_gate",
+            #[cfg(feature = "full-runtime")]
             governance: None,
         };
     }
@@ -1199,6 +1212,7 @@ fn choose_low_level_decoder_policy(
         high_support_loss,
         block_schur_loss,
         reason: "expected_loss_minimum",
+        #[cfg(feature = "full-runtime")]
         governance: None,
     }
 }
@@ -1215,7 +1229,10 @@ fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: &DecoderPol
     stats.policy_mode = Some(decoder_policy_mode_label(decision.mode));
     stats.policy_reason = Some(decision.reason);
     stats.policy_replay_ref = Some(POLICY_REPLAY_REF);
-    stats.governance = decision.governance;
+    #[cfg(feature = "full-runtime")]
+    {
+        stats.governance = decision.governance;
+    }
     stats.policy_density_permille = decision.features.density_permille;
     stats.policy_rank_deficit_permille = decision.features.rank_deficit_permille;
     stats.policy_inactivation_pressure_permille = decision.features.inactivation_pressure_permille;
@@ -1442,13 +1459,13 @@ fn select_pivot_row(
 pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
-    dense_factor_cache: parking_lot::Mutex<DenseFactorCache>,
+    dense_factor_cache: crate::sync::pl::Mutex<DenseFactorCache>,
     /// Rate limiting for ESI/ObjectId combinations to prevent amplification attacks.
     ///
     /// br-asupersync-ju2k01: Tracks ESI access patterns and compute budget
     /// consumption to detect and block malicious ESI values near u32::MAX
     /// that can cause expensive O(L³) Gaussian elimination operations.
-    esi_rate_limits: parking_lot::Mutex<HashMap<(u32, ObjectId), EsiRateLimit>>,
+    esi_rate_limits: crate::sync::pl::Mutex<HashMap<(u32, ObjectId), EsiRateLimit>>,
 }
 
 impl InactivationDecoder {
@@ -1465,8 +1482,8 @@ impl InactivationDecoder {
         Self {
             params,
             seed,
-            dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
-            esi_rate_limits: parking_lot::Mutex::new(HashMap::new()),
+            dense_factor_cache: crate::sync::pl::Mutex::new(DenseFactorCache::default()),
+            esi_rate_limits: crate::sync::pl::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1485,8 +1502,8 @@ impl InactivationDecoder {
         Ok(Self {
             params,
             seed,
-            dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
-            esi_rate_limits: parking_lot::Mutex::new(HashMap::new()),
+            dense_factor_cache: crate::sync::pl::Mutex::new(DenseFactorCache::default()),
+            esi_rate_limits: crate::sync::pl::Mutex::new(HashMap::new()),
         })
     }
 
@@ -2084,6 +2101,7 @@ impl InactivationDecoder {
     /// * `symbols` - Received symbols (at least L required)
     /// * `object_id` - Object ID for the proof artifact
     /// * `sbn` - Source block number for the proof artifact
+    #[cfg(feature = "full-runtime")]
     #[allow(clippy::result_large_err)]
     pub fn decode_with_proof(
         &self,
@@ -2301,6 +2319,7 @@ impl InactivationDecoder {
     /// Phase 1: Peeling with proof trace capture.
     ///
     /// Like `peel`, but also records solved symbols to the proof trace.
+    #[cfg(feature = "full-runtime")]
     fn peel_with_proof(state: &mut DecoderState, trace: &mut PeelingTrace) {
         Self::peel_impl(state, |col| {
             trace.record_solved(col);
@@ -2714,6 +2733,7 @@ impl InactivationDecoder {
     ///
     /// Like `inactivate_and_solve`, but also records inactivations, pivots,
     /// and row operations to the proof trace.
+    #[cfg(feature = "full-runtime")]
     #[allow(clippy::too_many_lines)]
     fn inactivate_and_solve_with_proof(
         &self,

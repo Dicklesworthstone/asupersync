@@ -134,33 +134,7 @@ pub use admission::{
 
 static REMOTE_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Identifier for a remote node in the cluster.
-///
-/// Nodes are opaque identifiers. The runtime does not interpret them beyond
-/// equality comparison and display. The transport layer maps `NodeId` to
-/// actual network addresses.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct NodeId(String);
-
-impl NodeId {
-    /// Creates a new node identifier from a string.
-    #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    /// Returns the node identifier as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for NodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Node({})", self.0)
-    }
-}
+pub use crate::trace::distributed::vclock::NodeId;
 
 /// A unique identifier for a remote task.
 ///

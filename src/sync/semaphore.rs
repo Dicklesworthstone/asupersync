@@ -34,7 +34,7 @@
 //! drop(permit);
 //! ```
 
-use parking_lot::Mutex as ParkingMutex;
+use crate::sync::pl::Mutex as ParkingMutex;
 use slab::Slab;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -93,18 +93,53 @@ impl std::error::Error for TryAcquireError {}
 /// Existing acquisition methods keep their original error types and admission
 /// behavior. Checked methods require an explicit context and admit one runtime
 /// obligation per nonempty permit set, regardless of its number of units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CheckedAcquireError {
     /// The semaphore acquisition failed before obligation admission.
-    #[error(transparent)]
-    Semaphore(#[from] AcquireError),
+    Semaphore(AcquireError),
     /// A try-acquire would wait for capacity or an earlier FIFO waiter.
-    #[error(transparent)]
-    Unavailable(#[from] TryAcquireError),
+    Unavailable(TryAcquireError),
     /// The runtime refused the obligation; no permit is returned.
-    #[error(transparent)]
-    Admission(#[from] crate::runtime::obligation_mailbox::ObligationAdmissionError),
+    Admission(crate::runtime::obligation_mailbox::ObligationAdmissionError),
+}
+
+impl std::fmt::Display for CheckedAcquireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Semaphore(err) => std::fmt::Display::fmt(err, f),
+            Self::Unavailable(err) => std::fmt::Display::fmt(err, f),
+            Self::Admission(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl std::error::Error for CheckedAcquireError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Semaphore(err) => Some(err),
+            Self::Unavailable(err) => Some(err),
+            Self::Admission(err) => Some(err),
+        }
+    }
+}
+
+impl From<AcquireError> for CheckedAcquireError {
+    fn from(err: AcquireError) -> Self {
+        Self::Semaphore(err)
+    }
+}
+
+impl From<TryAcquireError> for CheckedAcquireError {
+    fn from(err: TryAcquireError) -> Self {
+        Self::Unavailable(err)
+    }
+}
+
+impl From<crate::runtime::obligation_mailbox::ObligationAdmissionError> for CheckedAcquireError {
+    fn from(err: crate::runtime::obligation_mailbox::ObligationAdmissionError) -> Self {
+        Self::Admission(err)
+    }
 }
 
 #[inline]
@@ -745,6 +780,7 @@ impl Semaphore {
     /// returned unless checked obligation admission succeeds. The rollback
     /// guard settles before the owner retires on error or unwind.
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn try_acquire_one_checked_with<Caps, T, E>(
         &self,
         cx: &Cx<Caps>,

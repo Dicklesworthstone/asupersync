@@ -1,22 +1,36 @@
 //! Take combinator.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`take`](super::StreamExt::take) method.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Take<S> {
-    #[pin]
     stream: S,
     remaining: usize,
     done: bool,
 }
 
+struct TakeProj<'a, S> {
+    stream: Pin<&'a mut S>,
+    remaining: &'a mut usize,
+    done: &'a mut bool,
+}
+
 impl<S> Take<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> TakeProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; `remaining` and `done` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        TakeProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            remaining: &mut this.remaining,
+            done: &mut this.done,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
         Self {
@@ -91,15 +105,30 @@ impl<S: Stream> Stream for Take<S> {
 /// Stream for the [`take_while`](super::StreamExt::take_while) method.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct TakeWhile<S, F> {
-    #[pin]
     stream: S,
     predicate: F,
     done: bool,
 }
 
+struct TakeWhileProj<'a, S, F> {
+    stream: Pin<&'a mut S>,
+    predicate: &'a mut F,
+    done: &'a mut bool,
+}
+
 impl<S, F> TakeWhile<S, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> TakeWhileProj<'_, S, F> {
+        // SAFETY: `stream` is structurally pinned; `predicate` and `done` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        TakeWhileProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            predicate: &mut this.predicate,
+            done: &mut this.done,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, predicate: F) -> Self {
         Self {

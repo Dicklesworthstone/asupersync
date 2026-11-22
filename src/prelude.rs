@@ -125,5 +125,5 @@ pub use crate::time::{interval, sleep, timeout};
 pub use crate::{join, race, scope, spawn};
 
 // ── Deterministic lab essentials (tests / `test-internals` only) ──────────
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(feature = "full-runtime", any(test, feature = "test-internals")))]
 pub use crate::{LabConfig, LabRuntime};

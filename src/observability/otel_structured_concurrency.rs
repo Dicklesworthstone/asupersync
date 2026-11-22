@@ -65,7 +65,7 @@ use opentelemetry::{
     trace::{Span, SpanKind, Status, Tracer},
 };
 #[cfg(feature = "metrics")]
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 #[cfg(feature = "metrics")]
 use crate::sync::atomic::{AtomicU64, Ordering};
 

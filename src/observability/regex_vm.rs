@@ -17,7 +17,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 
 use super::regex_boundaries::BoundaryEvalErrorKind;
 use super::regex_ir::{

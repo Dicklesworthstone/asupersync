@@ -3133,12 +3133,12 @@
     fn cx_spawn_local_owner_worker_runs_non_send_future() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(
+        let local_ready = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
                 std::collections::VecDeque::new(),
             ),
         ));
-        let local_scheduler = Arc::new(parking_lot::Mutex::new(
+        let local_scheduler = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
@@ -3238,7 +3238,7 @@
     fn cx_spawn_local_synchronous_factory_panic_resolves_join_panicked() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, _root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(
+        let local_ready = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
                 std::collections::VecDeque::new(),
             ),
@@ -3303,12 +3303,12 @@
     fn local_pre_admission_abort_dispatches_after_publish_store_and_schedule() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, _root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(
+        let local_ready = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
                 std::collections::VecDeque::new(),
             ),
         ));
-        let local_scheduler = Arc::new(parking_lot::Mutex::new(
+        let local_scheduler = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
@@ -3601,7 +3601,7 @@
     fn cx_spawn_local_into_closing_region_resolves_cancelled() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(
+        let local_ready = Arc::new(crate::sync::pl::Mutex::new(
             crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
                 std::collections::VecDeque::new(),
             ),

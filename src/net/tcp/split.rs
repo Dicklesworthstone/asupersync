@@ -13,7 +13,7 @@ use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::udp::ReactorRegistration;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::io::{self, IoSliceMut};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Write};

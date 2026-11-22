@@ -56,7 +56,7 @@
             let barrier = RetirementBarrier::pending();
             let mut inner = crate::types::CxInner::new(owner, record.id, Budget::INFINITE);
             inner.retirement_barrier = Some(Arc::clone(&barrier));
-            record.cx_inner = Some(Arc::new(parking_lot::RwLock::new(inner)));
+            record.cx_inner = Some(Arc::new(crate::sync::pl::RwLock::new(inner)));
             let task = TaskId::from_arena(table.insert_task(record));
             let guard = Retired(Arc::clone(&retired), hostile);
             table.store_spawned_task(

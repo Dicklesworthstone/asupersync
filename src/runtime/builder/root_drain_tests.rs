@@ -9,6 +9,7 @@ use crate::types::{
     CancelKind, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, Outcome, RegionId, TaskId,
 };
+use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 
 fn runtime_for(case: u8) -> Runtime {
@@ -1672,4 +1673,382 @@ fn prepared_retirement_fences_quiescence_after_actual_region_close() {
             );
         }
     }
+}
+
+struct ParkedNormalTask {
+    gate: Arc<ReleaseGate>,
+    parked: Option<std::sync::mpsc::Sender<TaskId>>,
+    completed: Arc<AtomicBool>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Future for ParkedNormalTask {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<()> {
+        let cx = Cx::current().expect("native normal task context");
+        *self.gate.waker.lock() = Some(task.waker().clone());
+        if self.gate.released.load(Ordering::Acquire) {
+            self.completed.store(true, Ordering::Release);
+            return Poll::Ready(());
+        }
+        assert!(cx.checkpoint().is_ok());
+        if let Some(parked) = self.parked.take() {
+            parked
+                .send(cx.task_id())
+                .expect("publish parked normal task");
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for ParkedNormalTask {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[test]
+fn prepared_cleanup_and_child_finalizer_poll_while_normal_max_tasks_slot_is_occupied() {
+    use crate::runtime::state::{PreparedCleanupError, SpawnError};
+
+    for case in 0..4 {
+        let runtime = runtime_for(case);
+        let root = runtime.inner.root_region;
+        {
+            let mut state = runtime.inner.state.lock().unwrap();
+            assert!(state.set_region_limits(
+                root,
+                RegionLimits {
+                    max_tasks: Some(1),
+                    ..RegionLimits::unlimited()
+                },
+            ));
+        }
+        runtime
+            .configure_prepared_cleanup(2)
+            .expect("configure prepared cleanup capacity");
+
+        let normal_gate = Arc::new(ReleaseGate::default());
+        let (normal_parked_tx, normal_parked_rx) = mpsc::channel();
+        let normal_done = Arc::new(AtomicBool::new(false));
+        let normal_drops = Arc::new(AtomicUsize::new(0));
+        let normal_handle = runtime
+            .handle()
+            .try_spawn(ParkedNormalTask {
+                gate: Arc::clone(&normal_gate),
+                parked: Some(normal_parked_tx),
+                completed: Arc::clone(&normal_done),
+                drops: Arc::clone(&normal_drops),
+            })
+            .expect("occupy single normal max_tasks=1 slot");
+
+        assert!(
+            matches!(
+                runtime.handle().try_spawn(async {}),
+                Err(SpawnError::RegionAtCapacity { .. })
+            ),
+            "case {case}: second normal task must fail while max_tasks=1 slot is occupied"
+        );
+
+        let gate_first = Arc::new(ReleaseGate::default());
+        let gate_second = Arc::new(ReleaseGate::default());
+        let (prep_tx, prep_rx) = mpsc::channel();
+        let prep1_done = Arc::new(AtomicBool::new(false));
+        let prep2_done = Arc::new(AtomicBool::new(false));
+        let prep_drops = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|threads| {
+            let r1 = &runtime;
+            let g1 = Arc::clone(&gate_first);
+            let tx1 = prep_tx.clone();
+            let d1 = Arc::clone(&prep1_done);
+            let dr1 = Arc::clone(&prep_drops);
+            let t1 = threads.spawn(move || {
+                r1.prepare_async_cleanup(RootFinalizer {
+                    gate: g1,
+                    parked: Some(tx1),
+                    completed: d1,
+                    drops: dr1,
+                })
+                .map_err(|(err, _)| err)
+            });
+
+            let r2 = &runtime;
+            let g2 = Arc::clone(&gate_second);
+            let tx2 = prep_tx.clone();
+            let d2 = Arc::clone(&prep2_done);
+            let dr2 = Arc::clone(&prep_drops);
+            let t2 = threads.spawn(move || {
+                r2.prepare_async_cleanup(RootFinalizer {
+                    gate: g2,
+                    parked: Some(tx2),
+                    completed: d2,
+                    drops: dr2,
+                })
+                .map_err(|(err, _)| err)
+            });
+
+            assert!(
+                t1.join().unwrap().is_ok(),
+                "case {case}: concurrent prepare 1 failed"
+            );
+            assert!(
+                t2.join().unwrap().is_ok(),
+                "case {case}: concurrent prepare 2 failed"
+            );
+        });
+
+        assert!(
+            matches!(
+                runtime.prepare_async_cleanup(async {}),
+                Err((PreparedCleanupError::AtCapacity, _))
+            ),
+            "case {case}: capacity 2 exhausted"
+        );
+
+        if case > 0 {
+            let normal_task_id = normal_parked_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("case > 0: normal task must park on native worker");
+            wait_parked(&runtime, normal_task_id);
+
+            let child_gate = Arc::new(ReleaseGate::default());
+            let (child_parked_tx, child_parked_rx) = mpsc::channel();
+            let child_done = Arc::new(AtomicBool::new(false));
+            let child_drops = Arc::new(AtomicUsize::new(0));
+            let cancel_effects = {
+                let mut state = runtime.inner.state.lock().unwrap();
+                let child = state
+                    .create_child_region(root, Budget::INFINITE)
+                    .expect("create child region under occupied root");
+                assert!(state.register_async_finalizer(
+                    child,
+                    RootFinalizer {
+                        gate: Arc::clone(&child_gate),
+                        parked: Some(child_parked_tx),
+                        completed: Arc::clone(&child_done),
+                        drops: Arc::clone(&child_drops),
+                    },
+                ));
+                let effects =
+                    state.cancel_request(child, &crate::types::CancelReason::shutdown(), None);
+                state.track_cancel_dispatch(effects)
+            };
+            let (tasks_to_schedule, wakes) = cancel_effects.into_parts();
+            for (task_id, priority) in tasks_to_schedule {
+                runtime.inner.scheduler.inject_cancel(task_id, priority);
+            }
+            wakes.dispatch();
+            runtime.inner.scheduler.wake_all();
+
+            let child_fin_task = child_parked_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("child async finalizer must poll while root max_tasks=1 slot is occupied");
+            assert!(
+                matches!(
+                    runtime.handle().try_spawn(async {}),
+                    Err(SpawnError::RegionAtCapacity { .. })
+                ),
+                "case {case}: root normal slot must remain occupied while child finalizer polls"
+            );
+            child_gate.release();
+            wait_until(
+                || child_done.load(Ordering::Acquire) && child_drops.load(Ordering::Acquire) == 1,
+                "child finalizer finishes while root max_tasks=1 slot stays occupied",
+            );
+            let _ = child_fin_task;
+            assert!(
+                matches!(
+                    runtime.handle().try_spawn(async {}),
+                    Err(SpawnError::RegionAtCapacity { .. })
+                ),
+                "case {case}: root normal slot must still be occupied after child finalizer finishes"
+            );
+        }
+
+        normal_gate.release();
+        if case > 0 {
+            wait_until(
+                || normal_done.load(Ordering::Acquire),
+                "occupied normal task completes",
+            );
+        }
+        drop(normal_handle);
+
+        let report = std::thread::scope(|threads| {
+            let drain = threads.spawn(|| runtime.shutdown_drained(Duration::from_secs(2)));
+            let _first_fin = prep_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first prepared finalizer polled");
+            if gate_first.waker.lock().is_some() {
+                gate_first.release();
+            } else {
+                assert!(
+                    gate_second.waker.lock().is_some(),
+                    "case {case}: expected one parked prepared finalizer gate"
+                );
+                gate_second.release();
+            }
+            let _second_fin = prep_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("second prepared finalizer polled");
+            gate_first.release();
+            gate_second.release();
+            drain.join().expect("shutdown_drained join")
+        });
+
+        assert_eq!(
+            report.outcome,
+            RootDrainOutcome::Quiescent,
+            "case {case}: report={report:?}"
+        );
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(normal_done.load(Ordering::Acquire));
+        assert!(prep1_done.load(Ordering::Acquire));
+        assert!(prep2_done.load(Ordering::Acquire));
+        assert_eq!(prep_drops.load(Ordering::Acquire), 2);
+        assert!(runtime.inner.state.lock().unwrap().region(root).is_none());
+    }
+}
+
+#[test]
+fn arena_activate_dormant_and_task_table_activate_cleanup_preserve_capacity_without_realloc() {
+    use crate::record::TaskRecord;
+    use crate::runtime::task_table::TaskTable;
+    use crate::types::{RegionId, TaskId};
+    use crate::util::{Arena, ArenaIndex};
+
+    let mut arena = Arena::with_capacity(2);
+    let a = arena.insert(11_u64);
+    let b = arena.insert(22_u64);
+    let initial_cap = arena.capacity();
+    let initial_bytes = arena.reserved_bytes();
+    assert_eq!(initial_cap, 2);
+    assert_eq!(arena.len(), 2);
+
+    assert!(arena.make_dormant(a));
+    assert_eq!(arena.len(), 1);
+    assert!(arena.get(a).is_none());
+    assert!(!arena.make_dormant(a));
+    assert!(!arena.activate_dormant(b));
+
+    let stale = ArenaIndex::new(a.index(), a.generation().wrapping_add(1));
+    assert!(!arena.activate_dormant(stale));
+
+    assert!(arena.activate_dormant(a));
+    assert_eq!(arena.len(), 2);
+    assert_eq!(arena.get(a).copied(), Some(11));
+    assert_eq!(arena.capacity(), initial_cap);
+    assert_eq!(arena.reserved_bytes(), initial_bytes);
+
+    let mut table = TaskTable::new();
+    let owner = RegionId::from_arena(ArenaIndex::new(0, 0));
+    let idx1 = table.insert(TaskRecord::new(
+        TaskId::from_arena(ArenaIndex::new(0, 0)),
+        owner,
+        Budget::INFINITE,
+    ));
+    let task1 = TaskId::from_arena(idx1);
+    let idx2 = table.insert(TaskRecord::new(
+        TaskId::from_arena(ArenaIndex::new(1, 0)),
+        owner,
+        Budget::INFINITE,
+    ));
+    let task2 = TaskId::from_arena(idx2);
+
+    assert!(table.make_cleanup_dormant(task1));
+    assert!(table.make_cleanup_dormant(task2));
+    let table_cap = table.tasks_arena().capacity();
+    let table_bytes = table.tasks_arena().reserved_bytes();
+    assert_eq!(table.len(), 0);
+    assert_eq!(table.live_task_count(), 0);
+
+    let stale_task = TaskId::from_arena(ArenaIndex::new(
+        idx1.index(),
+        idx1.generation().wrapping_add(1),
+    ));
+    assert!(!table.activate_cleanup(stale_task));
+    assert!(table.activate_cleanup(task1));
+    assert_eq!(table.len(), 1);
+    assert!(table.task(task1).is_some());
+    assert_eq!(table.tasks_arena().capacity(), table_cap);
+    assert_eq!(table.tasks_arena().reserved_bytes(), table_bytes);
+
+    let retired = table
+        .take_dormant_cleanup(task2)
+        .expect("retire dormant cleanup task2");
+    assert_eq!(retired.id, task2);
+    assert!(table.take_dormant_cleanup(task2).is_none());
+    assert_eq!(table.len(), 1);
+}
+
+#[test]
+fn prepared_cleanup_error_paths_preserve_future_and_reject_invalid_capacities() {
+    use crate::runtime::state::PreparedCleanupError;
+
+    let runtime = runtime_for(0);
+
+    struct DropProbe(Arc<AtomicUsize>);
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    let unconfigured_drops = Arc::new(AtomicUsize::new(0));
+    let probe = DropProbe(Arc::clone(&unconfigured_drops));
+    let Err((PreparedCleanupError::Disabled, fut)) = runtime.prepare_async_cleanup(async move {
+        let _keep = probe;
+    }) else {
+        panic!("unconfigured prepared cleanup must return Disabled");
+    };
+    assert_eq!(unconfigured_drops.load(Ordering::Acquire), 0);
+    drop(fut);
+    assert_eq!(unconfigured_drops.load(Ordering::Acquire), 1);
+
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(0),
+        Err(PreparedCleanupError::Disabled)
+    ));
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(65_537),
+        Err(PreparedCleanupError::Disabled)
+    ));
+    assert!(runtime.configure_prepared_cleanup(1).is_ok());
+    assert!(runtime.prepare_async_cleanup(async {}).is_ok());
+
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(2),
+        Err(PreparedCleanupError::ReservationsActive)
+    ));
+
+    let cap_drops = Arc::new(AtomicUsize::new(0));
+    let cap_probe = DropProbe(Arc::clone(&cap_drops));
+    let Err((PreparedCleanupError::AtCapacity, cap_fut)) =
+        runtime.prepare_async_cleanup(async move {
+            let _keep = cap_probe;
+        })
+    else {
+        panic!("exhausted prepared cleanup must return AtCapacity");
+    };
+    assert_eq!(cap_drops.load(Ordering::Acquire), 0);
+    drop(cap_fut);
+    assert_eq!(cap_drops.load(Ordering::Acquire), 1);
+
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+
+    let closed_drops = Arc::new(AtomicUsize::new(0));
+    let closed_probe = DropProbe(Arc::clone(&closed_drops));
+    let Err((PreparedCleanupError::RegionUnavailable, closed_fut)) =
+        runtime.prepare_async_cleanup(async move {
+            let _keep = closed_probe;
+        })
+    else {
+        panic!("closed root prepared cleanup must return RegionUnavailable");
+    };
+    assert_eq!(closed_drops.load(Ordering::Acquire), 0);
+    drop(closed_fut);
+    assert_eq!(closed_drops.load(Ordering::Acquire), 1);
 }

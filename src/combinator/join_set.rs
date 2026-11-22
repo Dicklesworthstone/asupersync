@@ -130,9 +130,9 @@ struct Member<T, E> {
 /// Candidate members plus the waker of the task waiting in `join_next`.
 #[derive(Default)]
 struct ReadyMembers {
-    candidates: parking_lot::Mutex<BTreeSet<u64>>,
+    candidates: crate::sync::pl::Mutex<BTreeSet<u64>>,
     // Arc clones under this mutex never invoke an executor's RawWaker clone.
-    waiter: parking_lot::Mutex<Option<Arc<Waker>>>,
+    waiter: crate::sync::pl::Mutex<Option<Arc<Waker>>>,
 }
 
 impl ReadyMembers {

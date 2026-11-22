@@ -237,7 +237,7 @@ use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex as PoolMutex;
+use crate::sync::pl::Mutex as PoolMutex;
 use smallvec::SmallVec;
 
 use crate::cx::Cx;
@@ -1309,15 +1309,43 @@ impl std::error::Error for PoolError {
 ///
 /// Admission refusal returns the physical checkout to the pool and never
 /// changes the existing [`PoolError`] variants or legacy acquisition behavior.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum CheckedPoolError {
     /// The underlying pool acquisition failed.
-    #[error(transparent)]
-    Pool(#[from] PoolError),
+    Pool(PoolError),
     /// The runtime refused the return liability before acquisition succeeded.
-    #[error(transparent)]
-    Admission(#[from] crate::runtime::obligation_mailbox::ObligationAdmissionError),
+    Admission(crate::runtime::obligation_mailbox::ObligationAdmissionError),
+}
+
+impl std::fmt::Display for CheckedPoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pool(err) => std::fmt::Display::fmt(err, f),
+            Self::Admission(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl std::error::Error for CheckedPoolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Pool(err) => Some(err),
+            Self::Admission(err) => Some(err),
+        }
+    }
+}
+
+impl From<PoolError> for CheckedPoolError {
+    fn from(err: PoolError) -> Self {
+        Self::Pool(err)
+    }
+}
+
+impl From<crate::runtime::obligation_mailbox::ObligationAdmissionError> for CheckedPoolError {
+    fn from(err: crate::runtime::obligation_mailbox::ObligationAdmissionError) -> Self {
+        Self::Admission(err)
+    }
 }
 
 /// An idle resource in the pool.

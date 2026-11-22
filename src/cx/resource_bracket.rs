@@ -16,7 +16,7 @@ use super::{CancelWakerToken, ChildRegionError, ChildRegionSpec, Cx};
 use crate::record::task::TaskOutcome;
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::types::{Budget, CancelReason, Outcome, PanicPayload, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::any::Any;
 use std::fmt;
 use std::future::{Future, poll_fn};

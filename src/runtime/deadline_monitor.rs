@@ -106,7 +106,7 @@ struct DeadlineCompletionQueueState {
 /// locks or dispatching callbacks.
 #[derive(Debug)]
 pub(crate) struct DeadlineCompletionQueue {
-    inner: parking_lot::Mutex<DeadlineCompletionQueueState>,
+    inner: crate::sync::pl::Mutex<DeadlineCompletionQueueState>,
     capacity: usize,
     callback_panics: AtomicU64,
 }
@@ -118,7 +118,7 @@ impl DeadlineCompletionQueue {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: parking_lot::Mutex::new(DeadlineCompletionQueueState::default()),
+            inner: crate::sync::pl::Mutex::new(DeadlineCompletionQueueState::default()),
             capacity,
             callback_panics: AtomicU64::new(0),
         }

@@ -48,20 +48,17 @@
 
 use crate::types::{RegionId, TaskId};
 
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
-use thiserror::Error;
 
 /// Errors that can occur during resource cleanup verification.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ResourceCleanupError {
     /// Resource leak detected during region close.
-    #[error(
-        "resource leak detected in region {region_id:?}: {leak_count} resources not cleaned up"
-    )]
     ResourceLeak {
         /// Region whose close verification found leaked resources.
         region_id: RegionId,
@@ -72,18 +69,15 @@ pub enum ResourceCleanupError {
     },
 
     /// Resource attribution failed - cannot determine owner.
-    #[error("cannot attribute resource {resource_id:?} to any region")]
     AttributionFailed {
         /// Resource that could not be attributed to a region.
         resource_id: ResourceId,
     },
 
     /// Resource tracking is not enabled.
-    #[error("resource cleanup verification is not enabled")]
     NotEnabled,
 
     /// Invalid resource state transition.
-    #[error("invalid resource state transition: {resource_id:?} from {from:?} to {to:?}")]
     InvalidTransition {
         /// Resource whose state transition was rejected.
         resource_id: ResourceId,
@@ -94,9 +88,6 @@ pub enum ResourceCleanupError {
     },
 
     /// Resource cleanup is still in progress and must be rechecked before close.
-    #[error(
-        "resource cleanup still pending in region {region_id:?}: {pending_count} resources not yet cleaned"
-    )]
     CleanupPending {
         /// Region whose cleanup is not yet complete.
         region_id: RegionId,
@@ -107,8 +98,46 @@ pub enum ResourceCleanupError {
     },
 }
 
+impl std::fmt::Display for ResourceCleanupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResourceLeak {
+                region_id,
+                leak_count,
+                ..
+            } => write!(
+                f,
+                "resource leak detected in region {region_id:?}: {leak_count} resources not cleaned up"
+            ),
+            Self::AttributionFailed { resource_id } => {
+                write!(f, "cannot attribute resource {resource_id:?} to any region")
+            }
+            Self::NotEnabled => f.write_str("resource cleanup verification is not enabled"),
+            Self::InvalidTransition {
+                resource_id,
+                from,
+                to,
+            } => write!(
+                f,
+                "invalid resource state transition: {resource_id:?} from {from:?} to {to:?}"
+            ),
+            Self::CleanupPending {
+                region_id,
+                pending_count,
+                ..
+            } => write!(
+                f,
+                "resource cleanup still pending in region {region_id:?}: {pending_count} resources not yet cleaned"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResourceCleanupError {}
+
 /// Unique identifier for tracked resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourceId(u64);
 
 impl ResourceId {
@@ -133,7 +162,8 @@ impl ResourceId {
 }
 
 /// Categories of tracked resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ResourceType {
     /// File descriptor (file, socket, pipe).
     FileDescriptor,
@@ -167,7 +197,8 @@ impl ResourceType {
 }
 
 /// State of a tracked resource throughout its lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ResourceState {
     /// Resource has been allocated but not yet attached to a region.
     Allocated,
@@ -201,7 +232,8 @@ impl ResourceState {
 }
 
 /// Details of a tracked resource.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourceRecord {
     /// Unique identifier for this resource.
     pub id: ResourceId,
@@ -285,7 +317,8 @@ impl ResourceRecord {
 }
 
 /// Configuration for resource cleanup verification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourceCleanupConfig {
     /// Enable resource cleanup verification.
     pub enable_verification: bool,
@@ -318,7 +351,8 @@ impl Default for ResourceCleanupConfig {
 }
 
 /// Statistics about resource cleanup verification.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourceCleanupStats {
     /// Total number of resources allocated.
     pub total_allocated: u64,

@@ -38,7 +38,7 @@ impl Drop for HeapPayload {
 
 struct CloseWaiter {
     counts: Arc<CleanupCounts>,
-    receipt: Arc<parking_lot::Mutex<Option<RegionCloseOutcome>>>,
+    receipt: Arc<crate::sync::pl::Mutex<Option<RegionCloseOutcome>>>,
 }
 
 impl Wake for CloseWaiter {

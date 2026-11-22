@@ -5,7 +5,7 @@ use crate::record::region::{RegionLimits, RegionState};
 use crate::runtime::spawn_mailbox::SpawnRequestParts;
 use crate::runtime::state::SpawnAdmission;
 use crate::types::{Budget, Outcome};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 

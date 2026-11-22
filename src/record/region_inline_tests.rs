@@ -10,7 +10,7 @@
     use crate::record::finalizer::Finalizer;
     use crate::types::MinPlusCurve;
     use crate::util::ArenaIndex;
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
 
     fn test_region_id() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(1, 0))

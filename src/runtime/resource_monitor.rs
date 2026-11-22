@@ -31,13 +31,13 @@ use crate::sync::LockMetricsSnapshot;
 use crate::sync::lock_ordering::{LockModule, LockOrderAtlasSnapshot, LockRank};
 use crate::types::pressure::SystemPressure;
 use crate::types::{CapabilityBudget, RegionId};
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use thiserror::Error;
 
 /// Stable schema for operator-facing platform probe reports.
 pub const RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION: &str =
@@ -82,31 +82,45 @@ const ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES: u64 = 64 * 1024 * 102
 const ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 
 /// Errors that can occur during resource monitoring.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ResourceMonitorError {
     /// Resource type is not registered.
-    #[error("unknown resource type: {resource_type}")]
     UnknownResourceType { resource_type: String },
 
     /// Monitoring is already active.
-    #[error("resource monitoring is already active")]
     AlreadyActive,
 
     /// System resource access failed.
-    #[error("failed to access system resource: {reason}")]
     SystemAccessFailed { reason: String },
 
     /// Configuration is invalid.
-    #[error("invalid configuration: {details}")]
     InvalidConfig { details: String },
 
     /// Degradation engine is not ready.
-    #[error("degradation engine not initialized")]
     EngineNotReady,
 }
 
+impl std::fmt::Display for ResourceMonitorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownResourceType { resource_type } => {
+                write!(f, "unknown resource type: {resource_type}")
+            }
+            Self::AlreadyActive => f.write_str("resource monitoring is already active"),
+            Self::SystemAccessFailed { reason } => {
+                write!(f, "failed to access system resource: {reason}")
+            }
+            Self::InvalidConfig { details } => write!(f, "invalid configuration: {details}"),
+            Self::EngineNotReady => f.write_str("degradation engine not initialized"),
+        }
+    }
+}
+
+impl std::error::Error for ResourceMonitorError {}
+
 /// Resource types tracked by the monitor.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ResourceType {
     /// Physical memory (heap allocations).
     Memory,
@@ -136,14 +150,15 @@ impl std::fmt::Display for ResourceType {
 }
 
 /// Built-in platform probes used by the system resource collector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum ResourceProbe {
     ProcessRssBytes,
     MemoryMaxBytes,
     ProcessFdCount,
     FileDescriptorLimit,
-    #[serde(rename = "load_avg_1min_scaled")]
+    #[cfg_attr(feature = "full-serialization", serde(rename = "load_avg_1min_scaled"))]
     LoadAvg1MinScaled,
     ProcessConnectionCount,
     NetworkConnectionLimit,
@@ -183,8 +198,9 @@ impl std::fmt::Display for ResourceProbe {
 }
 
 /// Availability state for a platform resource probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum ResourceProbeStatus {
     Supported,
     Unavailable,
@@ -193,8 +209,9 @@ pub enum ResourceProbeStatus {
 }
 
 /// Operator-safe fallback semantics for a failed or disabled probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum ResourceProbeFallback {
     None,
     OmitMeasurement,
@@ -217,8 +234,9 @@ impl std::fmt::Display for ResourceProbeFallback {
 }
 
 /// Aggregate verdict for operator-facing platform probe reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum ResourceProbeOperatorVerdict {
     Complete,
     DegradedWithUnavailableProbes,
@@ -227,7 +245,8 @@ pub enum ResourceProbeOperatorVerdict {
 }
 
 /// Serializable snapshot for one platform resource probe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourceProbeSnapshot {
     pub platform: String,
     pub resource_type: ResourceType,
@@ -241,7 +260,8 @@ pub struct ResourceProbeSnapshot {
 }
 
 /// Serializable platform probe inventory for the resource monitor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ResourcePlatformProbeReport {
     pub schema_version: String,
     pub platform: String,
@@ -256,8 +276,9 @@ pub struct ResourcePlatformProbeReport {
 }
 
 /// Top-level operator verdict for the unified runtime pressure snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureVerdict {
     Healthy,
     Unknown,
@@ -266,8 +287,9 @@ pub enum RuntimePressureVerdict {
 }
 
 /// First-party signal groups folded into a runtime pressure snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureSignal {
     Resources,
     RegionMemoryBudgets,
@@ -278,8 +300,9 @@ pub enum RuntimePressureSignal {
 }
 
 /// Availability and quality state for one pressure signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureSignalStatus {
     Present,
     Missing,
@@ -288,7 +311,8 @@ pub enum RuntimePressureSignalStatus {
 }
 
 /// Deterministic status row for one pressure signal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureSignalSnapshot {
     pub signal: RuntimePressureSignal,
     pub status: RuntimePressureSignalStatus,
@@ -296,7 +320,8 @@ pub struct RuntimePressureSignalSnapshot {
 }
 
 /// Serializable resource pressure row with deterministic numeric fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureResourceSnapshot {
     pub resource_type: ResourceType,
     pub resource_label: String,
@@ -313,8 +338,9 @@ pub struct RuntimePressureResourceSnapshot {
 }
 
 /// Compact spectral topology class used by the runtime pressure snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureSpectralClass {
     Unknown,
     Healthy,
@@ -325,8 +351,9 @@ pub enum RuntimePressureSpectralClass {
 }
 
 /// Compact early-warning severity used by the runtime pressure snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureEarlyWarningSeverity {
     Unknown,
     None,
@@ -336,8 +363,9 @@ pub enum RuntimePressureEarlyWarningSeverity {
 }
 
 /// Operator-facing severity for one remediation recommendation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureRecommendationSeverity {
     Observe,
     Investigate,
@@ -346,8 +374,9 @@ pub enum RuntimePressureRecommendationSeverity {
 }
 
 /// Stable reason code for one remediation recommendation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureRecommendationReason {
     Bottleneck,
     CriticalTopology,
@@ -357,8 +386,9 @@ pub enum RuntimePressureRecommendationReason {
 }
 
 /// Stable action code for one remediation recommendation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureRecommendationAction {
     CollectTaskInspectorDetails,
     ConfirmTrappedCycleEvidence,
@@ -369,8 +399,9 @@ pub enum RuntimePressureRecommendationAction {
 }
 
 /// Evidence boundary for a remediation recommendation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureRecommendationEvidenceScope {
     SpectralTopology,
     SpectralTrend,
@@ -378,7 +409,8 @@ pub enum RuntimePressureRecommendationEvidenceScope {
 }
 
 /// Deterministic advisory row for spectral remediation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureSpectralRecommendation {
     pub severity: RuntimePressureRecommendationSeverity,
     pub reason: RuntimePressureRecommendationReason,
@@ -389,8 +421,9 @@ pub struct RuntimePressureSpectralRecommendation {
 }
 
 /// Deterministic synthetic pressure scenario family for lab evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureLabScenarioKind {
     Healthy,
     CpuLanePressure,
@@ -401,7 +434,8 @@ pub enum RuntimePressureLabScenarioKind {
 }
 
 /// Stable evidence row for a deterministic runtime pressure lab scenario.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureLabScenarioEvidence {
     pub schema_version: String,
     pub scenario_id: String,
@@ -441,6 +475,7 @@ impl RuntimePressureLabScenarioEvidence {
         }
     }
 
+    #[cfg(feature = "full-serialization")]
     pub fn stable_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -458,7 +493,8 @@ impl From<EarlyWarningSeverity> for RuntimePressureEarlyWarningSeverity {
 }
 
 /// Serializable spectral health row with floating-point internals quantized.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureSpectralSnapshot {
     pub class: RuntimePressureSpectralClass,
     pub fiedler_micro_units: Option<u64>,
@@ -540,7 +576,8 @@ impl RuntimePressureSpectralSnapshot {
 }
 
 /// Deterministic RCH proof-lane pressure row folded into runtime pressure snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureRchProofLaneSnapshot {
     pub schema_version: String,
     pub lane_id: String,
@@ -589,7 +626,8 @@ impl RuntimePressureRchProofLaneSnapshot {
 }
 
 /// Deterministic region memory-budget pressure row folded into runtime pressure snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureRegionMemoryBudgetSnapshot {
     pub schema_version: String,
     pub region_id: RegionId,
@@ -675,7 +713,8 @@ impl RuntimePressureRegionMemoryBudgetSnapshot {
 }
 
 /// Unified operator-facing runtime pressure report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureSnapshot {
     pub schema_version: String,
     pub overall_verdict: RuntimePressureVerdict,
@@ -848,8 +887,9 @@ impl RuntimePressureSnapshot {
 }
 
 /// Freshness status attached to one admission-aware atlas input row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareAtlasFreshnessStatus {
     Fresh,
     Stale,
@@ -871,8 +911,9 @@ impl AdmissionAwareAtlasFreshnessStatus {
 }
 
 /// Read-only overlap classification for coordination evidence supplied to the atlas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareCoordinationOverlapClass {
     NoOverlap,
     OwnedExact,
@@ -887,8 +928,9 @@ pub enum AdmissionAwareCoordinationOverlapClass {
 }
 
 /// Conservative coordination decision derived from externally supplied atlas rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareCoordinationDecision {
     Proceed,
     Defer,
@@ -897,8 +939,9 @@ pub enum AdmissionAwareCoordinationDecision {
 }
 
 /// Stable labels for the evidence boundary an atlas snapshot may claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareAtlasClaimLabel {
     Advisory,
     ReplayBacked,
@@ -909,8 +952,9 @@ pub enum AdmissionAwareAtlasClaimLabel {
 }
 
 /// Advisory worker saturation class for the 64-core/256GiB swarm host profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareLargeHostWorkerSaturation {
     Available,
     LowMemory,
@@ -920,8 +964,9 @@ pub enum AdmissionAwareLargeHostWorkerSaturation {
 }
 
 /// Advisory batching decision for a large RCH swarm host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareLargeHostBatchingDecision {
     PreferWarmWorker,
     AdmitBatch,
@@ -932,7 +977,8 @@ pub enum AdmissionAwareLargeHostBatchingDecision {
 }
 
 /// Serializable lock contention row projected from existing lock metrics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareLockContentionAtlasRow {
     pub lock_name: String,
     pub lock_rank: String,
@@ -956,7 +1002,8 @@ pub struct AdmissionAwareLockContentionAtlasRow {
 }
 
 /// Serializable scheduler pressure row projected from runtime pressure evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareSchedulerPressureRow {
     pub scheduler_tail_pressure_label: String,
     pub methodology_baseline_rows: usize,
@@ -967,7 +1014,8 @@ pub struct AdmissionAwareSchedulerPressureRow {
 }
 
 /// Serializable region memory budget row projected from runtime pressure evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareRegionMemoryBudgetPressureRow {
     pub region_id: RegionId,
     pub region_label: String,
@@ -981,7 +1029,8 @@ pub struct AdmissionAwareRegionMemoryBudgetPressureRow {
 }
 
 /// Serializable spectral wait-graph row projected from runtime pressure evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareSpectralWaitGraphRow {
     pub early_warning_severity: RuntimePressureEarlyWarningSeverity,
     pub health_classification: RuntimePressureSpectralClass,
@@ -993,8 +1042,9 @@ pub struct AdmissionAwareSpectralWaitGraphRow {
 }
 
 /// Proof status for a trapped-cycle witness row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum AdmissionAwareTrappedCycleWitnessProofStatus {
     Validated,
     ReplayPending,
@@ -1004,7 +1054,8 @@ pub enum AdmissionAwareTrappedCycleWitnessProofStatus {
 }
 
 /// Directed wait edge inside an explicit trapped-cycle witness.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareTrappedCycleWaitEdgeRow {
     pub waiting_participant: String,
     pub held_by_participant: String,
@@ -1012,7 +1063,8 @@ pub struct AdmissionAwareTrappedCycleWaitEdgeRow {
 }
 
 /// Explicit trapped-cycle witness required before deadlock-style claims.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareTrappedCycleWitnessRow {
     pub witness_id: String,
     pub participants: Vec<String>,
@@ -1051,7 +1103,8 @@ impl AdmissionAwareTrappedCycleWitnessRow {
 }
 
 /// Serializable proof-lane admission row projected from runtime pressure evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareRchProofLaneAdmissionRow {
     pub lane_id: String,
     pub admission_decision: String,
@@ -1067,7 +1120,8 @@ pub struct AdmissionAwareRchProofLaneAdmissionRow {
 }
 
 /// Read-only dirty-tree coordination row supplied by a caller or fixture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareDirtyTreePeerOwnershipRow {
     pub path: String,
     pub dirty_classification: String,
@@ -1082,7 +1136,8 @@ pub struct AdmissionAwareDirtyTreePeerOwnershipRow {
 }
 
 /// Read-only Agent Mail reservation row supplied by a caller or fixture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareAgentMailReservationRow {
     pub path_pattern: String,
     pub holder: String,
@@ -1096,7 +1151,8 @@ pub struct AdmissionAwareAgentMailReservationRow {
 }
 
 /// Read-only bead tracker status row supplied by a caller or fixture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareBrTrackerStatusRow {
     pub bead_id: String,
     pub status: String,
@@ -1111,7 +1167,8 @@ pub struct AdmissionAwareBrTrackerStatusRow {
 }
 
 /// Read-only large-host worker warmth row supplied by a caller or fixture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareLargeHostWorkerWarmthRow {
     pub worker_id: String,
     pub cpu_cores: u16,
@@ -1135,7 +1192,8 @@ pub struct AdmissionAwareLargeHostWorkerWarmthRow {
 }
 
 /// Stable claim-boundary row emitted by the atlas builder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareClaimBoundaryLabelRow {
     pub label: AdmissionAwareAtlasClaimLabel,
     pub required_evidence: Vec<String>,
@@ -1145,7 +1203,8 @@ pub struct AdmissionAwareClaimBoundaryLabelRow {
 }
 
 /// Read-only operator closeout receipt supplied by a caller or fixture.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareOperatorCloseoutReceiptRow {
     pub bead_id: String,
     pub status: String,
@@ -1193,7 +1252,8 @@ impl AdmissionAwareRuntimePressureAtlasBuilderInput {
 }
 
 /// Source-backed admission-aware atlas snapshot assembled from explicit inputs only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct AdmissionAwareRuntimePressureAtlasSnapshot {
     pub schema_version: String,
     pub runtime_pressure_schema_version: String,
@@ -1326,6 +1386,7 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
         }
     }
 
+    #[cfg(feature = "full-serialization")]
     pub fn stable_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -2192,16 +2253,18 @@ fn admission_aware_claim_boundary_row(
 }
 
 /// Work class for pressure-aware admission decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureAdmissionWorkClass {
     Required,
     Optional,
 }
 
 /// Admission action emitted by the opt-in pressure-aware admission hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureAdmissionAction {
     Admit,
     Defer,
@@ -2209,8 +2272,9 @@ pub enum RuntimePressureAdmissionAction {
 }
 
 /// Stable reason codes for pressure-aware admission decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum RuntimePressureAdmissionReason {
     PolicyDisabled,
     RequiredWorkBypass,
@@ -2223,7 +2287,8 @@ pub enum RuntimePressureAdmissionReason {
 }
 
 /// Disabled-by-default policy for converting pressure snapshots into admission decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureAdmissionPolicy {
     pub schema_version: String,
     pub enabled: bool,
@@ -2344,7 +2409,8 @@ impl RuntimePressureAdmissionPolicy {
 }
 
 /// Deterministic ledger row for one pressure-aware admission decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimePressureAdmissionDecision {
     pub schema_version: String,
     pub policy_schema_version: String,
@@ -3116,7 +3182,8 @@ impl ResourceMeasurement {
 }
 
 /// Degradation level indicating severity of resource pressure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum DegradationLevel {
     /// No degradation needed.
     None = 0,
@@ -3161,7 +3228,8 @@ impl DegradationLevel {
 }
 
 /// Configuration for resource monitoring thresholds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TriggerConfig {
     /// Warning threshold (0.0-1.0 of max capacity).
     pub soft_threshold: f64,
@@ -3716,8 +3784,9 @@ impl DegradationStatsSnapshot {
 pub const TAIL_RISK_ADMISSION_LEDGER_SCHEMA_VERSION: &str = "asupersync.tail-risk-admission.v1";
 
 /// Admission outcome for overload-sensitive work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum TailRiskAdmissionDecision {
     Admit,
     Defer,
@@ -3725,8 +3794,9 @@ pub enum TailRiskAdmissionDecision {
 }
 
 /// Explicit reason codes for a tail-risk admission verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum TailRiskAdmissionReason {
     WakeToRunTail,
     QueueResidencyTail,
@@ -3740,7 +3810,8 @@ pub enum TailRiskAdmissionReason {
 }
 
 /// Bounded operator-tunable thresholds for overload admission.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TailRiskAdmissionProfile {
     pub wake_to_run_p99_ns_limit: u64,
     pub queue_residency_p99_ns_limit: u64,
@@ -3770,7 +3841,8 @@ impl Default for TailRiskAdmissionProfile {
 }
 
 /// Evidence vector consumed by the tail-risk admission rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TailRiskAdmissionEvidence {
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     pub retry_pressure_p99: Option<u64>,
@@ -3797,7 +3869,8 @@ impl TailRiskAdmissionEvidence {
 }
 
 /// Flattened evidence snapshot stored in the decision ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TailRiskAdmissionEvidenceSnapshot {
     pub wake_to_run_p99_ns: Option<u64>,
     pub queue_residency_p99_ns: Option<u64>,
@@ -3808,7 +3881,8 @@ pub struct TailRiskAdmissionEvidenceSnapshot {
 }
 
 /// Deterministic decision ledger for overload admission.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TailRiskAdmissionLedger {
     pub schema_version: String,
     pub decision: TailRiskAdmissionDecision,
@@ -4014,8 +4088,9 @@ pub const COHORT_ADMISSION_STEERING_LEDGER_SCHEMA_VERSION: &str =
     "asupersync.cohort-admission-steering.v1";
 
 /// Placement outcome for cohort-aware admission steering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum CohortAdmissionSteeringDecision {
     AdmitLocal,
     RedirectRemote,
@@ -4023,8 +4098,9 @@ pub enum CohortAdmissionSteeringDecision {
 }
 
 /// Explicit reason codes for cohort-aware admission steering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum CohortAdmissionSteeringReason {
     Disabled,
     MissingTopology,
@@ -4039,7 +4115,8 @@ pub enum CohortAdmissionSteeringReason {
 }
 
 /// Bounded knobs for cohort-aware admission steering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CohortAdmissionSteeringProfile {
     pub enabled: bool,
     pub local_ready_backlog_soft_limit: usize,
@@ -4067,7 +4144,8 @@ impl Default for CohortAdmissionSteeringProfile {
 }
 
 /// Deterministic budget state for bounded remote spill steering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CohortRemoteSpillBudgetState {
     pub epoch: u64,
     pub remaining_tokens: u16,
@@ -4113,7 +4191,8 @@ impl CohortRemoteSpillBudgetState {
 }
 
 /// Cohort-local evidence vector for admission steering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CohortAdmissionSteeringEvidence {
     pub local_cohort: Option<usize>,
     pub worker_to_cohort_map: Vec<usize>,
@@ -4168,7 +4247,8 @@ impl CohortAdmissionSteeringEvidence {
 }
 
 /// Flattened evidence snapshot stored in the cohort steering ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CohortAdmissionSteeringEvidenceSnapshot {
     pub local_cohort: Option<usize>,
     pub cohort_count: usize,
@@ -4184,7 +4264,8 @@ pub struct CohortAdmissionSteeringEvidenceSnapshot {
 }
 
 /// Deterministic decision ledger for cohort-aware admission steering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CohortAdmissionSteeringLedger {
     pub schema_version: String,
     pub decision: CohortAdmissionSteeringDecision,
@@ -4483,8 +4564,9 @@ impl CohortAdmissionSteeringLedger {
 pub const OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION: &str = "asupersync.overload-brownout.v1";
 
 /// Optional runtime surfaces that may be degraded during overload brownout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum BrownoutOptionalSurface {
     DetailedTracing,
     RichDiagnostics,
@@ -4493,8 +4575,9 @@ pub enum BrownoutOptionalSurface {
 }
 
 /// Critical runtime surfaces that brownout must never disable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum BrownoutProtectedSurface {
     CoreScheduling,
     CancellationDrain,
@@ -4503,8 +4586,9 @@ pub enum BrownoutProtectedSurface {
 }
 
 /// Brownout phase for optional runtime surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum OverloadBrownoutPhase {
     Normal,
     Observe,
@@ -4526,8 +4610,9 @@ impl OverloadBrownoutPhase {
 }
 
 /// Explicit reason codes for overload brownout decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum OverloadBrownoutReason {
     Disabled,
     MissingEvidenceFallback,
@@ -4543,7 +4628,8 @@ pub enum OverloadBrownoutReason {
 }
 
 /// Bounded operator-tunable profile for overload brownout decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct OverloadBrownoutProfile {
     pub enabled: bool,
     pub observe_memory_pressure_bps: u16,
@@ -4614,7 +4700,8 @@ impl OverloadBrownoutProfile {
 }
 
 /// Evidence vector for overload brownout decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct OverloadBrownoutEvidence {
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     /// Memory pressure in basis points, where `10_000` represents 100%.
@@ -4641,7 +4728,8 @@ impl OverloadBrownoutEvidence {
 }
 
 /// Flattened evidence snapshot stored in the overload brownout ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct OverloadBrownoutEvidenceSnapshot {
     pub wake_to_run_p99_ns: Option<u64>,
     pub queue_residency_p99_ns: Option<u64>,
@@ -4656,7 +4744,8 @@ pub struct OverloadBrownoutEvidenceSnapshot {
 }
 
 /// Deterministic decision ledger for overload brownout.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct OverloadBrownoutLedger {
     pub schema_version: String,
     pub phase: OverloadBrownoutPhase,
@@ -4928,8 +5017,9 @@ pub const UNIFIED_ADMISSION_BROWNOUT_LEDGER_SCHEMA_VERSION: &str =
     "asupersync.unified-admission-brownout.v1";
 
 /// Top-level phase emitted by the unified overload policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum UnifiedAdmissionBrownoutPhase {
     Normal,
     Observe,
@@ -4941,8 +5031,9 @@ pub enum UnifiedAdmissionBrownoutPhase {
 }
 
 /// Work-admission action selected after all overload controllers are composed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum UnifiedAdmissionAction {
     Admit,
     Defer,
@@ -4950,8 +5041,9 @@ pub enum UnifiedAdmissionAction {
 }
 
 /// Optional-surface action selected by the unified policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum UnifiedBrownoutAction {
     KeepFullSurfaces,
     Observe,
@@ -4961,8 +5053,9 @@ pub enum UnifiedBrownoutAction {
 }
 
 /// Explicit reason codes for the unified admission/brownout verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum UnifiedAdmissionBrownoutReason {
     Disabled,
     LowConfidenceFallback,
@@ -4980,7 +5073,8 @@ pub enum UnifiedAdmissionBrownoutReason {
 }
 
 /// Operator-tunable guardrails for the unified admission and brownout contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct UnifiedAdmissionBrownoutProfile {
     pub enabled: bool,
     pub min_confidence_percent: u8,
@@ -5002,7 +5096,8 @@ impl Default for UnifiedAdmissionBrownoutProfile {
 }
 
 /// Inputs for composing admission, cohort steering, and brownout ledgers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct UnifiedAdmissionBrownoutEvidence {
     pub offered_work_units: u64,
     pub critical_surface_units: u64,
@@ -5012,7 +5107,8 @@ pub struct UnifiedAdmissionBrownoutEvidence {
 }
 
 /// Deterministic operator-facing policy ledger that composes all overload controls.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct UnifiedAdmissionBrownoutLedger {
     pub schema_version: String,
     pub phase: UnifiedAdmissionBrownoutPhase,
@@ -5496,7 +5592,7 @@ mod platform {
 
     // ----- Windows ----------------------------------------------------------
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "full-platform"))]
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         let pid = sysinfo::get_current_pid()
             .map_err(|err| std::io::Error::other(format!("current pid unavailable: {err}")))?;
@@ -5517,7 +5613,15 @@ mod platform {
             })
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(feature = "full-platform")))]
+    pub fn process_rss_bytes() -> std::io::Result<u64> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "sysinfo feature is disabled",
+        ))
+    }
+
+    #[cfg(all(windows, feature = "full-platform"))]
     pub fn memory_max_bytes() -> std::io::Result<u64> {
         let mut system = sysinfo::System::new();
         system.refresh_memory();
@@ -5530,6 +5634,14 @@ mod platform {
         } else {
             Ok(total)
         }
+    }
+
+    #[cfg(all(windows, not(feature = "full-platform")))]
+    pub fn memory_max_bytes() -> std::io::Result<u64> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "sysinfo feature is disabled",
+        ))
     }
 
     #[cfg(windows)]
@@ -6285,7 +6397,8 @@ pub struct ResourceMonitor {
 }
 
 /// Configuration for the resource monitor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MonitorConfig {
     /// Collection interval for system resources.
     pub collection_interval: Duration,

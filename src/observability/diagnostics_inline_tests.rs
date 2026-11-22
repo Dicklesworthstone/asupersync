@@ -681,7 +681,7 @@
         cx_inner
             .checkpoint_state
             .record_with_message_at("connecting to db".to_string(), Time::from_millis(12));
-        task.set_cx_inner(Arc::new(parking_lot::RwLock::new(cx_inner)));
+        task.set_cx_inner(Arc::new(crate::sync::pl::RwLock::new(cx_inner)));
 
         let obligation_id = insert_obligation(
             &mut state,

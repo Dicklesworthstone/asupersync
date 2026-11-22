@@ -12,7 +12,7 @@
 //! runtime's dedicated blocking-pool threads do not have an installed
 //! [`Runtime`](crate::runtime::Runtime) handle and are admitted.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -109,7 +109,6 @@ where
 }
 
 /// Future returned by [`zip`].
-#[pin_project::pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled or awaited"]
 pub(crate) struct Zip<F1, F2>
@@ -117,12 +116,31 @@ where
     F1: Future,
     F2: Future,
 {
-    #[pin]
     future1: Option<F1>,
     output1: Option<F1::Output>,
-    #[pin]
     future2: Option<F2>,
     output2: Option<F2::Output>,
+}
+
+struct ZipProj<'a, F1: Future, F2: Future> {
+    future1: Pin<&'a mut Option<F1>>,
+    output1: &'a mut Option<F1::Output>,
+    future2: Pin<&'a mut Option<F2>>,
+    output2: &'a mut Option<F2::Output>,
+}
+
+impl<F1: Future, F2: Future> Zip<F1, F2> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ZipProj<'_, F1, F2> {
+        // SAFETY: `future1` and `future2` are structurally pinned; `output1` and `output2` are never moved while pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ZipProj {
+            future1: unsafe { Pin::new_unchecked(&mut this.future1) },
+            output1: &mut this.output1,
+            future2: unsafe { Pin::new_unchecked(&mut this.future2) },
+            output2: &mut this.output2,
+        }
+    }
 }
 
 impl<F1, F2> Future for Zip<F1, F2>
@@ -174,14 +192,28 @@ where
 }
 
 /// Future returned by [`or`].
-#[pin_project::pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled or awaited"]
 pub(crate) struct Or<F1, F2> {
-    #[pin]
     future1: F1,
-    #[pin]
     future2: F2,
+}
+
+struct OrProj<'a, F1, F2> {
+    future1: Pin<&'a mut F1>,
+    future2: Pin<&'a mut F2>,
+}
+
+impl<F1, F2> Or<F1, F2> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> OrProj<'_, F1, F2> {
+        // SAFETY: both `future1` and `future2` are structurally pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        OrProj {
+            future1: unsafe { Pin::new_unchecked(&mut this.future1) },
+            future2: unsafe { Pin::new_unchecked(&mut this.future2) },
+        }
+    }
 }
 
 impl<T, F1, F2> Future for Or<F1, F2>
@@ -224,13 +256,28 @@ where
 }
 
 /// Future returned by [`catch_unwind`].
-#[pin_project::pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled or awaited"]
 pub(crate) struct CatchUnwind<F> {
-    #[pin]
     inner: Option<F>,
     completed: bool,
+}
+
+struct CatchUnwindProj<'a, F> {
+    inner: Pin<&'a mut Option<F>>,
+    completed: &'a mut bool,
+}
+
+impl<F> CatchUnwind<F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> CatchUnwindProj<'_, F> {
+        // SAFETY: `inner` is structurally pinned; `completed` is Unpin.
+        let this = unsafe { self.get_unchecked_mut() };
+        CatchUnwindProj {
+            inner: unsafe { Pin::new_unchecked(&mut this.inner) },
+            completed: &mut this.completed,
+        }
+    }
 }
 
 fn drop_pinned_future<F>(

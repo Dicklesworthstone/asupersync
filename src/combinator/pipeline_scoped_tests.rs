@@ -163,11 +163,11 @@ enum Finish {
 
 async fn subtree_journey(cx: Cx, finish: Finish) {
     let seen = Arc::new(Progress::default());
-    let retained_regions = Arc::new(parking_lot::Mutex::new(Vec::<ChildRegion>::new()));
-    let retained_handles = Arc::new(parking_lot::Mutex::new(
+    let retained_regions = Arc::new(crate::sync::pl::Mutex::new(Vec::<ChildRegion>::new()));
+    let retained_handles = Arc::new(crate::sync::pl::Mutex::new(
         Vec::<TaskHandle<CancelReason>>::new(),
     ));
-    let outputs = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let outputs = Arc::new(crate::sync::pl::Mutex::new(Vec::<String>::new()));
     let (sender, mut receiver) = mpsc::channel(1);
     let (release, cleanup) = oneshot::channel();
     let unrelated_seen = Arc::new(Progress::default());
@@ -490,7 +490,7 @@ struct FlowCounts {
 
 #[derive(Default)]
 struct Flow {
-    counts: parking_lot::Mutex<FlowCounts>,
+    counts: crate::sync::pl::Mutex<FlowCounts>,
     changed: Notify,
 }
 
@@ -519,7 +519,7 @@ fn scoped_pipeline_typed_edges_and_slow_sink_keep_the_whole_work_window_bounded(
     let ((), lab) = run_async_under_lab(0x32_4002, |cx| async move {
         let flow = Arc::new(Flow::default());
         let observe = Arc::clone(&flow);
-        let outputs = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let outputs = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
         let published = Arc::clone(&outputs);
         let (release, first_sink) = oneshot::channel();
         let mut operation = cx
@@ -595,7 +595,7 @@ fn scoped_pipeline_typed_edges_and_slow_sink_keep_the_whole_work_window_bounded(
 fn scoped_pipeline_empty_and_identity_runs_close_without_losing_sink_acknowledgements() {
     for count in [0, 1, 5] {
         let ((), lab) = run_async_under_lab(0x32_4003, move |cx| async move {
-            let outputs = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let outputs = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
             let published = Arc::clone(&outputs);
             let report = ScopedPipelineExecution::new(&cx, 0..count, config(2))
                 .run(move |_sink, value| {
@@ -845,7 +845,7 @@ fn scoped_pipeline_foreign_polling_keeps_source_authority_and_checked_credits_on
         owner.runtime_mask = <CapSet<true, false, false, false, false> as CapSetRuntimeMask>::MASK;
         let owner_region = owner.region_id();
         let observations = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
-        let output = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
         let published = Arc::clone(&output);
         let mut work = std::pin::pin!(
             ScopedPipelineExecution::new(

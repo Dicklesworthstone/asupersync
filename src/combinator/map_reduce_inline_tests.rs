@@ -54,7 +54,7 @@
         let slot = |index: usize, handle| ExecutingMapSlot::<u32, ()> {
             index,
             handle: Some(handle),
-            returned: Arc::new(parking_lot::Mutex::new(None)),
+            returned: Arc::new(crate::sync::pl::Mutex::new(None)),
             value: None,
             drain_reason: None,
         };
@@ -118,7 +118,7 @@
     {
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0100).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let returned = Arc::new(crate::sync::pl::Mutex::new(None));
         let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
@@ -242,7 +242,7 @@
         struct ParkedSource {
             first: Option<usize>,
             panic: Arc<std::sync::atomic::AtomicBool>,
-            wake: Arc<parking_lot::Mutex<Option<std::task::Waker>>>,
+            wake: Arc<crate::sync::pl::Mutex<Option<std::task::Waker>>>,
             polls: Arc<AtomicUsize>,
             drops: Arc<AtomicUsize>,
         }
@@ -274,7 +274,7 @@
             let mut lab = LabRuntime::new(LabConfig::new(0x32_0201).max_steps(8192));
             let root = lab.state.create_root_region(Budget::INFINITE);
             let panic = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let wake = Arc::new(parking_lot::Mutex::new(None));
+            let wake = Arc::new(crate::sync::pl::Mutex::new(None));
             let polls = Arc::new(AtomicUsize::new(0));
             let drops = Arc::new(AtomicUsize::new(0));
             let source = ParkedSource {
@@ -285,10 +285,10 @@
                 drops: Arc::clone(&drops),
             };
             let (release, gate) = crate::channel::oneshot::channel::<()>();
-            let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
+            let gate = Arc::new(crate::sync::pl::Mutex::new(Some(gate)));
             let started = Arc::new(AtomicUsize::new(0));
             let child_started = Arc::clone(&started);
-            let returned = Arc::new(parking_lot::Mutex::new(None));
+            let returned = Arc::new(crate::sync::pl::Mutex::new(None));
             let publication = Arc::clone(&returned);
             let (parent, mut joined) = lab
                 .state
@@ -613,8 +613,8 @@
             let root = lab.state.create_root_region(Budget::INFINITE);
             let drops = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
             let value_drops = Arc::new(AtomicUsize::new(0));
-            let children = Arc::new(parking_lot::Mutex::new(Vec::new()));
-            let publication = Arc::new(parking_lot::Mutex::new(None));
+            let children = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+            let publication = Arc::new(crate::sync::pl::Mutex::new(None));
             let task_drops = Arc::clone(&drops);
             let task_values = Arc::clone(&value_drops);
             let task_children = Arc::clone(&children);
@@ -858,7 +858,7 @@
         let pulled = Arc::new(AtomicUsize::new(0));
         let input_pulled = Arc::clone(&pulled);
         let child_gate = Arc::clone(&gate);
-        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let returned = Arc::new(crate::sync::pl::Mutex::new(None));
         let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
@@ -1135,13 +1135,13 @@
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0110).max_steps(8192));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (started, first_wait) = crate::channel::oneshot::channel::<()>();
-        let started = Arc::new(parking_lot::Mutex::new(Some(started)));
-        let first_wait = Arc::new(parking_lot::Mutex::new(Some(first_wait)));
+        let started = Arc::new(crate::sync::pl::Mutex::new(Some(started)));
+        let first_wait = Arc::new(crate::sync::pl::Mutex::new(Some(first_wait)));
         let (release, held) = crate::channel::oneshot::channel::<()>();
-        let held = Arc::new(parking_lot::Mutex::new(Some(held)));
-        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let held = Arc::new(crate::sync::pl::Mutex::new(Some(held)));
+        let returned = Arc::new(crate::sync::pl::Mutex::new(None));
         let publication = Arc::clone(&returned);
-        let third_id = Arc::new(parking_lot::Mutex::new(None));
+        let third_id = Arc::new(crate::sync::pl::Mutex::new(None));
         let actual_third = Arc::clone(&third_id);
         let (parent, mut joined) = lab
             .state
@@ -1353,9 +1353,9 @@
             let trigger = Arc::new(crate::sync::Mutex::new(()));
             let held_trigger = trigger.try_lock_owned().unwrap();
             let (keep_sender, receiver) = crate::channel::mpsc::channel::<()>(1);
-            let receiver = Arc::new(parking_lot::Mutex::new(Some(receiver)));
+            let receiver = Arc::new(crate::sync::pl::Mutex::new(Some(receiver)));
             let (finish_cleanup, cleanup) = crate::channel::oneshot::channel::<()>();
-            let cleanup = Arc::new(parking_lot::Mutex::new(Some(cleanup)));
+            let cleanup = Arc::new(crate::sync::pl::Mutex::new(Some(cleanup)));
             let cleanup_started = Arc::new(AtomicUsize::new(0));
             let cleanup_finished = Arc::new(AtomicUsize::new(0));
             let started = Arc::clone(&cleanup_started);
@@ -1472,7 +1472,7 @@
         let trigger = Arc::new(crate::sync::Mutex::new(()));
         let held_trigger = trigger.try_lock_owned().unwrap();
         let (keep_sender, receiver) = crate::channel::mpsc::channel::<()>(1);
-        let receiver = Arc::new(parking_lot::Mutex::new(Some(receiver)));
+        let receiver = Arc::new(crate::sync::pl::Mutex::new(Some(receiver)));
         let child_trigger = Arc::clone(&trigger);
         let (parent, mut join) = lab
             .state
@@ -1595,10 +1595,10 @@
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0103).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (release, gate) = crate::channel::oneshot::channel::<()>();
-        let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
+        let gate = Arc::new(crate::sync::pl::Mutex::new(Some(gate)));
         let started = Arc::new(AtomicUsize::new(0));
         let child_started = Arc::clone(&started);
-        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let returned = Arc::new(crate::sync::pl::Mutex::new(None));
         let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
@@ -1690,11 +1690,11 @@
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0104).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (release, gate) = crate::channel::oneshot::channel::<()>();
-        let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
+        let gate = Arc::new(crate::sync::pl::Mutex::new(Some(gate)));
         let started = Arc::new(AtomicUsize::new(0));
         let child_started = Arc::clone(&started);
         let (notify_started, mut receive_started) = crate::channel::oneshot::channel::<()>();
-        let notify_started = Arc::new(parking_lot::Mutex::new(Some(notify_started)));
+        let notify_started = Arc::new(crate::sync::pl::Mutex::new(Some(notify_started)));
         let (parent, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
@@ -1761,7 +1761,7 @@
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0105).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (release, gate) = crate::channel::oneshot::channel::<()>();
-        let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
+        let gate = Arc::new(crate::sync::pl::Mutex::new(Some(gate)));
         let (parent, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
@@ -1832,11 +1832,11 @@
             for _ in 0..count {
                 let (sender, receiver) = crate::channel::mpsc::channel::<()>(1);
                 senders.push(sender);
-                receivers.push(parking_lot::Mutex::new(Some(receiver)));
+                receivers.push(crate::sync::pl::Mutex::new(Some(receiver)));
             }
             let receivers = Arc::new(receivers);
             let (finish_cleanup, cleanup) = crate::channel::oneshot::channel::<()>();
-            let cleanup = Arc::new(parking_lot::Mutex::new(Some(cleanup)));
+            let cleanup = Arc::new(crate::sync::pl::Mutex::new(Some(cleanup)));
             let (request_drop, mut drop_requested) = crate::channel::oneshot::channel::<()>();
             let ready_values = Arc::new(AtomicUsize::new(0));
             let dropped = Arc::new(AtomicUsize::new(0));
@@ -1846,7 +1846,7 @@
             let child_dropped = Arc::clone(&dropped);
             let child_started = Arc::clone(&cleanup_started);
             let child_finished = Arc::clone(&cleanup_finished);
-            let returned = Arc::new(parking_lot::Mutex::new(None));
+            let returned = Arc::new(crate::sync::pl::Mutex::new(None));
             let publication = Arc::clone(&returned);
             let (parent, mut join) = lab
                 .state
@@ -2004,13 +2004,13 @@
         for _ in 0..count {
             let (sender, receiver) = crate::channel::mpsc::channel::<()>(1);
             senders.push(sender);
-            receivers.push(parking_lot::Mutex::new(Some(receiver)));
+            receivers.push(crate::sync::pl::Mutex::new(Some(receiver)));
         }
         let receivers = Arc::new(receivers);
         let started = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let (all_started, mut receive_started) = crate::channel::oneshot::channel::<()>();
-        let all_started = Arc::new(parking_lot::Mutex::new(Some(all_started)));
+        let all_started = Arc::new(crate::sync::pl::Mutex::new(Some(all_started)));
         let (resume, mut receive_resume) = crate::channel::oneshot::channel::<()>();
         let child_started = Arc::clone(&started);
         let child_dropped = Arc::clone(&dropped);

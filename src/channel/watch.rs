@@ -38,7 +38,7 @@
 //! tx.send(new_config)?;
 //! ```
 
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use crate::sync::pl::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;

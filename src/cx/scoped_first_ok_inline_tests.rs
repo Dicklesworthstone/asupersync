@@ -5,7 +5,7 @@ use crate::record::RegionLimits;
 use crate::record::region::RegionState;
 use crate::runtime::state::SpawnAdmission;
 use crate::types::Budget;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Waker};

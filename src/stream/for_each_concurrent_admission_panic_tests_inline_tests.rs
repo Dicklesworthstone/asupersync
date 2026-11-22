@@ -4,7 +4,7 @@
     use crate::channel::mpsc;
     use crate::combinator::try_map_collect_concurrent;
     use crate::lab::run_async_under_lab;
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Waker};

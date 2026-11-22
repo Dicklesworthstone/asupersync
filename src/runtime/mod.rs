@@ -159,6 +159,7 @@ pub mod epoch_tracking;
 pub mod io_driver;
 pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
+#[cfg(feature = "full-runtime")]
 pub mod kernel;
 /// Bounded worker, blocking, stack and queue caps for memory-poor targets (opt-in).
 #[cfg(not(target_arch = "wasm32"))]
@@ -176,6 +177,7 @@ pub mod panic_isolation;
 pub mod pool_sizing;
 pub mod rch_health;
 pub mod reactor;
+#[cfg(feature = "full-runtime")]
 pub mod reactor_model;
 pub mod region_heap;
 #[cfg(test)]
@@ -191,6 +193,7 @@ pub mod scheduler;
 pub mod sharded_state;
 #[cfg(test)]
 pub mod sharded_state_conformance;
+#[cfg(feature = "full-runtime")]
 pub mod slo_policy;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
@@ -220,9 +223,18 @@ pub use blocking_pool::{
     BlockingPoolOptions, BlockingQueuePolicy, BlockingSpawnError, BlockingSpawnErrorKind,
     BlockingSubmission, BlockingTaskHandle,
 };
+#[cfg(feature = "full-runtime")]
 pub use builder::{
     BrowserHostServices, BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder,
     BrowserRuntimeSelectionResult, BrowserServiceWorkerBrokerSupportDiagnostics,
+    BrowserServiceWorkerBrokerSupportReason, BrowserSharedWorkerCoordinatorSupportDiagnostics,
+    BrowserSharedWorkerCoordinatorSupportReason, BrowserWorkerFallbackTarget, BrowserWorkerPump,
+    CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle, LocalJoinHandle, PumpDrainOutcome,
+    RootDrainOutcome, RootDrainReport, Runtime, RuntimeBuilder, RuntimeHandle,
+};
+#[cfg(not(feature = "full-runtime"))]
+pub use builder::{
+    BrowserHostServices, BrowserServiceWorkerBrokerSupportDiagnostics,
     BrowserServiceWorkerBrokerSupportReason, BrowserSharedWorkerCoordinatorSupportDiagnostics,
     BrowserSharedWorkerCoordinatorSupportReason, BrowserWorkerFallbackTarget, BrowserWorkerPump,
     CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle, LocalJoinHandle, PumpDrainOutcome,
@@ -272,9 +284,15 @@ pub use pool_sizing::{
     PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing, pool_sizing_candidate_metrics,
     recommend_pool_size, square_root_staffing_size,
 };
+#[cfg(feature = "full-runtime")]
 pub use reactor::{
     BrowserReactor, BrowserReactorConfig, Event, Events, Interest, LabReactor, Reactor,
     Registration, Source, Token,
+};
+#[cfg(not(feature = "full-runtime"))]
+pub use reactor::{
+    BrowserReactor, BrowserReactorConfig, Event, Events, Interest, Reactor, Registration, Source,
+    Token,
 };
 pub use region_heap::{HeapIndex, HeapRef, HeapStats, RegionHeap, global_alloc_count};
 pub use region_table::{RegionCreateError, RegionTable};
@@ -284,6 +302,7 @@ pub use resource_cleanup_verifier::{
 };
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
+#[cfg(feature = "full-runtime")]
 pub use slo_policy::{
     FourthWaveRuntimeBridgeDecision, SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision,
     SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind,

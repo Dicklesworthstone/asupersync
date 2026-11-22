@@ -43,7 +43,7 @@ use super::{Event, Interest, Reactor, Source, Token};
 use crate::lab::chaos::{ChaosConfig, ChaosRng, ChaosStats};
 use crate::tracing_compat::debug;
 use crate::types::Time;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};

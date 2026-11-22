@@ -155,8 +155,8 @@ enum Finish {
 
 async fn subtree_journey(cx: Cx, finish: Finish) {
     let seen = Arc::new(Progress::default());
-    let retained_regions = Arc::new(parking_lot::Mutex::new(Vec::<ChildRegion>::new()));
-    let retained_handles = Arc::new(parking_lot::Mutex::new(
+    let retained_regions = Arc::new(crate::sync::pl::Mutex::new(Vec::<ChildRegion>::new()));
+    let retained_handles = Arc::new(crate::sync::pl::Mutex::new(
         Vec::<TaskHandle<CancelReason>>::new(),
     ));
     let (sender, mut receiver) = mpsc::channel(1);
@@ -899,7 +899,7 @@ async fn stream_subtree_journey(cx: Cx) {
     let (inputs, source) = mpsc::channel(1);
     inputs.try_send((7_usize, cleanup)).unwrap();
     drop(inputs);
-    let handles = Arc::new(parking_lot::Mutex::new(Vec::<TaskHandle<CancelReason>>::new()));
+    let handles = Arc::new(crate::sync::pl::Mutex::new(Vec::<TaskHandle<CancelReason>>::new()));
     let retain = Arc::clone(&handles);
     let mut operation = cx
         .spawn(move |owner| async move {

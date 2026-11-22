@@ -38,7 +38,7 @@ use super::{
 };
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::{PanicPayload, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;

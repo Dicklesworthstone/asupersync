@@ -4,7 +4,7 @@
 
 use super::entry::LogEntry;
 use super::level::LogLevel;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 

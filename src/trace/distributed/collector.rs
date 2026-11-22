@@ -6,7 +6,7 @@ use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::runtime::TraceStorageProfile;
 use crate::types::Time;
 use crate::types::symbol::ObjectId;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 // br-asupersync-q6vujm — `BTreeMap` (not `HashMap`) is the keyed
 // container for in-flight distributed traces. The keyspace
 // (`DistTraceId`) is attacker-influenced — IDs arrive from remote peers

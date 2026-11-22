@@ -3,27 +3,44 @@
 //! The `Zip` combinator yields pairs from two streams until either stream ends.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// A stream that zips two streams into pairs.
 ///
 /// Created by [`StreamExt::zip`](super::StreamExt::zip).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Zip<S1: Stream, S2: Stream> {
-    #[pin]
     stream1: S1,
-    #[pin]
     stream2: S2,
     queued1: Option<S1::Item>,
     queued2: Option<S2::Item>,
     exhausted: bool,
 }
 
+struct ZipProj<'a, S1: Stream, S2: Stream> {
+    stream1: Pin<&'a mut S1>,
+    stream2: Pin<&'a mut S2>,
+    queued1: &'a mut Option<S1::Item>,
+    queued2: &'a mut Option<S2::Item>,
+    exhausted: &'a mut bool,
+}
+
 impl<S1: Stream, S2: Stream> Zip<S1, S2> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ZipProj<'_, S1, S2> {
+        // SAFETY: `stream1` and `stream2` are structurally pinned; remaining fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ZipProj {
+            stream1: unsafe { Pin::new_unchecked(&mut this.stream1) },
+            stream2: unsafe { Pin::new_unchecked(&mut this.stream2) },
+            queued1: &mut this.queued1,
+            queued2: &mut this.queued2,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     /// Creates a new `Zip` stream.
     pub(crate) fn new(stream1: S1, stream2: S2) -> Self {
         Self {

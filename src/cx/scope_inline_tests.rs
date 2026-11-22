@@ -2001,7 +2001,7 @@ fn region_close_future_wakes_all_registered_waiters() {
         }
     }
 
-    let notify = Arc::new(parking_lot::Mutex::new(
+    let notify = Arc::new(crate::sync::pl::Mutex::new(
         crate::record::region::RegionCloseState {
             closed: false,
             waiters: Default::default(),

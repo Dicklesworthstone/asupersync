@@ -5,6 +5,7 @@
 
 use crate::util::ArenaIndex;
 use core::fmt;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -173,13 +174,17 @@ impl fmt::Display for RegionId {
 /// are the canonical tag values; they are stable across versions and
 /// MUST NOT be reused for any other type without coordinating a
 /// schema-version bump.
+#[cfg(feature = "full-serialization")]
 const KIND_REGION_ID: &str = "RegionId";
+#[cfg(feature = "full-serialization")]
 const KIND_TASK_ID: &str = "TaskId";
+#[cfg(feature = "full-serialization")]
 const KIND_OBLIGATION_ID: &str = "ObligationId";
 // Note: DecisionId lives in `franken_kernel` and serialises as a hex
 // u128 — its wire shape is already distinct from the SerdeArenaIndex
 // triple here, so it does not need a discriminant tag.
 
+#[cfg(feature = "full-serialization")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SerdeIdEnvelope {
     kind: String,
@@ -187,6 +192,7 @@ struct SerdeIdEnvelope {
     generation: u32,
 }
 
+#[cfg(feature = "full-serialization")]
 impl SerdeIdEnvelope {
     #[inline]
     fn from_arena(arena: ArenaIndex, kind: &'static str) -> Self {
@@ -218,6 +224,7 @@ impl SerdeIdEnvelope {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl Serialize for RegionId {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -228,6 +235,7 @@ impl Serialize for RegionId {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl<'de> Deserialize<'de> for RegionId {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -338,6 +346,7 @@ impl fmt::Display for TaskId {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl Serialize for TaskId {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -348,6 +357,7 @@ impl Serialize for TaskId {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl<'de> Deserialize<'de> for TaskId {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -438,6 +448,7 @@ impl fmt::Display for ObligationId {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl Serialize for ObligationId {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -448,6 +459,7 @@ impl Serialize for ObligationId {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl<'de> Deserialize<'de> for ObligationId {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -464,7 +476,8 @@ impl<'de> Deserialize<'de> for ObligationId {
 ///
 /// In the production runtime, this corresponds to wall-clock time.
 /// In the lab runtime, this is virtual time controlled by the scheduler.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct Time(u64);
 
 impl Time {

@@ -3,7 +3,6 @@
 //! The `Count` future consumes a stream and counts the number of items.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,17 +16,32 @@ const COUNT_COOPERATIVE_BUDGET: usize = 1024;
 /// A future that counts the items in a stream.
 ///
 /// Created by [`StreamExt::count`](super::StreamExt::count).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Count<S> {
-    #[pin]
     stream: S,
     total: usize,
     completed: bool,
 }
 
+struct CountProj<'a, S> {
+    stream: Pin<&'a mut S>,
+    total: &'a mut usize,
+    completed: &'a mut bool,
+}
+
 impl<S> Count<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> CountProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; `total` and `completed` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        CountProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            total: &mut this.total,
+            completed: &mut this.completed,
+        }
+    }
+
     /// Creates a new `Count` future.
     #[inline]
     pub(crate) fn new(stream: S) -> Self {

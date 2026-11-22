@@ -40,7 +40,6 @@
 //! assert!(REQUEST_ID.try_get().is_err());
 //! ```
 
-use pin_project::{pin_project, pinned_drop};
 use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
@@ -274,15 +273,30 @@ impl<T: 'static> fmt::Debug for LocalKey<T> {
 
 /// A future running with a task-local value bound; returned by
 /// [`LocalKey::scope`].
-#[pin_project(PinnedDrop)]
 pub struct TaskLocalFuture<T: 'static, F> {
     local: &'static LocalKey<T>,
     slot: Option<T>,
-    #[pin]
     future: Option<F>,
 }
 
+struct TaskLocalFutureProj<'a, T: 'static, F> {
+    local: &'a &'static LocalKey<T>,
+    slot: &'a mut Option<T>,
+    future: Pin<&'a mut Option<F>>,
+}
+
 impl<T: 'static, F> TaskLocalFuture<T, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> TaskLocalFutureProj<'_, T, F> {
+        // SAFETY: `future` is structurally pinned; `local` and `slot` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        TaskLocalFutureProj {
+            local: &this.local,
+            slot: &mut this.slot,
+            future: unsafe { Pin::new_unchecked(&mut this.future) },
+        }
+    }
+
     /// Takes the bound value out of this future.
     ///
     /// Returns `None` when it was already taken. Taking it before the future
@@ -316,10 +330,11 @@ impl<T: 'static, F: Future> Future for TaskLocalFuture<T, F> {
     }
 }
 
-#[pinned_drop]
-impl<T: 'static, F> PinnedDrop for TaskLocalFuture<T, F> {
-    fn drop(self: Pin<&mut Self>) {
-        let this = self.project();
+impl<T: 'static, F> Drop for TaskLocalFuture<T, F> {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `TaskLocalFuture` is dropped in place whether pinned or unpinned.
+        let this = unsafe { Pin::new_unchecked(self) }.project();
         if std::mem::needs_drop::<F>() && this.future.is_some() {
             // Drop the unfinished future inside its scope so its destructors
             // see the value. If the scope cannot be entered (a borrow is

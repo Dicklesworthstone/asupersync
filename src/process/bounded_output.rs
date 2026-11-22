@@ -73,16 +73,44 @@ impl std::fmt::Display for OutputLimitExceeded {
 impl std::error::Error for OutputLimitExceeded {}
 
 /// Failure from bounded subprocess capture.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum BoundedOutputError {
     /// Spawn, pipe, cancellation, termination, or reap failure.
-    #[error(transparent)]
-    Process(#[from] ProcessError),
+    Process(ProcessError),
     /// Output exceeded a limit; the configured target was signalled and the
     /// direct child was reaped before this error was published.
-    #[error(transparent)]
-    LimitExceeded(#[from] OutputLimitExceeded),
+    LimitExceeded(OutputLimitExceeded),
+}
+
+impl std::fmt::Display for BoundedOutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Process(err) => std::fmt::Display::fmt(err, f),
+            Self::LimitExceeded(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl std::error::Error for BoundedOutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Process(err) => Some(err),
+            Self::LimitExceeded(err) => Some(err),
+        }
+    }
+}
+
+impl From<ProcessError> for BoundedOutputError {
+    fn from(err: ProcessError) -> Self {
+        Self::Process(err)
+    }
+}
+
+impl From<OutputLimitExceeded> for BoundedOutputError {
+    fn from(err: OutputLimitExceeded) -> Self {
+        Self::LimitExceeded(err)
+    }
 }
 
 impl Command {

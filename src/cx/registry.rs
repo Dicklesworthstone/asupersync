@@ -1945,7 +1945,7 @@ impl RegistryCap for NameRegistry {}
 // A Mutex-wrapped registry is also a valid capability, allowing shared mutable
 // access from multiple child contexts (e.g., when the app layer distributes
 // a single registry to its supervision tree).
-impl<T: RegistryCap> RegistryCap for parking_lot::Mutex<T> {}
+impl<T: RegistryCap> RegistryCap for crate::sync::pl::Mutex<T> {}
 
 // ============================================================================
 // Registry Events (trace visibility)

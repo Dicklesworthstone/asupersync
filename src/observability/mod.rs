@@ -37,20 +37,26 @@
 //! # let _ = (config, entry);
 //! ```
 
+#[cfg(feature = "full-runtime")]
 pub mod analyzer_plugin;
 #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
 pub mod async_export;
 #[cfg(test)]
 pub mod batch_span_processor_flush_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod cancellation_analyzer;
 pub mod cancellation_debt_monitor;
+#[cfg(feature = "full-runtime")]
 pub mod cancellation_tracer;
+#[cfg(feature = "full-runtime")]
 pub mod cancellation_visualizer;
 #[cfg(all(test, feature = "metrics"))]
 pub mod cardinality_limits_audit_test;
 pub mod collector;
 pub mod context;
+#[cfg(feature = "full-runtime")]
 pub mod debt_runtime_integration;
+#[cfg(feature = "full-runtime")]
 pub mod diagnostics;
 pub mod entry;
 #[cfg(test)]
@@ -63,6 +69,7 @@ pub mod metrics;
 pub mod mock_code_finder_clean_sweep_audit_test;
 #[cfg(test)]
 pub mod multi_runtime_subscriber_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod network_diagnostics;
 pub mod network_truth;
 pub mod obligation_tracker;
@@ -72,6 +79,7 @@ pub mod otel;
 pub mod otel_conformance_tests;
 #[cfg(test)]
 pub mod otel_sampling_strategy_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
@@ -129,6 +137,7 @@ pub mod otlp_span_deduplication_audit_test;
 pub mod otlp_span_event_timestamping_audit_test;
 #[cfg(test)]
 pub mod otlp_tail_based_sampling_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod otlp_trace_exporter;
 #[cfg(test)]
 pub mod otlp_trace_state_propagation_audit_test;
@@ -177,6 +186,7 @@ pub(crate) mod regex_vm;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod runtime_integration;
 #[cfg(test)]
 pub mod runtime_metrics_endpoint_audit_test;
@@ -189,9 +199,11 @@ pub mod span_lifecycle_obligation_leak_audit_test;
 #[cfg(test)]
 pub mod span_propagation_audit_test;
 pub mod spectral_health;
+#[cfg(feature = "full-runtime")]
 pub mod structured_cancellation_analyzer;
 #[cfg(test)]
 pub mod subscriber_installation_order_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod swarm_pressure_governor;
 pub mod task_inspector;
 #[cfg(all(test, feature = "metrics"))]
@@ -202,10 +214,12 @@ pub mod trace_id_format_audit_test;
 pub mod trace_id_high_load_audit_test;
 #[cfg(test)]
 pub mod w3c_baggage_propagation_audit_test;
+#[cfg(feature = "full-runtime")]
 pub mod w3c_trace_context;
 #[cfg(test)]
 pub mod w3c_trace_id_randomness_audit_test;
 
+#[cfg(feature = "full-runtime")]
 pub use analyzer_plugin::{
     ANALYZER_PLUGIN_CONTRACT_VERSION, AggregatedAnalyzerFinding, AnalyzerCapability,
     AnalyzerFinding, AnalyzerOutput, AnalyzerPlugin, AnalyzerPluginDescriptor,
@@ -214,6 +228,7 @@ pub use analyzer_plugin::{
     PluginExecutionState, PluginLifecycleEvent, PluginLifecyclePhase, PluginRegistrationError,
     SchemaDecision, SchemaNegotiation, negotiate_schema_version, run_analyzer_plugin_pack_smoke,
 };
+#[cfg(feature = "full-runtime")]
 pub use cancellation_analyzer::{
     AnalyzerConfig as CancellationAnalyzerConfig, BottleneckAnalysis, CancellationAnalyzer,
     CleanupEfficiency, CleanupTimingAnalysis, DistributionStats, EntityPerformance,
@@ -225,18 +240,22 @@ pub use cancellation_debt_monitor::{
     CancellationDebtConfig, CancellationDebtMonitor, DebtAlert, DebtAlertLevel, DebtSnapshot,
     PendingWork, WorkType,
 };
+#[cfg(feature = "full-runtime")]
 pub use cancellation_tracer::{
     CancellationAnalysis, CancellationTrace, CancellationTraceId, CancellationTraceStep,
     CancellationTracer, CancellationTracerConfig, CancellationTracerStats,
     CancellationTracerStatsSnapshot, EntityType, PropagationAnomaly, analyze_cancellation_patterns,
 };
+#[cfg(feature = "full-runtime")]
 pub use cancellation_visualizer::{
     AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,
     CancellationVisualizer, ThroughputStats, TimingFormat, VisualizerConfig,
 };
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
+#[cfg(feature = "full-runtime")]
 pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
+#[cfg(feature = "full-runtime")]
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
@@ -259,6 +278,7 @@ pub use level::LogLevel;
 pub use metrics::{
     Counter, Gauge, Histogram, MetricValue, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
 };
+#[cfg(feature = "full-runtime")]
 pub use network_diagnostics::{
     LimitingFactor, NetworkDiagnosticCli, NetworkDiagnosticReport, NetworkDiagnosticReporter,
     NetworkSummary, PressureLevel,
@@ -300,9 +320,11 @@ pub use otel::{
     OwnedOtlpMetricsConfig, OwnedOtlpMetricsError, OwnedOtlpSpanKind, OwnedOtlpStatusCode,
     OwnedOtlpTraceCollection, OwnedOtlpTraceConfig, OwnedOtlpTraceError, OwnedOtlpTraces,
 };
+#[cfg(feature = "full-runtime")]
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
 };
+#[cfg(feature = "full-runtime")]
 pub use otlp_trace_exporter::{
     LoadSheddingTraceExporter, OTLP_TAIL_SAMPLING_E2E_BEAD_ID, OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID,
     OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION, OtlpSpan, OtlpTailSamplingScope,
@@ -319,10 +341,12 @@ pub use pressure_governor::{
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
 };
+#[cfg(feature = "full-runtime")]
 pub use structured_cancellation_analyzer::{
     AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
     StructuredCancellationAnalyzer, StructuredCancellationConfig,
 };
+#[cfg(feature = "full-runtime")]
 pub use swarm_pressure_governor::{
     ResourceEnvelope, SwarmAdmissionDecision, SwarmAdmissionDecisionReceipt, SwarmAdmissionOwner,
     SwarmAdmissionWorkloadReceipt, SwarmPressureError, SwarmPressureGovernor,
@@ -340,6 +364,7 @@ pub use task_inspector::{
     TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire, TaskInspector, TaskInspectorConfig,
     TaskRegionCountWire, TaskStateInfo, TaskSummary, TaskSummaryWire,
 };
+#[cfg(feature = "full-runtime")]
 pub use w3c_trace_context::{
     SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CBaggage, W3CPropagationContext,
     W3CTraceContext, continue_or_start_trace, continue_or_start_trace_with,

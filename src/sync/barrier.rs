@@ -14,7 +14,7 @@
 //! pre-arrival vector clock from the same runtime. Withdrawn arrivals do not
 //! contribute, and a later generation cannot overwrite an earlier receipt.
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::future::Future;

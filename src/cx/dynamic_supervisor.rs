@@ -33,7 +33,7 @@ use crate::supervision::{
     ManagedSupervisorReport, RestartConfig, RestartTracker, RestartVerdict, UnstartedManagedSupervisor,
 };
 use crate::types::{CancelReason, RegionId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};

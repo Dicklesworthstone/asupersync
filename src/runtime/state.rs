@@ -16,6 +16,7 @@ use crate::cx::scope::{CatchUnwind, payload_to_string};
 use crate::epoch::EpochId;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
+#[cfg(feature = "full-runtime")]
 use crate::observability::swarm_pressure_governor::{
     SwarmPressureGovernor, SwarmPressureGovernorConfig,
 };
@@ -59,6 +60,7 @@ use crate::types::{
 };
 use crate::util::det_hash::DetHashMap;
 use crate::util::{Arena, ArenaIndex, DetEntropy, EntropySource, OsEntropy};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
@@ -323,7 +325,8 @@ fn log_cancel_protocol_violation(operation: &'static str, validation_result: &Tr
 }
 
 /// Auditable lifecycle events emitted by async finalizers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum FinalizerHistoryEvent {
     /// A finalizer was registered for a region.
     Registered {
@@ -415,7 +418,8 @@ impl fmt::Display for ManualFinalizerReceiptError {
 impl std::error::Error for ManualFinalizerReceiptError {}
 
 /// Auditable events proving that losing race participants are drained.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum LoserDrainHistoryEvent {
     /// A race began and registered the participant tasks that must drain.
     RaceStarted {
@@ -453,7 +457,7 @@ pub enum LoserDrainHistoryEvent {
 #[derive(Debug)]
 pub(crate) struct LoserDrainHistoryRecorder {
     next_race_id: AtomicU64,
-    events: parking_lot::Mutex<LoserDrainHistoryLog>,
+    events: crate::sync::pl::Mutex<LoserDrainHistoryLog>,
     /// Completed races kept after they finish; `usize::MAX` keeps every race.
     completed_race_limit: AtomicUsize,
 }
@@ -462,7 +466,7 @@ impl Default for LoserDrainHistoryRecorder {
     fn default() -> Self {
         Self {
             next_race_id: AtomicU64::new(0),
-            events: parking_lot::Mutex::default(),
+            events: crate::sync::pl::Mutex::default(),
             completed_race_limit: AtomicUsize::new(usize::MAX),
         }
     }
@@ -582,6 +586,7 @@ impl LoserDrainHistoryRecorder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SupervisionHistoryEvent {
     /// A supervisor run began; its children are its compiled indices.
+    #[cfg(feature = "full-runtime")]
     Supervisor {
         supervisor: u64,
         restart_policy: crate::supervision::RestartPolicy,
@@ -604,7 +609,7 @@ pub(crate) enum SupervisionHistoryEvent {
 #[derive(Debug, Default)]
 pub(crate) struct SupervisionHistoryRecorder {
     next_supervisor: AtomicU64,
-    events: parking_lot::Mutex<Vec<SupervisionHistoryEvent>>,
+    events: crate::sync::pl::Mutex<Vec<SupervisionHistoryEvent>>,
 }
 
 pub(crate) type SupervisionHistoryHandle = Arc<SupervisionHistoryRecorder>;
@@ -660,7 +665,7 @@ pub(crate) enum ReplyHistoryEvent {
 #[derive(Debug, Default)]
 pub(crate) struct ReplyHistoryRecorder {
     next_call: AtomicU64,
-    events: parking_lot::Mutex<Vec<ReplyHistoryEvent>>,
+    events: crate::sync::pl::Mutex<Vec<ReplyHistoryEvent>>,
 }
 
 pub(crate) type ReplyHistoryHandle = Arc<ReplyHistoryRecorder>;
@@ -1641,7 +1646,7 @@ struct LifecycleObserverPayload {
 #[derive(Default)]
 struct NativeCompletionProgress {
     task: Option<(TaskId, RegionId)>,
-    retirement_cx_inner: Option<Arc<parking_lot::RwLock<CxInner>>>,
+    retirement_cx_inner: Option<Arc<crate::sync::pl::RwLock<CxInner>>>,
     waiters: SmallVec<[TaskId; 4]>,
     cancel_targets: SmallVec<[Arc<CancelWaker>; 4]>,
     watch_effects: SmallVec<[crate::monitor::WatchEffects; 1]>,
@@ -2651,12 +2656,12 @@ impl TaskCompletionKind {
 
 struct MaskedFinalizer {
     inner: BoxedAsyncFinalizer,
-    cx_inner: Arc<parking_lot::RwLock<CxInner>>,
+    cx_inner: Arc<crate::sync::pl::RwLock<CxInner>>,
     entered: bool,
 }
 
 impl MaskedFinalizer {
-    fn new(inner: BoxedAsyncFinalizer, cx_inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
+    fn new(inner: BoxedAsyncFinalizer, cx_inner: Arc<crate::sync::pl::RwLock<CxInner>>) -> Self {
         Self {
             inner,
             cx_inner,
@@ -2964,6 +2969,7 @@ pub struct RuntimeState {
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
     /// Optional root key used to verify spawn capability macaroons.
+    #[cfg(feature = "full-runtime")]
     spawn_authorization_key: Option<crate::security::key::AuthKey>,
     /// Optional observability configuration for runtime contexts.
     observability: Option<RuntimeObservability>,
@@ -3032,7 +3038,7 @@ pub struct RuntimeState {
     leak_count: u64,
     /// Opt-in anytime-valid leak monitor, fed one age per resolved
     /// obligation (br-asupersync-bi2462.150.2). `None` by default.
-    obligation_leak_monitor: Option<parking_lot::Mutex<crate::obligation::eprocess::LeakMonitor>>,
+    obligation_leak_monitor: Option<crate::sync::pl::Mutex<crate::obligation::eprocess::LeakMonitor>>,
     /// Leaks that the `Recover` policy is aborting while a monitor is
     /// enabled: their abort effect must not feed the monitor an on-time age.
     leak_recovered_obligations: HashSet<ObligationId>,
@@ -3082,7 +3088,7 @@ pub struct RuntimeState {
     /// Logical cleanup results retained until the actual task completes. The
     /// scheduler's historical StoredTask error remains unit-typed.
     async_finalizer_outcomes:
-        HashMap<TaskId, Arc<parking_lot::Mutex<Option<crate::record::task::TaskOutcome>>>>,
+        HashMap<TaskId, Arc<crate::sync::pl::Mutex<Option<crate::record::task::TaskOutcome>>>>,
     /// Regions currently blocked on an in-flight async finalizer barrier.
     ///
     /// While a region is present here, lower finalizers in its stack must not
@@ -3126,7 +3132,7 @@ pub struct RuntimeState {
     /// State machine transition verifier for runtime entities.
     state_verifier: Arc<super::state_verifier::StateTransitionVerifier>,
     /// Cancel protocol state machine validator for runtime cancellation compliance.
-    cancel_protocol_validator: Arc<parking_lot::Mutex<CancelProtocolValidator>>,
+    cancel_protocol_validator: Arc<crate::sync::pl::Mutex<CancelProtocolValidator>>,
     /// Whether that validator tracks state machines. When it does not
     /// (release builds), runtime paths skip its lock entirely.
     cancel_protocol_tracking: bool,
@@ -3141,6 +3147,7 @@ pub struct RuntimeState {
     ///
     /// Provides comprehensive admission decisions, resource envelope tracking,
     /// and swarm coordination for distributed pressure management.
+    #[cfg(feature = "full-runtime")]
     swarm_pressure_governor: SwarmPressureGovernor,
     /// The pressure handle every task context the runtime builds carries while
     /// resource sampling runs (`RuntimeBuilder::resource_sampling`). `None`
@@ -3195,10 +3202,6 @@ impl std::fmt::Debug for RuntimeState {
             .field("logical_clock_mode", &self.logical_clock_mode)
             .field("cancel_attribution", &self.cancel_attribution)
             .field("entropy_source", &"<dyn EntropySource>")
-            .field(
-                "spawn_authorization_enabled",
-                &self.spawn_authorization_key.is_some(),
-            )
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
             .field(
@@ -3272,6 +3275,7 @@ impl RuntimeState {
         // RuntimeState owns the resource monitor and exposes the swarm-level
         // governor. The runtime-level PressureGovernor is attached by the
         // outer Runtime once the scheduler and state mutex are available.
+        #[cfg(feature = "full-runtime")]
         let swarm_pressure_governor = SwarmPressureGovernor::new_without_pressure_governor(
             SwarmPressureGovernorConfig::default(),
             Arc::clone(&resource_monitor),
@@ -3297,6 +3301,7 @@ impl RuntimeState {
             task_causality: false,
             cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
+            #[cfg(feature = "full-runtime")]
             spawn_authorization_key: None,
             observability: None,
             blocking_pool: None,
@@ -3356,7 +3361,7 @@ impl RuntimeState {
             // every task in this crate's tests and debug builds; release builds
             // keep an untracked validator, and spawn, completion and obligation
             // paths skip its global lock (br-asupersync-issue65-criticisms-kpmoy5.1.8).
-            cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
+            cancel_protocol_validator: Arc::new(crate::sync::pl::Mutex::new(
                 if cfg!(any(test, debug_assertions)) {
                     CancelProtocolValidator::new(CancelValidationLevel::Basic)
                 } else {
@@ -3366,6 +3371,7 @@ impl RuntimeState {
             cancel_protocol_tracking: cfg!(any(test, debug_assertions)),
             debt_monitor,
             resource_monitor,
+            #[cfg(feature = "full-runtime")]
             swarm_pressure_governor,
             task_pressure: None,
             deadline_completions: None,
@@ -3533,7 +3539,7 @@ impl RuntimeState {
     /// Returns a locked guard to the I/O driver, if present.
     ///
     /// Returns `None` if the runtime was created without a reactor.
-    pub fn io_driver_mut(&self) -> Option<parking_lot::MutexGuard<'_, IoDriver>> {
+    pub fn io_driver_mut(&self) -> Option<crate::sync::pl::MutexGuard<'_, IoDriver>> {
         self.io_driver.as_ref().map(IoDriverHandle::lock)
     }
 
@@ -3801,7 +3807,7 @@ impl RuntimeState {
     /// Gets a reference to the cancel protocol validator.
     #[inline]
     #[must_use]
-    pub fn cancel_protocol_validator(&self) -> &Arc<parking_lot::Mutex<CancelProtocolValidator>> {
+    pub fn cancel_protocol_validator(&self) -> &Arc<crate::sync::pl::Mutex<CancelProtocolValidator>> {
         &self.cancel_protocol_validator
     }
 
@@ -3811,7 +3817,7 @@ impl RuntimeState {
     #[inline]
     fn tracked_cancel_protocol_validator(
         &self,
-    ) -> Option<parking_lot::MutexGuard<'_, CancelProtocolValidator>> {
+    ) -> Option<crate::sync::pl::MutexGuard<'_, CancelProtocolValidator>> {
         self.cancel_protocol_tracking
             .then(|| self.cancel_protocol_validator.lock())
     }
@@ -4031,7 +4037,7 @@ impl RuntimeState {
 
     pub(crate) fn enable_lab_task_causality(&mut self) {
         self.logical_clock_mode = LogicalClockMode::Vector {
-            node: crate::remote::NodeId::new("lab"),
+            node: crate::trace::distributed::vclock::NodeId::new("lab"),
         };
         self.task_causality = true;
     }
@@ -4053,7 +4059,10 @@ impl RuntimeState {
                 .build_handle(self.timer_driver_handle());
         }
         let clock = LogicalClockMode::Vector {
-            node: crate::remote::NodeId::new(format!("lab-task:{:016x}", task.as_u64())),
+            node: crate::trace::distributed::vclock::NodeId::new(format!(
+                "lab-task:{:016x}",
+                task.as_u64()
+            )),
         }
         .build_handle(self.timer_driver_handle());
         if let Some((runtime, time)) = parent
@@ -4251,7 +4260,7 @@ impl RuntimeState {
         config: crate::obligation::eprocess::MonitorConfig,
         horizon: u64,
     ) {
-        self.obligation_leak_monitor = Some(parking_lot::Mutex::new(
+        self.obligation_leak_monitor = Some(crate::sync::pl::Mutex::new(
             crate::obligation::eprocess::LeakMonitor::change_detector(config, horizon),
         ));
     }
@@ -5375,15 +5384,18 @@ impl RuntimeState {
     /// This method provides access to the cryptographic key used to verify
     /// spawn capability macaroons. Returns None if authorization is disabled
     /// or not configured for this runtime.
+    #[cfg(feature = "full-runtime")]
     fn get_spawn_authorization_key(&self) -> Option<&crate::security::key::AuthKey> {
         self.spawn_authorization_key.as_ref()
     }
 
     /// Configure the root key used for spawn authorization.
+    #[cfg(feature = "full-runtime")]
     pub fn set_spawn_authorization_key(&mut self, key: Option<crate::security::key::AuthKey>) {
         self.spawn_authorization_key = key;
     }
 
+    #[cfg(feature = "full-runtime")]
     fn spawn_capability_identifier(region: RegionId) -> String {
         format!("spawn:region_{}", region.as_u64())
     }
@@ -5402,6 +5414,7 @@ impl RuntimeState {
         })
     }
 
+    #[cfg(feature = "full-runtime")]
     fn verify_spawn_authorization(
         &self,
         caller_cx: &crate::cx::Cx,
@@ -5614,7 +5627,15 @@ impl RuntimeState {
         // region table the target resolves — embedded today, shard B once
         // region minting converts).
         if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
-            let admission = if cleanup_task {
+            let admission = if !publish_spawn && cleanup_task {
+                // Dormant prepared-cleanup reservations stay off the region's live task
+                // list and are bounded by `prepared_cleanup_limit` rather than `max_tasks`.
+                if region_record.state().can_accept_work() {
+                    Ok(())
+                } else {
+                    Err(AdmissionError::Closed)
+                }
+            } else if cleanup_task {
                 region_record.add_cleanup_task(task_id)
             } else {
                 region_record.add_task(task_id)
@@ -6891,6 +6912,7 @@ impl RuntimeState {
     {
         use crate::runtime::StoredTask;
 
+        #[cfg(feature = "full-runtime")]
         self.verify_spawn_authorization(caller_cx, region)?;
 
         let (task_id, handle, cx, result_tx, spawn_effects) =
@@ -10849,10 +10871,6 @@ impl RuntimeState {
             Err(error) => return Err((PreparedCleanupError::TaskAdmission(error), future)),
         };
         let task = infrastructure.0;
-        self.regions
-            .get(region.arena_index())
-            .expect("open region")
-            .remove_task(task);
         assert!(tasks.resolve(&mut self.tasks).make_cleanup_dormant(task));
         // No task is published to a scheduler and no live task remains here.
         // Existing finalizer registration retains callback/LIFO/debt ownership.
@@ -11009,7 +11027,7 @@ impl RuntimeState {
             shutdown_budget,
             self.timer_driver_handle(),
         );
-        let terminal_outcome = Arc::new(parking_lot::Mutex::new(None));
+        let terminal_outcome = Arc::new(crate::sync::pl::Mutex::new(None));
         let terminal_publication = Arc::clone(&terminal_outcome);
 
         let wrapped_future = async move {
@@ -12155,6 +12173,7 @@ impl RuntimeState {
         );
 
         // Register resource envelope with swarm pressure governor
+        #[cfg(feature = "full-runtime")]
         if let Some((budget, capability_budget)) = envelope_budgets
             && let Ok(envelope) =
                 self.create_resource_envelope_for_region(region_id, &budget, &capability_budget)
@@ -12162,6 +12181,8 @@ impl RuntimeState {
             self.swarm_pressure_governor
                 .register_region_envelope(region_id, envelope);
         }
+        #[cfg(not(feature = "full-runtime"))]
+        let _ = envelope_budgets;
 
         // Notify epoch tracker of region creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
@@ -12612,6 +12633,7 @@ impl RuntimeState {
                             // The governor admits new regions against its live
                             // envelope count; a closed region must release its
                             // envelope (and any workload lease bound to it).
+                            #[cfg(feature = "full-runtime")]
                             let _ = self
                                 .swarm_pressure_governor
                                 .unregister_region_envelope(region_id);
@@ -12899,15 +12921,17 @@ impl RuntimeState {
             return Ok(());
         }
 
-        // For lower priority regions, use the enhanced swarm pressure governor
-        // We create a minimal context for the admission check since we're in the region creation path
-        let minimal_cx = self.create_minimal_cx_for_admission_check();
+        #[cfg(feature = "full-runtime")]
+        {
+            let minimal_cx = self.create_minimal_cx_for_admission_check();
 
-        match self.swarm_pressure_governor.check_region_admission(&minimal_cx, priority, None) {
-            Ok(admission_decision) => {
-                match admission_decision.decision {
-                    crate::observability::pressure_governor::AdmissionDecision::Admit |
-                    crate::observability::pressure_governor::AdmissionDecision::AdmitWithBackpressure => {
+            match self
+                .swarm_pressure_governor
+                .check_region_admission(&minimal_cx, priority, None)
+            {
+                Ok(admission_decision) => match admission_decision.decision {
+                    crate::observability::pressure_governor::AdmissionDecision::Admit
+                    | crate::observability::pressure_governor::AdmissionDecision::AdmitWithBackpressure => {
                         Ok(())
                     }
                     crate::observability::pressure_governor::AdmissionDecision::Reject => {
@@ -12916,30 +12940,62 @@ impl RuntimeState {
                             reason: admission_decision.reason,
                         })
                     }
-                }
-            }
-            Err(err) => {
-                // Fall back to basic degradation check if swarm governor fails
-                let should_shed = match (composite_level, priority) {
-                    (DegradationLevel::Heavy | DegradationLevel::Emergency, RegionPriority::Normal) => true,
-                    (
-                        DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
-                        RegionPriority::Low | RegionPriority::BestEffort,
-                    ) => true,
-                    _ => false,
-                };
+                },
+                Err(err) => {
+                    // Fall back to basic degradation check if swarm governor fails
+                    let should_shed = match (composite_level, priority) {
+                        (
+                            DegradationLevel::Heavy | DegradationLevel::Emergency,
+                            RegionPriority::Normal,
+                        ) => true,
+                        (
+                            DegradationLevel::Moderate
+                            | DegradationLevel::Heavy
+                            | DegradationLevel::Emergency,
+                            RegionPriority::Low | RegionPriority::BestEffort,
+                        ) => true,
+                        _ => false,
+                    };
 
-                if should_shed {
-                    Err(RegionCreateError::ResourcePressure {
-                        requested_priority: priority,
-                        reason: format!(
-                            "Resource pressure level {:?} prevents region creation at priority {:?} (swarm governor error: {})",
-                            composite_level, priority, err
-                        ),
-                    })
-                } else {
+                    if should_shed {
+                        return Err(RegionCreateError::ResourcePressure {
+                            requested_priority: priority,
+                            reason: format!(
+                                "Resource pressure level {:?} prevents region creation at priority {:?} (swarm governor error: {})",
+                                composite_level, priority, err
+                            ),
+                        });
+                    }
                     Ok(())
                 }
+            }
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            let should_shed = match (composite_level, priority) {
+                (
+                    DegradationLevel::Heavy | DegradationLevel::Emergency,
+                    RegionPriority::Normal,
+                ) => true,
+                (
+                    DegradationLevel::Moderate
+                    | DegradationLevel::Heavy
+                    | DegradationLevel::Emergency,
+                    RegionPriority::Low | RegionPriority::BestEffort,
+                ) => true,
+                _ => false,
+            };
+
+            if should_shed {
+                Err(RegionCreateError::ResourcePressure {
+                    requested_priority: priority,
+                    reason: format!(
+                        "Resource pressure level {:?} prevents region creation at priority {:?}",
+                        composite_level, priority
+                    ),
+                })
+            } else {
+                Ok(())
             }
         }
     }
@@ -12957,6 +13013,7 @@ impl RuntimeState {
     }
 
     /// Creates a resource envelope for a region based on its budgets.
+    #[cfg(feature = "full-runtime")]
     fn create_resource_envelope_for_region(
         &self,
         region_id: RegionId,
@@ -12992,7 +13049,8 @@ impl Default for RuntimeState {
 }
 
 /// Serializable identifier snapshot.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct IdSnapshot {
     /// Arena index for the entity.
     pub index: u32,
@@ -13031,7 +13089,8 @@ impl From<ObligationId> for IdSnapshot {
 }
 
 /// Serializable budget snapshot.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct BudgetSnapshot {
     /// Deadline in nanoseconds, if any.
     pub deadline: Option<u64>,
@@ -13055,7 +13114,8 @@ impl From<Budget> for BudgetSnapshot {
 }
 
 /// Snapshot of the runtime state for debugging or visualization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RuntimeSnapshot {
     /// Snapshot timestamp in nanoseconds.
     pub timestamp: u64,
@@ -13080,7 +13140,8 @@ pub struct RuntimeSnapshot {
 }
 
 /// Serializable region snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct RegionSnapshot {
     /// Region identifier.
     pub id: IdSnapshot,
@@ -13115,7 +13176,8 @@ impl RegionSnapshot {
 }
 
 /// Serializable region lifecycle state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum RegionStateSnapshot {
     /// Region is open and accepting work.
     Open,
@@ -13142,7 +13204,8 @@ impl From<RegionState> for RegionStateSnapshot {
 }
 
 /// Serializable task snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TaskSnapshot {
     /// Task identifier.
     pub id: IdSnapshot,
@@ -13186,7 +13249,8 @@ impl TaskSnapshot {
 }
 
 /// Serializable task lifecycle state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum TaskStateSnapshot {
     /// Task created but not yet running.
     Created,
@@ -13236,7 +13300,8 @@ impl TaskStateSnapshot {
 }
 
 /// Serializable cancellation kind.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum CancelKindSnapshot {
     /// Explicit user cancellation.
     User,
@@ -13281,7 +13346,8 @@ impl From<CancelKind> for CancelKindSnapshot {
 }
 
 /// Serializable cancellation reason.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CancelReasonSnapshot {
     /// Cancellation kind.
     pub kind: CancelKindSnapshot,
@@ -13314,7 +13380,8 @@ impl From<&CancelReason> for CancelReasonSnapshot {
 }
 
 /// Serializable task outcome summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum OutcomeSnapshot {
     /// Task completed successfully.
     Ok,
@@ -13353,7 +13420,8 @@ impl OutcomeSnapshot {
 }
 
 /// Serializable down/exit reason.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum DownReasonSnapshot {
     /// Process completed successfully.
     Normal,
@@ -13392,7 +13460,8 @@ impl From<&crate::monitor::DownReason> for DownReasonSnapshot {
 }
 
 /// Serializable obligation snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ObligationSnapshot {
     /// Obligation identifier.
     pub id: IdSnapshot,
@@ -13422,7 +13491,8 @@ impl ObligationSnapshot {
 }
 
 /// Serializable obligation kind.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationKindSnapshot {
     /// Send permit.
     SendPermit,
@@ -13452,7 +13522,8 @@ impl From<ObligationKind> for ObligationKindSnapshot {
 }
 
 /// Serializable obligation state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationStateSnapshot {
     /// Reserved but not yet resolved.
     Reserved,
@@ -13476,7 +13547,8 @@ impl From<ObligationState> for ObligationStateSnapshot {
 }
 
 /// Serializable obligation abort reason.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationAbortReasonSnapshot {
     /// Aborted due to cancellation.
     Cancel,
@@ -13497,7 +13569,8 @@ impl From<ObligationAbortReason> for ObligationAbortReasonSnapshot {
 }
 
 /// Serializable trace event snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct EventSnapshot {
     /// Event schema version.
     pub version: u32,
@@ -13524,7 +13597,8 @@ impl EventSnapshot {
 }
 
 /// Serializable trace event kind.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum EventKindSnapshot {
     /// Task was spawned.
     Spawn,
@@ -13671,7 +13745,8 @@ impl From<TraceEventKind> for EventKindSnapshot {
 }
 
 /// Serializable trace event payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum EventDataSnapshot {
     /// No additional data.
     None,
@@ -14093,7 +14168,8 @@ impl EventDataSnapshot {
 }
 
 /// Serializable representation of a held obligation at futurelock detection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct HeldObligationSnapshot {
     /// Obligation identifier.
     pub obligation: IdSnapshot,
@@ -14167,7 +14243,7 @@ fn captured_terminal_fast_cancellation_without_reason_is_refused() {
     let region = RegionId::new_for_test(0, 1);
     let budget = Budget::new();
     let reason = CancelReason::user("fast cancellation witness");
-    let inner = Arc::new(parking_lot::RwLock::new(
+    let inner = Arc::new(crate::sync::pl::RwLock::new(
         crate::types::task_context::CxInner::new(region, task, budget),
     ));
     let mut record = TaskRecord::new(task, region, budget);

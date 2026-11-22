@@ -24,7 +24,7 @@ use crate::runtime::task_handle::{ObservedSpawnCompletion, SpawnTerminalObserver
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::types::policy::{AggregateDecision, PolicyAction};
 use crate::types::{CancelReason, Outcome, PanicPayload, Policy, RegionId, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::any::Any;
 use std::fmt;
 use std::future::{Future, poll_fn};

@@ -1,6 +1,6 @@
 use super::*;
 use crate::channel::oneshot;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::atomic::AtomicBool;
 
 fn worker_config(mode: ManagedRestartMode) -> DynamicWorkerConfig {

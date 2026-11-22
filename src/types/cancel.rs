@@ -92,6 +92,7 @@
 
 use super::{Budget, RegionId, TaskId, Time};
 use core::fmt;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 
 /// br-asupersync-dyao05 — Hard cap on the cause-chain depth a
@@ -108,8 +109,10 @@ use serde::{Deserialize, Serialize};
 /// (distributed/snapshot.rs, fabric MessagePack frames, debug
 /// JSON endpoints) classifies the input as malformed and refuses
 /// to materialize the chain.
+#[cfg(feature = "full-serialization")]
 const MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH: usize = 64;
 
+#[cfg(feature = "full-serialization")]
 thread_local! {
     /// Per-thread cause-chain depth counter for `CancelReason`
     /// deserialization. Incremented on entry to
@@ -127,8 +130,10 @@ thread_local! {
 /// otherwise carries stale depth into the NEXT deserialize call
 /// on the same thread, which would either spuriously reject valid
 /// input or (worse) admit input deeper than the cap.
+#[cfg(feature = "full-serialization")]
 struct CauseDepthGuard;
 
+#[cfg(feature = "full-serialization")]
 impl Drop for CauseDepthGuard {
     fn drop(&mut self) {
         CANCEL_CAUSE_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
@@ -144,10 +149,12 @@ impl Drop for CauseDepthGuard {
 /// The check fires on each recursion step (one level of
 /// `Option<Box<CancelReason>>`); cumulative depth across the
 /// chain is bounded by `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH`.
+#[cfg(feature = "full-serialization")]
 fn deserialize_bounded_cause<'de, D>(deserializer: D) -> Result<Option<Box<CancelReason>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    #[cfg(feature = "full-serialization")]
     use serde::de::Error;
     let depth = CANCEL_CAUSE_DEPTH.with(|c| {
         let new = c.get().saturating_add(1);
@@ -180,7 +187,8 @@ where
 ///
 /// let custom = CancelAttributionConfig::new(8, 2048);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CancelAttributionConfig {
     /// Maximum depth of cause chain to preserve.
     /// Deeper chains are truncated with a 'truncated' marker.
@@ -260,7 +268,8 @@ impl Default for CancelAttributionConfig {
 }
 
 /// The kind of cancellation request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum CancelKind {
     /// Explicit cancellation requested by user code.
     User,
@@ -291,7 +300,8 @@ pub enum CancelKind {
 // ========================================================================
 
 /// The cancellation phase witnessed by the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum CancelPhase {
     /// Cancellation has been requested but not yet acknowledged.
     Requested,
@@ -319,7 +329,8 @@ impl CancelPhase {
 ///
 /// This witness is emitted by the cancellation protocol to make completion
 /// verifiable and to detect inconsistent or out-of-order transitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CancelWitness {
     /// The task associated with this cancellation.
     pub task_id: TaskId,
@@ -517,7 +528,8 @@ impl fmt::Display for CancelKind {
 /// For example, a timeout might trigger a parent cancellation, which then
 /// cascades to children. Use [`root_cause()`][CancelReason::root_cause] to
 /// find the original cause, or iterate with [`chain()`][CancelReason::chain].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct CancelReason {
     /// The kind of cancellation.
     pub kind: CancelKind,
@@ -540,7 +552,7 @@ pub struct CancelReason {
     /// applies post-deserialize for the application-level truncation;
     /// this gate is the wire-level defence-in-depth against
     /// attacker-supplied snapshots.
-    #[serde(deserialize_with = "deserialize_bounded_cause")]
+    #[cfg_attr(feature = "full-serialization", serde(deserialize_with = "deserialize_bounded_cause"))]
     pub cause: Option<Box<Self>>,
     /// True if the cause chain was truncated due to limits.
     pub truncated: bool,

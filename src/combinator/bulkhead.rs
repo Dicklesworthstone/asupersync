@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};

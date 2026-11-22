@@ -14,7 +14,7 @@ use crate::observability::{
 };
 use crate::runtime::TraceStorageProfile;
 use crate::types::{CancelKind, CancelReason, Time};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;

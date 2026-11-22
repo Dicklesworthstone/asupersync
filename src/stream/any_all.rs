@@ -4,7 +4,6 @@
 //! The `All` future checks if all items match a predicate.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -18,17 +17,32 @@ const ANY_ALL_COOPERATIVE_BUDGET: usize = 1024;
 /// A future that checks if any item in a stream matches a predicate.
 ///
 /// Created by [`StreamExt::any`](super::StreamExt::any).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Any<S, P> {
-    #[pin]
     stream: S,
     predicate: P,
     result: Option<bool>,
 }
 
+struct AnyProj<'a, S, P> {
+    stream: Pin<&'a mut S>,
+    predicate: &'a mut P,
+    result: &'a mut Option<bool>,
+}
+
 impl<S, P> Any<S, P> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> AnyProj<'_, S, P> {
+        // SAFETY: `stream` is structurally pinned; `predicate` and `result` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        AnyProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            predicate: &mut this.predicate,
+            result: &mut this.result,
+        }
+    }
+
     /// Creates a new `Any` future.
     #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {
@@ -79,17 +93,32 @@ where
 /// A future that checks if all items in a stream match a predicate.
 ///
 /// Created by [`StreamExt::all`](super::StreamExt::all).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct All<S, P> {
-    #[pin]
     stream: S,
     predicate: P,
     result: Option<bool>,
 }
 
+struct AllProj<'a, S, P> {
+    stream: Pin<&'a mut S>,
+    predicate: &'a mut P,
+    result: &'a mut Option<bool>,
+}
+
 impl<S, P> All<S, P> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> AllProj<'_, S, P> {
+        // SAFETY: `stream` is structurally pinned; `predicate` and `result` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        AllProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            predicate: &mut this.predicate,
+            result: &mut this.result,
+        }
+    }
+
     /// Creates a new `All` future.
     #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {

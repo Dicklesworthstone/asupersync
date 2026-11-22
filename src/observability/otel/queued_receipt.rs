@@ -2,7 +2,7 @@
 
 use super::{ExportError, ExportQueue, OtlpGrpcExportReport, OtlpGrpcResponse};
 use crate::grpc::Code;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;

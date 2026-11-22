@@ -7,7 +7,7 @@
         clippy::future_not_send
     )]
     use super::*;
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
 
     fn finalizer_policy_table() -> String {
         [
@@ -431,7 +431,7 @@
     }
 
     fn shutdown_budget(budget: Option<Budget>) -> ShutdownBudget {
-        std::sync::Arc::new(parking_lot::RwLock::new(budget))
+        std::sync::Arc::new(crate::sync::pl::RwLock::new(budget))
     }
 
     #[test]
@@ -871,7 +871,7 @@
         let polls = probe.polls.clone();
         let drops = probe.drops.clone();
         let deadline = Time::from_secs(23).saturating_add_nanos(2_000_000);
-        let observed_outcome = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let observed_outcome = std::sync::Arc::new(crate::sync::pl::Mutex::new(None));
         let completed_outcome = std::sync::Arc::clone(&observed_outcome);
         let (task, mut joined) = lab
             .state

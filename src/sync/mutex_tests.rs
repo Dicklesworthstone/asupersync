@@ -3470,7 +3470,7 @@ mod tests {
         println!("  - WaiterChain: FIFO slab-backed queue");
         println!("    • O(1) insertion/removal operations");
         println!("    • Memory overhead: O(1) per waiter slot");
-        println!("    • Contention: Single parking_lot::Mutex guards entire state");
+        println!("    • Contention: Single crate::sync::pl::Mutex guards entire state");
 
         println!("  - Fairness overhead:");
         println!("    • FIFO ordering enforcement adds latency");

@@ -1517,7 +1517,7 @@
     #[test]
     fn checkpoint_with_converts_user_message_before_inner_lock() {
         struct ReentrantMessage {
-            inner: Arc<parking_lot::RwLock<CxInner>>,
+            inner: Arc<crate::sync::pl::RwLock<CxInner>>,
             conversions: Arc<AtomicUsize>,
         }
 
@@ -1976,7 +1976,7 @@
         use std::task::{Wake, Waker};
 
         struct DropProbe {
-            inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+            inner: std::sync::Weak<crate::sync::pl::RwLock<CxInner>>,
             drops: Arc<AtomicUsize>,
             unlocked_drops: Arc<AtomicUsize>,
         }
@@ -3614,7 +3614,7 @@
 
             let mut lab = LabRuntime::new(LabConfig::new(0x93_2B_B2));
             let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
-            let out = Arc::new(parking_lot::Mutex::new(None));
+            let out = Arc::new(crate::sync::pl::Mutex::new(None));
             let out_in_task = Arc::clone(&out);
             let (owner, _join) = lab
                 .state

@@ -5,12 +5,12 @@
 //! coordinating cancellation across peers, and [`CleanupCoordinator`] for
 //! managing partial symbol set cleanup.
 
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::pl::RwLock;
 use core::fmt;
-use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelAttributionConfig, CancelKind, CancelReason, Time};
@@ -1127,7 +1127,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         // for the broadcaster's lifetime and is mixed into synthetic
         // token_ids when no local token exists for an object.
         let mut tag_buf = [0u8; 8];
-        getrandom::fill(&mut tag_buf).expect("OS entropy source unavailable");
+        crate::util::entropy::fill_os_entropy(&mut tag_buf);
         let sender_tag = u64::from_ne_bytes(tag_buf);
         Self {
             peers: RwLock::new(SmallVec::new()),

@@ -67,8 +67,29 @@ fn count_native_cost_allocation(bytes: usize) {
     }
 }
 
+std::thread_local! {
+    static INJECT_ALLOC_FAILURE_COUNTDOWN: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if INJECT_ALLOC_FAILURE_COUNTDOWN
+            .try_with(|countdown| match countdown.get() {
+                Some(0) => {
+                    countdown.set(None);
+                    true
+                }
+                Some(remaining) => {
+                    countdown.set(Some(remaining - 1));
+                    false
+                }
+                None => false,
+            })
+            .unwrap_or(false)
+        {
+            return std::ptr::null_mut();
+        }
         ALLOC_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         ALLOC_BYTES.with(|bytes| {
             bytes.set(bytes.get().saturating_add(layout.size() as u64));
@@ -1985,4 +2006,119 @@ fn chain_copy_across_the_boundary_allocates_like_a_contiguous_copy() {
         crossing_allocs = crossing_allocs,
         contiguous_allocs = contiguous_allocs
     );
+}
+
+#[test]
+fn prepared_cleanup_oom_via_counting_allocator_returns_storage_unavailable_and_recovers() {
+    use asupersync::runtime::state::PreparedCleanupError;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct ScopedAllocFailureGuard;
+    impl ScopedAllocFailureGuard {
+        fn arm(skip_allocs: usize) -> Self {
+            INJECT_ALLOC_FAILURE_COUNTDOWN.with(|c| c.set(Some(skip_allocs)));
+            Self
+        }
+    }
+    impl Drop for ScopedAllocFailureGuard {
+        fn drop(&mut self) {
+            let _ = INJECT_ALLOC_FAILURE_COUNTDOWN.try_with(|c| c.set(None));
+        }
+    }
+
+    let _guard = ALLOC_TEST_GUARD.lock();
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current_thread runtime for OOM test");
+
+    {
+        let _oom_first = ScopedAllocFailureGuard::arm(0);
+        assert!(matches!(
+            runtime.configure_prepared_cleanup(4),
+            Err(PreparedCleanupError::StorageUnavailable)
+        ));
+    }
+
+    {
+        let _oom_second = ScopedAllocFailureGuard::arm(1);
+        assert!(matches!(
+            runtime.configure_prepared_cleanup(4),
+            Err(PreparedCleanupError::StorageUnavailable)
+        ));
+    }
+
+    assert!(runtime.configure_prepared_cleanup(4).is_ok());
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_flag = Arc::clone(&ran);
+    assert!(
+        runtime
+            .prepare_async_cleanup(async move {
+                ran_flag.store(true, Ordering::Release);
+            })
+            .is_ok()
+    );
+
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+    assert!(ran.load(Ordering::Acquire));
+}
+
+#[test]
+fn prepared_cleanup_refusal_paths_zero_alloc_under_counting_allocator() {
+    use asupersync::runtime::state::PreparedCleanupError;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use std::time::Duration;
+
+    let _guard = ALLOC_TEST_GUARD.lock();
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current_thread runtime for zero-alloc refusal test");
+
+    let before_unconfigured = AllocSnapshot::take();
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(0),
+        Err(PreparedCleanupError::Disabled)
+    ));
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(65_537),
+        Err(PreparedCleanupError::Disabled)
+    ));
+    assert!(matches!(
+        runtime.prepare_async_cleanup(async {}),
+        Err((PreparedCleanupError::Disabled, _))
+    ));
+    let after_unconfigured = AllocSnapshot::take();
+    assert_eq!(after_unconfigured.allocs_since(&before_unconfigured), 0);
+    assert_eq!(after_unconfigured.bytes_since(&before_unconfigured), 0);
+
+    assert!(runtime.configure_prepared_cleanup(1).is_ok());
+    assert!(runtime.prepare_async_cleanup(async {}).is_ok());
+
+    let before_saturated = AllocSnapshot::take();
+    assert!(matches!(
+        runtime.configure_prepared_cleanup(2),
+        Err(PreparedCleanupError::ReservationsActive)
+    ));
+    assert!(matches!(
+        runtime.prepare_async_cleanup(async {}),
+        Err((PreparedCleanupError::AtCapacity, _))
+    ));
+    let after_saturated = AllocSnapshot::take();
+    assert_eq!(after_saturated.allocs_since(&before_saturated), 0);
+    assert_eq!(after_saturated.bytes_since(&before_saturated), 0);
+
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+
+    let before_closed = AllocSnapshot::take();
+    assert!(matches!(
+        runtime.prepare_async_cleanup(async {}),
+        Err((PreparedCleanupError::RegionUnavailable, _))
+    ));
+    let after_closed = AllocSnapshot::take();
+    assert_eq!(after_closed.allocs_since(&before_closed), 0);
+    assert_eq!(after_closed.bytes_since(&before_closed), 0);
 }

@@ -415,7 +415,7 @@ fn audit_queue_operation_latency_profile() {
     }
 
     println!("🔍 Implementation details:");
-    println!("   • Queue lock acquisition: parking_lot::Mutex (line 83)");
+    println!("   • Queue lock acquisition: crate::sync::pl::Mutex (line 83)");
     println!("   • Critical section: VecDeque operations inside lock");
     println!("   • Contention impact: Thread parking under high frequency");
 

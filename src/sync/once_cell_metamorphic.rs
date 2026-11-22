@@ -81,7 +81,7 @@ pub struct GlobalOnceCellState {
     /// Number of readers that got None.
     pub readers_with_none: AtomicUsize,
     /// Unique values observed by readers.
-    pub observed_values: parking_lot::Mutex<Vec<u32>>,
+    pub observed_values: crate::sync::pl::Mutex<Vec<u32>>,
     /// Number of cancellation events.
     pub cancellations: AtomicUsize,
     /// Test operation counter.
@@ -95,7 +95,7 @@ impl GlobalOnceCellState {
             failed_inits: AtomicUsize::new(0),
             readers_with_values: AtomicUsize::new(0),
             readers_with_none: AtomicUsize::new(0),
-            observed_values: parking_lot::Mutex::new(Vec::new()),
+            observed_values: crate::sync::pl::Mutex::new(Vec::new()),
             cancellations: AtomicUsize::new(0),
             operation_counter: AtomicU32::new(0),
         }

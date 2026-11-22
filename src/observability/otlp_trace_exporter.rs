@@ -14,7 +14,7 @@ use crate::runtime::resource_monitor::{
     OverloadBrownoutLedger, OverloadBrownoutPhase, OverloadBrownoutReason,
 };
 use crossbeam_queue::ArrayQueue;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};

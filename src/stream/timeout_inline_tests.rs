@@ -396,7 +396,7 @@ fn explicit_timer_is_not_redirected_by_the_ambient_context() {
     assert!(ambient_driver.is_empty());
 }
 
-#[pin_project]
+#[pin_project::pin_project]
 struct PinnedLocalSource {
     value: Option<Rc<u8>>,
     #[pin]
@@ -464,7 +464,7 @@ fn native_parked_stream_wakes_on_its_timer_or_explicit_context_cancellation() {
             let cx = context_with_driver(Budget::INFINITE, timer.clone());
             let rescue = Arc::new(AtomicBool::new(false));
             let polls = Arc::new(AtomicUsize::new(0));
-            let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+            let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
             let (parked_tx, parked_rx) = mpsc::channel();
             let (done_tx, done_rx) = mpsc::channel();
             let worker = std::thread::spawn({
@@ -548,7 +548,7 @@ fn native_foreign_owner_unmask_wakes_without_advancing_the_item_clock() {
         let reason = CancelReason::user("masked stream cancelled")
             .with_cause(CancelReason::timeout().with_message("preserve masked attribution"));
         let rescue = Arc::new(AtomicBool::new(false));
-        let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+        let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
         let (parked_tx, parked_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn({
@@ -625,7 +625,7 @@ fn native_spawn_join_preserves_the_stream_cancellation_result_and_drains() {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(5000)));
         let timer = TimerDriverHandle::with_virtual_clock(clock);
         let rescue = Arc::new(AtomicBool::new(false));
-        let saved_waker = Arc::new(parking_lot::Mutex::new(None::<Waker>));
+        let saved_waker = Arc::new(crate::sync::pl::Mutex::new(None::<Waker>));
         let polls = Arc::new(AtomicUsize::new(0));
         let (parked_tx, parked_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();

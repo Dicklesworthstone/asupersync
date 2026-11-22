@@ -24,7 +24,7 @@
 
 #![allow(unsafe_code)]
 
-use parking_lot::Mutex as ParkingMutex;
+use crate::sync::pl::Mutex as ParkingMutex;
 use std::cell::UnsafeCell;
 use std::future::Future;
 use std::marker::PhantomData;

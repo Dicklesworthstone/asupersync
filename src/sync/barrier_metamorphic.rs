@@ -25,7 +25,7 @@ use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::sync::{Barrier, BarrierWaitError};
 use crate::types::Budget;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;

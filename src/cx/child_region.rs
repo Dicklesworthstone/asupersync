@@ -40,7 +40,7 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 
 use crate::record::region::RegionCloseState;
 use crate::runtime::region_table::RegionCreateError;
@@ -187,6 +187,7 @@ pub struct ChildRegionOpening<Caps = crate::cx::cap::All> {
     pending: Option<(Arc<AdmittedRegionSlot>, Weak<()>)>,
     failure: Option<ChildRegionError>,
     parent_mask: crate::cx::cap::CapMask,
+    #[cfg(feature = "full-runtime")]
     parent_remote: Option<Arc<crate::remote::RemoteCap>>,
     parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
     caps: PhantomData<fn() -> Caps>,
@@ -197,6 +198,7 @@ impl<Caps> ChildRegionOpening<Caps> {
         slot: Arc<AdmittedRegionSlot>,
         liveness: Weak<()>,
         parent_mask: crate::cx::cap::CapMask,
+        #[cfg(feature = "full-runtime")]
         parent_remote: Option<Arc<crate::remote::RemoteCap>>,
         parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
     ) -> Self {
@@ -204,6 +206,7 @@ impl<Caps> ChildRegionOpening<Caps> {
             pending: Some((slot, liveness)),
             failure: None,
             parent_mask,
+            #[cfg(feature = "full-runtime")]
             parent_remote,
             parent_blocking_pool,
             caps: PhantomData,
@@ -215,6 +218,7 @@ impl<Caps> ChildRegionOpening<Caps> {
             pending: None,
             failure: Some(error),
             parent_mask: crate::cx::cap::CapMask::none(),
+            #[cfg(feature = "full-runtime")]
             parent_remote: None,
             parent_blocking_pool: None,
             caps: PhantomData,
@@ -247,10 +251,19 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
                     // the freshly minted identity and gateways. An absent pool
                     // must stay absent, and a caller-supplied pool must not be
                     // silently replaced with the runtime's default pool.
+                    #[cfg(feature = "full-runtime")]
+                    {
+                        admitted.cx = admitted.cx.with_remote_cap_handle(this.parent_remote.take());
+                    }
                     admitted.cx = admitted
                         .cx
-                        .with_remote_cap_handle(this.parent_remote.take())
                         .with_blocking_pool_handle(this.parent_blocking_pool.take());
+                    #[cfg(not(feature = "full-runtime"))]
+                    {
+                        admitted.cx = admitted
+                            .cx
+                            .with_blocking_pool_handle(this.parent_blocking_pool.take());
+                    }
                     Ok(ChildRegion::from_admitted(admitted))
                 }
                 Err(error) => Err(ChildRegionError::Create(error)),

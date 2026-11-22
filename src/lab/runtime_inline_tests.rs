@@ -840,12 +840,14 @@
         }
     }
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn empty_runtime_is_quiescent(runtime: &mut LabRuntime) {
         let quiescent = runtime.is_quiescent();
         crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
     }
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn advance_time(runtime: &mut LabRuntime) {
         let now = runtime.now();
@@ -3616,6 +3618,7 @@
     // Virtual Time Control Tests (bd-1hu19.3)
     // =========================================================================
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn advance_to_next_timer_empty(runtime: &mut LabRuntime) {
         let wakeups = runtime.advance_to_next_timer();
@@ -3903,6 +3906,7 @@
         crate::test_complete!("virtual_time_24_hour_instant_test");
     }
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn clock_pause_resume(runtime: &mut LabRuntime) {
         let not_paused = !runtime.is_clock_paused();
@@ -3917,6 +3921,7 @@
         crate::assert_with_log!(resumed, "resumed", true, resumed);
     }
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn inject_clock_skew(runtime: &mut LabRuntime) {
         runtime.advance_time(1_000_000_000); // 1 second
@@ -5951,6 +5956,7 @@
     // AutoAdvanceTermination tests (bead 56c785)
     // =========================================================================
 
+    #[cfg(feature = "proc-macros")]
     #[asupersync::lab_test(seeds = 42..43)]
     fn auto_advance_quiescent_termination(lab: &mut LabRuntime) {
         // No tasks enqueued → immediately quiescent

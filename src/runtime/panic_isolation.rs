@@ -18,7 +18,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicU64, Ordering};
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::time::Instant;
 
 static PANIC_COUNTER: AtomicU64 = AtomicU64::new(1);

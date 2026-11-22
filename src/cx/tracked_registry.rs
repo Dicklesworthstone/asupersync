@@ -23,7 +23,7 @@ use crate::runtime::obligation_mailbox::{
     ObligationAdmissionError, ObligationMailbox, ObligationToken, ObligationTransferError,
 };
 use crate::types::{RegionId, TaskId, Time};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
 use crate::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};

@@ -30,7 +30,7 @@ struct PartitionSimulatorExporter {
     is_partitioned: Arc<AtomicBool>,
     export_attempts: Arc<AtomicU64>,
     successful_exports: Arc<AtomicU64>,
-    exported_batches: Arc<parking_lot::Mutex<Vec<SpanBatch>>>,
+    exported_batches: Arc<crate::sync::pl::Mutex<Vec<SpanBatch>>>,
 }
 
 impl PartitionSimulatorExporter {
@@ -39,7 +39,7 @@ impl PartitionSimulatorExporter {
             is_partitioned: Arc::new(AtomicBool::new(false)),
             export_attempts: Arc::new(AtomicU64::new(0)),
             successful_exports: Arc::new(AtomicU64::new(0)),
-            exported_batches: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            exported_batches: Arc::new(crate::sync::pl::Mutex::new(Vec::new())),
         }
     }
 

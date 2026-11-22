@@ -332,7 +332,7 @@
 
     #[test]
     fn log_sink_receives_registration_event() {
-        use parking_lot::Mutex;
+        use crate::sync::pl::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = ControllerRegistry::new().with_log_sink(Arc::new(move |msg: &str| {
@@ -948,7 +948,7 @@
 
     #[test]
     fn structured_log_covers_promotion_and_rollback() {
-        use parking_lot::Mutex;
+        use crate::sync::pl::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = registry_with_policy(fast_policy());
@@ -981,7 +981,7 @@
 
     #[test]
     fn structured_log_covers_promotion_rejection() {
-        use parking_lot::Mutex;
+        use crate::sync::pl::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = registry_with_policy(fast_policy());
@@ -1007,7 +1007,7 @@
 
     #[test]
     fn structured_log_covers_hold_and_release() {
-        use parking_lot::Mutex;
+        use crate::sync::pl::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = ControllerRegistry::new();

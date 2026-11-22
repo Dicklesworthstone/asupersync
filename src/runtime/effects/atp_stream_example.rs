@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 
 /// Example ATP stream error type.
 #[derive(Debug, Clone)]

@@ -12,6 +12,7 @@
 
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 use std::fmt;
@@ -20,7 +21,8 @@ use std::fmt;
 ///
 /// Higher numeric values = higher priority.
 /// Classes are ordered to ensure control traffic takes priority over bulk data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[repr(u8)]
 pub enum PriorityClass {
     /// Background telemetry and metrics (lowest priority)
@@ -78,7 +80,8 @@ impl fmt::Display for PriorityClass {
 }
 
 /// Unique identifier for a schedulable content item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ContentId(pub u64);
 
 impl ContentId {
@@ -102,7 +105,8 @@ impl fmt::Display for ContentId {
 }
 
 /// System pressure measurements affecting scheduling decisions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct PressureSnapshot {
     /// Network congestion level (0.0 = no congestion, 1.0 = severe)
     pub network: f64,
@@ -266,7 +270,8 @@ impl Ord for ScheduledContent {
 }
 
 /// Reason for a scheduling decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ScheduleReason {
     /// Highest priority class available
     PriorityClass,
@@ -283,7 +288,8 @@ pub enum ScheduleReason {
 }
 
 /// Evidence record for a scheduling decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct ScheduleEvidence {
     /// Unique ID for this decision
     pub decision_id: u64,

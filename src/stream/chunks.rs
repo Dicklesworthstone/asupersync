@@ -5,7 +5,6 @@
 //! immediately available without waiting for a full batch.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -27,18 +26,35 @@ fn reserve_chunk<T>(items: &mut Vec<T>, cap: usize) {
 /// A stream that yields items in fixed-size chunks.
 ///
 /// Created by [`StreamExt::chunks`](super::StreamExt::chunks).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Chunks<S: Stream> {
-    #[pin]
     stream: S,
     items: Vec<S::Item>,
     cap: usize,
     done: bool,
 }
 
+struct ChunksProj<'a, S: Stream> {
+    stream: Pin<&'a mut S>,
+    items: &'a mut Vec<S::Item>,
+    cap: &'a mut usize,
+    done: &'a mut bool,
+}
+
 impl<S: Stream> Chunks<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ChunksProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are never moved out as pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ChunksProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            items: &mut this.items,
+            cap: &mut this.cap,
+            done: &mut this.done,
+        }
+    }
+
     /// Creates a new `Chunks` stream.
     #[inline]
     pub(crate) fn new(stream: S, cap: usize) -> Self {
@@ -127,18 +143,35 @@ where
 /// A stream that yields chunks of immediately available items.
 ///
 /// Created by [`StreamExt::ready_chunks`](super::StreamExt::ready_chunks).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct ReadyChunks<S: Stream> {
-    #[pin]
     stream: S,
     cap: usize,
     items: Vec<S::Item>,
     done: bool,
 }
 
+struct ReadyChunksProj<'a, S: Stream> {
+    stream: Pin<&'a mut S>,
+    cap: &'a mut usize,
+    items: &'a mut Vec<S::Item>,
+    done: &'a mut bool,
+}
+
 impl<S: Stream> ReadyChunks<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ReadyChunksProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; remaining fields are never moved out as pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ReadyChunksProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            cap: &mut this.cap,
+            items: &mut this.items,
+            done: &mut this.done,
+        }
+    }
+
     /// Creates a new `ReadyChunks` stream.
     #[inline]
     pub(crate) fn new(stream: S, cap: usize) -> Self {

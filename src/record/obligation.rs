@@ -6,6 +6,7 @@
 use crate::tracing_compat::{error, info, trace};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use core::fmt;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::backtrace::Backtrace;
 use std::sync::Arc;
@@ -50,7 +51,8 @@ impl fmt::Display for SourceLocation {
 }
 
 /// The kind of obligation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationKind {
     /// A send permit for a channel.
     SendPermit,
@@ -95,7 +97,8 @@ impl fmt::Display for ObligationKind {
 }
 
 /// The reason an obligation was aborted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationAbortReason {
     /// Aborted due to cancellation.
     Cancel,
@@ -130,7 +133,8 @@ impl fmt::Display for ObligationAbortReason {
 /// ledger. It keeps the state target and abort reason coupled so callers cannot
 /// accidentally record an `Aborted` state without its reason, or attach an abort
 /// reason to a non-abort terminal state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationResolution {
     /// The obligation was committed successfully.
     Commit,
@@ -188,7 +192,8 @@ impl fmt::Display for ObligationResolution {
 /// ```
 ///
 /// All terminal states (Committed, Aborted, Leaked) are absorbing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum ObligationState {
     /// Obligation is reserved but not yet resolved.
     /// Blocks region close until resolved.

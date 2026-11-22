@@ -35,7 +35,7 @@
 //! Every crash, restart, and rejected-during-crash event is logged
 //! to an [`EvidenceSink`].
 
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::Arc;
 use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

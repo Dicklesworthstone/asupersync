@@ -3,23 +3,23 @@
 //! A thread-safe unbounded queue for tasks that cannot be locally scheduled
 //! or are spawned from outside the runtime.
 
+#[cfg(any(target_family = "wasm", not(feature = "full-concurrency")))]
+use crate::sync::pl::Mutex;
 use crate::types::TaskId;
 use crate::util::CachePadded;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "full-concurrency"))]
 use crossbeam_queue::SegQueue;
-#[cfg(target_family = "wasm")]
-use parking_lot::Mutex;
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", not(feature = "full-concurrency")))]
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "full-concurrency"))]
 struct NativeQueueInner<T: Send> {
     queue: SegQueue<T>,
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "full-concurrency"))]
 impl<T: Send> Default for NativeQueueInner<T> {
     fn default() -> Self {
         Self {
@@ -28,7 +28,7 @@ impl<T: Send> Default for NativeQueueInner<T> {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "full-concurrency"))]
 impl<T: Send> NativeQueueInner<T> {
     #[inline]
     fn enqueue(&self, item: T) {
@@ -41,12 +41,12 @@ impl<T: Send> NativeQueueInner<T> {
     }
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", not(feature = "full-concurrency")))]
 struct NativeQueueInner<T: Send> {
     queue: Mutex<VecDeque<T>>,
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", not(feature = "full-concurrency")))]
 impl<T: Send> Default for NativeQueueInner<T> {
     fn default() -> Self {
         Self {
@@ -55,7 +55,7 @@ impl<T: Send> Default for NativeQueueInner<T> {
     }
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(any(target_family = "wasm", not(feature = "full-concurrency")))]
 impl<T: Send> NativeQueueInner<T> {
     #[inline]
     fn enqueue(&self, item: T) {

@@ -42,7 +42,7 @@ use crate::runtime::obligation_mailbox::{
     ObligationAdmissionError, ObligationToken, ObligationTransferError,
 };
 use crate::sync::Notify;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::{Future, poll_fn};

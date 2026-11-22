@@ -9,6 +9,7 @@ use crate::runtime::config::{
     ArenaLocalityReport, ArenaTemperaturePolicy, RuntimeCapacityHints, TraceStorageProfile,
 };
 use crate::runtime::resource_monitor::{RuntimePressureSnapshot, RuntimePressureVerdict};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 
 /// Stable schema for opt-in memory-residency policies.
@@ -30,8 +31,9 @@ const ESTIMATED_REGION_RECORD_BYTES: u64 = 192;
 const ESTIMATED_OBLIGATION_RECORD_BYTES: u64 = 160;
 
 /// Runtime behavior profile for memory-residency recommendations.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyProfile {
     /// Default profile. It emits a no-effect fallback recommendation.
     #[default]
@@ -41,8 +43,9 @@ pub enum MemoryResidencyProfile {
 }
 
 /// Selected recommendation tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyTier {
     /// Keep the candidate evidence on the hot resident path.
     Hot,
@@ -71,8 +74,9 @@ impl MemoryResidencyTier {
 }
 
 /// Live-task action boundary for a decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyLiveTaskAction {
     /// Recommendation-only output. The engine never drops, cancels, or migrates tasks.
     RecommendOnly,
@@ -89,8 +93,9 @@ impl MemoryResidencyLiveTaskAction {
 }
 
 /// Stable reason codes emitted in deterministic priority order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyReasonCode {
     /// The default policy profile is disabled.
     PolicyDisabled,
@@ -149,8 +154,9 @@ impl MemoryResidencyReasonCode {
 }
 
 /// Stable no-claim boundary emitted with every decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyNoClaimBoundary {
     /// The engine does not change runtime defaults or builder behavior.
     DefaultRuntimeBehaviorUnchanged,
@@ -529,7 +535,8 @@ impl<'a> MemoryResidencyPolicyInput<'a> {
 }
 
 /// Deterministic policy output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyDecision {
     /// Stable schema version.
     pub schema_version: String,
@@ -648,8 +655,9 @@ impl MemoryResidencyDecision {
 }
 
 /// Freshness verdict for a read-only accounting snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyAccountingStatus {
     /// The policy is disabled and no live residency accounting loop is active.
     Disabled,
@@ -675,8 +683,9 @@ impl MemoryResidencyAccountingStatus {
 }
 
 /// Stable source labels for accounting rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyAccountingSource {
     /// Runtime record-table capacity estimates.
     RuntimeRecordTables,
@@ -708,8 +717,9 @@ impl MemoryResidencyAccountingSource {
 }
 
 /// Stable aggregation kinds emitted by accounting snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum MemoryResidencyAggregationKind {
     /// Runtime-wide total row.
     RuntimeTotal,
@@ -741,7 +751,8 @@ impl MemoryResidencyAggregationKind {
 }
 
 /// Optional record-pool counters supplied by an inspector integration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyRecordPoolCounters {
     /// Task-record pool hits.
     pub task_hits: u64,
@@ -790,7 +801,8 @@ impl MemoryResidencyRecordPoolCounters {
 }
 
 /// Resolved runtime capacity and byte-accounting estimates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyCapacitySnapshot {
     /// Runtime task capacity.
     pub task_capacity: usize,
@@ -815,7 +827,8 @@ pub struct MemoryResidencyCapacitySnapshot {
 }
 
 /// One stable hot/warm/cold/fallback/no-win accounting row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyTierAccountingRow {
     /// Tier represented by this row.
     pub tier: MemoryResidencyTier,
@@ -832,7 +845,8 @@ pub struct MemoryResidencyTierAccountingRow {
 }
 
 /// One stable aggregation row for inspector/debug payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyAggregationRow {
     /// Aggregation kind.
     pub kind: MemoryResidencyAggregationKind,
@@ -847,7 +861,8 @@ pub struct MemoryResidencyAggregationRow {
 }
 
 /// Read-only point-in-time memory-residency accounting payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MemoryResidencyAccountingSnapshot {
     /// Stable schema version.
     pub schema_version: String,

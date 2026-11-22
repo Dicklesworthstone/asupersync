@@ -561,6 +561,7 @@ impl std::str::FromStr for UtcTimestamp {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl serde::Serialize for UtcTimestamp {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -570,6 +571,7 @@ impl serde::Serialize for UtcTimestamp {
     }
 }
 
+#[cfg(feature = "full-serialization")]
 impl<'de> serde::Deserialize<'de> for UtcTimestamp {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

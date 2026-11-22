@@ -18,7 +18,7 @@ use std::sync::mpsc;
 struct PollWait {
     entered: mpsc::Sender<()>,
     released: Mutex<bool>,
-    changed: parking_lot::Condvar,
+    changed: crate::sync::pl::Condvar,
 }
 
 impl PollWait {
@@ -280,7 +280,7 @@ fn mutation_interrupts_locked_turn_after_lost_wakes(
     let wait = Arc::new(PollWait {
         entered: entered_tx,
         released: Mutex::new(false),
-        changed: parking_lot::Condvar::new(),
+        changed: crate::sync::pl::Condvar::new(),
     });
     *reactor.poll_wait.lock() = Some(Arc::clone(&wait));
     let (done_tx, done_rx) = mpsc::channel();

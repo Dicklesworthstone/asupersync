@@ -11,7 +11,7 @@ use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
 use crate::types::Policy;
 use crate::types::{CancelAttributionConfig, CancelKind};
 use crate::util::ArenaIndex;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
@@ -2016,7 +2016,7 @@ fn v0_4_3_compatibility_task_record_setters_retain_independent_semantics() {
         .task(task_id)
         .and_then(|record| record.cx.clone())
         .expect("runtime task must retain its live Cx");
-    let replacement = Arc::new(parking_lot::RwLock::new(CxInner::new(
+    let replacement = Arc::new(crate::sync::pl::RwLock::new(CxInner::new(
         root,
         task_id,
         Budget::INFINITE,
@@ -4090,7 +4090,7 @@ fn pop_region_finalizer_lifo() {
     let mut state = RuntimeState::new();
     let region = state.create_root_region(Budget::INFINITE);
 
-    let order = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let order = std::sync::Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
     let o1 = order.clone();
     let o2 = order.clone();
     let o3 = order.clone();
@@ -4674,7 +4674,7 @@ fn runtime_validator_counts_each_sync_finalizer_completion() {
     init_test("runtime_validator_counts_each_sync_finalizer_completion");
     let mut state = RuntimeState::new();
     let region = state.create_root_region(Budget::INFINITE);
-    let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let order = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
     let first_order = Arc::clone(&order);
     let second_order = Arc::clone(&order);
@@ -11605,7 +11605,7 @@ fn a_panicking_tick_gate_leaves_the_workers_running() {
 
 #[derive(Default)]
 struct PanicRecordingMetricsInner {
-    panics: parking_lot::Mutex<Vec<&'static str>>,
+    panics: crate::sync::pl::Mutex<Vec<&'static str>>,
 }
 
 struct PanicRecordingMetrics(Arc<PanicRecordingMetricsInner>);

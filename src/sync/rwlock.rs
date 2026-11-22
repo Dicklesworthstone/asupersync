@@ -69,7 +69,7 @@
 
 #![allow(unsafe_code)]
 
-use parking_lot::Mutex as ParkingMutex;
+use crate::sync::pl::Mutex as ParkingMutex;
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
 use std::future::Future;

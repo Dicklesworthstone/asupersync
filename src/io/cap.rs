@@ -71,8 +71,9 @@ pub struct IoStats {
 }
 
 /// HTTP method allowlist for browser fetch capability checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "UPPERCASE"))]
 pub enum FetchMethod {
     /// HTTP GET.
     Get,
@@ -188,7 +189,8 @@ impl std::fmt::Display for FetchPolicyError {
 impl std::error::Error for FetchPolicyError {}
 
 /// Explicit authority boundaries for browser fetch operations.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
 pub struct FetchAuthority {
     /// Allowed origins (`scheme://host[:port]`). Empty means no origin authority.
     pub allowed_origins: Vec<String>,

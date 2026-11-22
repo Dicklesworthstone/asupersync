@@ -29,7 +29,7 @@ use crate::channel::{mpsc, oneshot};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::supervision::{ChildName, ManagedChildFactory, ManagedSupervisor};
 use crate::types::{CancelReason, PanicPayload};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};

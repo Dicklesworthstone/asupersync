@@ -4,7 +4,7 @@ use crate::lab::{LabConfig, LabRuntime};
 use crate::record::region::RegionState;
 use crate::runtime::state::SpawnAdmission;
 use crate::types::{Budget, CancelKind, CancelReason, Outcome, RegionId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;

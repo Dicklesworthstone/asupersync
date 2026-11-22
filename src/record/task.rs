@@ -13,7 +13,7 @@ use crate::types::task_context::{
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
 };
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};

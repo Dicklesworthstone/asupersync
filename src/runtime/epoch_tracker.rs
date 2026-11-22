@@ -39,7 +39,7 @@ use crate::epoch::EpochId;
 use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use crate::sync::pl::{Mutex, MutexGuard, RwLock};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;

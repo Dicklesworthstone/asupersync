@@ -851,7 +851,7 @@ impl TcpStream {
 #[derive(Default)]
 struct ReadinessFlag {
     ready: std::sync::atomic::AtomicBool,
-    task: parking_lot::Mutex<Option<std::task::Waker>>,
+    task: crate::sync::pl::Mutex<Option<std::task::Waker>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

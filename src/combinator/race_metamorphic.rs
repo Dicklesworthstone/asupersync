@@ -63,7 +63,7 @@ struct TestFuture {
     /// Tracks if cancellation was requested
     cancelled: AtomicBool,
     /// Cancel reason if cancelled
-    cancel_reason: parking_lot::Mutex<Option<CancelReason>>,
+    cancel_reason: crate::sync::pl::Mutex<Option<CancelReason>>,
     /// Track completion state
     completed: AtomicBool,
     /// Track drain state
@@ -86,7 +86,7 @@ impl TestFuture {
             should_panic: false,
             should_panic_during_drain: false,
             cancelled: AtomicBool::new(false),
-            cancel_reason: parking_lot::Mutex::new(None),
+            cancel_reason: crate::sync::pl::Mutex::new(None),
             completed: AtomicBool::new(false),
             drained: AtomicBool::new(false),
             global_state,
@@ -164,17 +164,17 @@ impl Future for TestFuture {
 #[derive(Debug, Default)]
 struct GlobalTestState {
     /// Futures that have been polled
-    polled_futures: parking_lot::Mutex<Vec<u32>>,
+    polled_futures: crate::sync::pl::Mutex<Vec<u32>>,
     /// Futures that have completed successfully
-    completed_futures: parking_lot::Mutex<Vec<(u32, i32)>>,
+    completed_futures: crate::sync::pl::Mutex<Vec<(u32, i32)>>,
     /// Futures that have been cancelled
-    cancelled_futures: parking_lot::Mutex<Vec<u32>>,
+    cancelled_futures: crate::sync::pl::Mutex<Vec<u32>>,
     /// Futures that have been drained
-    drained_futures: parking_lot::Mutex<Vec<u32>>,
+    drained_futures: crate::sync::pl::Mutex<Vec<u32>>,
     /// Futures that panicked during execution
-    execution_panics: parking_lot::Mutex<Vec<u32>>,
+    execution_panics: crate::sync::pl::Mutex<Vec<u32>>,
     /// Futures that panicked during drain
-    drain_panics: parking_lot::Mutex<Vec<u32>>,
+    drain_panics: crate::sync::pl::Mutex<Vec<u32>>,
     /// Total number of polls across all futures
     total_polls: AtomicUsize,
     /// Race operation count

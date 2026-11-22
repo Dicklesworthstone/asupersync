@@ -159,6 +159,7 @@
 
 use crate::error::Error;
 use crate::observability::ObservabilityConfig;
+#[cfg(feature = "full-runtime")]
 use crate::observability::diagnostics::Diagnostics;
 use crate::observability::metrics::MetricsProvider;
 use crate::observability::task_inspector::{
@@ -190,20 +191,21 @@ use crate::types::{Budget, CancelAttributionConfig};
 use crate::util::EntropySource;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Reflect, global};
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use crate::sync::pl::{Condvar, Mutex, MutexGuard};
 use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+#[cfg(feature = "full-runtime")]
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
-use thiserror::Error as ThisError;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
+#[cfg(feature = "full-runtime")]
 use crate::types::{
     WasmAbiOutcomeEnvelope, WasmAbiVersion, WasmAbortPropagationMode, WasmDispatchError,
     WasmDispatcherDiagnostics, WasmExportDispatcher, WasmHandleRef, WasmScopeEnterBuilder,
@@ -2436,10 +2438,10 @@ fn browser_shared_worker_coordinator_support_from_probe(
 }
 
 /// Error returned when the preview Rust browser runtime cannot be constructed.
-#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+#[cfg(feature = "full-runtime")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserRuntimeBuildError {
     /// The current host truthfully fail-closed to `lane.unsupported`.
-    #[error("{message}")]
     Unsupported {
         /// Execution-ladder diagnostics that explain the fail-closed decision.
         execution_ladder: BrowserExecutionLadderDiagnostics,
@@ -2447,7 +2449,6 @@ pub enum BrowserRuntimeBuildError {
         message: String,
     },
     /// Runtime handle creation failed at the dispatcher boundary.
-    #[error("failed to create preview browser runtime handle: {source}")]
     RuntimeCreate {
         /// Execution-ladder diagnostics in effect when creation failed.
         execution_ladder: BrowserExecutionLadderDiagnostics,
@@ -2456,6 +2457,29 @@ pub enum BrowserRuntimeBuildError {
     },
 }
 
+#[cfg(feature = "full-runtime")]
+impl std::fmt::Display for BrowserRuntimeBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported { message, .. } => f.write_str(message),
+            Self::RuntimeCreate { source, .. } => {
+                write!(f, "failed to create preview browser runtime handle: {source}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "full-runtime")]
+impl std::error::Error for BrowserRuntimeBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unsupported { .. } => None,
+            Self::RuntimeCreate { source, .. } => Some(source),
+        }
+    }
+}
+
+#[cfg(feature = "full-runtime")]
 impl BrowserRuntimeBuildError {
     /// Returns the browser execution-ladder diagnostics associated with this failure.
     #[must_use]
@@ -2471,6 +2495,7 @@ impl BrowserRuntimeBuildError {
     }
 }
 
+#[cfg(feature = "full-runtime")]
 #[derive(Debug)]
 struct BrowserRuntimeInner {
     dispatcher: RefCell<WasmExportDispatcher>,
@@ -2484,11 +2509,13 @@ struct BrowserRuntimeInner {
 /// This is intentionally narrower than the native [`Runtime`]: it provides a
 /// truthful browser entrypoint over the wasm ABI dispatcher instead of
 /// pretending the browser already has full native-thread runtime parity.
+#[cfg(feature = "full-runtime")]
 #[derive(Debug, Clone)]
 pub struct BrowserRuntime {
     inner: Rc<BrowserRuntimeInner>,
 }
 
+#[cfg(feature = "full-runtime")]
 impl BrowserRuntime {
     fn new(
         dispatcher: WasmExportDispatcher,
@@ -2562,6 +2589,7 @@ impl BrowserRuntime {
 }
 
 /// No-throw preview browser runtime selection result.
+#[cfg(feature = "full-runtime")]
 #[derive(Debug, Clone)]
 pub struct BrowserRuntimeSelectionResult {
     /// Truthful execution-ladder diagnostics for the current host.
@@ -2572,6 +2600,7 @@ pub struct BrowserRuntimeSelectionResult {
     pub error: Option<BrowserRuntimeBuildError>,
 }
 
+#[cfg(feature = "full-runtime")]
 impl BrowserRuntimeSelectionResult {
     /// Returns `true` when a preview runtime was constructed successfully.
     #[must_use]
@@ -2580,6 +2609,7 @@ impl BrowserRuntimeSelectionResult {
     }
 }
 
+#[cfg(feature = "full-runtime")]
 fn build_browser_runtime_selection_from_probe(
     preferred_lane: Option<BrowserExecutionLane>,
     consumer_version: Option<WasmAbiVersion>,
@@ -2595,6 +2625,7 @@ fn build_browser_runtime_selection_from_probe(
     )
 }
 
+#[cfg(feature = "full-runtime")]
 fn build_browser_runtime_selection_with_dispatcher_from_probe(
     preferred_lane: Option<BrowserExecutionLane>,
     consumer_version: Option<WasmAbiVersion>,
@@ -2639,6 +2670,7 @@ fn build_browser_runtime_selection_with_dispatcher_from_probe(
 }
 
 /// Preview builder for Rust-authored browser runtime construction.
+#[cfg(feature = "full-runtime")]
 #[derive(Debug, Clone)]
 pub struct BrowserRuntimeBuilder {
     preferred_lane: Option<BrowserExecutionLane>,
@@ -2646,12 +2678,14 @@ pub struct BrowserRuntimeBuilder {
     abort_mode: WasmAbortPropagationMode,
 }
 
+#[cfg(feature = "full-runtime")]
 impl Default for BrowserRuntimeBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "full-runtime")]
 impl BrowserRuntimeBuilder {
     /// Creates a preview browser runtime builder with automatic lane negotiation.
     #[must_use]
@@ -2752,6 +2786,7 @@ impl BrowserRuntimeBuilder {
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     storage_bounds: Option<RuntimeStorageBounds>,
+    #[cfg(feature = "full-runtime")]
     required_spawn_authorization: Option<crate::security::key::AuthKey>,
     scoped_cpu_worker_limit: Option<usize>,
     reactor: Option<Arc<dyn Reactor>>,
@@ -2768,8 +2803,10 @@ pub struct RuntimeBuilder {
     /// the single worker from the calling thread (GH#58).
     current_thread: bool,
     /// Optional bounded production poll/wake capture, installed before exposure.
+    #[cfg(feature = "full-runtime")]
     capture_schedules: bool,
     /// Given to every worker before it starts (asupersync-7yq1pv item 2).
+    #[cfg(feature = "full-runtime")]
     scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
     /// Set once the blocking pool's maximum is chosen explicitly. The default
     /// pool is marked so CPU-bound fan-out ignores its cap (kpmoy5.1.15).
@@ -2899,6 +2936,7 @@ impl RuntimeBuilder {
         Self {
             config,
             storage_bounds: None,
+            #[cfg(feature = "full-runtime")]
             required_spawn_authorization: None,
             scoped_cpu_worker_limit: None,
             reactor: None,
@@ -2910,7 +2948,9 @@ impl RuntimeBuilder {
             entropy_source: None,
             host_services: default_runtime_host_services(),
             current_thread: false,
+            #[cfg(feature = "full-runtime")]
             capture_schedules: false,
+            #[cfg(feature = "full-runtime")]
             scheduler_evidence_sink: None,
             blocking_sized: false,
             blocking_queue_policy: BlockingQueuePolicy::Fifo,
@@ -2925,6 +2965,7 @@ impl RuntimeBuilder {
     /// The returned builder performs truthful execution-ladder selection and
     /// fail-closes to structured diagnostics when no direct browser-runtime
     /// lane is available.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn browser() -> BrowserRuntimeBuilder {
         BrowserRuntimeBuilder::new()
@@ -2944,6 +2985,7 @@ impl RuntimeBuilder {
     /// separately without changing the canonical trace event schema. Inspect
     /// [`Runtime::schedule_capture_snapshot`] for explicit truncation and
     /// projection errors before attempting production-to-Lab replay.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn capture_schedules(mut self, enabled: bool) -> Self {
         self.capture_schedules = enabled;
@@ -2962,6 +3004,7 @@ impl RuntimeBuilder {
     ///
     /// Task-level budget and cancellation evidence is separate: attach a sink
     /// to a context with [`Cx::with_evidence_sink`](crate::cx::Cx::with_evidence_sink).
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn scheduler_evidence_sink(
         mut self,
@@ -3383,6 +3426,7 @@ impl RuntimeBuilder {
     ///
     /// Only `RuntimeState::create_task_with_auth` checks it: `Cx::spawn`, `Scope::spawn*` and
     /// runtime-handle spawns do not consult it (asupersync-s45073 H3). Unset, nothing is checked.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn with_spawn_authorization_key(mut self, key: crate::security::key::AuthKey) -> Self {
         self.config.security.spawn_authorization_key = Some(key);
@@ -3423,6 +3467,7 @@ impl RuntimeBuilder {
     /// The legacy [`Self::with_spawn_authorization_key`] setting is independent
     /// and keeps its existing scope. [`Self::disable_spawn_authorization`]
     /// clears both settings; the last call to this method selects the strict key.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn require_spawn_authorization(mut self, key: crate::security::key::AuthKey) -> Self {
         self.required_spawn_authorization = Some(key);
@@ -3433,9 +3478,12 @@ impl RuntimeBuilder {
     ///
     /// This explicitly disables spawn authorization even if it was previously enabled.
     #[must_use]
-    pub fn disable_spawn_authorization(mut self) -> Self {
-        self.config.security.spawn_authorization_key = None;
-        self.required_spawn_authorization = None;
+    pub fn disable_spawn_authorization(#[allow(unused_mut)] mut self) -> Self {
+        #[cfg(feature = "full-runtime")]
+        {
+            self.config.security.spawn_authorization_key = None;
+            self.required_spawn_authorization = None;
+        }
         self
     }
 
@@ -3754,6 +3802,7 @@ impl RuntimeBuilder {
         let Self {
             config,
             storage_bounds,
+            #[cfg(feature = "full-runtime")]
             required_spawn_authorization,
             scoped_cpu_worker_limit,
             reactor,
@@ -3765,7 +3814,9 @@ impl RuntimeBuilder {
             entropy_source,
             host_services,
             current_thread,
+            #[cfg(feature = "full-runtime")]
             capture_schedules,
+            #[cfg(feature = "full-runtime")]
             scheduler_evidence_sink,
             blocking_sized,
             blocking_queue_policy,
@@ -3850,7 +3901,9 @@ impl RuntimeBuilder {
             terminal_io_reactor_snapshot,
             host_services.as_ref(),
             current_thread,
+            #[cfg(feature = "full-runtime")]
             scheduler_evidence_sink,
+            #[cfg(feature = "full-runtime")]
             required_spawn_authorization,
             blocking_queue_policy,
             blocking_admission_policy,
@@ -3863,6 +3916,7 @@ impl RuntimeBuilder {
         } else {
             runtime
         };
+        #[cfg(feature = "full-runtime")]
         if capture_schedules {
             let trace = runtime
                 .inner
@@ -4505,7 +4559,9 @@ impl Runtime {
             None,
             host_services,
             false,
+            #[cfg(feature = "full-runtime")]
             None,
+            #[cfg(feature = "full-runtime")]
             None,
             BlockingQueuePolicy::Fifo,
             BlockingAdmissionPolicy::Unbounded,
@@ -4526,7 +4582,9 @@ impl Runtime {
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
         current_thread: bool,
+        #[cfg(feature = "full-runtime")]
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+        #[cfg(feature = "full-runtime")]
         required_spawn_authorization: Option<crate::security::key::AuthKey>,
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
@@ -4541,7 +4599,9 @@ impl Runtime {
             terminal_io_reactor_snapshot,
             host_services,
             current_thread,
+            #[cfg(feature = "full-runtime")]
             scheduler_evidence_sink,
+            #[cfg(feature = "full-runtime")]
             required_spawn_authorization,
             blocking_queue_policy,
             blocking_admission_policy,
@@ -4560,7 +4620,9 @@ impl Runtime {
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
         current_thread: bool,
+        #[cfg(feature = "full-runtime")]
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
+        #[cfg(feature = "full-runtime")]
         required_spawn_authorization: Option<crate::security::key::AuthKey>,
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
@@ -4608,12 +4670,14 @@ impl Runtime {
                 entropy_source,
                 terminal_io_reactor_snapshot,
                 host_services,
+                #[cfg(feature = "full-runtime")]
                 scheduler_evidence_sink,
                 blocking_queue_policy,
                 blocking_admission_policy,
                 blocking_thread_stack_size,
                 storage_bounds,
             );
+            #[cfg(feature = "full-runtime")]
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
@@ -4635,12 +4699,14 @@ impl Runtime {
                 entropy_source,
                 terminal_io_reactor_snapshot,
                 host_services,
+                #[cfg(feature = "full-runtime")]
                 scheduler_evidence_sink,
                 blocking_queue_policy,
                 blocking_admission_policy,
                 blocking_thread_stack_size,
                 storage_bounds,
             );
+            #[cfg(feature = "full-runtime")]
             inner.install_required_spawn_authorization(required_spawn_authorization);
             let inner = Arc::new(inner);
             if let Some(pump) = host_services.browser_pump() {
@@ -5493,6 +5559,7 @@ impl Runtime {
     /// The returned immutable receipt reports storage loss and can reject an
     /// incomplete projection through its `production_schedule` method. This
     /// snapshot does not stop live workers or certify their terminal outcomes.
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn schedule_capture_snapshot(&self) -> Option<crate::trace::ScheduleCaptureSnapshot> {
         self.inner.scheduler.schedule_capture_snapshot()
@@ -5558,6 +5625,7 @@ impl Runtime {
     /// `find_leaked_obligations`, and the structural/deadlock analyses read the
     /// live task, region, and obligation tables under the same per-query lock
     /// discipline as [`Runtime::task_inspector`].
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn diagnostics(&self) -> Diagnostics {
         Diagnostics::from_source(RuntimeStateSource::Shared {
@@ -5822,6 +5890,7 @@ impl RuntimeHandle {
     ///
     /// Returns `None` when this is a weak handle whose runtime has already
     /// been torn down. See [`Runtime::diagnostics`].
+    #[cfg(feature = "full-runtime")]
     #[must_use]
     pub fn diagnostics(&self) -> Option<Diagnostics> {
         let inner = self.try_inner().ok()?;
@@ -6238,19 +6307,19 @@ impl<T> std::fmt::Debug for LocalJoinHandle<T> {
     }
 }
 
-#[pin_project::pin_project]
 struct CatchUnwind<F> {
-    #[pin]
     inner: F,
 }
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
 
+    #[allow(unsafe_code)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
+        // SAFETY: `inner` is structurally pinned and never moved out.
+        let mut inner = unsafe { self.map_unchecked_mut(|this| &mut this.inner) };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            this.inner.as_mut().poll(cx)
+            inner.as_mut().poll(cx)
         }));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
@@ -6325,6 +6394,7 @@ impl RuntimeShutdownCompletion {
 struct RuntimeInner {
     config: RuntimeConfig,
     /// Refuses tokenless runtime-handle task producers in explicit strict mode.
+    #[cfg(feature = "full-runtime")]
     required_spawn_authorization: std::sync::OnceLock<()>,
     state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
     /// Sharded backing whose Arc-shared shard A the scheduler dispatches
@@ -6396,6 +6466,7 @@ struct RuntimeInner {
 /// runtime's concrete scheduler and state types. The weak pointer still
 /// refers to the same runtime allocation and cannot prolong its lifetime.
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 trait RequestOwnerFactory: Send + Sync {
     fn register(
         self: Arc<Self>,
@@ -6416,6 +6487,7 @@ impl RequestOwnerFactory for RuntimeInner {
 /// Weak provenance carried only by externally constructed request contexts.
 #[derive(Clone)]
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct RequestRuntime(std::sync::Weak<dyn RequestOwnerFactory>);
 
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
@@ -6426,6 +6498,7 @@ impl std::fmt::Debug for RequestRuntime {
 }
 
 #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl RequestRuntime {
     fn new(inner: &Arc<RuntimeInner>) -> Self {
         let weak = Arc::downgrade(inner) as std::sync::Weak<dyn RequestOwnerFactory>;
@@ -6451,6 +6524,7 @@ pub(crate) struct CallerTaskRegistration {
 
 impl CallerTaskRegistration {
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "service-protocols"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn cx(&self) -> &crate::cx::Cx {
         &self.cx
     }
@@ -6756,6 +6830,7 @@ impl RuntimeInner {
 
     /// Must run before creating any RuntimeHandle or starting host workers:
     /// on_thread_start callbacks receive an ambient handle immediately.
+    #[cfg(feature = "full-runtime")]
     fn install_required_spawn_authorization(&self, key: Option<crate::security::key::AuthKey>) {
         if let Some(key) = key {
             let gateway = self
@@ -6770,6 +6845,7 @@ impl RuntimeInner {
     }
 
     fn check_unscoped_spawn_authority(&self) -> Result<(), SpawnError> {
+        #[cfg(feature = "full-runtime")]
         if self.required_spawn_authorization.get().is_some() {
             return Err(SpawnError::AuthorizationDenied {
                 region: self.root_region,
@@ -6999,6 +7075,7 @@ impl RuntimeInner {
         if let Some(source) = entropy_source {
             runtime_state.set_entropy_source(source);
         }
+        #[cfg(feature = "full-runtime")]
         runtime_state.set_spawn_authorization_key(config.security.spawn_authorization_key.clone());
         runtime_state.set_read_biased_region_snapshot(config.enable_read_biased_region_snapshot);
         // Nothing replays a native runtime's oracle histories; unbounded, they
@@ -7048,6 +7125,7 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
+        #[cfg(feature = "full-runtime")]
         scheduler_evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
         blocking_queue_policy: BlockingQueuePolicy,
         blocking_admission_policy: BlockingAdmissionPolicy,
@@ -7202,7 +7280,9 @@ impl RuntimeInner {
             } else {
                 None
             };
+        #[cfg_attr(not(feature = "full-runtime"), allow(unused_mut))]
         let mut workers = scheduler.take_workers();
+        #[cfg(feature = "full-runtime")]
         if let Some(sink) = scheduler_evidence_sink {
             for worker in &mut workers {
                 worker.set_evidence_sink(Arc::clone(&sink));
@@ -7228,6 +7308,7 @@ impl RuntimeInner {
         (
             Self {
                 config,
+                #[cfg(feature = "full-runtime")]
                 required_spawn_authorization: std::sync::OnceLock::new(),
                 state,
                 sharded_state,
@@ -8550,7 +8631,7 @@ mod root_budget_tests;
 #[path = "builder_request_deadline_tests.rs"]
 mod request_deadline_tests;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "full-runtime"))]
 #[path = "builder_spawn_authorization_tests.rs"]
 mod spawn_authorization_tests;
 

@@ -35,6 +35,7 @@ use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -332,7 +333,8 @@ impl TaskDetails {
 }
 
 /// Simplified task state for inspection (matches TaskState but serializable).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum TaskStateInfo {
     /// Initial state after spawn.
     Created,
@@ -377,7 +379,8 @@ pub const RUNTIME_INSPECTOR_SNAPSHOT_SCHEMA_V1: &str = "asupersync.runtime_inspe
 /// These are queue entries, not distinct runnable tasks. Priority heaps may
 /// retain stale entries after promotion or cancellation. Concurrent transfers
 /// can be observed in both their source and destination, or in neither.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[non_exhaustive]
 pub struct SchedulerQueueDepths {
     /// Entries in the cancellation lane.
@@ -389,7 +392,8 @@ pub struct SchedulerQueueDepths {
 }
 
 /// Read-only observations of one worker, ordered by worker id in the snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[non_exhaustive]
 pub struct SchedulerWorkerSnapshot {
     /// Zero-based worker id.
@@ -419,7 +423,8 @@ pub struct SchedulerWorkerSnapshot {
 /// It acquires one small queue or certificate lock at a time and never acquires
 /// the runtime's record-table locks. Controller decisions are not included;
 /// their absence does not indicate that an adaptive policy is disabled.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[non_exhaustive]
 pub struct SchedulerSnapshot {
     /// Schema version identifier.
@@ -461,7 +466,8 @@ pub struct SchedulerSnapshot {
 /// Records and scheduler state are captured separately. Record locks are
 /// released before any scheduler queue lock is acquired, so the two components
 /// must not be treated as one atomic state or used to infer quiescence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 #[non_exhaustive]
 pub struct RuntimeInspectorSnapshot {
     /// Schema version identifier for this envelope.
@@ -482,7 +488,8 @@ impl RuntimeInspectorSnapshot {
 }
 
 /// Controls whether a runtime snapshot includes free-form diagnostic text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum InspectorProfile {
     /// Include obligation descriptions, acquisition locations, and checkpoint messages.
     Full,
@@ -491,7 +498,8 @@ pub enum InspectorProfile {
 }
 
 /// The sources and limits of a snapshot, rather than inferred runtime telemetry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorCoverage {
     /// The runtime's record-table locks were held together during collection.
     /// False for a caller-borrowed or detached `RuntimeState`.
@@ -514,7 +522,8 @@ pub struct InspectorCoverage {
 }
 
 /// Counts derived from the records actually present in a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorCounters {
     /// Retained task records, including completed tasks not yet reaped.
     pub tasks: usize,
@@ -537,7 +546,8 @@ pub struct InspectorCounters {
 }
 
 /// Serializable copy of every dimension of a runtime budget.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorBudget {
     /// Absolute deadline in the budget's clock domain.
     pub deadline: Option<Time>,
@@ -561,20 +571,22 @@ impl From<Budget> for InspectorBudget {
 }
 
 /// A retained progress checkpoint, in its task's runtime-clock domain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorCheckpoint {
     /// Runtime timestamp recorded by the task.
     pub at: Time,
     /// Omitted under the shareable profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "full-serialization", serde(skip_serializing_if = "Option::is_none"))]
     pub message: Option<String>,
 }
 
 /// A task record with its context budget and bounded progress trail.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorTask {
     /// Existing task wire fields, including join waiters and pending obligation ids.
-    #[serde(flatten)]
+    #[cfg_attr(feature = "full-serialization", serde(flatten))]
     pub details: TaskDetailsWire,
     /// Context budget when the task still has context state; never synthesized.
     pub budget: Option<InspectorBudget>,
@@ -588,7 +600,8 @@ pub struct InspectorTask {
 }
 
 /// A region's topology, lifecycle state, budget, and close-blocking counters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorRegion {
     /// Region identity.
     pub id: RegionId,
@@ -617,7 +630,8 @@ pub struct InspectorRegion {
 }
 
 /// An obligation still retained by the runtime, including terminal records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorObligation {
     /// Obligation identity.
     pub id: ObligationId,
@@ -638,17 +652,18 @@ pub struct InspectorObligation {
     /// Resolution reason for an aborted obligation.
     pub abort_reason: Option<ObligationAbortReason>,
     /// Diagnostic description; omitted under the shareable profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "full-serialization", serde(skip_serializing_if = "Option::is_none"))]
     pub description: Option<String>,
     /// Acquisition path, line, and column; omitted under the shareable profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "full-serialization", serde(skip_serializing_if = "Option::is_none"))]
     pub acquired_at: Option<String>,
     /// Whether a backtrace was captured. Backtrace text is never exported.
     pub has_acquire_backtrace: bool,
 }
 
 /// A registered task join dependency. Either endpoint may since have been reaped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorWaitEdge {
     /// Task waiting for completion.
     pub waiter: TaskId,
@@ -663,7 +678,8 @@ pub struct InspectorWaitEdge {
 /// panic text, and backtrace text are never included. The shareable profile also
 /// removes free-form descriptions, source locations, and checkpoint messages.
 /// See [`InspectorCoverage`] for fields unavailable from these record tables.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct InspectorSnapshot {
     /// Schema version identifier.
     pub schema_version: String,
@@ -897,7 +913,8 @@ impl InspectorSnapshot {
 }
 
 /// Deterministic wire payload for task-inspector snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TaskConsoleWireSnapshot {
     /// Schema version identifier.
     pub schema_version: String,
@@ -937,6 +954,7 @@ impl TaskConsoleWireSnapshot {
     /// # Errors
     ///
     /// Returns `serde_json::Error` when serialization fails.
+    #[cfg(feature = "full-serialization")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -946,6 +964,7 @@ impl TaskConsoleWireSnapshot {
     /// # Errors
     ///
     /// Returns `serde_json::Error` when serialization fails.
+    #[cfg(feature = "full-serialization")]
     pub fn to_pretty_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -955,13 +974,15 @@ impl TaskConsoleWireSnapshot {
     /// # Errors
     ///
     /// Returns `serde_json::Error` when parsing fails.
+    #[cfg(feature = "full-serialization")]
     pub fn from_json(payload: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(payload)
     }
 }
 
 /// Region-level task count in wire payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TaskRegionCountWire {
     /// Region identifier.
     pub region_id: RegionId,
@@ -970,7 +991,8 @@ pub struct TaskRegionCountWire {
 }
 
 /// Summary section for task-inspector wire snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TaskSummaryWire {
     /// Total number of tasks.
     pub total_tasks: usize,
@@ -1011,7 +1033,8 @@ impl From<TaskSummary> for TaskSummaryWire {
 }
 
 /// Task-level section for task-inspector wire snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TaskDetailsWire {
     /// Task identifier.
     pub id: TaskId,
@@ -1426,6 +1449,7 @@ impl TaskInspector {
     /// # Errors
     ///
     /// Returns `serde_json::Error` when serialization fails.
+    #[cfg(feature = "full-serialization")]
     pub fn wire_snapshot_json(&self) -> Result<String, serde_json::Error> {
         self.wire_snapshot().to_json()
     }
@@ -1435,6 +1459,7 @@ impl TaskInspector {
     /// # Errors
     ///
     /// Returns `serde_json::Error` when serialization fails.
+    #[cfg(feature = "full-serialization")]
     pub fn wire_snapshot_pretty_json(&self) -> Result<String, serde_json::Error> {
         self.wire_snapshot().to_pretty_json()
     }

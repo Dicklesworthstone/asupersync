@@ -57,6 +57,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 
 use crate::types::cancel::CancelReason;
@@ -117,7 +118,8 @@ impl std::fmt::Display for MonitorRef {
 ///
 /// Maps from the runtime's [`Outcome`] type to a monitor-specific enum
 /// that can be pattern-matched by watchers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub enum DownReason {
     /// Process completed successfully (`Outcome::Ok`).
     Normal,
@@ -673,7 +675,7 @@ pub(crate) enum WatchApply {
 /// that produced it, instead of storing it for an awaiting handle: a
 /// GenServer's monitors and trapped links feed its system-message lane.
 pub(crate) struct WatchSlot<R, N> {
-    inner: parking_lot::Mutex<WatchSlotInner<R, N>>,
+    inner: crate::sync::pl::Mutex<WatchSlotInner<R, N>>,
     sink: Option<WatchSink<N>>,
 }
 
@@ -702,7 +704,7 @@ struct WatchSlotInner<R, N> {
 impl<R, N> Default for WatchSlot<R, N> {
     fn default() -> Self {
         Self {
-            inner: parking_lot::Mutex::new(WatchSlotInner {
+            inner: crate::sync::pl::Mutex::new(WatchSlotInner {
                 established: None,
                 notice: None,
                 abandoned: false,
@@ -929,6 +931,7 @@ pub struct ServerWatchOpening<R: Copy, N: Clone> {
 pub type ServerMonitorOpening = ServerWatchOpening<MonitorRef, DownNotification>;
 
 /// [`ServerWatchOpening`] for a link.
+#[cfg(feature = "full-runtime")]
 pub type ServerLinkOpening = ServerWatchOpening<crate::link::LinkRef, crate::link::ExitSignal>;
 
 impl<R: Copy + std::fmt::Debug, N: Clone> std::fmt::Debug for ServerWatchOpening<R, N> {
@@ -1210,6 +1213,7 @@ pub(crate) enum WatchCommand {
     Demonitor {
         monitor_ref: MonitorRef,
     },
+    #[cfg(feature = "full-runtime")]
     Link {
         /// The task holding the link; `task_region` is its region when it is
         /// given by id.
@@ -1221,6 +1225,7 @@ pub(crate) enum WatchCommand {
         /// Drains so far that found the task's or peer's spawn unadmitted.
         attempts: u32,
     },
+    #[cfg(feature = "full-runtime")]
     Unlink {
         link_ref: crate::link::LinkRef,
     },
@@ -1234,8 +1239,11 @@ impl WatchCommand {
     pub(crate) fn wake_unapplied(&self) {
         match self {
             Self::Monitor { slot, .. } => slot.wake_waiter(),
+            #[cfg(feature = "full-runtime")]
             Self::Link { slot, .. } => slot.wake_waiter(),
-            Self::Demonitor { .. } | Self::Unlink { .. } => {}
+            Self::Demonitor { .. } => {}
+            #[cfg(feature = "full-runtime")]
+            Self::Unlink { .. } => {}
         }
     }
 }
@@ -1254,6 +1262,7 @@ impl std::fmt::Debug for WatchCommand {
                 .debug_struct("Demonitor")
                 .field("monitor_ref", monitor_ref)
                 .finish(),
+            #[cfg(feature = "full-runtime")]
             Self::Link {
                 task,
                 task_policy,
@@ -1265,6 +1274,7 @@ impl std::fmt::Debug for WatchCommand {
                 .field("task_policy", task_policy)
                 .field("peer", peer)
                 .finish_non_exhaustive(),
+            #[cfg(feature = "full-runtime")]
             Self::Unlink { link_ref } => f
                 .debug_struct("Unlink")
                 .field("link_ref", link_ref)
@@ -1279,8 +1289,10 @@ impl std::fmt::Debug for WatchCommand {
 pub(crate) struct TaskWatches {
     monitors: MonitorSet,
     monitor_slots: BTreeMap<MonitorRef, std::sync::Arc<MonitorSlot>>,
+    #[cfg(feature = "full-runtime")]
     links: crate::link::LinkSet,
     /// The establishing task and its slot, per link.
+    #[cfg(feature = "full-runtime")]
     link_slots: BTreeMap<crate::link::LinkRef, (TaskId, std::sync::Arc<crate::link::LinkSlot>)>,
 }
 
@@ -1289,7 +1301,14 @@ impl TaskWatches {
     /// to fire.
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
-        self.monitors.is_empty() && self.links.is_empty()
+        #[cfg(feature = "full-runtime")]
+        {
+            self.monitors.is_empty() && self.links.is_empty()
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            self.monitors.is_empty()
+        }
     }
 
     /// Applies one command. `live_region` returns a task's owning region while
@@ -1335,6 +1354,7 @@ impl TaskWatches {
                 self.monitor_slots.remove(&monitor_ref);
                 WatchApply::Done(None)
             }
+            #[cfg(feature = "full-runtime")]
             WatchCommand::Link {
                 task,
                 task_region,
@@ -1372,6 +1392,7 @@ impl TaskWatches {
                     Ok((link_ref, peer))
                 }))
             }
+            #[cfg(feature = "full-runtime")]
             WatchCommand::Unlink { link_ref } => {
                 self.links.unlink(link_ref);
                 self.link_slots.remove(&link_ref);
@@ -1433,36 +1454,40 @@ impl TaskWatches {
 
         // Links: an abnormal exit cancels propagating peers and signals
         // trapping ones; a normal exit only signals trapping peers.
-        if reason.is_normal() {
-            for (link_ref, peer) in self.links.peers_of(task) {
-                if self.links.exit_policy_for(link_ref, peer) == Some(crate::link::ExitPolicy::Trap)
-                {
-                    self.push_trapped_exit(
-                        &mut effects,
-                        peer,
-                        crate::link::ExitSignal {
-                            from: task,
-                            reason: DownReason::Normal,
-                            link_ref,
-                        },
-                    );
+        #[cfg(feature = "full-runtime")]
+        {
+            if reason.is_normal() {
+                for (link_ref, peer) in self.links.peers_of(task) {
+                    if self.links.exit_policy_for(link_ref, peer)
+                        == Some(crate::link::ExitPolicy::Trap)
+                    {
+                        self.push_trapped_exit(
+                            &mut effects,
+                            peer,
+                            crate::link::ExitSignal {
+                                from: task,
+                                reason: DownReason::Normal,
+                                link_ref,
+                            },
+                        );
+                    }
+                }
+            } else {
+                for action in self.links.resolve_exits(task, now, &reason).into_sorted() {
+                    match action {
+                        crate::link::LinkExitAction::CancelPeer { to, reason, .. } => {
+                            effects.cancels.push((to, reason));
+                        }
+                        crate::link::LinkExitAction::DeliverExit { to, signal } => {
+                            self.push_trapped_exit(&mut effects, to, signal);
+                        }
+                        crate::link::LinkExitAction::Ignored { .. } => {}
+                    }
                 }
             }
-        } else {
-            for action in self.links.resolve_exits(task, now, &reason).into_sorted() {
-                match action {
-                    crate::link::LinkExitAction::CancelPeer { to, reason, .. } => {
-                        effects.cancels.push((to, reason));
-                    }
-                    crate::link::LinkExitAction::DeliverExit { to, signal } => {
-                        self.push_trapped_exit(&mut effects, to, signal);
-                    }
-                    crate::link::LinkExitAction::Ignored { .. } => {}
-                }
+            for link_ref in self.links.remove_task(task) {
+                self.link_slots.remove(&link_ref);
             }
-        }
-        for link_ref in self.links.remove_task(task) {
-            self.link_slots.remove(&link_ref);
         }
 
         if effects.is_empty() {
@@ -1474,6 +1499,7 @@ impl TaskWatches {
         Some(effects)
     }
 
+    #[cfg(feature = "full-runtime")]
     fn push_trapped_exit(
         &self,
         effects: &mut WatchEffects,
@@ -1496,6 +1522,7 @@ pub(crate) struct WatchEffects {
     at: Time,
     /// The slot, the watcher it belongs to, and the DOWN to deliver.
     downs: Vec<(std::sync::Arc<MonitorSlot>, TaskId, DownNotification)>,
+    #[cfg(feature = "full-runtime")]
     exits: Vec<(
         std::sync::Arc<crate::link::LinkSlot>,
         crate::link::ExitSignal,
@@ -1506,7 +1533,14 @@ pub(crate) struct WatchEffects {
 
 impl WatchEffects {
     fn is_empty(&self) -> bool {
-        self.downs.is_empty() && self.exits.is_empty() && self.cancels.is_empty()
+        #[cfg(feature = "full-runtime")]
+        {
+            self.downs.is_empty() && self.exits.is_empty() && self.cancels.is_empty()
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            self.downs.is_empty() && self.cancels.is_empty()
+        }
     }
 
     /// `(watcher, monitored task, completion time)` for every DOWN this exit
@@ -1530,6 +1564,7 @@ impl WatchEffects {
                 std::mem::forget(payload);
             }
         }
+        #[cfg(feature = "full-runtime")]
         for (slot, signal) in self.exits {
             if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 slot.deliver(at, signal);

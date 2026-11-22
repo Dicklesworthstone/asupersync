@@ -11,7 +11,7 @@ use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CurveBudget, RRefAccess, RegionId, TaskId, Time,
 };
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::cell::Cell;
 use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -932,10 +932,10 @@ pub struct RegionRecord {
     /// Logical time when the region was created.
     pub created_at: Time,
     /// Notification state for tasks waiting on this region to close.
-    pub close_notify: std::sync::Arc<parking_lot::Mutex<RegionCloseState>>,
+    pub close_notify: std::sync::Arc<crate::sync::pl::Mutex<RegionCloseState>>,
     /// Retained outside the region heap so an owned handle can observe close
     /// even after the runtime reclaims this generation's record.
-    close_receipt: Arc<parking_lot::Mutex<Option<RegionCloseOutcome>>>,
+    close_receipt: Arc<crate::sync::pl::Mutex<Option<RegionCloseOutcome>>>,
     /// Explicit shutdown ceiling, separate from the ordinary work budget.
     /// Finalizers retain this same handle and observe later tightening.
     shutdown_budget: crate::record::finalizer::ShutdownBudget,
@@ -1067,11 +1067,11 @@ impl RegionRecord {
             id,
             parent,
             created_at,
-            close_notify: std::sync::Arc::new(parking_lot::Mutex::new(RegionCloseState {
+            close_notify: std::sync::Arc::new(crate::sync::pl::Mutex::new(RegionCloseState {
                 closed: false,
                 waiters: Vec::new(),
             })),
-            close_receipt: Arc::new(parking_lot::Mutex::new(None)),
+            close_receipt: Arc::new(crate::sync::pl::Mutex::new(None)),
             shutdown_budget: Arc::new(RwLock::new(None)),
             state: Arc::new(AtomicRegionState::new(RegionState::Open)),
             finalizers: RwLock::new(FinalizerStack::new()),
@@ -1294,7 +1294,7 @@ impl RegionRecord {
 
     pub(crate) fn close_receipt_handle(
         &self,
-    ) -> Arc<parking_lot::Mutex<Option<RegionCloseOutcome>>> {
+    ) -> Arc<crate::sync::pl::Mutex<Option<RegionCloseOutcome>>> {
         Arc::clone(&self.close_receipt)
     }
 

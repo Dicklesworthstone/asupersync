@@ -72,6 +72,7 @@
 //! belongs to its [`Stdin`] handle, so a cancelled read loses no input as long
 //! as the handle is kept.
 
+#[cfg(feature = "full-runtime")]
 pub mod browser_storage;
 pub mod browser_stream;
 mod buf_reader;
@@ -129,6 +130,7 @@ pub use transfer_session::{
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
+#[cfg(feature = "full-runtime")]
 pub use browser_storage::{
     BrowserStorageAdapter, BrowserStorageError, StorageEvent, StorageEventOutcome,
 };
@@ -170,13 +172,17 @@ pub mod unix {
     pub use super::async_fd::{AsyncFd, AsyncFdReadyGuard, AsyncFdReadyMutGuard, TryIoError};
 }
 
+#[cfg(feature = "full-runtime")]
 pub mod replay;
+#[cfg(feature = "full-runtime")]
 pub mod replay_session;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full-runtime", not(target_arch = "wasm32")))]
 pub mod replay_archive;
 
+#[cfg(feature = "full-runtime")]
 pub mod replay_group;
 
 /// Joint multi-stream, clock, and entropy capture with ordered offline replay.
+#[cfg(feature = "full-runtime")]
 pub mod replay_group_session;

@@ -8,7 +8,7 @@
     )]
     use super::*;
     use crate::test_utils::init_test_logging;
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

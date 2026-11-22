@@ -13,18 +13,24 @@
 
 pub mod collector;
 pub mod context;
+#[cfg(feature = "full-runtime")]
 pub mod crdt;
 pub mod id;
+#[cfg(feature = "full-runtime")]
 pub mod lattice;
+#[cfg(feature = "full-runtime")]
 pub mod sheaf;
 pub mod span;
 pub mod vclock;
 
 pub use collector::{SymbolTraceCollector, TraceRecord, TraceSummary};
 pub use context::{RegionTag, SymbolTraceContext, TraceFlags};
+#[cfg(feature = "full-runtime")]
 pub use crdt::{GCounter, LWWRegister, MVRegister, Merge, ORSet, PNCounter};
 pub use id::{DistTraceId, SymbolSpanId};
+#[cfg(feature = "full-runtime")]
 pub use lattice::{LatticeState, LeaseLatticeState, ObligationEntry, ObligationLattice};
+#[cfg(feature = "full-runtime")]
 pub use sheaf::{
     ConsistencyReport, ConstraintViolation, NodeSnapshot, PhantomState, SagaConsistencyChecker,
     SagaConstraint,

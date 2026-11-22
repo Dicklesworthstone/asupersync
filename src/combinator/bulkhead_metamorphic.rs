@@ -88,11 +88,11 @@ impl TestWorkUnit {
 #[derive(Debug, Default)]
 struct GlobalBulkheadState {
     /// Work units processed per bulkhead
-    processed_per_bulkhead: parking_lot::Mutex<HashMap<String, Vec<u64>>>,
+    processed_per_bulkhead: crate::sync::pl::Mutex<HashMap<String, Vec<u64>>>,
     /// Work units rejected per bulkhead
-    rejected_per_bulkhead: parking_lot::Mutex<HashMap<String, Vec<u64>>>,
+    rejected_per_bulkhead: crate::sync::pl::Mutex<HashMap<String, Vec<u64>>>,
     /// Work units cancelled per bulkhead
-    cancelled_per_bulkhead: parking_lot::Mutex<HashMap<String, Vec<u64>>>,
+    cancelled_per_bulkhead: crate::sync::pl::Mutex<HashMap<String, Vec<u64>>>,
     /// Total permit acquisitions across all bulkheads
     total_acquisitions: AtomicU64,
     /// Total permit releases across all bulkheads

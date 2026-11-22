@@ -48,7 +48,7 @@
 
 use super::MessageCausality;
 use crate::cx::{CancelWakerToken, Cx};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

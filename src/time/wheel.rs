@@ -211,14 +211,25 @@ impl CoalescingConfig {
 }
 
 /// Error returned when a timer duration exceeds the configured maximum.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("timer duration {duration:?} exceeds maximum allowed duration {max:?}")]
+#[derive(Debug, Clone)]
 pub struct TimerDurationExceeded {
     /// The requested duration.
     pub duration: Duration,
     /// The maximum allowed duration.
     pub max: Duration,
 }
+
+impl std::fmt::Display for TimerDurationExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "timer duration {:?} exceeds maximum allowed duration {:?}",
+            self.duration, self.max
+        )
+    }
+}
+
+impl std::error::Error for TimerDurationExceeded {}
 
 /// Opaque handle for a scheduled timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

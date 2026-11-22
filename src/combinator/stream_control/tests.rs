@@ -39,12 +39,12 @@ impl Drop for HostilePayload {
 async fn stopped_journey(cx: Cx, kind: StopKind, cleanup_panics: bool) {
     let (signal, mut stop_signal) = oneshot::channel::<()>();
     let (started, mut ready) = oneshot::channel::<()>();
-    let started = Arc::new(parking_lot::Mutex::new(Some(started)));
+    let started = Arc::new(crate::sync::pl::Mutex::new(Some(started)));
     let (resource, _resource_receiver) = mpsc::channel::<()>(1);
     let member_resource = resource.clone();
     let cleaned = Arc::new(AtomicUsize::new(0));
     let child_cleaned = Arc::clone(&cleaned);
-    let handles = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let handles = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
     let retained = Arc::clone(&handles);
     let polls = Arc::new(AtomicUsize::new(0));
     let source_polls = Arc::clone(&polls);
@@ -250,7 +250,7 @@ fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
         let (stop, mut stopped) = oneshot::channel();
         let (in_cleanup, mut cleaning) = oneshot::channel();
         let (release, released) = oneshot::channel();
-        let gates = Arc::new(parking_lot::Mutex::new(Some((in_cleanup, released))));
+        let gates = Arc::new(crate::sync::pl::Mutex::new(Some((in_cleanup, released))));
         let started = Arc::new(AtomicBool::new(false));
         let mut producer = cx.spawn(move |owner| async move {
             try_for_each_concurrent_scoped_until(
@@ -301,7 +301,7 @@ fn stop_during_error_drain_does_not_replace_the_selected_item_failure() {
 #[test]
 fn nested_region_panic_is_not_hidden_by_a_successful_item() {
     let ((), report) = run_async_under_lab(0x5706, |cx| async move {
-        let kept = Arc::new(parking_lot::Mutex::new((Vec::new(), Vec::new())));
+        let kept = Arc::new(crate::sync::pl::Mutex::new((Vec::new(), Vec::new())));
         let keep = Arc::clone(&kept);
         let outcome = try_for_each_concurrent_scoped_until(
             &cx,
@@ -346,7 +346,7 @@ fn nested_region_panic_is_not_hidden_by_a_successful_item() {
 fn owner_cancelled_mid_run_gets_its_own_reason() {
     let ((), report) = run_async_under_lab(0x5707, |cx| async move {
         let parked = Arc::new(AtomicBool::new(false));
-        let observed = Arc::new(parking_lot::Mutex::new(None));
+        let observed = Arc::new(crate::sync::pl::Mutex::new(None));
         let (park, record) = (Arc::clone(&parked), Arc::clone(&observed));
         let mut producer = cx
             .spawn(move |owner| async move {

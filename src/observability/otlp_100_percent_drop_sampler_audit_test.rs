@@ -125,8 +125,8 @@ pub struct DropSamplerOtlpExporterFixture {
     export_calls: AtomicU64,
     network_calls: AtomicU64,
     memory_allocations: AtomicU64,
-    exported_batches: parking_lot::Mutex<Vec<DropSamplerBatchFixture>>,
-    processing_log: parking_lot::Mutex<Vec<String>>,
+    exported_batches: crate::sync::pl::Mutex<Vec<DropSamplerBatchFixture>>,
+    processing_log: crate::sync::pl::Mutex<Vec<String>>,
 }
 
 impl DropSamplerOtlpExporterFixture {
@@ -135,8 +135,8 @@ impl DropSamplerOtlpExporterFixture {
             export_calls: AtomicU64::new(0),
             network_calls: AtomicU64::new(0),
             memory_allocations: AtomicU64::new(0),
-            exported_batches: parking_lot::Mutex::new(Vec::new()),
-            processing_log: parking_lot::Mutex::new(Vec::new()),
+            exported_batches: crate::sync::pl::Mutex::new(Vec::new()),
+            processing_log: crate::sync::pl::Mutex::new(Vec::new()),
         }
     }
 

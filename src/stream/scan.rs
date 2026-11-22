@@ -4,7 +4,6 @@
 //! intermediate accumulator value instead of only the final result.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -17,15 +16,30 @@ use std::task::{Context, Poll};
 /// is updated. If `f` returns `None`, the stream terminates.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Scan<S, St, F> {
-    #[pin]
     stream: S,
     state: Option<St>,
     f: F,
 }
 
+struct ScanProj<'a, S, St, F> {
+    stream: Pin<&'a mut S>,
+    state: &'a mut Option<St>,
+    f: &'a mut F,
+}
+
 impl<S, St, F> Scan<S, St, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ScanProj<'_, S, St, F> {
+        // SAFETY: `stream` is structurally pinned; `state` and `f` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ScanProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            state: &mut this.state,
+            f: &mut this.f,
+        }
+    }
+
     /// Creates a new `Scan` stream.
     #[inline]
     pub(crate) fn new(stream: S, initial_state: St, f: F) -> Self {

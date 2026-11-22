@@ -42,7 +42,7 @@ use crate::runtime::reactor::{
     Event, Events, Interest, IoReactorBackend, IoReactorCapabilitySnapshot, Reactor, SlabToken,
     Source, Token, TokenSlab,
 };
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,7 +79,7 @@ const fn interest_map_capacity(events_capacity: usize) -> usize {
 fn lock_for_mutation<'a>(
     driver: &'a Mutex<IoDriver>,
     reactor: &dyn Reactor,
-) -> parking_lot::MutexGuard<'a, IoDriver> {
+) -> crate::sync::pl::MutexGuard<'a, IoDriver> {
     if let Some(guard) = driver.try_lock() {
         return guard;
     }
@@ -987,13 +987,13 @@ impl IoDriverHandle {
     }
 
     /// Returns a lock guard for direct access to the driver.
-    pub fn lock(&self) -> parking_lot::MutexGuard<'_, IoDriver> {
+    pub fn lock(&self) -> crate::sync::pl::MutexGuard<'_, IoDriver> {
         self.inner.lock()
     }
 
     /// Attempts to acquire the lock for direct access to the driver.
     #[must_use]
-    pub fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, IoDriver>> {
+    pub fn try_lock(&self) -> Option<crate::sync::pl::MutexGuard<'_, IoDriver>> {
         self.inner.try_lock()
     }
 }
@@ -1509,12 +1509,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "full-runtime")]
     struct SourceErrorProbe {
         model: crate::runtime::reactor_model::LabReactorModel,
         driver: Mutex<Option<Weak<Mutex<IoDriver>>>>,
         queries: AtomicUsize,
     }
 
+    #[cfg(feature = "full-runtime")]
     impl Reactor for SourceErrorProbe {
         fn register(
             &self,
@@ -1557,6 +1559,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "full-runtime")]
     fn source_error_probe() -> (Arc<SourceErrorProbe>, IoDriverHandle) {
         let reactor = Arc::new(SourceErrorProbe {
             model: crate::runtime::reactor_model::LabReactorModel::new(),
@@ -1568,6 +1571,7 @@ mod tests {
         (reactor, driver)
     }
 
+    #[cfg(feature = "full-runtime")]
     #[test]
     fn registration_maintenance_preserves_source_error_for_next_operation() {
         let (reactor, driver) = source_error_probe();

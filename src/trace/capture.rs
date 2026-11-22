@@ -25,7 +25,7 @@ use super::replay::{
     ProductionSchedule, ProjectionError,
 };
 use crate::types::{Budget, CancelReason, Severity, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod archive;

@@ -61,7 +61,7 @@ pub struct OtlpExportQueueStats {
 pub(super) struct ExportQueue {
     state: Mutex<QueueState>,
     ready: crate::sync::Notify,
-    retired: parking_lot::Condvar,
+    retired: crate::sync::pl::Condvar,
 }
 
 #[derive(Debug, Default)]

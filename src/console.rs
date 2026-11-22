@@ -5,7 +5,7 @@
 //! an explicit writer to keep output deterministic in tests.
 
 use crate::tracing_compat::{debug, info, trace};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::io::{self, IsTerminal, Write};
 
 /// ANSI reset sequence.

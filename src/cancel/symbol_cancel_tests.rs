@@ -3181,7 +3181,7 @@ mod tests {
         let mut rng = DetRng::new(0xbeef);
         let token = SymbolCancelToken::new(ObjectId::new(7, 7), &mut rng);
         let coord = CancelMarkSeenHarness {
-            seen_sequences: parking_lot::RwLock::new(SeenSequences::default()),
+            seen_sequences: crate::sync::pl::RwLock::new(SeenSequences::default()),
             max_seen: 5,
         };
         for i in 0..15u64 {
@@ -3196,7 +3196,7 @@ mod tests {
     }
 
     struct CancelMarkSeenHarness {
-        seen_sequences: parking_lot::RwLock<SeenSequences>,
+        seen_sequences: crate::sync::pl::RwLock<SeenSequences>,
         max_seen: usize,
     }
 

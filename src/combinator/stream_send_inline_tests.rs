@@ -120,7 +120,7 @@
     fn disconnected_destination_returns_the_non_clone_output() {
         let ((), report) = run_async_under_lab(0x5E04, |cx| async move {
             let (sender, receiver) = mpsc::channel(1);
-            let receiver = Arc::new(parking_lot::Mutex::new(Some(receiver)));
+            let receiver = Arc::new(crate::sync::pl::Mutex::new(Some(receiver)));
             let live = Arc::new(AtomicUsize::new(0));
             let mapper_live = Arc::clone(&live);
             let outcome = try_map_send_concurrent_scoped(

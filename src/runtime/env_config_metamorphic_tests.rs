@@ -146,7 +146,7 @@ fn arb_config_operation() -> impl Strategy<Value = ConfigOperation> {
 
 /// Helper to set environment variables with cleanup.
 struct EnvGuard {
-    _lock: parking_lot::MutexGuard<'static, ()>,
+    _lock: crate::sync::pl::MutexGuard<'static, ()>,
     vars_to_unset: Vec<String>,
     vars_to_restore: HashMap<String, String>,
 }

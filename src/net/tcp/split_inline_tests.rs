@@ -478,7 +478,7 @@
     #[cfg(unix)]
     use crate::types::{Budget, RegionId, TaskId};
     #[cfg(unix)]
-    use parking_lot::Mutex;
+    use crate::sync::pl::Mutex;
     #[cfg(unix)]
     use std::collections::HashMap;
     use std::io::{IoSliceMut, Write};

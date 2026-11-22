@@ -8,8 +8,8 @@
 //! No backend callback executes under the short predicate mutex.
 
 #[cfg(not(target_arch = "wasm32"))]
-use parking_lot::Condvar;
-use parking_lot::Mutex;
+use crate::sync::pl::Condvar;
+use crate::sync::pl::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]

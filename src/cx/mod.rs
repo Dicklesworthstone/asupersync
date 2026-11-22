@@ -62,19 +62,25 @@ pub mod cap;
 pub mod capacity_ticket;
 pub mod child_region;
 pub mod cx;
+#[cfg(feature = "full-runtime")]
 mod dynamic_replacement;
+#[cfg(feature = "full-runtime")]
 pub mod dynamic_service;
+#[cfg(feature = "full-runtime")]
 pub mod dynamic_supervisor;
 pub mod fiber;
 pub(crate) mod io_gate;
+#[cfg(feature = "full-runtime")]
 pub mod macaroon;
 mod owned_join;
 pub mod policy_region;
 pub mod registry;
+#[cfg(feature = "full-runtime")]
 pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
 pub mod scoped_first_ok;
+#[cfg(feature = "full-runtime")]
 pub mod scoped_fs;
 pub mod scoped_hedge;
 pub mod scoped_join;
@@ -83,10 +89,11 @@ pub mod scoped_race;
 pub mod scoped_race_all;
 pub mod scoped_retry;
 pub mod scoped_timeout;
+#[cfg(feature = "full-runtime")]
 pub mod supervisor_service;
 pub mod tracked_registry;
 // Source-only readiness increment: opt in for validation before production use.
-#[cfg(feature = "test-internals")]
+#[cfg(all(feature = "full-runtime", feature = "test-internals"))]
 pub mod worker_readiness;
 pub mod wrappers;
 
@@ -109,11 +116,14 @@ pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
     DeadlineBudgetStats, MAX_SPAWN_BATCH_SIZE, PollBudgetStats, SpanGuard, SpawnBatchError,
 };
+#[cfg(feature = "full-runtime")]
 pub use dynamic_replacement::DynamicChildReplacement;
+#[cfg(feature = "full-runtime")]
 pub use dynamic_service::{
     DynamicControlError, DynamicServiceChildInfo, DynamicServiceChildState, DynamicServiceConfig,
     DynamicServiceExit, DynamicServiceHandle, DynamicSupervisorClient,
 };
+#[cfg(feature = "full-runtime")]
 pub use dynamic_supervisor::{
     DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildResult, DynamicChildState,
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
@@ -121,6 +131,7 @@ pub use dynamic_supervisor::{
 };
 pub use fiber::{FiberHandle, FiberScope, LocalFiberScope};
 pub use io_gate::{IoCapabilityDenied, WithAmbient};
+#[cfg(feature = "full-runtime")]
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,
@@ -137,6 +148,7 @@ pub use scoped_first_ok::{
     ScopedFirstOkAttempt, ScopedFirstOkClose, ScopedFirstOkError, ScopedFirstOkReport,
     ScopedFirstOkStop, ScopedFirstOkTask,
 };
+#[cfg(feature = "full-runtime")]
 pub use scoped_fs::{ScopedFs, ScopedFsError};
 pub use scoped_hedge::{
     ScopedHedgeBranch, ScopedHedgeBranchReport, ScopedHedgeClose, ScopedHedgeError, ScopedHedgeReport,

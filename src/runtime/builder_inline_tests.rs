@@ -9,7 +9,7 @@
     use crate::time::sleep;
     use crate::trace::{TraceEvent, TraceEventKind};
     use crate::types::{Budget, CancelReason, CxInner, RegionId, TaskId, Time};
-    use parking_lot::RwLock;
+    use crate::sync::pl::RwLock;
     #[cfg(unix)]
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -5089,7 +5089,7 @@ worker_threads = 16
         polls: Arc<AtomicUsize>,
         wakes: Arc<AtomicUsize>,
         drops: Arc<AtomicUsize>,
-        observed_cx: Arc<parking_lot::Mutex<Option<Cx>>>,
+        observed_cx: Arc<crate::sync::pl::Mutex<Option<Cx>>>,
         wake_again: bool,
         retired: std::sync::mpsc::Sender<()>,
         _resource: crate::sync::OwnedMutexGuard<()>,
@@ -5221,7 +5221,7 @@ worker_threads = 16
         let polls = Arc::new(AtomicUsize::new(0));
         let wakes = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
-        let observed_cx = Arc::new(parking_lot::Mutex::new(None));
+        let observed_cx = Arc::new(crate::sync::pl::Mutex::new(None));
         let resource = Arc::new(crate::sync::Mutex::new(()));
         let resource_guard = resource.try_lock_owned().unwrap();
         let (retired_tx, retired_rx) = std::sync::mpsc::channel();
@@ -5559,7 +5559,7 @@ worker_threads = 16
         action: NativeManagedFinalizerAction,
     }
 
-    type NativeManagedFinalizerLog = Arc<parking_lot::Mutex<Vec<NativeManagedFinalizerEvent>>>;
+    type NativeManagedFinalizerLog = Arc<crate::sync::pl::Mutex<Vec<NativeManagedFinalizerEvent>>>;
 
     #[derive(Debug)]
     enum NativeManagedFinalizerCommand {
@@ -5579,7 +5579,7 @@ worker_threads = 16
         generation: crate::supervision::ManagedGeneration,
         wait: Pin<Box<dyn Future<Output = ()> + Send>>,
         log: NativeManagedFinalizerLog,
-        observed: Arc<parking_lot::Mutex<Option<Cx>>>,
+        observed: Arc<crate::sync::pl::Mutex<Option<Cx>>>,
         pending: bool,
         done: bool,
         _resource: crate::sync::OwnedMutexGuard<()>,
@@ -5708,7 +5708,7 @@ worker_threads = 16
             RestartPolicy::OneForAll => &[0, 1, 2],
             RestartPolicy::RestForOne => &[1, 2],
         };
-        let log: NativeManagedFinalizerLog = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log: NativeManagedFinalizerLog = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
         let resources: Arc<Vec<_>> = Arc::new(
             (0..3)
                 .map(|_| Arc::new(crate::sync::Mutex::new(())))
@@ -5846,7 +5846,7 @@ worker_threads = 16
         let mut receipts = Vec::new();
         for &child in affected {
             let (release, mut wait) = oneshot::channel();
-            let observed_cx = Arc::new(parking_lot::Mutex::new(None));
+            let observed_cx = Arc::new(crate::sync::pl::Mutex::new(None));
             let resource = resources[child].try_lock_owned().unwrap();
             let finalizer = NativeManagedHeldFinalizer {
                 child,

@@ -3,7 +3,6 @@
 //! The `Map` combinator transforms each item in a stream using a provided function.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -12,15 +11,30 @@ use std::task::{Context, Poll};
 /// Created by [`StreamExt::map`](super::StreamExt::map).
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Map<S, F> {
-    #[pin]
     stream: S,
     f: F,
     exhausted: bool,
 }
 
+struct MapProj<'a, S, F> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    exhausted: &'a mut bool,
+}
+
 impl<S, F> Map<S, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> MapProj<'_, S, F> {
+        // SAFETY: `stream` is structurally pinned; `f` and `exhausted` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        MapProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     /// Creates a new `Map` stream.
     #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {

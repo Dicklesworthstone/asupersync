@@ -27,7 +27,7 @@ use crate::runtime::blocking_pool::{
     BlockingPoolHandle, BlockingSpawnErrorKind, BlockingTaskHandle,
 };
 use crate::runtime::state::SpawnError;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

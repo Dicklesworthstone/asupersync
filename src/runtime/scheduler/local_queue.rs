@@ -7,14 +7,17 @@
 use crate::record::task::TaskRecord;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
+use crate::sync::pl::Mutex;
 use crate::types::TaskId;
 #[cfg(any(test, feature = "test-internals"))]
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
+#[cfg(feature = "full-concurrency")]
 use hashbrown::HashSet;
-use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::cell::RefCell;
+#[cfg(not(feature = "full-concurrency"))]
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

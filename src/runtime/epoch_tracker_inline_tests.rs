@@ -27,7 +27,7 @@
     #[cfg(feature = "tracing-integration")]
     #[test]
     fn module_desync_emits_at_debug_not_error() {
-        use parking_lot::Mutex;
+        use crate::sync::pl::Mutex;
         use std::sync::Arc;
         use tracing::Subscriber;
         use tracing_subscriber::layer::{Context, Layer};

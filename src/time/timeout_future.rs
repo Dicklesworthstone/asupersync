@@ -5,7 +5,6 @@
 use super::elapsed::Elapsed;
 use super::sleep::Sleep;
 use crate::types::Time;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -55,10 +54,8 @@ fn ambient_timer_now() -> Option<Time> {
 /// }
 /// ```
 #[derive(Debug)]
-#[pin_project]
 pub struct TimeoutFuture<F> {
     /// The inner future.
-    #[pin]
     future: F,
     /// The sleep future for the timeout.
     sleep: Sleep,
@@ -68,6 +65,27 @@ pub struct TimeoutFuture<F> {
     /// Tracks whether the last terminal result was a timeout, which is the
     /// only terminal state that `reset` can safely re-arm.
     timed_out: bool,
+}
+
+struct TimeoutFutureProj<'a, F> {
+    future: Pin<&'a mut F>,
+    sleep: &'a mut Sleep,
+    completed: &'a mut bool,
+    timed_out: &'a mut bool,
+}
+
+impl<F> TimeoutFuture<F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> TimeoutFutureProj<'_, F> {
+        // SAFETY: `future` is structurally pinned; `sleep`, `completed`, and `timed_out` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        TimeoutFutureProj {
+            future: unsafe { Pin::new_unchecked(&mut this.future) },
+            sleep: &mut this.sleep,
+            completed: &mut this.completed,
+            timed_out: &mut this.timed_out,
+        }
+    }
 }
 
 impl<F> TimeoutFuture<F> {

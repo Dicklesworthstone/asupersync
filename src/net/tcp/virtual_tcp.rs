@@ -31,7 +31,7 @@
 
 use super::traits::{TcpListenerApi, TcpStreamApi};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};

@@ -6,14 +6,15 @@
 //! latency, queue residency, backlog pressure, cancellation debt, and explicit
 //! topology/knob metadata.
 
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// Stable version identifier for scheduler swarm-evidence artifacts.
 pub const SCHEDULER_EVIDENCE_SCHEMA_VERSION: &str = "asupersync.scheduler-evidence.v1";
 
 /// Compact evidence artifact describing one scheduler tuning run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerEvidenceArtifact {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -175,8 +176,9 @@ impl SchedulerEvidenceArtifact {
 }
 
 /// Explicit workload classes for swarm-host scheduler runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SchedulerWorkloadClass {
     /// Interactive agent-swarm traffic with latency-sensitive bursts.
     InteractiveSwarm,
@@ -189,7 +191,8 @@ pub enum SchedulerWorkloadClass {
 }
 
 /// Stable topology description for a scheduler evidence artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerTopologyDescriptor {
     /// Number of scheduler workers participating in the run.
     pub worker_threads: usize,
@@ -200,7 +203,8 @@ pub struct SchedulerTopologyDescriptor {
 }
 
 /// Scheduler knobs subject to offline recommendations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerKnobProfile {
     /// Worker thread count in the profiled runtime.
     pub worker_threads: usize,
@@ -215,7 +219,8 @@ pub struct SchedulerKnobProfile {
 }
 
 /// Tail and backlog metrics captured for one run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerEvidenceMetrics {
     /// Wake-to-run latency median in nanoseconds.
     pub wake_to_run_p50_ns: u64,
@@ -281,7 +286,8 @@ impl SchedulerEvidenceMetrics {
 }
 
 /// Deterministic offline tuning report emitted from one evidence artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerTuneReport {
     /// Output schema version for the tuning report.
     pub schema_version: String,
@@ -306,8 +312,9 @@ pub struct SchedulerTuneReport {
 }
 
 /// Stable reason codes for why a recommendation was made.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SchedulerRecommendationReason {
     /// Wake-to-run latency and ready backlog imply more workers are needed.
     WorkersSaturated,
@@ -326,7 +333,8 @@ pub const SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION: &str =
     "asupersync.scheduler-coordination-evidence-inputs.v1";
 
 /// Scheduler-facing evidence inputs synthesized from coordination workload packs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerCoordinationEvidenceInputs {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -365,7 +373,8 @@ impl SchedulerCoordinationEvidenceInputs {
 }
 
 /// One scheduler evidence input for a real coordination-pressure family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SchedulerCoordinationEvidenceInput {
     /// Stable input id used by planner and profile consumers.
     pub evidence_input_id: String,
@@ -427,8 +436,9 @@ impl SchedulerCoordinationEvidenceInput {
 }
 
 /// Coordination pressure families that can be promoted into scheduler inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum CoordinationPressureFamily {
     /// Advisory tracker/file-lock contention.
     TrackerLockContention,
@@ -465,7 +475,8 @@ pub const SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION: &str =
 /// This type is intentionally inert: it records capacity and coordination
 /// signals supplied by an adapter or fixture, but it never reads ambient OS
 /// state and never authorizes cleanup by itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmCapacitySnapshot {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -855,8 +866,9 @@ impl SwarmCapacitySnapshot {
 }
 
 /// Memory host tier used by the deterministic budget planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryHostTier {
     /// Total memory was not reported.
     Unknown,
@@ -928,7 +940,8 @@ impl SwarmMemoryHostTier {
 }
 
 /// Deterministic per-lane memory budget plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmMemoryBudgetPlan {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -957,8 +970,9 @@ pub struct SwarmMemoryBudgetPlan {
 }
 
 /// Workload class for the memory residency planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryResidencyWorkloadClass {
     /// Region/task state that must stay resident for runtime progress.
     InteractiveRuntime,
@@ -991,8 +1005,9 @@ impl SwarmMemoryResidencyWorkloadClass {
 }
 
 /// Residency tier selected for a workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryResidencyTier {
     /// The whole request remains hot and resident.
     Hot,
@@ -1007,8 +1022,9 @@ pub enum SwarmMemoryResidencyTier {
 }
 
 /// Brownout class selected by the residency planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryBrownoutClass {
     /// No brownout is needed.
     None,
@@ -1023,8 +1039,9 @@ pub enum SwarmMemoryBrownoutClass {
 }
 
 /// Deterministic memory residency decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryResidencyDecision {
     /// Admit the whole request as hot resident state.
     AdmitHot,
@@ -1037,8 +1054,9 @@ pub enum SwarmMemoryResidencyDecision {
 }
 
 /// Fail-closed fallback reason for no-win memory decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryResidencyFallbackReason {
     /// The selected workload lane had no usable memory budget.
     EmptyBudget,
@@ -1051,8 +1069,9 @@ pub enum SwarmMemoryResidencyFallbackReason {
 }
 
 /// Runtime invariants that memory brownout must preserve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryProtectedInvariant {
     /// Scheduler and worker progress remain available.
     CoreScheduling,
@@ -1079,7 +1098,8 @@ impl SwarmMemoryProtectedInvariant {
 }
 
 /// Memory envelope before or after a residency decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmMemoryResidencyEnvelope {
     /// Available bytes from the explicit capacity snapshot.
     pub available_bytes: u64,
@@ -1094,7 +1114,8 @@ pub struct SwarmMemoryResidencyEnvelope {
 }
 
 /// Request for a deterministic memory residency decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmMemoryResidencyRequest {
     /// Stable policy/run identifier.
     pub policy_id: String,
@@ -1137,7 +1158,8 @@ impl SwarmMemoryResidencyRequest {
 }
 
 /// Deterministic memory residency and brownout policy report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmMemoryResidencyPlan {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -1198,8 +1220,9 @@ pub struct SwarmMemoryResidencyPlan {
 }
 
 /// Work lanes that swarm-scale admission policy classifies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmAdmissionLane {
     /// Latency-sensitive source edits, code review, and lightweight checks.
     InteractiveSourceOnly,
@@ -1214,8 +1237,9 @@ pub enum SwarmAdmissionLane {
 }
 
 /// Deterministic admission decision for one work lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmAdmissionDecision {
     /// Work may proceed under the attached validation class.
     Admit,
@@ -1226,8 +1250,9 @@ pub enum SwarmAdmissionDecision {
 }
 
 /// Validation class an admitted lane should use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmValidationClass {
     /// Source-only checks such as rustfmt, JSON parsing, or diff checks.
     SourceOnly,
@@ -1240,8 +1265,9 @@ pub enum SwarmValidationClass {
 }
 
 /// Stable reason codes for lane admission decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmAdmissionReasonCode {
     /// Source-only work remains available even under disk pressure.
     SourceOnlyAlwaysAvailable,
@@ -1282,7 +1308,8 @@ pub enum SwarmAdmissionReasonCode {
 }
 
 /// Admission decision for one lane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmLaneAdmission {
     /// Lane being classified.
     pub lane: SwarmAdmissionLane,
@@ -1295,7 +1322,8 @@ pub struct SwarmLaneAdmission {
 }
 
 /// Full deterministic report derived from one capacity snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmAdmissionReport {
     /// Version tag for this schema.
     pub schema_version: String,
@@ -1308,7 +1336,8 @@ pub struct SwarmAdmissionReport {
 }
 
 /// Explicit CPU topology hints for swarm-scale admission decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmCpuTopologyHints {
     /// Logical CPU count visible to the admission adapter.
     pub logical_cpus: usize,
@@ -1347,8 +1376,9 @@ impl SwarmCpuTopologyHints {
 }
 
 /// Coarse memory-pressure tier for deterministic policy fixtures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmMemoryPressureTier {
     /// Adapter did not provide a memory-pressure classification.
     #[default]
@@ -1364,14 +1394,15 @@ pub enum SwarmMemoryPressureTier {
 }
 
 /// Explicit memory capacity inputs for swarm-scale policy.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmMemoryCapacity {
     /// Available memory in bytes, if reported.
     pub available_bytes: Option<u64>,
     /// Total memory in bytes, if reported.
     pub total_bytes: Option<u64>,
     /// Coarse pressure tier supplied by the adapter or fixture.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub pressure_tier: SwarmMemoryPressureTier,
 }
 
@@ -1387,8 +1418,9 @@ impl SwarmMemoryCapacity {
 }
 
 /// Coarse disk-pressure level for proof/artifact admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmDiskPressureLevel {
     /// Adapter did not provide a disk-pressure classification.
     #[default]
@@ -1402,14 +1434,15 @@ pub enum SwarmDiskPressureLevel {
 }
 
 /// Explicit disk capacity inputs for swarm-scale policy.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmDiskCapacity {
     /// Free bytes on the relevant project/artifact filesystem, if reported.
     pub free_bytes: Option<u64>,
     /// Total bytes on the relevant filesystem, if reported.
     pub total_bytes: Option<u64>,
     /// Coarse pressure level supplied by the adapter or fixture.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub pressure_level: SwarmDiskPressureLevel,
 }
 
@@ -1425,8 +1458,9 @@ impl SwarmDiskCapacity {
 }
 
 /// rch-backed proof-work availability from the coordinator's point of view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 pub enum SwarmRchAdmissibility {
     /// Adapter did not provide an rch availability classification.
     #[default]
@@ -1442,23 +1476,25 @@ pub enum SwarmRchAdmissibility {
 }
 
 /// Explicit remote proof-worker state for swarm-scale policy.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct SwarmRchCapacity {
     /// rch admission classification.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub admissibility: SwarmRchAdmissibility,
     /// Number of healthy remote workers, if known.
     pub healthy_worker_count: Option<usize>,
     /// Number of currently available remote build slots, if known.
     pub available_slots: Option<usize>,
     /// Stable reason labels explaining degraded/unavailable states.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub blocked_reason_codes: Vec<String>,
 }
 
 /// Coordination-control backlog signals that affect work-conserving decisions.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "full-serialization", serde(default))]
 pub struct SwarmCoordinationBacklogSignals {
     /// Ready Beads count.
     pub ready_beads: usize,
@@ -1477,10 +1513,9 @@ pub struct SwarmCoordinationBacklogSignals {
 }
 
 /// Validation and recommendation failures for scheduler evidence artifacts.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SchedulerEvidenceError {
     /// The artifact schema version does not match the supported contract.
-    #[error("unsupported schema version: expected {expected}, found {found}")]
     UnsupportedSchemaVersion {
         /// Supported schema version for the current parser.
         expected: String,
@@ -1488,79 +1523,57 @@ pub enum SchedulerEvidenceError {
         found: String,
     },
     /// The run label was empty or whitespace-only.
-    #[error("run label must not be empty")]
     EmptyRunLabel,
     /// The topology declared no worker threads.
-    #[error("topology must declare at least one worker thread")]
     ZeroWorkerThreads,
     /// The topology declared no cohorts.
-    #[error("topology must declare at least one cohort")]
     ZeroCohortCount,
     /// The topology declared a zero memory budget.
-    #[error("topology must declare a non-zero memory budget")]
     ZeroMemoryBudget,
     /// The profiled knob set declared zero workers.
-    #[error("current knob profile must declare at least one worker")]
     ZeroCurrentWorkers,
     /// The profiled knob set declared a zero steal batch size.
-    #[error("current knob profile must declare a non-zero steal batch size")]
     ZeroStealBatchSize,
     /// The profiled knob set declared a zero cancel streak limit.
-    #[error("current knob profile must declare a non-zero cancel streak limit")]
     ZeroCancelStreakLimit,
     /// One percentile trio regressed from sorted order.
-    #[error("{field} percentiles must be monotonic (p50 <= p95 <= p99)")]
     NonMonotonicPercentiles {
         /// Percentile family that violated monotonic ordering.
         field: &'static str,
     },
     /// The remote-steal ratio fell outside the valid percentage range.
-    #[error("remote steal ratio must be between 0 and 100 inclusive, found {0}")]
     RemoteStealRatioOutOfRange(u8),
     /// A coordination evidence document had no inputs.
-    #[error("coordination evidence input set must not be empty")]
     EmptyEvidenceInputSet,
     /// A coordination evidence id was empty.
-    #[error("coordination evidence input id must not be empty")]
     EmptyEvidenceInputId,
     /// A coordination workload id was empty.
-    #[error("coordination workload id must not be empty")]
     EmptyCoordinationWorkloadId,
     /// Semantic pressure dimensions were absent.
-    #[error("coordination evidence must declare semantic pressure dimensions")]
     EmptySemanticPressure,
     /// Provenance-only context was absent.
-    #[error("coordination evidence must declare provenance-only context")]
     EmptyProvenanceContext,
     /// No accepted source event backed the input.
-    #[error("coordination evidence must include at least one source event")]
     ZeroSourceEventCount,
     /// A source hash field was empty.
-    #[error("coordination evidence source hashes must not be empty")]
     EmptySourceHash,
     /// A source hash was not a stable sha256 reference.
-    #[error("coordination evidence source hash must start with sha256:, found {found}")]
     InvalidSourceHash {
         /// Hash value that failed validation.
         found: String,
     },
     /// The capacity snapshot id was empty.
-    #[error("swarm capacity snapshot id must not be empty")]
     EmptyCapacitySnapshotId,
     /// A memory residency policy id was empty.
-    #[error("swarm memory residency policy id must not be empty")]
     EmptyMemoryResidencyPolicyId,
     /// A memory residency workload id was empty.
-    #[error("swarm memory residency workload id must not be empty")]
     EmptyMemoryResidencyWorkloadId,
     /// A required capacity dimension was zero or otherwise invalid.
-    #[error("swarm capacity dimension is invalid: {field}")]
     InvalidCapacityDimension {
         /// Stable field path for the invalid dimension.
         field: &'static str,
     },
     /// A free/available capacity value exceeded the corresponding total.
-    #[error("swarm capacity available field {available_field} exceeds total field {total_field}")]
     CapacityAvailableExceedsTotal {
         /// Field that reported the available/free value.
         available_field: &'static str,
@@ -1568,6 +1581,78 @@ pub enum SchedulerEvidenceError {
         total_field: &'static str,
     },
 }
+
+impl std::fmt::Display for SchedulerEvidenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion { expected, found } => {
+                write!(f, "unsupported schema version: expected {expected}, found {found}")
+            }
+            Self::EmptyRunLabel => f.write_str("run label must not be empty"),
+            Self::ZeroWorkerThreads => {
+                f.write_str("topology must declare at least one worker thread")
+            }
+            Self::ZeroCohortCount => f.write_str("topology must declare at least one cohort"),
+            Self::ZeroMemoryBudget => f.write_str("topology must declare a non-zero memory budget"),
+            Self::ZeroCurrentWorkers => {
+                f.write_str("current knob profile must declare at least one worker")
+            }
+            Self::ZeroStealBatchSize => {
+                f.write_str("current knob profile must declare a non-zero steal batch size")
+            }
+            Self::ZeroCancelStreakLimit => {
+                f.write_str("current knob profile must declare a non-zero cancel streak limit")
+            }
+            Self::NonMonotonicPercentiles { field } => {
+                write!(f, "{field} percentiles must be monotonic (p50 <= p95 <= p99)")
+            }
+            Self::RemoteStealRatioOutOfRange(val) => {
+                write!(f, "remote steal ratio must be between 0 and 100 inclusive, found {val}")
+            }
+            Self::EmptyEvidenceInputSet => f.write_str("coordination evidence input set must not be empty"),
+            Self::EmptyEvidenceInputId => f.write_str("coordination evidence input id must not be empty"),
+            Self::EmptyCoordinationWorkloadId => {
+                f.write_str("coordination workload id must not be empty")
+            }
+            Self::EmptySemanticPressure => {
+                f.write_str("coordination evidence must declare semantic pressure dimensions")
+            }
+            Self::EmptyProvenanceContext => {
+                f.write_str("coordination evidence must declare provenance-only context")
+            }
+            Self::ZeroSourceEventCount => {
+                f.write_str("coordination evidence must include at least one source event")
+            }
+            Self::EmptySourceHash => {
+                f.write_str("coordination evidence source hashes must not be empty")
+            }
+            Self::InvalidSourceHash { found } => {
+                write!(f, "coordination evidence source hash must start with sha256:, found {found}")
+            }
+            Self::EmptyCapacitySnapshotId => {
+                f.write_str("swarm capacity snapshot id must not be empty")
+            }
+            Self::EmptyMemoryResidencyPolicyId => {
+                f.write_str("swarm memory residency policy id must not be empty")
+            }
+            Self::EmptyMemoryResidencyWorkloadId => {
+                f.write_str("swarm memory residency workload id must not be empty")
+            }
+            Self::InvalidCapacityDimension { field } => {
+                write!(f, "swarm capacity dimension is invalid: {field}")
+            }
+            Self::CapacityAvailableExceedsTotal {
+                available_field,
+                total_field,
+            } => write!(
+                f,
+                "swarm capacity available field {available_field} exceeds total field {total_field}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SchedulerEvidenceError {}
 
 fn memory_residency_counts(
     requested_bytes: u64,

@@ -5,7 +5,7 @@
 //! recorder. No tracing callback runs while a context lock is held.
 
 use crate::types::CxInner;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};

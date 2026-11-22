@@ -73,7 +73,7 @@ impl Resolver {
                     }
                 }
                 let nameservers = self.native_nameservers()?;
-                let (v6, v4) = futures_lite::future::zip(
+                let (v6, v4) = crate::util::future::zip(
                     self.query_records_native(cx, host, DnsQueryType::Aaaa, &nameservers, &query_deadline),
                     self.query_records_native(cx, host, DnsQueryType::A, &nameservers, &query_deadline),
                 )

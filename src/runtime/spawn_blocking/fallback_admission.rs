@@ -7,7 +7,7 @@
 //! callbacks run outside both the queue mutex and the relay mutex.
 
 use super::{poll_claim_fallback_slot, try_claim_fallback_slot};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;

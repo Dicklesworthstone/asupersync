@@ -347,18 +347,20 @@ fn validate_thread_name_prefix(field_name: &'static str, val: &str) -> Result<()
 /// min_threads = 1
 /// max_threads = 512
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
 pub struct RuntimeConfigLayer {
     /// Scheduler settings.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub scheduler: SchedulerConfigLayer,
     /// Blocking pool settings.
-    #[serde(default)]
+    #[cfg_attr(feature = "full-serialization", serde(default))]
     pub blocking: BlockingConfigLayer,
 }
 
 /// Scheduler section of the typed runtime config layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
 pub struct SchedulerConfigLayer {
     /// Number of worker threads.
     pub worker_threads: Option<usize>,
@@ -387,7 +389,8 @@ pub struct SchedulerConfigLayer {
 }
 
 /// Blocking pool section of the typed runtime config layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockingConfigLayer {
     /// Minimum number of blocking threads.
     pub min_threads: Option<usize>,

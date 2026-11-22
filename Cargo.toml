@@ -150,7 +150,7 @@ nightly-outcome-try = []
 # Reserve a dedicated feature name for the native FABRIC lane. The actual
 # module wiring still lives in `src/messaging/mod.rs` and is not fully gated
 # yet.
-messaging-fabric = []
+messaging-fabric = ["full-runtime"]
 waker-profiling = []
 # Feature-gated runtime instrumentation counters (timer-thread spawns,
 # sched_yield calls, worker spins/parks/unparks, live timer population) for the
@@ -162,20 +162,69 @@ runtime-metrics = []
 # This does not imply full wasm parity; it only enables guarded compilation paths.
 wasm-browser-preview = []
 # Browser runtime capability slices for wasm profile composition.
-wasm-runtime = ["wasm-browser-preview"]
+wasm-runtime = ["wasm-browser-preview", "full-runtime"]
 browser-io = []
 browser-trace = []
 deterministic-mode = []
-# Compatibility markers for the planned runtime module split. Serialization
-# and native I/O modules still compile without these features, so their
-# dependencies must remain required for existing no-default-features users.
-# Make those edges optional only when the corresponding module gates exist.
+# Compatibility markers for the planned runtime module split.
 runtime-core = []
 native-runtime = []
+# Granular opt-in feature bundles for heavy / optional runtime subsystems.
+# Excluded from `slim-runtime-profile` (and bare `--no-default-features`) so
+# resource-constrained firmware targets pay zero proc-macro or crypto/serde bloat.
+full-crypto = [
+    "dep:aes-gcm",
+    "dep:chacha20poly1305",
+    "dep:hmac",
+    "dep:nkeys",
+    "dep:sha1",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:zeroize",
+    "dep:getrandom",
+    "dep:base64",
+    "dep:hex",
+    "dep:crc32fast",
+]
+full-serialization = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:bincode",
+    "dep:rmp-serde",
+    "dep:prost",
+]
+full-platform = [
+    "dep:nix",
+    "dep:signal-hook",
+    "dep:sysinfo",
+    "dep:tempfile",
+    "dep:xattr",
+    "dep:unicode-normalization",
+]
+full-governance = [
+    "dep:franken-kernel",
+    "dep:franken-decision",
+    "dep:franken-evidence",
+]
+full-concurrency = [
+    "dep:parking_lot",
+    "dep:crossbeam-queue",
+    "dep:hashbrown",
+    "dep:pin-project",
+    "dep:futures-lite",
+]
+full-runtime = [
+    "full-crypto",
+    "full-serialization",
+    "full-platform",
+    "full-governance",
+    "full-concurrency",
+]
 # Restore HTTP, WebSocket, gRPC and HTTP application bindings when another
 # consumer selects the explicit slim profile. Default and bare no-default
 # selections retain their established APIs; only slim opts out of services.
-service-protocols = []
+service-protocols = ["full-runtime"]
 # The host child-process module (`asupersync::process`: `Command`, `Child`,
 # `Stdio`, ...). Together with the explicit slim profile this is a real module
 # gate. It is on by default, so default and
@@ -231,7 +280,7 @@ test-internals = [
 legacy-internal-test-harnesses = ["service-protocols"]
 # Focused proof lane for protocol serialization goldens and messaging
 # conformance rows without compiling the full legacy harness set.
-serialization-golden-harnesses = []
+serialization-golden-harnesses = ["full-runtime"]
 # Opt-in umbrella for admitted, environment-gated real-service E2E proof lanes.
 real-service-e2e = [
     "channel-mpsc-select-e2e",
@@ -242,7 +291,7 @@ real-service-e2e = [
     "raptorq-roundtrip-e2e",
 ]
 # Focused proof lane for the channel/MPSC combinator-selection E2E harness.
-channel-mpsc-select-e2e = []
+channel-mpsc-select-e2e = ["full-runtime"]
 # Focused maintained replacement for the dormant cross-subsystem recovery
 # journeys. It reuses the real obligation-cleanup harness for the worker-loss
 # row and explicitly enables the HTTP/2 service types used by recovery tests.
@@ -254,9 +303,9 @@ distributed-hash-snapshot-recovery-e2e = ["test-internals"]
 # Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
 h3-websocket-e2e = ["service-protocols"]
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.
-raptorq-roundtrip-e2e = []
+raptorq-roundtrip-e2e = ["full-runtime"]
 # Focused no-mock obligation cleanup E2E harness for asupersync-9u057b.5.
-obligation-cleanup-e2e = []
+obligation-cleanup-e2e = ["full-runtime"]
 # OpenTelemetry provider bridges for metrics, traces, and logs. The normal
 # dependency graph stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = [
@@ -272,18 +321,18 @@ tracing-integration = ["dep:tracing"]
 # Enable proc macros for structured concurrency (scope!, spawn!, join!, race!)
 proc-macros = ["dep:asupersync-macros"]
 # Optional Tower adapter for AsupersyncService.
-tower = ["dep:tower"]
+tower = ["full-runtime", "dep:tower"]
 # Enable LZ4 compression for trace files.
-trace-compression = ["dep:lz4_flex"]
+trace-compression = ["full-runtime", "dep:lz4_flex"]
 # Enable debug HTTP server for runtime inspection.
-debug-server = []
+debug-server = ["full-runtime"]
 # Enable TOML config file loading for RuntimeBuilder.
-config-file = ["dep:toml"]
+config-file = ["full-runtime", "dep:toml"]
 # Enable explicitly requested, bounded scenario include loading from YAML files.
-scenario-files = ["dep:serde_yaml"]
+scenario-files = ["full-runtime", "dep:serde_yaml"]
 # Enable the Cargo-built dependency marginal-ledger generator. This reuses the
 # already-approved optional TOML parser and does not enter production graphs.
-dependency-ledger = ["dep:toml"]
+dependency-ledger = ["full-runtime", "dep:toml"]
 # Enable lock contention metrics for ContendedMutex (wait/hold time tracking) and
 # production lock ordering validation. Zero cost when disabled. Enables deadlock
 # prevention checks in production builds for enhanced runtime safety.
@@ -304,7 +353,7 @@ tls-ring = ["tls-core", "rustls/ring"]
 # `TlsConnectorBuilder` / `TlsAcceptorBuilder`, or install a rustls process
 # default; otherwise building a connector or acceptor returns an error.
 # build.rs sets the `tls` cfg for it, so every `feature = "tls"` gate compiles.
-tls-core = ["dep:rustls", "dep:rustls-pki-types", "dep:x509-parser"]
+tls-core = ["full-runtime", "dep:rustls", "dep:rustls-pki-types", "dep:x509-parser"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
@@ -331,16 +380,16 @@ remote-service = ["cli", "tls"]
 # binary with `--features atp-cli`. If this feature omits `tls`, the CLI still
 # parses `--transport quic` but exits immediately from the cfg-disabled QUIC
 # branch instead of running the TLS-1.3 data plane.
-atp-cli = ["dep:clap", "tls", "dep:rustls-native-certs"]
+atp-cli = ["full-runtime", "dep:clap", "tls", "dep:rustls-native-certs"]
 # Enable SQLite async wrapper with blocking pool integration.
-sqlite = ["dep:rusqlite", "dep:sqlparser"]
+sqlite = ["full-runtime", "dep:rusqlite", "dep:sqlparser"]
 # Enable PostgreSQL async client with wire protocol.
-postgres = []
+postgres = ["full-runtime"]
 # Enable MySQL async client with wire protocol.
-mysql = []
+mysql = ["full-runtime"]
 # Native QUIC/HTTP3 rollout surfaces (T4.1).
 # These expose Tokio-free native paths for inventory/build/test contracts.
-quic = []
+quic = ["full-runtime"]
 http3 = ["quic", "service-protocols"]
 # Enable ATP Tailscale candidate-provider integration points. This intentionally
 # carries no Tailscale crate dependency; callers feed provider output into the
@@ -351,7 +400,7 @@ tailscale-path-provider = []
 # Enable tokio compatibility layer for transfer actors.
 tokio-compat = []
 # Enable Kafka client integration via rdkafka.
-kafka = ["dep:rdkafka"]
+kafka = ["full-runtime", "dep:rdkafka"]
 # CI umbrella for cross-platform runners that cannot build optional
 # Unix/service-bound integrations. Keep Tokio-backed benchmark adapters out of
 # this umbrella; they are explicit benchmark-only quarantine lanes.
@@ -411,7 +460,7 @@ ci-cross-platform = [
 compression = ["dep:flate2", "dep:brotli"]
 # Zstandard via the in-house, forbid(unsafe_code) asupersync-zstd codec: ATP TCP
 # bulk-data compression and the HTTP `zstd` content coding (br-asupersync-t1fblr).
-zstd = ["dep:asupersync-zstd"]
+zstd = ["full-runtime", "dep:asupersync-zstd"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
 # When disabled, the safe portable SIMD fallback (std::simd) still provides ~2-3x
 # over scalar table lookups. Disable to keep the raptorq module free of unsafe code.
@@ -447,7 +496,7 @@ atpd-daemon = ["cli", "dep:tracing-subscriber"]
 # Enable fuzzing support with arbitrary derive macros and OTLP request helpers.
 # This intentionally enables opentelemetry-proto's tonic-generated messages and
 # is outside the production no-Tokio guarantee.
-fuzz = ["dep:arbitrary", "dep:opentelemetry-proto"]
+fuzz = ["full-runtime", "dep:arbitrary", "dep:opentelemetry-proto"]
 
 [lib]
 path = "src/lib.rs"
@@ -470,6 +519,17 @@ required-features = ["dependency-ledger"]
 [[bin]]
 name = "generate_rfc6330_vectors"
 path = "scripts/generate_rfc6330_vectors.rs"
+required-features = ["full-runtime"]
+
+[[bin]]
+name = "quic_conformance_report"
+path = "src/bin/quic_conformance_report.rs"
+required-features = ["full-runtime"]
+
+[[bin]]
+name = "dependency_verification_matrix"
+path = "src/bin/dependency_verification_matrix.rs"
+required-features = ["full-runtime"]
 
 [[bin]]
 name = "atpd"
@@ -489,24 +549,24 @@ required-features = ["channel-mpsc-select-e2e"]
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
 # Dependencies added here must preserve determinism in the lab runtime.
-thiserror = "2.0"
+thiserror = { version = "2.0", optional = true }
 portable-atomic = { version = "1.15.0", default-features = false, features = ["fallback"] }
-crossbeam-queue = "0.3"
-parking_lot = "0.12"
+crossbeam-queue = { version = "0.3", optional = true }
+parking_lot = { version = "0.12", optional = true }
 slab = "0.4"
 smallvec = "1.15"
-pin-project = "1.1"
-rmp-serde = "1.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+pin-project = { version = "1.1", optional = true }
+rmp-serde = { version = "1.3", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 # Version parsing is used only by the feature-gated CLI upgrade/config flows.
 semver = { version = "1.0", features = ["serde"], optional = true }
 memchr = "2.8"
-getrandom = "0.4"
-hex = "0.4"
-unicode-normalization = "0.1.25"
+getrandom = { version = "0.4", optional = true }
+hex = { version = "0.4", optional = true }
+unicode-normalization = { version = "0.1.25", optional = true }
 # Use maintained bincode-next (crate imported as `bincode`) with serde interop.
-bincode = { package = "bincode-next", version = "3.1.1", features = ["serde"] }
+bincode = { package = "bincode-next", version = "3.1.1", features = ["serde"], optional = true }
 # Optional tracing integration - only compiled when tracing-integration feature is enabled
 tracing = { version = "0.1", optional = true }
 # Optional tracing subscriber for test-internals feature. EnvFilter is scoped
@@ -534,9 +594,9 @@ asupersync-macros = { version = "0.6.0", path = "asupersync-macros", optional = 
 # Optional in-house Zstandard codec for ATP bulk-data compression (feature `zstd`)
 asupersync-zstd = { version = "0.6.0", path = "asupersync-zstd", optional = true }
 # FrankenSuite evidence ledger, kernel types, and decision contracts (bd-1e2if.3, bd-1e2if.6)
-franken-decision = { version = "0.6.0", path = "franken_decision" }
-franken-evidence = { version = "0.6.0", path = "franken_evidence" }
-franken-kernel = { version = "0.6.0", path = "franken_kernel" }
+franken-decision = { version = "0.6.0", path = "franken_decision", optional = true }
+franken-evidence = { version = "0.6.0", path = "franken_evidence", optional = true }
+franken-kernel = { version = "0.6.0", path = "franken_kernel", optional = true }
 # Optional conformance tooling (CLI + reports) - removed to break cyclic dependency
 # conformance = { package = "asupersync-conformance", version = "0.6.0", path = "conformance", optional = true }
 # Optional LZ4 compression for trace files
@@ -546,7 +606,7 @@ visibility = { version = "0.1", optional = true }
 # Optional arbitrary derive support for fuzzing
 arbitrary = { version = "1", features = ["derive"], optional = true }
 # Tempfile helper for test-internals and test logging utilities.
-tempfile = "3.25"
+tempfile = { version = "3.25", optional = true }
 # Async trait support for benchmark adapters
 async-trait = { version = "0.1", optional = true }
 # Tokio async runtime for benchmark execution
@@ -564,11 +624,11 @@ webpki-roots = { version = "1.0", optional = true }
 # Base64 encoding for WebSocket handshake and certificate pins.
 # default-features off: base64 0.23 default-enables an unsafe-SIMD engine
 # (`simd-unsafe`); we keep the safe scalar engine only.
-base64 = { version = "0.23", default-features = false, features = ["std"] }
+base64 = { version = "0.23", default-features = false, features = ["std"], optional = true }
 # NATS nkey seed parsing and nonce signing
-nkeys = "0.4.5"
+nkeys = { version = "0.4.5", optional = true }
 # SHA-1 hashing for WebSocket Sec-WebSocket-Accept calculation (RFC 6455)
-sha1 = "0.11"
+sha1 = { version = "0.11", optional = true }
 # signal-hook moved to [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # X.509 certificate parsing for SPKI extraction
 x509-parser = { version = "0.18", optional = true }
@@ -587,17 +647,17 @@ rusqlite = { version = "0.40", features = ["bundled", "hooks"], optional = true 
 sqlparser = { version = "0.62", optional = true }
 # SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM. Wipe
 # transient digest state so SCRAM HMAC midstates do not remain after use.
-sha2 = { version = "0.11", features = ["zeroize"] }
+sha2 = { version = "0.11", features = ["zeroize"], optional = true }
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
-hmac = "0.13"
+hmac = { version = "0.13", optional = true }
 # Constant-time equality for authentication tags.
-subtle = "2.6"
+subtle = { version = "2.6", optional = true }
 # Secure memory zeroization for AuthKey and other sensitive data
-zeroize = { version = "1.8", features = ["derive"] }
+zeroize = { version = "1.8", features = ["derive"], optional = true }
 # NOTE: the `hkdf` crate was removed 2026-07-23 (dead dependency): HKDF is
 # hand-rolled on `hmac` in net/atp/handshake/key_schedule.rs and security/key.rs.
 # CRC32 for ATP journal/stream integrity (atp/journal, net/atp/sdk/stream, masque)
-crc32fast = "1.4"
+crc32fast = { version = "1.4", optional = true }
 # QUIC/HTTP3 is intentionally native-only for ATP and the runtime core.
 # Do not add an external QUIC/H3 stack dependency here.
 # Kafka client integration via rdkafka (optional, requires librdkafka on the system).
@@ -609,16 +669,16 @@ backtrace = { version = "0.3", optional = true }
 # Symbol demangling for readable stack traces
 rustc-demangle = { version = "0.1", optional = true }
 # Reactor backends use HashMap on multiple platforms.
-hashbrown = "0.17"
+hashbrown = { version = "0.17", optional = true }
 # Lightweight async helpers used by web handler adapter shims.
-futures-lite = "2.6"
+futures-lite = { version = "2.6", optional = true }
 # Optional gzip/deflate compression via pure-Rust miniz_oxide backend.
 flate2 = { version = "1.1", optional = true }
 # Optional Brotli compression for HTTP response bodies.
 brotli = { version = "9.0", optional = true }
 # System information for daemon process control
-sysinfo = "0.39"
-prost = "0.14"
+sysinfo = { version = "0.39", optional = true }
+prost = { version = "0.14", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 io-uring = { version = "0.7", optional = true }
@@ -643,7 +703,7 @@ windows-sys = { version = "0.61.2", features = [
 
 # wasm32 browser builds require JS-backed entropy wiring for getrandom.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -677,19 +737,21 @@ web-sys = { version = "0.3", features = [
 polling = "3.11"
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["dir", "fs", "net", "poll", "process", "signal", "socket", "time", "uio", "user"] }
-signal-hook = "0.4"
-aes-gcm = "0.11"
-chacha20poly1305 = "0.11"
+nix = { version = "0.31", features = ["dir", "fs", "net", "poll", "process", "signal", "socket", "time", "uio", "user"], optional = true }
+signal-hook = { version = "0.4", optional = true }
+aes-gcm = { version = "0.11", optional = true }
+chacha20poly1305 = { version = "0.11", optional = true }
 
 # xattr is unix-only (its source references std::os::unix); gate the dependency
 # so non-unix targets (e.g. x86_64-pc-windows-msvc) don't try to compile it.
 # The xattr call sites in src/net/atp/transport_common/metadata.rs are already
 # #[cfg(unix)]-gated.
 [target.'cfg(unix)'.dependencies]
-xattr = "1.6.1"
+xattr = { version = "1.6.1", optional = true }
 
 [dev-dependencies]
+futures-lite = "2.6"
+pin-project = "1.1"
 proptest = "1.10"
 # Compile-fail contract for the capability-gated v2 spawn surface
 # (tests/compile_fail_spawn.rs); same version as asupersync-macros.
@@ -2109,3 +2171,11 @@ assign_op_pattern = "allow"
 question_mark = "allow"
 implicit_clone = "allow"
 cloned_ref_to_slice_refs = "allow"
+# Pre-existing upstream b32c5ba66 pedantic/nursery style lints under nightly-2026-08-31.
+assigning_clones = "allow"
+box_collection = "allow"
+checked_conversions = "allow"
+manual_saturating_arithmetic = "allow"
+option_as_ref_cloned = "allow"
+redundant_pub_crate = "allow"
+ref_option = "allow"

@@ -1428,7 +1428,7 @@ impl<P: Send + 'static> Drop for PanickingCapture<P> {
 }
 
 /// A waker whose `wake` unwinds with `payload`.
-struct WakePanics<P: Send + 'static>(parking_lot::Mutex<Option<P>>);
+struct WakePanics<P: Send + 'static>(crate::sync::pl::Mutex<Option<P>>);
 
 impl<P: Send + 'static> std::task::Wake for WakePanics<P> {
     fn wake(self: Arc<Self>) {
@@ -1462,7 +1462,7 @@ fn watched_pool() -> (BlockingPool, Arc<AtomicUsize>) {
 
 /// A job that records the thread it runs on.
 fn record_thread(
-    ids: &Arc<parking_lot::Mutex<Vec<std::thread::ThreadId>>>,
+    ids: &Arc<crate::sync::pl::Mutex<Vec<std::thread::ThreadId>>>,
 ) -> impl FnOnce() + Send + 'static {
     let ids = Arc::clone(ids);
     move || {
@@ -1474,7 +1474,7 @@ fn record_thread(
 fn a_worker_frees_an_ordinary_panic_payload_and_survives_one_whose_destructor_panics() {
     bounded(|| {
         let (pool, stops) = watched_pool();
-        let ids = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let ids = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
         // An ordinary payload is freed exactly once, while its job's bytes are still reserved, and before the job is
         // reported done.
@@ -1664,7 +1664,7 @@ fn a_stranded_drain_reports_both_tasks_when_the_first_capture_panics_with_a_path
 /// on the same worker.
 fn finish_a_task_whose_waker_panics<P: Send + 'static>(pool: &BlockingPool, payload: P) {
     let (task, release, _) = hold_charged_worker(&pool.handle(), 0);
-    let waker = Waker::from(Arc::new(WakePanics(parking_lot::Mutex::new(Some(payload)))));
+    let waker = Waker::from(Arc::new(WakePanics(crate::sync::pl::Mutex::new(Some(payload)))));
     assert!(task.poll_done(&Context::from_waker(&waker)).is_pending());
     // The completion holds the only reference.
     drop(waker);

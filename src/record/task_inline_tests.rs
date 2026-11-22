@@ -52,7 +52,7 @@
         struct PanickingLayer {
             attempts: Arc<AtomicUsize>,
             reentries: Arc<AtomicUsize>,
-            outer_lock: Arc<parking_lot::Mutex<()>>,
+            outer_lock: Arc<crate::sync::pl::Mutex<()>>,
         }
 
         impl<S> tracing_subscriber::Layer<S> for PanickingLayer
@@ -74,7 +74,7 @@
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let reentries = Arc::new(AtomicUsize::new(0));
-        let outer_lock = Arc::new(parking_lot::Mutex::new(()));
+        let outer_lock = Arc::new(crate::sync::pl::Mutex::new(()));
         let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
         let subscriber = tracing_subscriber::registry().with(PanickingLayer {
             attempts: Arc::clone(&attempts),
@@ -1308,7 +1308,7 @@
     #[test]
     fn failed_delegated_publication_retires_snapshot_after_outer_lock() {
         struct DropProbe {
-            outer_lock: Arc<parking_lot::Mutex<()>>,
+            outer_lock: Arc<crate::sync::pl::Mutex<()>>,
             drops: Arc<AtomicUsize>,
             drops_under_outer_lock: Arc<AtomicUsize>,
         }
@@ -1327,7 +1327,7 @@
             }
         }
 
-        let outer_lock = Arc::new(parking_lot::Mutex::new(()));
+        let outer_lock = Arc::new(crate::sync::pl::Mutex::new(()));
         let drops = Arc::new(AtomicUsize::new(0));
         let drops_under_outer_lock = Arc::new(AtomicUsize::new(0));
         let inner = Arc::new(RwLock::new(CxInner::new(

@@ -60,6 +60,7 @@ use crate::trace::event::{TraceData, TraceEvent, TraceEventKind, decode_obligati
 use crate::trace::independence::{AccessMode, Resource, resource_footprint};
 use crate::util::DetHasher;
 use crate::util::det_hash::DetHashMap;
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -74,7 +75,8 @@ pub struct FoataTrace {
 ///
 /// This key mirrors the canonical intra-layer ordering used by Foata traces,
 /// making it suitable for golden fixture prefixes and diffing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct TraceEventKey {
     /// Discriminant for the event kind.
     pub kind: u8,
@@ -688,7 +690,14 @@ fn event_total_order_key(event: &TraceEvent) -> ((u8, u64, u64, u64), Vec<u8>) {
 /// Rust's slice sorting still requires a comparator that is a total order, so
 /// equal canonical keys are ordered by the complete serialized event.
 fn event_total_order_tiebreak(event: &TraceEvent) -> Vec<u8> {
-    serde_json::to_vec(event).unwrap_or_else(|_| format!("{event:?}").into_bytes())
+    #[cfg(feature = "full-serialization")]
+    {
+        serde_json::to_vec(event).unwrap_or_else(|_| format!("{event:?}").into_bytes())
+    }
+    #[cfg(not(feature = "full-serialization"))]
+    {
+        format!("{event:?}").into_bytes()
+    }
 }
 
 /// Equality on the semantic content of a trace event.

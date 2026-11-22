@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use parking_lot::{Mutex, RwLock};
+use crate::sync::pl::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{Future, poll_fn};

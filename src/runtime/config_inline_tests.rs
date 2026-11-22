@@ -76,8 +76,10 @@
         crate::test_complete!("artifact_json_path_validation_rejects_unsafe_or_non_json_paths");
     }
 
+    #[cfg(feature = "full-runtime")]
     #[test]
     fn shadow_run_regret_margin_saturates_without_wrapping() {
+        use super::planner_and_bundles::signed_profile_bundle_shadow_run_regret_margin_basis_points;
         init_test("shadow_run_regret_margin_saturates_without_wrapping");
         crate::assert_with_log!(
             signed_profile_bundle_shadow_run_regret_margin_basis_points(150, 100) == 50,

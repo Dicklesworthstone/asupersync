@@ -9,7 +9,7 @@
 use crate::cx::{ChildRegionError, ChildRegionSpec, Cx};
 use crate::stream::{Stream, StreamExt, try_for_each_concurrent};
 use crate::types::Outcome;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;

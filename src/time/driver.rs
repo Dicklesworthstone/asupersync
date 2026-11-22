@@ -6,7 +6,7 @@
 
 use crate::runtime::reactor::Reactor;
 use crate::types::Time;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Waker;
@@ -530,7 +530,7 @@ impl<T: TimeSource> TimerDriver<T> {
     /// waker can own the last reference to a task whose drop cancels a timer
     /// here; dropped under the lock, that re-entry would deadlock
     /// (br-asupersync-m85zfi LOW 5).
-    fn unlock(mut wheel: parking_lot::MutexGuard<'_, TimerWheel>) {
+    fn unlock(mut wheel: crate::sync::pl::MutexGuard<'_, TimerWheel>) {
         let dropped = wheel.take_dropped_wakers();
         drop(wheel);
         drop(dropped);

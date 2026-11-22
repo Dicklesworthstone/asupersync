@@ -67,7 +67,7 @@ use crate::trace::event::TraceEvent;
 use crate::types::Outcome;
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, CachePadded};
-use parking_lot::{Mutex, RwLock};
+use crate::sync::pl::{Mutex, RwLock};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -212,7 +212,7 @@ pub struct AdmittedTask {
     pub task_id: TaskId,
     /// Weak handle to the admission-built capability context, for
     /// handle-side abort plumbing (A2.2).
-    pub cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    pub cx_inner: std::sync::Weak<crate::sync::pl::RwLock<crate::types::task_context::CxInner>>,
     /// True after admission transfers cancellation routing to the canonical
     /// task/gateway. On ordinary admission that coincides with first-lane
     /// publication; a managed pre-admission abort may transfer routing to its
@@ -225,7 +225,7 @@ pub struct AdmittedTask {
 impl AdmittedTask {
     pub(crate) fn pending(
         task_id: TaskId,
-        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+        cx_inner: std::sync::Weak<crate::sync::pl::RwLock<crate::types::task_context::CxInner>>,
     ) -> Self {
         Self {
             task_id,
@@ -237,7 +237,7 @@ impl AdmittedTask {
     #[cfg(test)]
     pub(crate) fn published(
         task_id: TaskId,
-        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+        cx_inner: std::sync::Weak<crate::sync::pl::RwLock<crate::types::task_context::CxInner>>,
     ) -> Self {
         Self {
             task_id,
@@ -597,14 +597,14 @@ pub(crate) type PendingCancelReason = Arc<RwLock<Option<CancelReason>>>;
 #[doc(hidden)]
 #[must_use = "admitted tasks must cross the runnable publication boundary"]
 pub struct AdmissionPublication {
-    cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    cx_inner: std::sync::Weak<crate::sync::pl::RwLock<crate::types::task_context::CxInner>>,
     slot: Option<Arc<AdmittedTaskSlot>>,
     requested: Option<PendingCancelReason>,
 }
 
 impl AdmissionPublication {
     pub(crate) fn new(
-        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+        cx_inner: std::sync::Weak<crate::sync::pl::RwLock<crate::types::task_context::CxInner>>,
         slot: Option<Arc<AdmittedTaskSlot>>,
     ) -> Self {
         let requested = slot.as_ref().map(|slot| slot.pending_cancel_reason());
@@ -2327,15 +2327,21 @@ pub struct SpawnGateway {
     /// reply-linearity oracle (br-asupersync-52hxjz). Only the lab sets it.
     reply_history: Option<crate::runtime::state::ReplyHistoryHandle>,
     /// Installed once by the explicit strict builder, before exposing runtime.
+    #[cfg(feature = "full-runtime")]
     required_spawn_key: OnceLock<crate::security::key::AuthKey>,
 }
 
 /// Only crate-owned spawn producers can attach this immutable caller proof.
+#[cfg(feature = "full-runtime")]
 pub(crate) struct SpawnAuthority {
     caller: TaskId,
     token: Option<Arc<crate::cx::macaroon::MacaroonToken>>,
 }
 
+#[cfg(not(feature = "full-runtime"))]
+pub(crate) struct SpawnAuthority;
+
+#[cfg(feature = "full-runtime")]
 impl SpawnAuthority {
     pub(crate) fn new(
         caller: TaskId,
@@ -2366,10 +2372,12 @@ impl SpawnGateway {
             )),
             supervision_history: None,
             reply_history: None,
+            #[cfg(feature = "full-runtime")]
             required_spawn_key: OnceLock::new(),
         }
     }
 
+    #[cfg(feature = "full-runtime")]
     pub(crate) fn require_spawn_authorization(&self, key: crate::security::key::AuthKey) {
         assert!(
             self.required_spawn_key.set(key).is_ok(),
@@ -2378,16 +2386,31 @@ impl SpawnGateway {
     }
 
     pub(crate) fn spawn_authorization_required(&self) -> bool {
-        self.required_spawn_key.get().is_some()
+        #[cfg(feature = "full-runtime")]
+        {
+            self.required_spawn_key.get().is_some()
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            false
+        }
     }
 
     pub(crate) fn capture_spawn_authority<Caps>(
         &self,
         cx: &crate::cx::Cx<Caps>,
     ) -> Option<SpawnAuthority> {
-        self.required_spawn_key
-            .get()
-            .map(|_| cx.spawn_authority_snapshot())
+        #[cfg(feature = "full-runtime")]
+        {
+            self.required_spawn_key
+                .get()
+                .map(|_| cx.spawn_authority_snapshot())
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            let _ = cx;
+            None
+        }
     }
 
     pub(crate) fn verify_spawn_cx<Caps>(
@@ -2396,15 +2419,23 @@ impl SpawnGateway {
         region: RegionId,
         budget: Budget,
     ) -> Result<(), SpawnError> {
-        if !self.spawn_authorization_required() {
-            return Ok(());
+        #[cfg(feature = "full-runtime")]
+        {
+            if !self.spawn_authorization_required() {
+                return Ok(());
+            }
+            let authority = self.capture_spawn_authority(cx);
+            // Sealed race regions are private ownership machinery. They retain
+            // their nearest unsealed authority target, never widening an ordinary
+            // user-created child region. Admission re-derives this from its table.
+            let authority_region = cx.spawn_authorization_region_for(region).unwrap_or(region);
+            self.verify_spawn_authority(authority.as_ref(), authority_region, budget)
         }
-        let authority = self.capture_spawn_authority(cx);
-        // Sealed race regions are private ownership machinery. They retain
-        // their nearest unsealed authority target, never widening an ordinary
-        // user-created child region. Admission re-derives this from its table.
-        let authority_region = cx.spawn_authorization_region_for(region).unwrap_or(region);
-        self.verify_spawn_authority(authority.as_ref(), authority_region, budget)
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            let _ = (cx, region, budget);
+            Ok(())
+        }
     }
 
     /// Verification performs no user callbacks and is safe at the admission
@@ -2415,6 +2446,8 @@ impl SpawnGateway {
         region: RegionId,
         budget: Budget,
     ) -> Result<(), SpawnError> {
+        #[cfg(feature = "full-runtime")]
+        {
         let Some(key) = self.required_spawn_key.get() else {
             return Ok(());
         };
@@ -2447,6 +2480,12 @@ impl SpawnGateway {
         token
             .verify_for_identifier(key, &format!("spawn:region_{}", region.as_u64()), &context)
             .map_err(|_| denied())
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            let _ = (authority, region, budget);
+            Ok(())
+        }
     }
 
     /// Hands managed supervisors a history for the lab's supervision oracle

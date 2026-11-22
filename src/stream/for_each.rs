@@ -3,7 +3,6 @@
 //! The `ForEach` future consumes a stream and executes a closure for each item.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -16,17 +15,32 @@ const FOR_EACH_COOPERATIVE_BUDGET: usize = 1024;
 /// A future that executes a closure for each item in a stream.
 ///
 /// Created by [`StreamExt::for_each`](super::StreamExt::for_each).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct ForEach<S, F> {
-    #[pin]
     stream: S,
     f: F,
     completed: bool,
 }
 
+struct ForEachProj<'a, S, F> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    completed: &'a mut bool,
+}
+
 impl<S, F> ForEach<S, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ForEachProj<'_, S, F> {
+        // SAFETY: `stream` is structurally pinned; `f` and `completed` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ForEachProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            completed: &mut this.completed,
+        }
+    }
+
     /// Creates a new `ForEach` future.
     #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
@@ -75,19 +89,35 @@ where
 /// A future that executes an async closure for each item in a stream.
 ///
 /// Created by [`StreamExt::for_each_async`](super::StreamExt::for_each_async).
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct ForEachAsync<S, F, Fut> {
-    #[pin]
     stream: S,
     f: F,
-    #[pin]
     pending: Option<Fut>,
     completed: bool,
 }
 
+struct ForEachAsyncProj<'a, S, F, Fut> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    pending: Pin<&'a mut Option<Fut>>,
+    completed: &'a mut bool,
+}
+
 impl<S, F, Fut> ForEachAsync<S, F, Fut> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> ForEachAsyncProj<'_, S, F, Fut> {
+        // SAFETY: `stream` and `pending` are structurally pinned; `f` and `completed` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        ForEachAsyncProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            pending: unsafe { Pin::new_unchecked(&mut this.pending) },
+            completed: &mut this.completed,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {
         Self {

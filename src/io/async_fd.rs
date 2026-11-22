@@ -52,7 +52,7 @@ const WRITE: u8 = 1 << 1;
 /// direction is woken by its readiness.
 pub struct AsyncFd<T: AsRawFd> {
     // Declared before `inner` so the registration goes first on drop.
-    registration: parking_lot::Mutex<ReactorRegistration>,
+    registration: crate::sync::pl::Mutex<ReactorRegistration>,
     readiness: Arc<FdReadiness>,
     inner: Option<T>,
 }
@@ -80,7 +80,7 @@ struct FdReadiness {
     /// direction ready (a spurious direction is cleared by the next
     /// `WouldBlock`).
     armed: AtomicU8,
-    waiters: parking_lot::Mutex<Vec<FdWaiter>>,
+    waiters: crate::sync::pl::Mutex<Vec<FdWaiter>>,
     next_owner: AtomicU64,
 }
 
@@ -252,7 +252,7 @@ impl<T: AsRawFd> AsyncFd<T> {
     /// None today; the `Result` matches `tokio::io::unix::AsyncFd::new`.
     pub fn new(inner: T) -> io::Result<Self> {
         Ok(Self {
-            registration: parking_lot::Mutex::new(ReactorRegistration::new()),
+            registration: crate::sync::pl::Mutex::new(ReactorRegistration::new()),
             readiness: Arc::new(FdReadiness::default()),
             inner: Some(inner),
         })

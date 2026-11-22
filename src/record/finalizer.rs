@@ -397,7 +397,7 @@ impl std::error::Error for FinalizerBudgetError {}
 ///
 /// The region updates this monotonically before dispatching cancellation wakes.
 /// Reading a snapshot invokes no user callback under runtime or region locks.
-pub(crate) type ShutdownBudget = std::sync::Arc<parking_lot::RwLock<Option<Budget>>>;
+pub(crate) type ShutdownBudget = std::sync::Arc<crate::sync::pl::RwLock<Option<Budget>>>;
 
 /// Enforces an explicit shutdown envelope at an unlocked task-poll boundary.
 ///

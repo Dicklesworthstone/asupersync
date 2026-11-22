@@ -10,7 +10,7 @@
 
 use crate::types::DEFAULT_SYMBOL_SIZE;
 use core::fmt;
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::sync::Arc;
 use crate::sync::atomic::AtomicU64;
 

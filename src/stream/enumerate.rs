@@ -1,22 +1,36 @@
 //! Enumerate combinator.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`enumerate`](super::StreamExt::enumerate) method.
-#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Enumerate<S> {
-    #[pin]
     stream: S,
     count: usize,
     done: bool,
 }
 
+struct EnumerateProj<'a, S> {
+    stream: Pin<&'a mut S>,
+    count: &'a mut usize,
+    done: &'a mut bool,
+}
+
 impl<S> Enumerate<S> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> EnumerateProj<'_, S> {
+        // SAFETY: `stream` is structurally pinned; `count` and `done` are `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+        EnumerateProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            count: &mut this.count,
+            done: &mut this.done,
+        }
+    }
+
     #[inline]
     pub(crate) fn new(stream: S) -> Self {
         Self {

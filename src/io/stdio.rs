@@ -167,7 +167,7 @@ impl Target {
 /// The result slot of a write or flush running on the blocking pool.
 #[derive(Default)]
 struct Completion {
-    state: parking_lot::Mutex<(Option<io::Result<()>>, Option<Waker>)>,
+    state: crate::sync::pl::Mutex<(Option<io::Result<()>>, Option<Waker>)>,
     /// The pool's handle for the job, kept only on a byte-bounded pool, where the job's bytes outlive its result: the
     /// job reports its result from inside its closure, before the worker drops the closure and returns the bytes.
     /// Set once, at submission, before anyone polls.

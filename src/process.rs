@@ -62,7 +62,7 @@ use std::cmp::Ordering;
 use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 use std::os::unix::{ffi::OsStrExt, net::UnixStream};
 #[cfg(windows)]
 use std::os::windows::{
@@ -154,31 +154,53 @@ fn cleanup_child_after_spawn_setup_failure_with_target(
 }
 
 /// Error type for process operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ProcessError {
     /// An I/O error occurred.
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+    Io(io::Error),
 
     /// The process was not found (ENOENT).
-    #[error("process not found: {0}")]
     NotFound(String),
 
     /// Permission denied (EACCES).
-    #[error("permission denied: {0}")]
     PermissionDenied(String),
 
     /// The process was terminated by a signal.
-    #[error("process terminated by signal {0}")]
     Signaled(i32),
 
     /// The requested process configuration is not supported on this platform.
-    #[error("unsupported process configuration: {0}")]
     Unsupported(String),
 
     /// The requested process configuration is internally inconsistent.
-    #[error("invalid process configuration: {0}")]
     InvalidConfiguration(String),
+}
+
+impl std::fmt::Display for ProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::NotFound(msg) => write!(f, "process not found: {msg}"),
+            Self::PermissionDenied(msg) => write!(f, "permission denied: {msg}"),
+            Self::Signaled(sig) => write!(f, "process terminated by signal {sig}"),
+            Self::Unsupported(msg) => write!(f, "unsupported process configuration: {msg}"),
+            Self::InvalidConfiguration(msg) => write!(f, "invalid process configuration: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProcessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for ProcessError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 impl From<ProcessError> for io::Error {
@@ -665,7 +687,7 @@ impl ExactImageCommand {
             )));
         }
         crate::cx::io_gate::require_ambient_io("process::ExactImageCommand::spawn")?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
         {
             spawn_exact_image_unix(self)
         }
@@ -673,7 +695,10 @@ impl ExactImageCommand {
         {
             spawn_exact_image_windows(self)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        )))]
         {
             Err(ProcessError::Unsupported(format!(
                 "exact-image process spawning is unsupported on {}",
@@ -683,11 +708,14 @@ impl ExactImageCommand {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 type ExactImagePipe = UnixStream;
 #[cfg(windows)]
 type ExactImagePipe = std::fs::File;
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(
+    all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+    windows
+)))]
 #[derive(Debug)]
 struct ExactImagePipe;
 
@@ -700,11 +728,17 @@ pub struct ExactImageChildStdin {
 
 impl std::io::Write for ExactImageChildStdin {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        ))]
         {
             std::io::Write::write(&mut self.inner, buf)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        )))]
         {
             let _ = buf;
             Err(io::Error::new(
@@ -715,11 +749,17 @@ impl std::io::Write for ExactImageChildStdin {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        ))]
         {
             std::io::Write::flush(&mut self.inner)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        )))]
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -738,11 +778,17 @@ pub struct ExactImageChildStdout {
 
 impl std::io::Read for ExactImageChildStdout {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        ))]
         {
             self.inner.read(buf)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        )))]
         {
             let _ = buf;
             Err(io::Error::new(
@@ -762,11 +808,17 @@ pub struct ExactImageChildStderr {
 
 impl std::io::Read for ExactImageChildStderr {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        ))]
         {
             self.inner.read(buf)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(
+            all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+            windows
+        )))]
         {
             let _ = buf;
             Err(io::Error::new(
@@ -861,11 +913,17 @@ impl Drop for ExactImageChild {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(
+    all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+    windows
+)))]
 #[derive(Debug)]
 struct ExactImagePlatformChild;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(
+    all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+    windows
+)))]
 impl ExactImagePlatformChild {
     fn id(&self) -> u32 {
         0
@@ -893,7 +951,7 @@ impl ExactImagePlatformChild {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 #[derive(Debug)]
 struct ExactImagePlatformChild {
     pid: nix::unistd::Pid,
@@ -902,7 +960,7 @@ struct ExactImagePlatformChild {
     tree_terminated: bool,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 impl ExactImagePlatformChild {
     fn id(&self) -> u32 {
         debug_assert!(self.pid.as_raw() > 0);
@@ -989,7 +1047,7 @@ impl ExactImagePlatformChild {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn exact_image_exit_status(status: nix::sys::wait::WaitStatus) -> Option<ExitStatus> {
     match status {
         nix::sys::wait::WaitStatus::Exited(_, code) => {
@@ -1002,12 +1060,12 @@ fn exact_image_exit_status(status: nix::sys::wait::WaitStatus) -> Option<ExitSta
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn nix_errno_to_io(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn exact_image_spawn_error(program: &Path, error: nix::errno::Errno) -> ProcessError {
     match error {
         nix::errno::Errno::ENOENT => ProcessError::NotFound(program.display().to_string()),
@@ -1018,14 +1076,14 @@ fn exact_image_spawn_error(program: &Path, error: nix::errno::Errno) -> ProcessE
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn exact_image_cstring(bytes: &[u8], what: &str) -> Result<std::ffi::CString, ProcessError> {
     std::ffi::CString::new(bytes).map_err(|_| {
         ProcessError::InvalidConfiguration(format!("{what} contains an interior NUL byte"))
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn exact_image_unix_vectors(
     command: &ExactImageCommand,
 ) -> Result<(Vec<std::ffi::CString>, Vec<std::ffi::CString>), ProcessError> {
@@ -1062,7 +1120,7 @@ fn exact_image_unix_vectors(
     Ok((argv, env))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn reserve_exact_image_standard_fds() -> io::Result<Vec<std::fs::File>> {
     let mut reservations = Vec::new();
     loop {
@@ -1078,7 +1136,7 @@ fn reserve_exact_image_standard_fds() -> io::Result<Vec<std::fs::File>> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn add_exact_image_close_action(
     actions: &mut nix::spawn::PosixSpawnFileActions,
     fd: RawFd,
@@ -1099,7 +1157,7 @@ fn add_exact_image_close_action(
 /// this call's success condition, not a failure. Linux accepts the same
 /// sequence and returns `Ok`. These sockets come straight from
 /// `UnixStream::pair()`, so no other source of `ENOTCONN` is reachable.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn shutdown_exact_image_direction(
     stream: &UnixStream,
     direction: std::net::Shutdown,
@@ -1120,7 +1178,7 @@ fn shutdown_exact_image_direction(
 /// same host and load, same output bytes. 4 MB and 16 MB were no faster.
 /// Linux starts at about 208 KB (`net.core.wmem_default`) and clamps requests
 /// to `wmem_max`, so it keeps its default (br-asupersync-u9dtoj).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 const EXACT_IMAGE_STREAM_BUFFER_BYTES: usize = 1 << 20;
 
 /// On macOS, raises the send buffer of `writer` and the receive buffer of
@@ -1130,7 +1188,7 @@ const EXACT_IMAGE_STREAM_BUFFER_BYTES: usize = 1 << 20;
 /// Best effort: the size only affects throughput, so a host that refuses it
 /// (`kern.ipc.maxsockbuf` below 1 MB) still gets a working child with the
 /// default buffers.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn size_exact_image_stream(writer: &UnixStream, reader: &UnixStream) {
     if cfg!(target_os = "macos") {
         let _ =
@@ -1140,7 +1198,7 @@ fn size_exact_image_stream(writer: &UnixStream, reader: &UnixStream) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild, ProcessError> {
     use std::net::Shutdown;
 
@@ -3099,7 +3157,7 @@ fn try_dispatch_kill_on_drop_reap_on_pool(
     pool: &crate::runtime::blocking_pool::BlockingPoolHandle,
     child: std_process::Child,
 ) -> Result<(), std_process::Child> {
-    let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
+    let shared_child = std::sync::Arc::new(crate::sync::pl::Mutex::new(Some(child)));
     let worker_child = std::sync::Arc::clone(&shared_child);
     let handle = pool.spawn(move || {
         let mut child_slot = worker_child.lock();
@@ -3118,7 +3176,7 @@ fn try_dispatch_kill_on_drop_reap_on_pool(
 }
 
 fn spawn_detached_kill_on_drop_reaper(child: std_process::Child) -> Result<(), std_process::Child> {
-    let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
+    let shared_child = std::sync::Arc::new(crate::sync::pl::Mutex::new(Some(child)));
     let thread_child = std::sync::Arc::clone(&shared_child);
 
     if std::thread::Builder::new()
@@ -5940,7 +5998,7 @@ impl Child {
 /// observe an exit without reaping (Linux `waitid` with `WNOWAIT`), the child
 /// stays an unreaped zombie, which keeps the number reserved, until the group
 /// has been killed.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 #[derive(Clone, Copy, Debug)]
 enum ExactImageExit {
     /// Not seen to exit yet.
@@ -5952,11 +6010,11 @@ enum ExactImageExit {
 }
 
 /// Whether [`exact_image_peek_exit`] leaves an exited child unreaped.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 const EXACT_IMAGE_PEEK_KEEPS_ZOMBIE: bool =
     cfg!(all(target_os = "linux", not(target_env = "uclibc")));
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 impl ExactImageExit {
     fn observed(self) -> Option<ExitStatus> {
         match self {
@@ -5977,7 +6035,7 @@ impl ExactImageExit {
 
 /// Reports, without blocking, whether `pid` has exited. On Linux the child is
 /// left unreaped; elsewhere (no `waitid` in nix) it is reaped, as before.
-#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+#[cfg(all(feature = "full-platform", target_os = "linux", not(target_env = "uclibc")))]
 fn exact_image_peek_exit(pid: nix::unistd::Pid) -> nix::Result<nix::sys::wait::WaitStatus> {
     use nix::sys::wait::{Id, WaitPidFlag};
     nix::sys::wait::waitid(
@@ -5986,12 +6044,15 @@ fn exact_image_peek_exit(pid: nix::unistd::Pid) -> nix::Result<nix::sys::wait::W
     )
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "uclibc")))]
+#[cfg(all(
+    feature = "full-platform",
+    any(target_os = "macos", all(target_os = "linux", target_env = "uclibc"))
+))]
 fn exact_image_peek_exit(pid: nix::unistd::Pid) -> nix::Result<nix::sys::wait::WaitStatus> {
     nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "full-platform", any(target_os = "linux", target_os = "macos")))]
 impl ExactImagePlatformChild {
     /// Blocks until the direct child exits. On Linux the child is left
     /// unreaped, so [`ExactImageChild::wait`] kills the group while the zombie
@@ -6045,7 +6106,10 @@ impl ExactImagePlatformChild {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(
+    all(feature = "full-platform", any(target_os = "linux", target_os = "macos")),
+    windows
+)))]
 impl ExactImagePlatformChild {
     fn wait_for_exit(&mut self) -> io::Result<ExitStatus> {
         self.wait()

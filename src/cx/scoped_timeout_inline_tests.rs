@@ -6,7 +6,7 @@ use crate::runtime::spawn_mailbox::{RegionCommand, SpawnGateway, SpawnMailbox};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::state::SpawnAdmission;
 use crate::types::{Budget, Outcome, TaskId};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Wake, Waker};

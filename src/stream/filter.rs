@@ -3,7 +3,6 @@
 //! The `Filter` combinator yields only items that match a predicate.
 
 use super::Stream;
-use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -18,15 +17,30 @@ const FILTER_REJECTION_BUDGET: usize = 1024;
 /// Created by [`StreamExt::filter`](super::StreamExt::filter).
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct Filter<S, P> {
-    #[pin]
     stream: S,
     predicate: P,
     exhausted: bool,
 }
 
+struct FilterProj<'a, S, P> {
+    stream: Pin<&'a mut S>,
+    predicate: &'a mut P,
+    exhausted: &'a mut bool,
+}
+
 impl<S, P> Filter<S, P> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> FilterProj<'_, S, P> {
+        // SAFETY: `stream` is structurally pinned; `predicate` and `exhausted` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        FilterProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            predicate: &mut this.predicate,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     /// Creates a new `Filter` stream.
     #[inline]
     pub(crate) fn new(stream: S, predicate: P) -> Self {
@@ -107,15 +121,30 @@ where
 /// Created by [`StreamExt::filter_map`](super::StreamExt::filter_map).
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
 pub struct FilterMap<S, F> {
-    #[pin]
     stream: S,
     f: F,
     exhausted: bool,
 }
 
+struct FilterMapProj<'a, S, F> {
+    stream: Pin<&'a mut S>,
+    f: &'a mut F,
+    exhausted: &'a mut bool,
+}
+
 impl<S, F> FilterMap<S, F> {
+    #[allow(unsafe_code)]
+    fn project(self: Pin<&mut Self>) -> FilterMapProj<'_, S, F> {
+        // SAFETY: `stream` is structurally pinned; `f` and `exhausted` are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        FilterMapProj {
+            stream: unsafe { Pin::new_unchecked(&mut this.stream) },
+            f: &mut this.f,
+            exhausted: &mut this.exhausted,
+        }
+    }
+
     /// Creates a new `FilterMap` stream.
     #[inline]
     pub(crate) fn new(stream: S, f: F) -> Self {

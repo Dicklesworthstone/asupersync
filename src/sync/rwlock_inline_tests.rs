@@ -927,7 +927,7 @@
         init_test("test_writer_fifo_ordering");
         let cx = test_cx();
         let lock = StdArc::new(RwLock::new(Vec::<u32>::new()));
-        let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = StdArc::new(crate::sync::pl::Mutex::new(Vec::new()));
 
         // Hold a read lock so writers must queue.
         let read_guard = read_blocking(&lock, &cx);

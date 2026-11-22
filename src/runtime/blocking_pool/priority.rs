@@ -1,8 +1,9 @@
 //! Queue selection for opt-in blocking-pool priorities.
 
 use super::BlockingTask;
+use crate::sync::pl::Mutex;
+#[cfg(feature = "full-concurrency")]
 use crossbeam_queue::SegQueue;
-use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
 
@@ -37,7 +38,10 @@ pub enum BlockingQueuePolicy {
 }
 
 pub(super) enum BlockingTaskQueue {
+    #[cfg(feature = "full-concurrency")]
     Fifo(SegQueue<BlockingTask>),
+    #[cfg(not(feature = "full-concurrency"))]
+    Fifo(Mutex<VecDeque<BlockingTask>>),
     Priority {
         max_priority_streak: NonZeroUsize,
         queue: Mutex<PriorityQueue>,
@@ -47,7 +51,10 @@ pub(super) enum BlockingTaskQueue {
 impl BlockingTaskQueue {
     pub(super) fn new(policy: BlockingQueuePolicy) -> Self {
         match policy {
+            #[cfg(feature = "full-concurrency")]
             BlockingQueuePolicy::Fifo => Self::Fifo(SegQueue::new()),
+            #[cfg(not(feature = "full-concurrency"))]
+            BlockingQueuePolicy::Fifo => Self::Fifo(Mutex::new(VecDeque::new())),
             BlockingQueuePolicy::Priority {
                 max_priority_streak,
             } => Self::Priority {
@@ -71,7 +78,10 @@ impl BlockingTaskQueue {
 
     pub(super) fn push(&self, task: BlockingTask) {
         match self {
+            #[cfg(feature = "full-concurrency")]
             Self::Fifo(queue) => queue.push(task),
+            #[cfg(not(feature = "full-concurrency"))]
+            Self::Fifo(queue) => queue.lock().push_back(task),
             Self::Priority { queue, .. } => {
                 queue
                     .lock()
@@ -85,7 +95,10 @@ impl BlockingTaskQueue {
 
     pub(super) fn pop(&self) -> Option<BlockingTask> {
         match self {
+            #[cfg(feature = "full-concurrency")]
             Self::Fifo(queue) => queue.pop(),
+            #[cfg(not(feature = "full-concurrency"))]
+            Self::Fifo(queue) => queue.lock().pop_front(),
             Self::Priority {
                 max_priority_streak,
                 queue,

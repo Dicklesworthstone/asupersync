@@ -148,19 +148,23 @@ use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
+#[cfg(feature = "full-runtime")]
 use crate::trace::capture::ScheduleCaptureRecorder;
+#[cfg(feature = "full-runtime")]
 use crate::trace::{TraceBufferHandle, TraceData, TraceEvent, TraceEventKind};
 use crate::tracing_compat::{error, trace};
 use crate::types::task_context::CxCancellationState;
 use crate::types::{CxInner, RegionId, TaskId, Time};
 use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
-use parking_lot::Mutex;
-use parking_lot::RwLock;
+use crate::sync::pl::Mutex;
+use crate::sync::pl::RwLock;
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+#[cfg(feature = "full-runtime")]
+use std::sync::OnceLock;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -2192,8 +2196,9 @@ where
     None
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
+#[cfg_attr(feature = "full-serialization", serde(rename_all = "snake_case"))]
 // Precise causes are populated as wait-site registration paths are wired up;
 // current production snapshots fall back to Unknown.
 #[allow(dead_code)]
@@ -2206,14 +2211,16 @@ enum WaitCause {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
 struct WaitLocation {
     file: Option<&'static str>,
     line: Option<u32>,
     label: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
 struct WaitGraphEdgeSnapshot {
     waiter: TaskId,
     cause: WaitCause,
@@ -2227,7 +2234,8 @@ struct WaitGraphTaskSnapshot {
     wait_edges: Vec<WaitGraphEdgeSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
 struct DeadlockWaitEdgeReport {
     waiter: TaskId,
     blocked_on: TaskId,
@@ -2235,13 +2243,15 @@ struct DeadlockWaitEdgeReport {
     location: WaitLocation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
 struct DeadlockCycleReport {
     tasks: Vec<TaskId>,
     edges: Vec<DeadlockWaitEdgeReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize))]
 struct WaitGraphSignalReport {
     node_count: usize,
     undirected_edges: Vec<(usize, usize)>,
@@ -2460,6 +2470,7 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
 pub struct ThreeLaneScheduler {
     /// Shared before workers are moved to their execution threads; publication
     /// is one-time and occurs before RuntimeBuilder exposes the runtime.
+    #[cfg(feature = "full-runtime")]
     schedule_capture: Arc<OnceLock<Arc<ScheduleCaptureRecorder>>>,
     /// Global injection queue for cross-thread wakeups.
     global: Arc<GlobalInjector>,
@@ -2649,6 +2660,7 @@ impl SchedulerConstructionHandles {
 }
 
 impl ThreeLaneScheduler {
+    #[cfg(feature = "full-runtime")]
     pub(crate) fn enable_schedule_capture(&self, trace: TraceBufferHandle) {
         let _ = self
             .schedule_capture
@@ -2658,6 +2670,7 @@ impl ThreeLaneScheduler {
             )));
     }
 
+    #[cfg(feature = "full-runtime")]
     pub(crate) fn schedule_capture_snapshot(
         &self,
     ) -> Option<crate::trace::ScheduleCaptureSnapshot> {
@@ -2669,9 +2682,12 @@ impl ThreeLaneScheduler {
     /// Tells an enabled schedule capture that `task` owns a `block_on`
     /// caller's root future, which no worker dispatches.
     pub(crate) fn note_caller_task(&self, task: TaskId) {
+        #[cfg(feature = "full-runtime")]
         if let Some(capture) = self.schedule_capture.get() {
             capture.note_caller_task(task);
         }
+        #[cfg(not(feature = "full-runtime"))]
+        let _ = task;
     }
 
     /// Process-unique key of this runtime's per-thread local-task stores
@@ -2926,6 +2942,7 @@ impl ThreeLaneScheduler {
         let enable_parking = DEFAULT_ENABLE_PARKING;
         let global = Arc::new(GlobalInjector::new());
         let scheduler_evidence = None;
+        #[cfg(feature = "full-runtime")]
         let schedule_capture = Arc::new(OnceLock::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = SmallVec::<[ThreeLaneWorker; 16]>::with_capacity(worker_count);
@@ -3022,6 +3039,7 @@ impl ThreeLaneScheduler {
 
             workers.push(ThreeLaneWorker {
                 id,
+                #[cfg(feature = "full-runtime")]
                 schedule_capture: Arc::clone(&schedule_capture),
                 local_store_key,
                 local: Arc::clone(&local_schedulers[id]),
@@ -3077,12 +3095,15 @@ impl ThreeLaneScheduler {
                 },
                 preemption_fairness_snapshot,
                 last_published_preemption_dispatches: 0,
+                #[cfg(feature = "full-runtime")]
                 evidence_sink: None,
+                #[cfg(feature = "full-runtime")]
                 decision_contract: if enable_governor {
                     Some(super::decision_contract::SchedulerDecisionContract::new())
                 } else {
                     None
                 },
+                #[cfg(feature = "full-runtime")]
                 decision_posterior: if enable_governor {
                     Some(franken_decision::Posterior::uniform(
                         super::decision_contract::state::COUNT,
@@ -3130,6 +3151,7 @@ impl ThreeLaneScheduler {
 
         Self {
             global,
+            #[cfg(feature = "full-runtime")]
             schedule_capture,
             local_schedulers,
             local_ready,
@@ -4323,6 +4345,7 @@ pub struct ThreeLaneWorker {
     /// Unique worker ID.
     pub id: WorkerId,
     /// Empty in the default configuration; no recorder or Waker adapter exists.
+    #[cfg(feature = "full-runtime")]
     schedule_capture: Arc<OnceLock<Arc<ScheduleCaptureRecorder>>>,
     /// Process-unique key of this runtime's per-thread local-task stores
     /// (GH#58, asupersync-1fyc8f); see [`ThreeLaneScheduler::local_store_key`].
@@ -4443,10 +4466,13 @@ pub struct ThreeLaneWorker {
     /// Total lane dispatches included in the latest published certificate.
     last_published_preemption_dispatches: u64,
     /// Optional evidence sink for scheduler decision tracing (bd-1e2if.3).
+    #[cfg(feature = "full-runtime")]
     evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
     /// Decision contract for principled scheduler action selection (bd-1e2if.6).
+    #[cfg(feature = "full-runtime")]
     decision_contract: Option<super::decision_contract::SchedulerDecisionContract>,
     /// Posterior maintained across governor invocations (bd-1e2if.6).
+    #[cfg(feature = "full-runtime")]
     decision_posterior: Option<franken_decision::Posterior>,
     /// Optional adaptive policy for selecting the cancel streak limit.
     adaptive_cancel_policy: Option<AdaptiveCancelStreakPolicy>,
@@ -5391,7 +5417,8 @@ pub struct StarvationStats {
 /// This is an observed dispatch-step certificate. It does not prove wall-clock
 /// latency, bounded task poll duration, or global priority ordering across
 /// workers.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "full-serialization", derive(serde::Serialize, serde::Deserialize))]
 pub struct PreemptionFairnessCertificate {
     /// Worker-local baseline cancel streak limit `L`.
     pub base_limit: usize,
@@ -5641,14 +5668,22 @@ impl UnwindCompletionArtifacts {
 
 impl ThreeLaneWorker {
     fn capture_waker(&self, waker: Waker, task: TaskId, region: Option<RegionId>) -> Waker {
-        match (self.schedule_capture.get(), region) {
-            (Some(capture), Some(region)) => Waker::from(Arc::new(CaptureWake {
-                inner: waker,
-                capture: Arc::clone(capture),
-                task,
-                region,
-            })),
-            _ => waker,
+        #[cfg(feature = "full-runtime")]
+        {
+            match (self.schedule_capture.get(), region) {
+                (Some(capture), Some(region)) => Waker::from(Arc::new(CaptureWake {
+                    inner: waker,
+                    capture: Arc::clone(capture),
+                    task,
+                    region,
+                })),
+                _ => waker,
+            }
+        }
+        #[cfg(not(feature = "full-runtime"))]
+        {
+            let _ = (task, region);
+            waker
         }
     }
 
@@ -5658,6 +5693,7 @@ impl ThreeLaneWorker {
             .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
     }
 
+    #[cfg(feature = "full-runtime")]
     fn capture_cancel_ack(
         &self,
         task: TaskId,
@@ -6026,6 +6062,7 @@ impl ThreeLaneWorker {
     }
 
     /// Attaches an evidence sink for scheduler decision tracing.
+    #[cfg(feature = "full-runtime")]
     pub fn set_evidence_sink(&mut self, sink: Arc<dyn crate::evidence_sink::EvidenceSink>) {
         self.evidence_sink = Some(sink);
     }
@@ -6044,10 +6081,14 @@ impl ThreeLaneWorker {
     /// signal in unit tests that set up an explicit drain scenario.
     #[cfg(any(test, feature = "test-internals"))]
     pub fn disable_decision_contract_for_test(&mut self) {
-        self.decision_contract = None;
-        self.decision_posterior = None;
+        #[cfg(feature = "full-runtime")]
+        {
+            self.decision_contract = None;
+            self.decision_posterior = None;
+        }
     }
 
+    #[cfg(feature = "full-runtime")]
     fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {
         let Some(ref sink) = self.evidence_sink else {
             return;
@@ -8697,6 +8738,7 @@ impl ThreeLaneWorker {
 
         self.steps_since_snapshot += 1;
         if self.steps_since_snapshot < self.governor_interval {
+            #[cfg(feature = "full-runtime")]
             self.emit_scheduler_evidence_for_suggestion(self.cached_suggestion);
             return self.cached_suggestion;
         }
@@ -8798,6 +8840,7 @@ impl ThreeLaneWorker {
         }
 
         // Apply decision contract modulation if available (bd-1e2if.6).
+        #[cfg(feature = "full-runtime")]
         let mut suggestion = if let (Some(contract), Some(posterior)) =
             (&self.decision_contract, &mut self.decision_posterior)
         {
@@ -8901,6 +8944,8 @@ impl ThreeLaneWorker {
         } else {
             lyapunov_suggestion
         };
+        #[cfg(not(feature = "full-runtime"))]
+        let mut suggestion = lyapunov_suggestion;
 
         // Spectral topology override: this makes structural health influence the
         // live scheduling path when governor mode is enabled. Mere wait-graph
@@ -8968,6 +9013,7 @@ impl ThreeLaneWorker {
         // prod-default (sink unconfigured) at zero cost, and `cached_suggestion`
         // is still consulted for the cache-hit fast-return at the top of
         // `governor_suggest` — only the change-detection guard is removed.
+        #[cfg(feature = "full-runtime")]
         self.emit_scheduler_evidence_for_suggestion(suggestion);
 
         self.cached_suggestion = suggestion;
@@ -9769,6 +9815,7 @@ impl ThreeLaneWorker {
         };
 
         let is_local = stored.is_local();
+        #[cfg(feature = "full-runtime")]
         let capture_region = self.schedule_capture.get().and_then(|_| {
             task_cx.as_ref().map(crate::cx::Cx::region_id).or_else(|| {
                 self.with_task_table_ref(|table| table.task(task_id).map(|record| record.owner))
@@ -9808,7 +9855,9 @@ impl ThreeLaneWorker {
                     scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
             };
-            self.capture_waker(waker, task_id, capture_region)
+            #[cfg(feature = "full-runtime")]
+            let waker = self.capture_waker(waker, task_id, capture_region);
+            waker
         };
         // Create/reuse cancel waker.
         // Fast path: when cached with matching priority, skip cx_inner entirely
@@ -9845,6 +9894,7 @@ impl ThreeLaneWorker {
                         scheduler_evidence: self.scheduler_evidence.clone(),
                     }))
                 };
+                #[cfg(feature = "full-runtime")]
                 let w = self.capture_waker(w, task_id, capture_region);
                 // New waker: prepare and retire ownership outside CxInner's
                 // lock because custom Waker callbacks may reenter this task.
@@ -9899,6 +9949,7 @@ impl ThreeLaneWorker {
         // timed, and ready lanes re-evaluate their fairness gates.
         let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cx = Context::from_waker(&waker);
+            #[cfg(feature = "full-runtime")]
             if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
                 let now = self.capture_now();
                 capture.record(Some(self.id), |seq| {
@@ -9948,6 +9999,7 @@ impl ThreeLaneWorker {
                 artifacts.dispatch_post_lock(self);
             }
             Ok(Poll::Pending) => {
+                #[cfg(feature = "full-runtime")]
                 if let (Some(capture), Some(region)) = (self.schedule_capture.get(), capture_region) {
                     let now = self.capture_now();
                     capture.record(Some(self.id), |seq| {
@@ -9991,6 +10043,7 @@ impl ThreeLaneWorker {
                 };
                 let (cancel_ack, mut cancel_wakes) = cancel_effects.into_parts();
                 if let Some(receipt) = cancel_ack.as_ref() {
+                    #[cfg(feature = "full-runtime")]
                     if self.schedule_capture.get().is_some() {
                         self.capture_cancel_ack(task_id, receipt, self.capture_now());
                     }
@@ -10248,7 +10301,10 @@ impl ThreeLaneWorker {
             PolledCompletion::AbandonedLocal { panic: None, .. }
         );
         // Sample an injected clock before any task/state lock is acquired.
+        #[cfg(feature = "full-runtime")]
         let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
+        #[cfg(not(feature = "full-runtime"))]
+        let capture_time: Option<Time> = None;
         if self.task_table.is_some() {
             /// Owns the record detached from shard A until its completion
             /// commits. The configured Panic leak policy unwinds out of the
@@ -10367,9 +10423,12 @@ impl ThreeLaneWorker {
                 obligation_observers,
             };
 
+            #[cfg(feature = "full-runtime")]
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
                 self.capture_cancel_ack(task_id, receipt, now);
             }
+            #[cfg(not(feature = "full-runtime"))]
+            let _ = capture_time;
 
             let mut state = self
                 .state
@@ -10443,9 +10502,12 @@ impl ThreeLaneWorker {
             let (cancel_ack, checkpoint_wakes) =
                 Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
             cancel_wakes.merge(checkpoint_wakes);
+            #[cfg(feature = "full-runtime")]
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
                 self.capture_cancel_ack(task_id, receipt, now);
             }
+            #[cfg(not(feature = "full-runtime"))]
+            let _ = capture_time;
             let ack_materialized = cancel_ack.is_some();
             let _ = state.update_task(task_id, |record| {
                 Self::apply_polled_completion(record, completion, ack_materialized);
@@ -10810,6 +10872,7 @@ impl ThreeLaneWorker {
     }
 }
 
+#[cfg(feature = "full-runtime")]
 struct CaptureWake {
     inner: Waker,
     capture: Arc<ScheduleCaptureRecorder>,
@@ -10817,6 +10880,7 @@ struct CaptureWake {
     region: RegionId,
 }
 
+#[cfg(feature = "full-runtime")]
 impl CaptureWake {
     fn record(&self) {
         // A Waker can be invoked from any thread, including a different
@@ -10828,6 +10892,7 @@ impl CaptureWake {
     }
 }
 
+#[cfg(feature = "full-runtime")]
 impl Wake for CaptureWake {
     fn wake(self: Arc<Self>) {
         self.record();

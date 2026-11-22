@@ -7,13 +7,16 @@
 //! Exposes evidence with uncertainty, not omniscience.
 
 use crate::observability::metrics::{Counter, Gauge, Histogram};
+#[cfg(feature = "full-serialization")]
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// Custom serde module for SystemTime serialization.
+#[cfg(feature = "full-serialization")]
 mod system_time_serde {
+    #[cfg(feature = "full-serialization")]
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -136,7 +139,8 @@ impl Default for NetworkTruthMetrics {
 }
 
 /// Path quality assessment based on observed metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct PathQuality {
     /// Path identifier
     pub path_id: String,
@@ -149,12 +153,13 @@ pub struct PathQuality {
     /// Path stability score (0.0-1.0)
     pub stability_score: f64,
     /// Timestamp of last update (seconds since Unix epoch)
-    #[serde(with = "system_time_serde")]
+    #[cfg_attr(feature = "full-serialization", serde(with = "system_time_serde"))]
     pub last_updated: SystemTime,
 }
 
 /// Metric estimate with uncertainty bounds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct MetricEstimate {
     /// Point estimate
     pub value: f64,
@@ -167,7 +172,8 @@ pub struct MetricEstimate {
 }
 
 /// Pressure model combining multiple signal sources.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "full-serialization", derive(Serialize, Deserialize))]
 pub struct PressureModel {
     /// Network pressure (0.0-1.0)
     pub network: f64,

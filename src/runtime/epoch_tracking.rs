@@ -18,10 +18,33 @@
 
 use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
+#[cfg(feature = "full-concurrency")]
 use crossbeam_queue::SegQueue;
 use crate::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(not(feature = "full-concurrency"))]
+struct SegQueue<T>(crate::sync::pl::Mutex<std::collections::VecDeque<T>>);
+
+#[cfg(not(feature = "full-concurrency"))]
+impl<T> SegQueue<T> {
+    fn new() -> Self {
+        Self(crate::sync::pl::Mutex::new(std::collections::VecDeque::new()))
+    }
+
+    fn push(&self, value: T) {
+        self.0.lock().push_back(value);
+    }
+
+    fn pop(&self) -> Option<T> {
+        self.0.lock().pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().len()
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Shared `Instant` origin used to serialize monotonic timestamps into a

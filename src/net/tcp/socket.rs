@@ -6,7 +6,7 @@
 
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::{KeepaliveConfig, TcpKeepaliveConfig, TcpStream};
-use parking_lot::Mutex;
+use crate::sync::pl::Mutex;
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;

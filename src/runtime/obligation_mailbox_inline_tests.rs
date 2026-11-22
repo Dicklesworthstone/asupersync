@@ -4076,7 +4076,7 @@
     /// stays parked (not re-scheduled) until the test wakes it.
     struct WaitForFlag {
         flag: Arc<std::sync::atomic::AtomicBool>,
-        waker: Arc<parking_lot::Mutex<Option<std::task::Waker>>>,
+        waker: Arc<crate::sync::pl::Mutex<Option<std::task::Waker>>>,
     }
 
     impl std::future::Future for WaitForFlag {
@@ -4100,8 +4100,8 @@
         let mut runtime = lab();
         let root = runtime.state.create_root_region(Budget::INFINITE);
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let waker: Arc<parking_lot::Mutex<Option<std::task::Waker>>> =
-            Arc::new(parking_lot::Mutex::new(None));
+        let waker: Arc<crate::sync::pl::Mutex<Option<std::task::Waker>>> =
+            Arc::new(crate::sync::pl::Mutex::new(None));
         let (task, _handle) = {
             let flag = Arc::clone(&flag);
             let waker = Arc::clone(&waker);

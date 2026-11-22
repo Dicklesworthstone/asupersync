@@ -324,9 +324,9 @@ struct BoundedJoinCandidates {
 
 #[derive(Default)]
 struct BoundedJoinReady {
-    candidates: parking_lot::Mutex<BoundedJoinCandidates>,
+    candidates: crate::sync::pl::Mutex<BoundedJoinCandidates>,
     // Only Arc refcounts, never arbitrary RawWaker callbacks, run under locks.
-    waiter: parking_lot::Mutex<Option<Arc<Waker>>>,
+    waiter: crate::sync::pl::Mutex<Option<Arc<Waker>>>,
 }
 
 impl BoundedJoinReady {

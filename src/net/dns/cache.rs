@@ -3,7 +3,7 @@
 //! Provides a thread-safe cache for DNS lookup results with TTL-based expiration.
 
 use crate::types::Time;
-use parking_lot::RwLock;
+use crate::sync::pl::RwLock;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use crate::sync::atomic::{AtomicU64, Ordering};
