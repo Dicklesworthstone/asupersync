@@ -192,6 +192,27 @@ impl Http2Options {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Http1RequestOwnership {
+    Connection,
+    ChildRegion,
+}
+
+fn validate_owned_http1_context(cx: &Cx) -> io::Result<()> {
+    // Match the H1 owned runner before either protocol child is admitted.
+    // Its OwnedRequests executor is deliberately private to the H1 modules.
+    let reason = if cx.timer_driver().is_none() {
+        "owned HTTP/1 serving requires a runtime timer"
+    } else if cx.spawn_gateway_handle().is_none() {
+        "owned HTTP/1 serving requires a runtime gateway"
+    } else {
+        return Ok(());
+    };
+    Err(io::Error::other(crate::http::h1::HttpError::Io(
+        io::Error::other(format!("HTTP/1 request ownership: {reason}")),
+    )))
+}
+
 /// One TCP listener serving HTTP/1.1 and HTTP/2; see the
 /// [module documentation](self).
 ///
@@ -338,8 +359,10 @@ where
     /// before growing the request body and resets only the excess stream with
     /// `ENHANCE_YOUR_CALM`. Bodyless requests remain admissible at capacity.
     ///
-    /// Reservations survive admitted handler and response processing; owned
-    /// HTTP/2 requests also retain them through actual request-subtree cleanup.
+    /// [`Self::run_owned_in`] retains reservations through actual request-subtree
+    /// cleanup for both protocols. [`Self::run`] and [`Self::run_in`] retain
+    /// HTTP/1 reservations through handler and response retirement, and HTTP/2
+    /// reservations through its existing request-subtree cleanup.
     /// Incomplete uploads release their reservations when discarded. Per-request
     /// size limits still apply independently. The default has no aggregate cap.
     ///
@@ -391,7 +414,12 @@ where
     /// A non-transient accept error (after draining the connections already
     /// handed over), or either listener's error.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<HttpAutoShutdownStats> {
-        let result = self.run_with(TaskSpawner::Root(runtime.clone())).await;
+        let result = self
+            .run_with(
+                TaskSpawner::Root(runtime.clone()),
+                Http1RequestOwnership::Connection,
+            )
+            .await;
         acknowledge_coordinator_cancellation();
         result
     }
@@ -403,6 +431,8 @@ where
     /// the owning region stops acceptance and drains this entire service, with
     /// no runtime-root tasks left behind. Run this future inside the region that
     /// owns the service, for example a [`ChildRegion`](crate::cx::ChildRegion).
+    /// HTTP/1 handlers retain their established connection context; use
+    /// [`Self::run_owned_in`] for actual HTTP/1 request child regions too.
     ///
     /// Graceful and forced shutdown use the same signal and statistics as
     /// [`Self::run`]. Either protocol task ending early also stops acceptance and
@@ -415,12 +445,59 @@ where
     /// cancellation or panic error. A context without runtime spawn wiring is
     /// refused before accepting connections.
     pub async fn run_in(self, cx: &Cx) -> io::Result<HttpAutoShutdownStats> {
-        let result = self.run_with(TaskSpawner::Owned(cx.clone())).await;
+        let result = self
+            .run_with(
+                TaskSpawner::Owned(cx.clone()),
+                Http1RequestOwnership::Connection,
+            )
+            .await;
         acknowledge_coordinator_cancellation();
         result
     }
 
-    async fn run_with(self, spawner: TaskSpawner) -> io::Result<HttpAutoShutdownStats> {
+    /// Serve both protocols with an actual task and child region per request.
+    ///
+    /// Listener, detection, and connection tasks belong to `cx`'s region as in
+    /// [`Self::run_in`]. HTTP/1 handler factories and response conversion now run
+    /// in an admitted request task with its own ambient [`Cx`] identity; work
+    /// spawned through that context stays in the request subtree. HTTP/2 keeps
+    /// its existing owned request dispatch. Both cleartext and TLS handoff use
+    /// these same request owners and the shared body admission budget.
+    ///
+    /// Buffered responses wait for actual request descendants and finalizers
+    /// to retire. HTTP/1 connection reuse and its next pipelined request wait
+    /// for that same close barrier. Request timeouts and shutdown initiate
+    /// cancellation and join cleanup; non-cooperative descendants can delay
+    /// completion beyond drain grace. Elapsed time alone does not establish
+    /// quiescence or release a live request's body reservation.
+    ///
+    /// An admitted HTTP/1 upgrade starts after its request region closes. Its
+    /// callback and session retain their separate connection-owned context and
+    /// lifetime. Dropping this serving future requests cleanup; draining the
+    /// owning region observes the actual retirement of the service's work.
+    ///
+    /// # Errors
+    /// The errors of [`Self::run_in`]. A context without a runtime timer or
+    /// spawn gateway is refused before either protocol listener is spawned.
+    pub async fn run_owned_in(self, cx: &Cx) -> io::Result<HttpAutoShutdownStats> {
+        let result = async {
+            validate_owned_http1_context(cx)?;
+            self.run_with(
+                TaskSpawner::Owned(cx.clone()),
+                Http1RequestOwnership::ChildRegion,
+            )
+            .await
+        }
+        .await;
+        acknowledge_coordinator_cancellation();
+        result
+    }
+
+    async fn run_with(
+        self,
+        spawner: TaskSpawner,
+        http1_ownership: Http1RequestOwnership,
+    ) -> io::Result<HttpAutoShutdownStats> {
         let http1_queue = Arc::new(HandoffQueue::default());
         let http2_queue = Arc::new(HandoffQueue::default());
         let handler = Arc::clone(&self.handler);
@@ -445,7 +522,10 @@ where
             run: move |child: TaskSpawner| async move {
                 match child {
                     TaskSpawner::Root(runtime) => http1.run(&runtime).await,
-                    TaskSpawner::Owned(cx) => http1.run_in(&cx).await,
+                    TaskSpawner::Owned(cx) => match http1_ownership {
+                        Http1RequestOwnership::Connection => http1.run_in(&cx).await,
+                        Http1RequestOwnership::ChildRegion => http1.run_owned_in(&cx).await,
+                    },
                 }
             },
         };

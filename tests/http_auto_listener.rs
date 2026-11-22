@@ -1343,4 +1343,405 @@ mod shared_body_budget {
             );
         }
     }
+
+    mod owned_requests {
+        use super::super::{HandlerRelease, ReleaseHandlersOnDrop, report};
+        use super::{
+            H2Peer, StopOnDrop, bounded, config, http1_head, http2_body_refused, http2_data,
+            native_runtime, open_http2_body, run_lifecycle,
+        };
+        use asupersync::cx::{ChildRegionSpec, Cx};
+        use asupersync::http::HttpAutoListener;
+        use asupersync::http::h1::types::{Request, Response};
+        use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+        use asupersync::net::TcpStream;
+        use asupersync::runtime::{RuntimeHandle, yield_now};
+        #[cfg(feature = "test-internals")]
+        use asupersync::server::shutdown::ShutdownPhase;
+        use asupersync::sync::Notify;
+        use asupersync::trace::{TraceData, TraceEventKind};
+        use asupersync::types::{RegionId, TaskId};
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::future::{Future, poll_fn};
+        use std::num::NonZeroUsize;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::task::Poll;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct Invocation {
+            path: String,
+            task: TaskId,
+            region: RegionId,
+            registered: bool,
+        }
+
+        struct State {
+            invocations: Mutex<Vec<Invocation>>,
+            child_started: Notify,
+            child_pending: AtomicBool,
+            cleanup_started: Notify,
+            cleanup_pending: AtomicBool,
+            verified: AtomicUsize,
+            release: Arc<HandlerRelease>,
+        }
+
+        impl State {
+            fn capture_factory(&self, handle: &RuntimeHandle, path: &str) -> Cx {
+                let cx = Cx::current().expect("handler factory has an actual request context");
+                let registered = handle
+                    .task_inspector(Default::default())
+                    .unwrap()
+                    .by_region(cx.region_id())
+                    .into_iter()
+                    .any(|task| task.id == cx.task_id() && !task.is_terminal());
+                self.invocations.lock().unwrap().push(Invocation {
+                    path: path.to_owned(),
+                    task: cx.task_id(),
+                    region: cx.region_id(),
+                    registered,
+                });
+                cx
+            }
+        }
+
+        async fn answer(mut request: Request, state: Arc<State>, cx: Cx) -> Response {
+            let polled = Cx::current().unwrap();
+            assert_eq!(polled.task_id(), cx.task_id());
+            assert_eq!(polled.region_id(), cx.region_id());
+            if request.uri == "/owned-first" {
+                let body = std::mem::take(&mut request.body);
+                let child_state = Arc::clone(&state);
+                let request_region = cx.region_id();
+                let request_task = cx.task_id();
+                let _child = cx
+                    .spawn(move |child| async move {
+                        assert_eq!(child.region_id(), request_region);
+                        assert_ne!(child.task_id(), request_task);
+                        let mut cancelled = std::pin::pin!(child.cancelled());
+                        let mut witnessed = false;
+                        poll_fn(|task| {
+                            let result = cancelled.as_mut().poll(task);
+                            if result.is_pending() && !witnessed {
+                                child_state.child_pending.store(true, Ordering::Release);
+                                child_state.child_started.notify_waiters();
+                                witnessed = true;
+                            }
+                            result
+                        })
+                        .await;
+                        assert!(child.checkpoint().is_err());
+                        let mut release =
+                            std::pin::pin!(child_state.release.changed.wait_until(|| {
+                                child_state.release.released.load(Ordering::Acquire)
+                            }));
+                        let mut witnessed = false;
+                        poll_fn(|task| {
+                            let result = release.as_mut().poll(task);
+                            if result.is_pending() && !witnessed {
+                                child_state.cleanup_pending.store(true, Ordering::Release);
+                                child_state.cleanup_started.notify_waiters();
+                                witnessed = true;
+                            }
+                            result
+                        })
+                        .await;
+                        assert_eq!(body.as_slice(), b"retained");
+                        child_state.verified.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .unwrap();
+                state
+                    .child_started
+                    .wait_until(|| state.child_pending.load(Ordering::Acquire))
+                    .await;
+            } else if request.uri == "/reused-http2" {
+                assert_eq!(request.body.as_slice(), b"reusable");
+            }
+            report(request).await
+        }
+
+        async fn http1_response(stream: &mut TcpStream, expected: &[u8]) {
+            let head = http1_head(stream).await;
+            assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+            let length = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .expect("response body is framed")
+                .1
+                .trim()
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(length, expected.len());
+            let mut body = vec![0; length];
+            bounded(stream.read_exact(&mut body)).await.unwrap();
+            assert_eq!(body, expected);
+        }
+
+        #[test]
+        fn owned_handoff_waits_for_original_body_descendants_before_response_and_keepalive() {
+            for workers in [1, 2] {
+                run_lifecycle(
+                    native_runtime(workers).build().unwrap(),
+                    |handle| async move {
+                        let parent = Cx::current().unwrap();
+                        let service = parent
+                            .open_child_region(ChildRegionSpec::inherit())
+                            .await
+                            .unwrap();
+                        let service_id = service.region_id();
+                        let release = Arc::new(HandlerRelease::default());
+                        let _release_on_drop = ReleaseHandlersOnDrop(Arc::clone(&release));
+                        let state = Arc::new(State {
+                            invocations: Mutex::new(Vec::new()),
+                            child_started: Notify::new(),
+                            child_pending: AtomicBool::new(false),
+                            cleanup_started: Notify::new(),
+                            cleanup_pending: AtomicBool::new(false),
+                            verified: AtomicUsize::new(0),
+                            release,
+                        });
+                        let handler_state = Arc::clone(&state);
+                        let observer = handle.clone();
+                        let listener = HttpAutoListener::bind(
+                            "127.0.0.1:0",
+                            move |request: Request| {
+                                let cx = handler_state.capture_factory(&observer, &request.uri);
+                                answer(request, Arc::clone(&handler_state), cx)
+                            },
+                            config(),
+                        )
+                        .await
+                        .unwrap()
+                        .max_buffered_request_bytes(NonZeroUsize::new(8).unwrap());
+                        let address = listener.local_addr().unwrap();
+                        let stats = listener.stats_handle();
+                        let shutdown = listener.shutdown_signal();
+                        let _stop_on_drop = StopOnDrop(shutdown.clone());
+                        let owner = service.cx().clone();
+                        let serving: Pin<Box<dyn Future<Output = _> + Send>> =
+                            Box::pin(async move { listener.run_owned_in(&owner).await });
+                        let mut run = service.cx().spawn(move |_| serving).unwrap();
+
+                        let mut http1 = bounded(TcpStream::connect(address)).await.unwrap();
+                        bounded(http1.write_all(
+                        b"POST /owned-first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\n\r\n\
+                          retainedGET /owned-next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    ))
+                    .await
+                    .unwrap();
+                        // The handler waited for its child's actual Pending poll, then
+                        // returned. Only request-region close can now cancel that child.
+                        bounded(
+                            state
+                                .cleanup_started
+                                .wait_until(|| state.cleanup_pending.load(Ordering::Acquire)),
+                        )
+                        .await;
+                        assert_eq!(stats.reserved_request_body_bytes(), 8);
+                        assert_eq!(state.verified.load(Ordering::SeqCst), 0);
+                        {
+                            let observed = state.invocations.lock().unwrap();
+                            assert_eq!(observed.len(), 1);
+                            assert_eq!(observed[0].path, "/owned-first");
+                            assert!(observed[0].registered);
+                            assert_ne!(observed[0].region, service_id);
+                        }
+
+                        let mut http2 = H2Peer::connect(address, Vec::new()).await;
+                        http2.request(1, "/owned-http2").await;
+                        assert_eq!(
+                            http2.response_body(1).await,
+                            b"Http2 /owned-http2 peer=true"
+                        );
+                        open_http2_body(&mut http2, 3, "/blocked-by-owned-child").await;
+                        http2_data(&mut http2, 3, b"x", true).await;
+                        http2_body_refused(&mut http2, 3).await;
+                        assert_eq!(stats.body_budget_refusals_total(), 1);
+                        assert_eq!(stats.reserved_request_body_bytes(), 8);
+                        assert_eq!(state.invocations.lock().unwrap().len(), 2);
+                        // A real read must park while the child holds cleanup. The
+                        // pipelined next request has not reached its handler either.
+                        {
+                            let mut byte = [0u8; 1];
+                            let mut reading = std::pin::pin!(http1.read(&mut byte));
+                            poll_fn(|task| {
+                                assert!(
+                                    reading.as_mut().poll(task).is_pending(),
+                                    "HTTP/1 response escaped the request subtree"
+                                );
+                                Poll::Ready(())
+                            })
+                            .await;
+                        }
+
+                        state.release.release();
+                        http1_response(&mut http1, b"Http11 /owned-first peer=true").await;
+                        http1_response(&mut http1, b"Http11 /owned-next peer=true").await;
+                        let mut rest = Vec::new();
+                        bounded(http1.read_to_end(&mut rest)).await.unwrap();
+                        assert!(rest.is_empty());
+                        drop(http1);
+                        assert_eq!(state.verified.load(Ordering::SeqCst), 1);
+                        bounded(async {
+                            while stats.reserved_request_body_bytes() != 0 {
+                                yield_now().await;
+                            }
+                        })
+                        .await;
+
+                        open_http2_body(&mut http2, 5, "/reused-http2").await;
+                        http2_data(&mut http2, 5, b"reusable", true).await;
+                        assert_eq!(
+                            http2.response_body(5).await,
+                            b"Http2 /reused-http2 peer=true"
+                        );
+                        let observed = state.invocations.lock().unwrap().clone();
+                        assert_eq!(observed.len(), 4);
+                        assert!(observed.iter().all(|request| request.registered));
+                        assert_eq!(
+                            observed
+                                .iter()
+                                .map(|request| request.task)
+                                .collect::<BTreeSet<_>>()
+                                .len(),
+                            4
+                        );
+                        assert_eq!(
+                            observed
+                                .iter()
+                                .map(|request| request.region)
+                                .collect::<BTreeSet<_>>()
+                                .len(),
+                            4
+                        );
+                        let parents: BTreeMap<_, _> = handle
+                            .trace_snapshot()
+                            .unwrap()
+                            .into_iter()
+                            .filter_map(|event| match (event.kind, event.data) {
+                                (
+                                    TraceEventKind::RegionCreated,
+                                    TraceData::Region {
+                                        region,
+                                        parent: Some(parent),
+                                    },
+                                ) => Some((region, parent)),
+                                _ => None,
+                            })
+                            .collect();
+                        for request in observed {
+                            assert_ne!(request.region, service_id);
+                            let mut region = request.region;
+                            let mut visited = BTreeSet::new();
+                            while region != service_id {
+                                assert!(visited.insert(region), "cyclic request ancestry");
+                                region = *parents.get(&region).unwrap_or_else(|| {
+                                    panic!("{} escaped the service region", request.path)
+                                });
+                            }
+                        }
+                        drop(http2);
+                        assert!(shutdown.begin_drain(Duration::from_secs(5)));
+                        let drained = bounded(run.join(&parent)).await.unwrap().unwrap();
+                        assert!(drained.http1.drain_report.unwrap().reached_quiescence);
+                        assert!(drained.http2.drain_report.unwrap().reached_quiescence);
+                        bounded(service.close()).await.unwrap();
+                        assert!(
+                            handle
+                                .task_inspector(Default::default())
+                                .unwrap()
+                                .by_region(service_id)
+                                .is_empty()
+                        );
+                        assert_eq!(stats.reserved_request_body_bytes(), 0);
+                        assert_eq!(stats.body_budget_refusals_total(), 1);
+                        assert!(!parent.is_cancel_requested());
+                    },
+                );
+            }
+        }
+
+        #[cfg(feature = "test-internals")]
+        #[test]
+        fn owned_handoff_refuses_detached_contexts_before_protocol_admission() {
+            for workers in [1, 2] {
+                run_lifecycle(
+                    native_runtime(workers).build().unwrap(),
+                    |handle| async move {
+                        let current = Cx::current().unwrap();
+                        let timer = current.timer_driver().expect("native runtime timer");
+                        for (missing, timer) in [("timer", None), ("gateway", Some(timer))] {
+                            let detached = Cx::new_with_drivers(
+                                current.region_id(),
+                                current.task_id(),
+                                asupersync::types::Budget::INFINITE,
+                                None,
+                                None,
+                                None,
+                                timer,
+                                None,
+                            );
+                            let listener = HttpAutoListener::bind("127.0.0.1:0", report, config())
+                                .await
+                                .unwrap();
+                            let address = listener.local_addr().unwrap();
+                            let shutdown = listener.shutdown_signal();
+                            let stats = listener.stats_handle();
+                            // A real connection is queued before run is called. A
+                            // rejected owner must never admit it into either protocol.
+                            let mut peer = bounded(TcpStream::connect(address)).await.unwrap();
+                            bounded(peer.write_all(
+                            b"GET /must-not-dispatch HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )).await.unwrap();
+                            let admissions = || {
+                                handle
+                                    .trace_snapshot()
+                                    .unwrap()
+                                    .into_iter()
+                                    .filter(|event| {
+                                        matches!(
+                                            event.kind,
+                                            TraceEventKind::Spawn
+                                                | TraceEventKind::TaskSpawnEnqueued
+                                                | TraceEventKind::TaskAdmitted
+                                                | TraceEventKind::RegionCreated
+                                        )
+                                    })
+                                    .count()
+                            };
+                            let before = admissions();
+                            let error =
+                                bounded(listener.run_owned_in(&detached)).await.unwrap_err();
+                            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                            assert!(
+                                error.to_string().contains(&format!(
+                                    "owned HTTP/1 serving requires a runtime {missing}"
+                                )),
+                                "{error}"
+                            );
+                            assert_eq!(admissions(), before, "preflight spawned a service child");
+                            assert_eq!(shutdown.phase(), ShutdownPhase::Running);
+                            assert_eq!(stats.reserved_request_body_bytes(), 0);
+                            let mut response = Vec::new();
+                            let closed = bounded(peer.read_to_end(&mut response)).await;
+                            assert!(
+                                closed.is_ok()
+                                    || closed.is_err_and(|error| {
+                                        matches!(
+                                            error.kind(),
+                                            std::io::ErrorKind::ConnectionReset
+                                                | std::io::ErrorKind::ConnectionAborted
+                                        )
+                                    })
+                            );
+                            assert!(response.is_empty(), "preflight admitted the queued request");
+                        }
+                    },
+                );
+            }
+        }
+    }
 }
