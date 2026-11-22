@@ -397,7 +397,7 @@ fn never_start(_: Cx) -> Ready<Result<u32, &'static str>> {
 #[test]
 fn scoped_first_ok_initial_next_cancellation_precedes_empty_and_missing_runtime() {
     for has_factory in [false, true] {
-        let owner = Cx::detached_cancel_context();
+        let owner = Cx::for_testing();
         let input_owner = owner.clone();
         let reason = CancelReason::user("cancel from initial iterator callback");
         let input_reason = reason.clone();
@@ -444,7 +444,7 @@ impl IntoIterator for CancelOnConversion {
 
 #[test]
 fn scoped_first_ok_input_conversion_cancellation_prevents_first_pull() {
-    let owner = Cx::detached_cancel_context();
+    let owner = Cx::for_testing();
     let pulls = Arc::new(AtomicUsize::new(0));
     let factories = CancelOnConversion {
         owner: owner.clone(),

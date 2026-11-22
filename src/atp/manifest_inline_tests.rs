@@ -278,7 +278,7 @@ fn merkle_v2_unicode_path_order_uses_utf8_on_every_platform() {
     let first = Some(std::path::PathBuf::from("\u{e000}"));
     let second = Some(std::path::PathBuf::from("\u{10000}"));
     assert_eq!(
-        MerkleV2Hasher::compare_paths(&first, &second),
+        MerkleV2Hasher::compare_paths(first.as_ref(), second.as_ref()),
         std::cmp::Ordering::Less
     );
 }
@@ -297,7 +297,7 @@ fn merkle_v2_non_unicode_unix_paths_preserve_raw_bytes() {
     second_hash.path(&second);
     assert_ne!(first_hash.finish(), second_hash.finish());
     assert_eq!(
-        MerkleV2Hasher::compare_paths(&Some(first), &Some(second)),
+        MerkleV2Hasher::compare_paths(Some(&first), Some(&second)),
         std::cmp::Ordering::Less,
     );
 }
@@ -316,7 +316,7 @@ fn merkle_v2_non_unicode_windows_paths_preserve_unpaired_surrogates() {
     second_hash.path(&second);
     assert_ne!(first_hash.finish(), second_hash.finish());
     assert_eq!(
-        MerkleV2Hasher::compare_paths(&Some(first), &Some(second)),
+        MerkleV2Hasher::compare_paths(Some(&first), Some(&second)),
         std::cmp::Ordering::Less,
     );
 }
