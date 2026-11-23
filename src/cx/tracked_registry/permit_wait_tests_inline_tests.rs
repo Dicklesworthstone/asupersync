@@ -2,7 +2,9 @@
 
 use super::super::tests::{finish, fixture, flush};
 use super::*;
+use crate::runtime::TaskHandle;
 use crate::runtime::obligation_mailbox::ObligationGateway;
+use crate::time::{TimerDriverHandle, VirtualClock};
 use crate::types::{Budget, CancelKind};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +39,138 @@ fn ready<T>(result: Poll<Result<T, TrackedNameError>>) -> T {
         Poll::Ready(Err(error)) => panic!("unexpected name refusal: {error}"),
         Poll::Pending => panic!("name should be ready"),
     }
+}
+
+fn without_time(cx: &Cx) -> Cx {
+    let _restricted = cx
+        .restrict::<crate::cx::cap::None>()
+        .set_current_restricted();
+    Cx::current().expect("restricted explicit context")
+}
+
+fn virtual_fixture() -> (
+    crate::lab::LabRuntime,
+    Cx,
+    TaskHandle<()>,
+    Arc<VirtualClock>,
+    TimerDriverHandle,
+) {
+    use crate::lab::{LabConfig, LabRuntime};
+    crate::test_utils::init_test_logging();
+    let mut lab = LabRuntime::new(LabConfig::new(0x100_71ae).max_steps(512));
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    lab.state.set_timer_driver(timer.clone());
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let region = lab
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .unwrap();
+    let (task, handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .unwrap();
+    let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+    (lab, cx, handle, clock, timer)
+}
+
+#[test]
+fn restricted_wait_enforces_a_budget_tightened_after_task_admission() {
+    let (mut lab, cx, handle, clock, timer) = virtual_fixture();
+    let names = TrackedNameRegistry::new();
+    let owner = names.register(&cx, "worker").unwrap();
+    let deadline = Time::from_secs(1);
+    // No native admission timer owns this later, narrower operation budget.
+    cx.inner.write().budget.deadline = Some(deadline);
+    assert!(cx.inner.read().budget_deadline_timer.is_none());
+    let restricted = without_time(&cx);
+    assert!(restricted.timer_driver().is_none());
+    let (count, waker) = counter();
+    let mut wait = Box::pin(names.reserve_wait(&restricted, "worker"));
+    assert!(poll(wait.as_mut(), &waker).is_pending());
+    assert_eq!(timer.next_deadline(), Some(deadline));
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    clock.advance_to(deadline);
+    assert_eq!(timer.process_timers(), 1);
+    assert!(count.0.load(Ordering::SeqCst) > 0);
+    assert!(matches!(
+        poll(wait.as_mut(), &waker),
+        Poll::Ready(Err(TrackedNameError::Cancelled))
+    ));
+    assert_eq!(
+        restricted.cancel_reason().unwrap().kind,
+        CancelKind::Deadline
+    );
+    assert_eq!(names.whereis("worker"), Some(owner.holder()));
+    assert!(names.waiters.lock().is_empty());
+    assert!(timer.is_empty());
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    drop(wait);
+    owner.release().unwrap();
+    flush(&mut lab);
+    assert_eq!(lab.state.pending_obligation_count(), 0);
+    assert_eq!(lab.state.leak_count(), 0);
+    drop(handle);
+}
+
+#[test]
+fn restricted_masked_budget_expiry_parks_until_unmask_without_timer_spin() {
+    let (mut lab, cx, handle, clock, timer) = virtual_fixture();
+    let names = TrackedNameRegistry::new();
+    let owner = names.register(&cx, "worker").unwrap();
+    let deadline = Time::from_secs(1);
+    cx.inner.write().budget.deadline = Some(deadline);
+    let restricted = without_time(&cx);
+    let (count, waker) = counter();
+    let mut wait = Box::pin(names.reserve_wait(&restricted, "worker"));
+    restricted.masked(|| {
+        assert!(poll(wait.as_mut(), &waker).is_pending());
+        clock.advance_to(deadline);
+        assert_eq!(timer.process_timers(), 1);
+        assert!(poll(wait.as_mut(), &waker).is_pending());
+        assert!(timer.is_empty());
+        count.0.store(0, Ordering::SeqCst);
+        assert!(poll(wait.as_mut(), &waker).is_pending());
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(names.whereis("worker"), Some(owner.holder()));
+    });
+    assert!(count.0.load(Ordering::SeqCst) > 0, "unmask wakes the wait");
+    assert!(matches!(
+        poll(wait.as_mut(), &waker),
+        Poll::Ready(Err(TrackedNameError::Cancelled))
+    ));
+    assert_eq!(
+        restricted.cancel_reason().unwrap().kind,
+        CancelKind::Deadline
+    );
+    assert!(names.waiters.lock().is_empty());
+    assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    drop(wait);
+    owner.release().unwrap();
+    flush(&mut lab);
+    assert_eq!(lab.state.pending_obligation_count(), 0);
+    assert_eq!(lab.state.leak_count(), 0);
+    drop(handle);
+}
+
+#[test]
+fn explicit_wait_deadline_still_requires_the_public_time_capability() {
+    let (lab, cx, handle, _clock, timer) = virtual_fixture();
+    let names = TrackedNameRegistry::new();
+    let owner = names.register(&cx, "worker").unwrap();
+    let restricted = without_time(&cx);
+    let mut wait = Box::pin(names.reserve_wait_until(&restricted, "worker", Time::from_secs(1)));
+    assert!(matches!(
+        poll(wait.as_mut(), Waker::noop()),
+        Poll::Ready(Err(TrackedNameError::TimerRequired))
+    ));
+    drop(wait);
+    assert_eq!(names.whereis("worker"), Some(owner.holder()));
+    assert!(names.waiters.lock().is_empty());
+    assert!(timer.is_empty());
+    owner.release().unwrap();
+    finish(lab, &cx, handle, 1);
 }
 
 #[test]

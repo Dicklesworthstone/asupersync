@@ -4,7 +4,7 @@
 
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::registry::{NameLeaseError, NameRegistry};
-use asupersync::cx::{ChildRegionSpec, Cx, Scope};
+use asupersync::cx::{ChildRegionSpec, Cx, Scope, TrackedNameError, TrackedNameRegistry};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{RuntimeState, SpawnError};
 use asupersync::supervision::{
@@ -491,6 +491,87 @@ async fn journey(cx: Cx) {
     collision_and_wait_cancel(cx.clone()).await;
     replace_fences_stale_lease(cx.clone()).await;
     abandoned_controller_retains_name_through_cleanup(cx).await;
+}
+
+async fn tracked_wait_with_restricted_time(cx: Cx) {
+    let names = TrackedNameRegistry::new();
+    for cancel in [false, true] {
+        let mut owner = Some(names.register(&cx, "worker").unwrap());
+        let waiting_names = names.clone();
+        let (parked, mut witness) = oneshot::channel();
+        let mut waiter = cx
+            .spawn(move |child| async move {
+                // Capture the restricted context without keeping a thread-local
+                // guard across an await or granting public timing authority.
+                let restricted = {
+                    let _current = child
+                        .restrict::<asupersync::cx::cap::None>()
+                        .set_current_restricted();
+                    Cx::current().expect("restricted native task")
+                };
+                assert!(restricted.timer_driver().is_none());
+                assert!(restricted.budget().deadline.is_some());
+                match witnessed(waiting_names.register_wait(&restricted, "worker"), parked).await {
+                    Ok(lease) => lease.release(),
+                    Err(error) => Err(error),
+                }
+            })
+            .unwrap();
+        // This receive can complete only after the actual name wait returned
+        // Pending with its notifications installed. No sleep guesses readiness.
+        witness.recv(&cx).await.unwrap();
+        assert_eq!(names.whereis("worker"), Some(cx.task_id()));
+        if cancel {
+            waiter.abort();
+            assert_eq!(
+                waiter.join(&cx).await.unwrap(),
+                Err(TrackedNameError::Cancelled)
+            );
+            assert_eq!(names.whereis("worker"), Some(cx.task_id()));
+            owner.take().unwrap().release().unwrap();
+        } else {
+            owner.take().unwrap().release().unwrap();
+            waiter.join(&cx).await.unwrap().unwrap();
+        }
+        assert_eq!(names.whereis("worker"), None);
+        eprintln!(
+            "TRACKED_NAME_WAIT scenario=restricted_time cancel={cancel} parked=true name_released=true"
+        );
+    }
+}
+
+#[test]
+fn tracked_name_waits_inherit_budgets_without_requiring_time_authority() {
+    use asupersync::runtime::RuntimeBuilder;
+
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native root context");
+            let budget = Budget::INFINITE.with_deadline(cx.now() + Duration::from_secs(60));
+            let boundary = cx
+                .open_child_region(ChildRegionSpec::inherit().with_budget(budget))
+                .await
+                .unwrap();
+            let mut task = boundary
+                .cx()
+                .spawn(tracked_wait_with_restricted_time)
+                .unwrap();
+            asupersync::time::timeout(cx.now(), Duration::from_secs(10), task.join(&cx))
+                .await
+                .unwrap()
+                .unwrap();
+            boundary.close().await.unwrap();
+        });
+        assert!(runtime.is_quiescent());
+        eprintln!("TRACKED_NAME_WAIT backend=native workers={workers} quiescent=true");
+    }
 }
 
 #[test]

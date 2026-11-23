@@ -7,7 +7,7 @@ use crate::record::ObligationAbortReason;
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
 use crate::types::{RegionId, TaskId, Time};
 use std::future::{Future, poll_fn};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
@@ -50,8 +50,9 @@ impl TrackedNameRegistry {
     ///
     /// Release, abort, and dropped ownership wake this name's contenders; no
     /// polling timer or background task is used. Cancellation is independently
-    /// wake-driven and respects checkpoint masks. A finite context deadline is
-    /// driven by its explicit timer capability, never an ambient fallback.
+    /// wake-driven and respects checkpoint masks. A finite context budget is
+    /// enforced on that context's clock even when its public time capability
+    /// is restricted; budget expiry returns [`TrackedNameError::Cancelled`].
     ///
     /// Once the name is free, checked admission must succeed before a permit is
     /// returned. Quota refusal is an error, not an indefinite wait for credits.
@@ -69,7 +70,9 @@ impl TrackedNameRegistry {
     /// Like [`Self::reserve_wait`], with an additional absolute wait deadline.
     ///
     /// An expired wait returns `Registry(WaitBudgetExceeded)` before acquiring
-    /// the name. An inherited context deadline can end the wait sooner.
+    /// the name. Waiting for this caller-selected deadline requires the
+    /// context's public timer capability. Its inherited budget can cancel the
+    /// operation sooner, independently of that capability.
     pub async fn reserve_wait_until<'a>(
         &self,
         cx: &'a Cx,
@@ -90,6 +93,11 @@ impl TrackedNameRegistry {
         wait_identity(cx)?;
         self.bind_runtime(cx)?;
         let interest = self.subscribe(&name);
+        // A task's admission-time deadline need not equal the explicit
+        // operation context's budget. Keep its own wake on the same clock as
+        // checkpoint, without acquiring a public TIME capability. This also
+        // covers a narrower context whose deadline was never armed by admission.
+        let mut budget_deadline = cx.budget_deadline_sleep();
         let mut retries = 0usize;
         loop {
             // Sample BEFORE testing the condition. Notify::notified() captures
@@ -128,12 +136,7 @@ impl TrackedNameRegistry {
                 Err(error) => return Err(TrackedNameError::Registry(error)),
             }
 
-            let inherited = cx.budget().deadline;
-            let wake_at = match (deadline, inherited) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-            let sleep = match wake_at {
+            let sleep = match deadline {
                 Some(at) => Some(crate::time::Sleep::with_timer_driver(
                     at,
                     cx.timer_driver().ok_or(TrackedNameError::TimerRequired)?,
@@ -146,6 +149,15 @@ impl TrackedNameRegistry {
             poll_fn(|task| {
                 cancellation.token =
                     Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
+                if budget_deadline
+                    .as_mut()
+                    .is_some_and(|timer| Pin::new(timer).poll_deadline(task).is_ready())
+                {
+                    // Expiry wakes checkpoint; it does not bypass masking or
+                    // become an explicit wait timeout. Keep the cancellation
+                    // subscription for unmasking, but retire the ready timer.
+                    budget_deadline = None;
+                }
                 if cx.checkpoint().is_err() {
                     return Poll::Ready(Err(TrackedNameError::Cancelled));
                 }
