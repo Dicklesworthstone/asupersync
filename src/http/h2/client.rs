@@ -290,6 +290,7 @@ impl Http2Client {
         if let Some(pool) = &self.pool {
             self.pool = Some(Arc::new(ConnectionPool {
                 max_idle: pool.max_idle,
+                max_idle_total: pool.max_idle_total,
                 idle: Mutex::new(HashMap::new()),
             }));
         }
@@ -319,10 +320,52 @@ impl Http2Client {
         self.pool = (max_idle > 0).then(|| {
             Arc::new(ConnectionPool {
                 max_idle,
+                max_idle_total: None,
                 idle: Mutex::new(HashMap::new()),
             })
         });
         self
+    }
+
+    /// Keep idle connections within both per-origin and client-wide limits.
+    ///
+    /// This has the reuse, retry, and 30-second idle-expiry behavior of
+    /// [`Self::reuse_connections`], with an additional bound on retained idle
+    /// transports across all origins and client clones. When the total limit
+    /// is full, returning a connection for an origin with capacity retires
+    /// the oldest idle connection before keeping the returned one. An origin
+    /// already at its own limit keeps its existing connections instead.
+    ///
+    /// Either limit being zero disables reuse. These limits do not constrain
+    /// active requests or connections retained by unfinished response bodies.
+    /// Changing the TLS connector creates a separate pool with the same limits.
+    /// The existing [`Self::reuse_connections`] method retains its original
+    /// per-origin-only behavior.
+    #[must_use]
+    pub fn reuse_connections_bounded(
+        mut self,
+        max_idle_per_origin: usize,
+        max_idle_total: usize,
+    ) -> Self {
+        self.pool = (max_idle_per_origin > 0 && max_idle_total > 0).then(|| {
+            Arc::new(ConnectionPool {
+                max_idle: max_idle_per_origin,
+                max_idle_total: Some(max_idle_total),
+                idle: Mutex::new(HashMap::new()),
+            })
+        });
+        self
+    }
+
+    /// Close all connections currently idle in this client's shared pool.
+    ///
+    /// Returns the number removed. Clones sharing the pool observe the same
+    /// cleanup. Active requests and unfinished streaming bodies are unaffected;
+    /// they may return their connections to the pool after this call. Reuse
+    /// remains enabled, and a later request can establish a new connection.
+    /// Transports are dropped after releasing the pool lock.
+    pub fn close_idle_connections(&self) -> usize {
+        self.pool.as_ref().map_or(0, |pool| pool.clear())
     }
 
     /// Begin a request with an explicit method and absolute HTTP(S) URL.
@@ -1576,6 +1619,7 @@ impl AsyncWrite for Http2ClientIo {
 /// Generic only so its bookkeeping can be tested without sockets.
 struct ConnectionPool<C = Http2Conn<Http2ClientIo>> {
     max_idle: usize,
+    max_idle_total: Option<usize>,
     idle: Mutex<HashMap<Origin, Vec<(Time, C)>>>,
 }
 
@@ -1616,28 +1660,67 @@ impl<C> ConnectionPool<C> {
 
     /// Keep `conn` for reuse, and close the expired idle connections of
     /// every origin: a client that reaches many hosts would otherwise keep a
-    /// socket to each until a request to that same host came along.
+    /// socket to each until a request to that same host came along. A bounded
+    /// pool also retires its oldest idle connection when its total is full.
     fn put(&self, origin: Origin, conn: C, now: Time) {
-        let mut expired = Vec::new();
+        if self.max_idle == 0 || self.max_idle_total == Some(0) {
+            return;
+        }
+        let mut retired = Vec::new();
         {
             let mut idle = self.idle.lock();
             idle.retain(|_, conns| {
                 let mut index = 0;
                 while index < conns.len() {
                     if idle_expired(conns[index].0, now) {
-                        expired.push(conns.remove(index).1);
+                        retired.push(conns.remove(index).1);
                     } else {
                         index += 1;
                     }
                 }
                 !conns.is_empty()
             });
-            let conns = idle.entry(origin).or_default();
-            if conns.len() < self.max_idle {
-                conns.push((now, conn));
+            if idle
+                .get(&origin)
+                .is_none_or(|conns| conns.len() < self.max_idle)
+            {
+                if self
+                    .max_idle_total
+                    .is_some_and(|limit| idle.values().map(Vec::len).sum::<usize>() >= limit)
+                {
+                    // Break equal-age ties by origin and position, so a
+                    // HashMap iteration order never decides which peer closes.
+                    let oldest = idle
+                        .iter()
+                        .flat_map(|(key, conns)| {
+                            conns
+                                .iter()
+                                .enumerate()
+                                .map(move |(index, (since, _))| (since.as_nanos(), key, index))
+                        })
+                        .min()
+                        .map(|(_, key, index)| ((*key).clone(), index));
+                    if let Some((key, index)) = oldest {
+                        let conns = idle.get_mut(&key).expect("selected idle origin exists");
+                        retired.push(conns.remove(index).1);
+                        if conns.is_empty() {
+                            idle.remove(&key);
+                        }
+                    }
+                }
+                idle.entry(origin).or_default().push((now, conn));
             }
         }
-        drop(expired);
+        drop(retired);
+    }
+
+    /// Detach every idle connection under the lock, then retire transports
+    /// without the lock held. An active request may repopulate the pool.
+    fn clear(&self) -> usize {
+        let idle = std::mem::take(&mut *self.idle.lock());
+        let count = idle.values().map(Vec::len).sum();
+        drop(idle);
+        count
     }
 }
 

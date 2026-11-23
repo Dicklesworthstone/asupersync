@@ -38,6 +38,12 @@ fn a_clone_given_another_tls_connector_gets_its_own_pool() {
         "a clone that keeps its connector still shares"
     );
     assert!(Http2Client::new().tls_connector(connector()).pool.is_none());
+
+    let bounded = Http2Client::new().reuse_connections_bounded(2, 7);
+    let isolated = bounded.clone().tls_connector(connector());
+    assert!(!Arc::ptr_eq(&pool(&bounded), &pool(&isolated)));
+    assert_eq!(pool(&isolated).max_idle, 2);
+    assert_eq!(pool(&isolated).max_idle_total, Some(7));
 }
 
 #[derive(Default)]
@@ -545,6 +551,7 @@ fn response_metadata_and_framing_are_bounded() {
 fn putting_a_connection_back_closes_the_expired_idle_ones_of_every_origin() {
     let pool = ConnectionPool::<u32> {
         max_idle: 4,
+        max_idle_total: None,
         idle: Mutex::new(HashMap::new()),
     };
     let origin = |host: &str| -> Origin { (false, host.to_owned(), 80) };
@@ -580,6 +587,198 @@ fn putting_a_connection_back_closes_the_expired_idle_ones_of_every_origin() {
     // take still answers with the newest live connection of its origin.
     pool.put(origin("d"), 6, Time::from_secs(63));
     assert_eq!(pool.take(&origin("d"), Time::from_secs(63)), Some(6));
+}
+
+/// br-asupersync-server-stack-hardening-eeexl1: bound retained sockets across
+/// hosts without changing existing clients' per-origin-only configuration.
+#[test]
+fn bounded_reuse_is_opt_in_and_either_zero_limit_disables_it() {
+    let legacy = Http2Client::new().reuse_connections(2);
+    assert_eq!(legacy.pool.as_ref().unwrap().max_idle_total, None);
+    let bounded = Http2Client::new().reuse_connections_bounded(2, 5);
+    let shared = bounded.clone();
+    let pool = bounded.pool.as_ref().unwrap();
+    assert_eq!(pool.max_idle, 2);
+    assert_eq!(pool.max_idle_total, Some(5));
+    assert!(Arc::ptr_eq(pool, shared.pool.as_ref().unwrap()));
+    for (per_origin, total) in [(0, 0), (0, 5), (2, 0)] {
+        let disabled = bounded.clone().reuse_connections_bounded(per_origin, total);
+        assert!(disabled.pool.is_none());
+        assert_eq!(disabled.close_idle_connections(), 0);
+    }
+    let legacy_again = bounded.reuse_connections(2);
+    assert_eq!(legacy_again.pool.as_ref().unwrap().max_idle_total, None);
+}
+
+#[test]
+fn bounded_pool_retires_oldest_across_origins_without_displacing_full_origins() {
+    let pool = ConnectionPool::<u32> {
+        max_idle: 2,
+        max_idle_total: Some(3),
+        idle: Mutex::new(HashMap::new()),
+    };
+    let origin = |host: &str| -> Origin { (false, host.to_owned(), 80) };
+    pool.put(origin("a"), 1, Time::from_secs(0));
+    pool.put(origin("b"), 2, Time::from_secs(1));
+    pool.put(origin("a"), 3, Time::from_secs(2));
+    pool.put(origin("c"), 4, Time::from_secs(3));
+    // The oldest entry, not the most recently used entry of "a", retires.
+    assert_eq!(
+        pool.idle.lock()[&origin("a")],
+        vec![(Time::from_secs(2), 3)]
+    );
+    pool.put(origin("a"), 5, Time::from_secs(4));
+    assert!(!pool.idle.lock().contains_key(&origin("b")));
+    // "a" is now full. Returning another connection must not evict "c".
+    pool.put(origin("a"), 6, Time::from_secs(5));
+    assert_eq!(pool.take(&origin("c"), Time::from_secs(5)), Some(4));
+    assert_eq!(pool.take(&origin("a"), Time::from_secs(5)), Some(5));
+    assert_eq!(pool.take(&origin("a"), Time::from_secs(5)), Some(3));
+    assert!(pool.idle.lock().is_empty());
+
+    for conn in 0..100 {
+        pool.put(origin(&format!("host-{conn}")), conn, Time::from_secs(6));
+        let idle = pool.idle.lock();
+        assert_eq!(
+            idle.values().map(Vec::len).sum::<usize>(),
+            (conn as usize + 1).min(3)
+        );
+        assert!(idle.values().all(|conns| !conns.is_empty()));
+    }
+}
+
+#[test]
+fn bounded_pool_reclaims_expired_connections_before_evicting_live_ones() {
+    let pool = ConnectionPool::<u32> {
+        max_idle: 2,
+        max_idle_total: Some(2),
+        idle: Mutex::new(HashMap::new()),
+    };
+    let origin = |host: &str| -> Origin { (false, host.to_owned(), 80) };
+    pool.put(origin("expired"), 1, Time::ZERO);
+    pool.put(origin("live"), 2, Time::from_secs(20));
+    pool.put(origin("new"), 3, Time::from_secs(31));
+    assert!(!pool.idle.lock().contains_key(&origin("expired")));
+    assert_eq!(pool.take(&origin("live"), Time::from_secs(31)), Some(2));
+    assert_eq!(pool.take(&origin("new"), Time::from_secs(31)), Some(3));
+}
+
+#[test]
+fn bounded_pool_equal_age_eviction_uses_origin_then_insertion_order() {
+    let pool = ConnectionPool::<u32> {
+        max_idle: 2,
+        max_idle_total: Some(3),
+        idle: Mutex::new(HashMap::new()),
+    };
+    let origin = |host: &str| -> Origin { (false, host.to_owned(), 80) };
+    pool.put(origin("b"), 1, Time::ZERO);
+    pool.put(origin("a"), 2, Time::ZERO);
+    pool.put(origin("a"), 3, Time::ZERO);
+    pool.put(origin("c"), 4, Time::ZERO);
+    assert_eq!(pool.take(&origin("a"), Time::ZERO), Some(3));
+    assert_eq!(pool.take(&origin("a"), Time::ZERO), None);
+    assert_eq!(pool.take(&origin("b"), Time::ZERO), Some(1));
+    assert_eq!(pool.take(&origin("c"), Time::ZERO), Some(4));
+}
+
+#[test]
+fn pool_eviction_rejection_expiry_and_clear_drop_transports_outside_lock() {
+    struct DropProbe {
+        pool: std::sync::Weak<ConnectionPool<Self>>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            if let Some(pool) = self.pool.upgrade() {
+                assert!(
+                    pool.idle.try_lock().is_some(),
+                    "transport destructor ran while the pool was locked"
+                );
+            }
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let pool = Arc::new(ConnectionPool {
+        max_idle: 1,
+        max_idle_total: Some(2),
+        idle: Mutex::new(HashMap::new()),
+    });
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let put = |host: &str, seconds| {
+        pool.put(
+            (false, host.to_owned(), 80),
+            DropProbe {
+                pool: Arc::downgrade(&pool),
+                dropped: Arc::clone(&dropped),
+            },
+            Time::from_secs(seconds),
+        );
+    };
+    put("a", 0);
+    put("b", 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    put("a", 2); // Per-origin rejection.
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    put("c", 3); // Global eviction of "a".
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    put("d", 32); // Expiry of "b" before total-cap eviction.
+    assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(pool.clear(), 2);
+    assert_eq!(dropped.load(Ordering::SeqCst), 5);
+    assert!(pool.idle.lock().is_empty());
+    assert_eq!(pool.clear(), 0);
+}
+
+#[test]
+fn closing_idle_connections_on_a_clone_releases_sockets_but_keeps_checked_out_ones() {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream as StdTcpStream};
+
+    let pair = || {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let conn = Http2Conn {
+            wire: Framed::new(
+                ReadErrorTap {
+                    inner: Http2ClientIo::Plain(TcpStream::from_std(client).unwrap()),
+                    read_error: None,
+                },
+                FrameCodec::new(),
+            ),
+            connection: Connection::client(Settings::client()),
+            overhead_frames: 0,
+            max_overhead_frames: DEFAULT_MAX_OVERHEAD_FRAMES,
+            settings_acked: false,
+        };
+        (conn, peer)
+    };
+    let client = Http2Client::new().reuse_connections_bounded(1, 2);
+    let shared = client.clone();
+    let pool = client.pool.as_ref().unwrap();
+    let active_origin = (false, "active".to_owned(), 80);
+    let idle_origin = (false, "idle".to_owned(), 80);
+    let (active, mut active_peer) = pair();
+    let (idle, mut idle_peer) = pair();
+    pool.put(active_origin.clone(), active, Time::ZERO);
+    pool.put(idle_origin, idle, Time::ZERO);
+    let checked_out = pool.take(&active_origin, Time::ZERO).unwrap();
+
+    assert_eq!(shared.close_idle_connections(), 1);
+    assert_eq!(idle_peer.read(&mut [0]).unwrap(), 0);
+    active_peer.set_nonblocking(true).unwrap();
+    assert_eq!(
+        active_peer.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    active_peer.set_nonblocking(false).unwrap();
+    // Cleanup does not disable reuse: a checked-out connection may return.
+    pool.put(active_origin, checked_out, Time::ZERO);
+    assert_eq!(client.close_idle_connections(), 1);
+    assert_eq!(active_peer.read(&mut [0]).unwrap(), 0);
+    assert_eq!(shared.close_idle_connections(), 0);
 }
 
 struct ScriptedTransport {
