@@ -315,6 +315,7 @@ pub struct Http1StreamingConfig {
     pub unread_body_drain_bytes: u64,
     /// Maximum time spent synchronizing unread request-body EOF.
     pub unread_body_drain_timeout: Duration,
+    preserve_response_on_drain_failure: bool,
     request_body_policy: Option<Http1RequestBodyPolicy>,
     streaming_body_budget: Option<Arc<BodyBudget>>,
 }
@@ -345,6 +346,7 @@ impl From<Http1Config> for Http1StreamingConfig {
             unread_body_drain_frames: 8,
             unread_body_drain_bytes: 512 * 1024,
             unread_body_drain_timeout: Duration::from_millis(500),
+            preserve_response_on_drain_failure: false,
             request_body_policy: None,
             streaming_body_budget: None,
         }
@@ -424,6 +426,30 @@ impl Http1StreamingConfig {
         self.unread_body_drain_frames = frames;
         self.unread_body_drain_bytes = bytes;
         self.unread_body_drain_timeout = timeout;
+        self
+    }
+
+    /// Keep a completed handler's response when draining its unread request
+    /// body exceeds the configured frame, byte, or time allowance.
+    ///
+    /// The connection is always closed after that response: an incomplete
+    /// drain never permits keep-alive reuse. Produced responses retain their
+    /// producer, framing checks, write deadlines, and cancellation policy.
+    /// This lets an early rejection such as `401` reach the client without
+    /// being replaced by a cleanup-only `413` or `408` after the handler ran.
+    ///
+    /// The default is `false`, preserving the historical drain-error response.
+    /// Malformed bodies, body-size admission failures, cancellation, transport
+    /// failures, and force-close remain terminal even when this is enabled.
+    /// A body failure that arrives before the handler completes also retains
+    /// its existing error behavior.
+    ///
+    /// Pass this configuration to [`Http1StreamingServer::with_config`],
+    /// [`Http1StreamingServer::with_config_produced`], or
+    /// [`super::listener::Http1Listener::with_streaming_config`].
+    #[must_use]
+    pub fn preserve_response_on_drain_failure(mut self, preserve: bool) -> Self {
+        self.preserve_response_on_drain_failure = preserve;
         self
     }
 }
@@ -1932,6 +1958,12 @@ struct StreamingRequestExecution {
     request: RequestExecutionConfig,
 }
 
+// The outer None is a closed exchange. An absent writer alongside a completed
+// handler means bounded cleanup failed: the response can be sent, but the
+// connection must close because synchronized request-body EOF is unproven.
+type JoinedStreamingRequest<R> =
+    Result<Option<(R, Option<IncomingRequestBodyWriter>)>, IncomingBodyError>;
+
 enum StreamingRequestOutcome {
     Complete {
         hop: ServerHopOutcome<Response>,
@@ -1943,16 +1975,11 @@ enum StreamingRequestOutcome {
 }
 
 impl StreamingRequestOutcome {
-    fn from_joined(
-        joined: Result<
-            Option<(ServerHopOutcome<Response>, IncomingRequestBodyWriter)>,
-            IncomingBodyError,
-        >,
-    ) -> Self {
+    fn from_joined(joined: JoinedStreamingRequest<ServerHopOutcome<Response>>) -> Self {
         match joined {
             Ok(Some((hop, writer))) => Self::Complete {
                 hop,
-                drain: Some(writer.drain_progress()),
+                drain: writer.as_ref().map(IncomingRequestBodyWriter::drain_progress),
             },
             Ok(None) => Self::Closed,
             Err(error) => Self::BodyFailed(error),
@@ -3240,9 +3267,15 @@ where
         // status before the (unreusable) connection closes, instead of dropping
         // it and returning an I/O error. incoming_body_failure_response maps
         // DrainTimeout to 408 but DrainLimitExceeded to None, so fall back to an
-        // explicit 413 + Connection: close. The produced streaming body is
-        // intentionally not started.
-        if let Err(error) = validate_unread_drain(writer.drain_progress(), &config) {
+        // explicit 413 + Connection: close by default. The opt-in preservation
+        // policy instead starts the completed handler's produced response;
+        // produced responses always close their connection after writing.
+        let drain_error = writer
+            .as_ref()
+            .and_then(|writer| validate_unread_drain(writer.drain_progress(), &config).err());
+        if let Some(error) = drain_error
+            && !preserve_completed_response(&config, &error)
+        {
             record_incoming_body_failure(&error);
             let mut response = incoming_body_failure_response(request_version, &error)
                 .unwrap_or_else(|| {
@@ -4174,7 +4207,7 @@ async fn join_streaming_handler_and_body<H, B, R>(
     body: B,
     config: &Http1StreamingConfig,
     shutdown_signal: Option<&ShutdownSignal>,
-) -> Result<Option<(R, IncomingRequestBodyWriter)>, IncomingBodyError>
+) -> JoinedStreamingRequest<R>
 where
     H: Future<Output = Option<R>>,
     B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>>,
@@ -4205,7 +4238,7 @@ where
             let Some(hop) = handler.await else {
                 return Ok(None);
             };
-            Ok(Some((hop, writer)))
+            Ok(Some((hop, Some(writer))))
         }
         StreamingJoinFirst::Body(Err(error)) => {
             body.take();
@@ -4231,11 +4264,28 @@ where
             else {
                 return Ok(None);
             };
-            let writer = drained.map_err(|_| IncomingBodyError::DrainTimeout)??;
-            Ok(Some((hop, writer)))
+            match drained.unwrap_or(Err(IncomingBodyError::DrainTimeout)) {
+                Ok(writer) => Ok(Some((hop, Some(writer)))),
+                Err(error) if preserve_completed_response(config, &error) => {
+                    record_incoming_body_failure(&error);
+                    // The handler's side effects already happened. Preserve
+                    // its result, but leave EOF unproven so no caller can
+                    // reuse the transport after this bounded drain stopped.
+                    Ok(Some((hop, None)))
+                }
+                Err(error) => Err(error),
+            }
         }
         StreamingJoinFirst::Handler(None) => Ok(None),
     }
+}
+
+fn preserve_completed_response(config: &Http1StreamingConfig, error: &IncomingBodyError) -> bool {
+    config.preserve_response_on_drain_failure
+        && matches!(
+            error,
+            IncomingBodyError::DrainLimitExceeded { .. } | IncomingBodyError::DrainTimeout
+        )
 }
 
 /// Map a rejected request *head* to the HTTP status the server owes the client

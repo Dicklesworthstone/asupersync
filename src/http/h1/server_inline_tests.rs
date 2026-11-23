@@ -95,6 +95,7 @@ struct TestIo {
     written: Arc<Mutex<Vec<u8>>>,
     read_limit: usize,
     read_error: Option<io::ErrorKind>,
+    pending_eof: Option<Arc<AtomicBool>>,
 }
 
 impl TestIo {
@@ -104,6 +105,7 @@ impl TestIo {
             written,
             read_limit: usize::MAX,
             read_error: None,
+            pending_eof: None,
         }
     }
 
@@ -114,6 +116,12 @@ impl TestIo {
 
     fn with_read_error(mut self, kind: io::ErrorKind) -> Self {
         self.read_error = Some(kind);
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_pending_eof(mut self, observed: Arc<AtomicBool>) -> Self {
+        self.pending_eof = Some(observed);
         self
     }
 }
@@ -191,6 +199,10 @@ impl AsyncRead for TestIo {
             return Poll::Ready(Err(io::Error::from(kind)));
         }
         if self.read_data.is_empty() {
+            if let Some(observed) = &self.pending_eof {
+                observed.store(true, Ordering::SeqCst);
+                return Poll::Pending;
+            }
             return Poll::Ready(Ok(()));
         }
         let n = buf
@@ -3350,6 +3362,261 @@ fn streaming_server_closes_when_unread_body_exceeds_drain_limit() {
         "the pipelined request must not be served after a forced close"
     );
     assert_eq!(state.phase, ConnectionPhase::Closing);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug)]
+enum UnreadDrainFailure {
+    ByteLimit,
+    FrameLimit,
+    Timeout,
+    MalformedBody,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UnreadDrainFailure {
+    fn setup(
+        self,
+        written: Arc<Mutex<Vec<u8>>>,
+    ) -> (TestIo, Http1StreamingConfig, Arc<AtomicBool>) {
+        let (request, frames, bytes, timeout): (&[u8], u64, u64, Duration) = match self {
+            Self::ByteLimit => (
+                b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n0123456789GET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                8,
+                4,
+                Duration::from_secs(1),
+            ),
+            Self::FrameLimit => (
+                b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                1,
+                1024,
+                Duration::from_secs(1),
+            ),
+            Self::Timeout => (
+                b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n012",
+                8,
+                1024,
+                Duration::from_millis(5),
+            ),
+            Self::MalformedBody => (
+                b"POST /first HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nz\r\nGET /second HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                8,
+                1024,
+                Duration::from_secs(1),
+            ),
+        };
+        let pending_read = Arc::new(AtomicBool::new(false));
+        let mut io = TestIo::new(request.to_vec(), written);
+        if matches!(self, Self::Timeout) {
+            // No sleeps or self-wakes: the server's registered drain timer
+            // must wake a genuinely parked, incomplete request-body read.
+            io = io.with_pending_eof(Arc::clone(&pending_read));
+        }
+        let config = Http1StreamingConfig::from(localhost_server_config())
+            .unread_body_drain(frames, bytes, timeout);
+        (io, config, pending_read)
+    }
+
+    fn expected_status(self, preserve: bool) -> u16 {
+        match self {
+            Self::MalformedBody => 400,
+            Self::ByteLimit | Self::FrameLimit | Self::Timeout if preserve => 401,
+            Self::Timeout => 408,
+            Self::ByteLimit | Self::FrameLimit => 413,
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn streaming_unread_drain_policy_preserves_completed_response_and_closes() {
+    for failure in [
+        UnreadDrainFailure::ByteLimit,
+        UnreadDrainFailure::FrameLimit,
+        UnreadDrainFailure::Timeout,
+        UnreadDrainFailure::MalformedBody,
+    ] {
+        for preserve in [false, true] {
+            for owned in [false, true] {
+                let case = format!("{failure:?}, preserve={preserve}, owned={owned}");
+                let written = Arc::new(Mutex::new(Vec::new()));
+                let (io, mut config, pending_read) = failure.setup(Arc::clone(&written));
+                // The false cases use the unmodified default configuration.
+                if preserve {
+                    config = config.preserve_response_on_drain_failure(true);
+                }
+                let handler_calls = Arc::new(AtomicUsize::new(0));
+                let observed_calls = Arc::clone(&handler_calls);
+                let server = Http1StreamingServer::with_config(
+                    move |_cx, request| {
+                        observed_calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(request.head.uri, "/first");
+                        async move {
+                            drop(request);
+                            Response::new(401, "Unauthorized", b"authentication required")
+                                .with_header("WWW-Authenticate", "Bearer")
+                                .with_header("Connection", "keep-alive")
+                        }
+                    },
+                    config,
+                );
+                let runtime = RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("build current-thread runtime");
+                let state = runtime
+                    .block_on(async {
+                        let cx = Cx::current().expect("runtime connection context");
+                        if owned {
+                            server.serve_owned(&cx, io).await
+                        } else {
+                            server.serve(&cx, io).await
+                        }
+                    })
+                    .expect(&case);
+
+                let written = written.lock().unwrap().clone();
+                let wire = String::from_utf8_lossy(&written);
+                let status = failure.expected_status(preserve);
+                assert!(
+                    wire.starts_with(&format!("HTTP/1.1 {status} ")),
+                    "{case}: {wire}"
+                );
+                assert_eq!(wire.matches("HTTP/1.1 ").count(), 1, "{case}");
+                assert_eq!(handler_calls.load(Ordering::SeqCst), 1, "{case}");
+                assert_eq!(state.requests_served, 1, "{case}");
+                assert_eq!(state.phase, ConnectionPhase::Closing, "{case}");
+                assert!(
+                    wire.to_ascii_lowercase().contains("\r\nconnection: close\r\n"),
+                    "{case}"
+                );
+                assert!(
+                    !wire.to_ascii_lowercase().contains("connection: keep-alive"),
+                    "{case}"
+                );
+                if status == 401 {
+                    assert!(wire.contains("WWW-Authenticate: Bearer\r\n"), "{case}");
+                    assert_eq!(
+                        response_body_bytes(&written),
+                        b"authentication required",
+                        "{case}"
+                    );
+                } else {
+                    assert!(!wire.contains("authentication required"), "{case}");
+                }
+                if matches!(failure, UnreadDrainFailure::Timeout) {
+                    assert!(
+                        pending_read.load(Ordering::SeqCst),
+                        "{case}: body read never parked"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn produced_unread_drain_policy_preserves_completed_response_and_closes() {
+    for failure in [
+        UnreadDrainFailure::ByteLimit,
+        UnreadDrainFailure::FrameLimit,
+        UnreadDrainFailure::Timeout,
+        UnreadDrainFailure::MalformedBody,
+    ] {
+        for preserve in [false, true] {
+            for owned in [false, true] {
+                let case = format!("{failure:?}, preserve={preserve}, owned={owned}");
+                let written = Arc::new(Mutex::new(Vec::new()));
+                let (io, mut config, pending_read) = failure.setup(Arc::clone(&written));
+                if preserve {
+                    config = config.preserve_response_on_drain_failure(true);
+                }
+                let handler_calls = Arc::new(AtomicUsize::new(0));
+                let producer_calls = Arc::new(AtomicUsize::new(0));
+                let observed_handlers = Arc::clone(&handler_calls);
+                let observed_producers = Arc::clone(&producer_calls);
+                let server = Http1StreamingServer::with_config_produced(
+                    move |_cx, request| {
+                        observed_handlers.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(request.head.uri, "/first");
+                        let producer_calls = Arc::clone(&observed_producers);
+                        async move {
+                            drop(request);
+                            Http1ProducedResponse::chunked(
+                                NonZeroUsize::MIN,
+                                401,
+                                "Unauthorized",
+                                move |producer_cx, mut sender| async move {
+                                    producer_calls.fetch_add(1, Ordering::SeqCst);
+                                    sender
+                                        .send_chunk(&producer_cx, b"authentication required")
+                                        .await?;
+                                    sender.finish(&producer_cx)?;
+                                    Ok(sender)
+                                },
+                            )
+                            .with_header("WWW-Authenticate", "Bearer")
+                            .with_header("Connection", "keep-alive")
+                        }
+                    },
+                    config,
+                );
+                let runtime = RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("build current-thread runtime");
+                let state = runtime
+                    .block_on(async {
+                        let cx = Cx::current().expect("runtime connection context");
+                        if owned {
+                            server.serve_produced_owned(&cx, io).await
+                        } else {
+                            server.serve_produced(&cx, io).await
+                        }
+                    })
+                    .expect(&case);
+
+                let written = written.lock().unwrap().clone();
+                let wire = String::from_utf8_lossy(&written);
+                let status = failure.expected_status(preserve);
+                assert!(
+                    wire.starts_with(&format!("HTTP/1.1 {status} ")),
+                    "{case}: {wire}"
+                );
+                assert_eq!(wire.matches("HTTP/1.1 ").count(), 1, "{case}");
+                assert_eq!(handler_calls.load(Ordering::SeqCst), 1, "{case}");
+                assert_eq!(state.requests_served, 1, "{case}");
+                assert_eq!(state.phase, ConnectionPhase::Closing, "{case}");
+                assert!(
+                    wire.to_ascii_lowercase().contains("\r\nconnection: close\r\n"),
+                    "{case}"
+                );
+                assert!(
+                    !wire.to_ascii_lowercase().contains("connection: keep-alive"),
+                    "{case}"
+                );
+                assert_eq!(
+                    producer_calls.load(Ordering::SeqCst),
+                    usize::from(status == 401),
+                    "{case}"
+                );
+                if status == 401 {
+                    assert!(wire.contains("WWW-Authenticate: Bearer\r\n"), "{case}");
+                    let mut body =
+                        ChunkedEncoder::encode_chunk(b"authentication required").into_vec();
+                    body.extend_from_slice(b"0\r\n\r\n");
+                    assert_eq!(response_body_bytes(&written), body, "{case}");
+                } else {
+                    assert!(!wire.contains("authentication required"), "{case}");
+                }
+                if matches!(failure, UnreadDrainFailure::Timeout) {
+                    assert!(
+                        pending_read.load(Ordering::SeqCst),
+                        "{case}: body read never parked"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
