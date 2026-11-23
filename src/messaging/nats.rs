@@ -234,7 +234,8 @@ pub enum NatsError {
     TlsRequired {
         /// True if the server's INFO frame set `tls_required`.
         server_required: bool,
-        /// True if the client config set `require_tls`.
+        /// True if client policy requires TLS, including a requirement
+        /// preserved from an earlier connection or explicit pool endpoint.
         client_required: bool,
     },
     /// TLS connector construction or handshake failure.
@@ -1742,6 +1743,7 @@ fn build_default_nats_tls_connector() -> Result<TlsConnector, NatsError> {
 struct NatsConnection {
     config: NatsConfig,
     connect_policy: NatsConnectPolicy,
+    server_pool: Option<NatsServerRotation>,
     stream: NatsStream,
     read_buf: NatsReadBuffer,
     state: Arc<SharedState>,
@@ -1939,8 +1941,10 @@ impl NatsConnection {
         cx: &Cx,
         config: NatsConfig,
         connect_policy: NatsConnectPolicy,
+        tls_floor: &mut bool,
     ) -> Result<Self, NatsError> {
         nats_checkpoint(cx)?;
+        *tls_floor |= config.require_tls;
         cx.trace(&format!(
             "nats: connecting to {}:{}",
             config.host, config.port
@@ -1953,6 +1957,7 @@ impl NatsConnection {
         let mut client = Self {
             config,
             connect_policy,
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::with_limit(read_buf_limit),
             state: Arc::new(SharedState::new()),
@@ -1981,16 +1986,20 @@ impl NatsConnection {
         // CONNECT bytes hit the wire.
 
         // br-asupersync-8nx7g9: preserve TLS requirement decision for reconnection
-        let tls_required = info.tls_required || client.config.require_tls;
+        // Keep this outside the connection owner: an unsuccessful attempt can
+        // still establish a TLS requirement for the next explicit endpoint.
+        let client_required = *tls_floor;
+        *tls_floor |= info.tls_required;
+        let tls_required = *tls_floor;
         client.tls_required_on_connect = tls_required;
 
         if tls_required {
             cx.trace(&format!(
                 "nats: TLS required (server={}, client={}); upgrading before CONNECT",
-                info.tls_required, client.config.require_tls
+                info.tls_required, client_required
             ));
             client
-                .upgrade_to_tls(cx, info.tls_required, client.config.require_tls)
+                .upgrade_to_tls(cx, info.tls_required, client_required)
                 .await?;
         }
 
@@ -2314,6 +2323,9 @@ impl NatsConnection {
             // One bound spans TCP and the entire handshake, including replay.
             // Failed attempts consume the existing attempt/backoff budget;
             // a peer withholding INFO must not hold the supervisor forever.
+            if let Some(pool) = &mut self.server_pool {
+                pool.select_next(&mut self.config, &mut self.tls_required_on_connect);
+            }
             let addr = format!("{}:{}", self.config.host, self.config.port);
             let timeout = self.connect_policy.timeout;
             let result = nats_connect_attempt(cx, timeout, async {
@@ -2348,8 +2360,10 @@ impl NatsConnection {
                     let _ = self.stream.shutdown(std::net::Shutdown::Both);
                     self.stream = NatsStream::Closed;
                     self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
-                    if matches!(error, NatsError::Cancelled) {
-                        return Err(NatsError::Cancelled);
+                    if matches!(error, NatsError::Cancelled)
+                        || (self.server_pool.is_some() && pool_error_is_terminal(&error))
+                    {
+                        return Err(error);
                     }
                     cx.trace(&format!(
                         "nats: connection attempt failed during reconnect: {error}"
@@ -2374,16 +2388,16 @@ impl NatsConnection {
         //
         // Fix: Preserve the effective TLS requirement from initial connection, and upgrade
         // instead of aborting when TLS support is available.
-        let tls_required =
-            self.tls_required_on_connect || self.config.require_tls || info.tls_required;
+        let client_required = self.tls_required_on_connect || self.config.require_tls;
+        let tls_required = client_required || info.tls_required;
         self.tls_required_on_connect = tls_required;
         if tls_required {
             cx.trace(&format!(
                 "nats: reconnection TLS requirement preserved from initial connection \
-                 (server_info_claims={}, client_config={}); upgrading before CONNECT replay",
-                info.tls_required, self.config.require_tls
+                 (server_info_claims={}, client_policy={}); upgrading before CONNECT replay",
+                info.tls_required, client_required
             ));
-            self.upgrade_to_tls(cx, info.tls_required, self.config.require_tls)
+            self.upgrade_to_tls(cx, info.tls_required, client_required)
                 .await?;
         }
 
@@ -3595,6 +3609,151 @@ impl Default for NatsKeepalive {
     }
 }
 
+/// Explicit fallback endpoints for [`NatsClient::connect_with_server_pool`].
+///
+/// The primary endpoint is the host/port in [`NatsConfig`]. Fallbacks are
+/// attempted in insertion order, then reconnections rotate through the whole
+/// list starting after the last attempted endpoint. Server-advertised
+/// [`ServerInfo::connect_urls`] are never added to this pool.
+///
+/// Every endpoint uses the same credentials and TLS connector from
+/// [`NatsConfig`]. Adding an endpoint explicitly authorizes sending those
+/// credentials to it. URLs containing credentials are rejected; configure
+/// authentication once on [`NatsConfig`]. A `tls://` fallback additionally
+/// requires TLS. Once any attempted endpoint requires TLS, that requirement
+/// applies to every later attempt, even if the requiring attempt fails.
+#[derive(Clone, Debug, Default)]
+pub struct NatsServerPool {
+    fallbacks: Vec<NatsServerEndpoint>,
+}
+
+impl NatsServerPool {
+    /// Maximum endpoints, including the primary endpoint in [`NatsConfig`].
+    pub const MAX_SERVERS: usize = 32;
+
+    /// Create an empty fallback list, retaining only the primary endpoint.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a `nats://host[:port]` or `tls://host[:port]` fallback.
+    ///
+    /// IPv6 addresses must be bracketed. Credentials, paths, query strings,
+    /// fragments, zero ports, URLs over 1024 bytes, and hosts over 253 bytes
+    /// are rejected. Diagnostics never echo the URL. At most 31 fallbacks
+    /// can be supplied; the primary endpoint occupies the remaining slot.
+    pub fn with_server(mut self, url: &str) -> Result<Self, NatsError> {
+        if self.fallbacks.len() >= Self::MAX_SERVERS - 1 {
+            return Err(NatsError::InvalidUrl(
+                "NATS server pool exceeds 32 endpoints including the primary".to_string(),
+            ));
+        }
+        // Check before parsing, which can otherwise echo a credential-bearing
+        // malformed URL in InvalidUrl. Pool Debug contains addresses only.
+        let invalid = || NatsError::InvalidUrl("invalid NATS fallback endpoint".to_string());
+        if url.len() > 1024 || url.contains('@') {
+            return Err(invalid());
+        }
+        let authority = url
+            .strip_prefix("nats://")
+            .or_else(|| url.strip_prefix("tls://"))
+            .ok_or_else(invalid)?;
+        if authority.is_empty()
+            || authority
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '?' | '#'))
+        {
+            return Err(invalid());
+        }
+        let config = NatsConfig::from_url(url).map_err(|_| invalid())?;
+        if config.host.len() > 253 || config.port == 0 {
+            return Err(invalid());
+        }
+        if let Some(ipv6) = config
+            .host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+        {
+            if ipv6.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(invalid());
+            }
+        } else if config.host.contains([':', '[', ']']) {
+            return Err(invalid());
+        }
+        self.fallbacks.push(NatsServerEndpoint {
+            host: config.host,
+            port: config.port,
+            require_tls: config.require_tls,
+        });
+        Ok(self)
+    }
+
+    /// Number of explicitly configured fallbacks, excluding the primary.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.fallbacks.len()
+    }
+
+    /// Whether the pool has no fallback endpoints.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fallbacks.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NatsServerEndpoint {
+    host: String,
+    port: u16,
+    require_tls: bool,
+}
+
+struct NatsServerRotation {
+    servers: Vec<NatsServerEndpoint>,
+    next: usize,
+}
+
+impl NatsServerRotation {
+    fn new(config: &NatsConfig, pool: NatsServerPool) -> Self {
+        let mut servers = Vec::with_capacity(pool.fallbacks.len() + 1);
+        servers.push(NatsServerEndpoint {
+            host: config.host.clone(),
+            port: config.port,
+            require_tls: config.require_tls,
+        });
+        servers.extend(pool.fallbacks);
+        Self { servers, next: 0 }
+    }
+
+    fn select_next(&mut self, config: &mut NatsConfig, tls_floor: &mut bool) {
+        let server = &self.servers[self.next];
+        config.host.clone_from(&server.host);
+        config.port = server.port;
+        *tls_floor |= server.require_tls;
+        self.next = (self.next + 1) % self.servers.len();
+    }
+}
+
+/// Cancellation, authentication validation and local TLS configuration stop
+/// failover. InvalidAuth also covers missing/invalid server nonces; preserve
+/// that conservative authentication boundary without parsing error strings.
+/// Server refusals, transport/protocol failures and TLS peer failures consume
+/// an attempt and rotate.
+fn pool_error_is_terminal(error: &NatsError) -> bool {
+    matches!(
+        error,
+        NatsError::Cancelled
+            | NatsError::InvalidAuth(_)
+            | NatsError::InvalidUrl(_)
+            | NatsError::TlsRequired { .. }
+            | NatsError::Tls(
+                crate::tls::TlsError::Configuration(_)
+                    | crate::tls::TlsError::FeatureDisabled { .. }
+            )
+    )
+}
+
 /// Connection-attempt policy for [`NatsClient::connect_with_policy`].
 ///
 /// The default preserves [`NatsClient::connect_with_config`]: no additional
@@ -3958,12 +4117,93 @@ impl NatsClient {
         config: NatsConfig,
         policy: NatsConnectPolicy,
     ) -> Result<Self, NatsError> {
+        let mut tls_floor = config.require_tls;
         let connection = nats_connect_attempt(
             cx,
             policy.timeout,
-            NatsConnection::connect_with_policy(cx, config, policy),
+            NatsConnection::connect_with_policy(cx, config, policy, &mut tls_floor),
         )
         .await?;
+        Self::from_connection(cx, connection, policy)
+    }
+
+    /// Connect to the primary endpoint with explicit fallback servers.
+    ///
+    /// Initial establishment tries the primary [`NatsConfig`] host/port, then
+    /// each fallback once in insertion order. Every attempt gets the full
+    /// [`NatsConnectPolicy::with_timeout`] bound. An exhausted initial sweep
+    /// returns the last endpoint's error; cancellation, authentication
+    /// validation errors (including an invalid/missing NKey/JWT nonce), and
+    /// invalid local TLS configuration stop the sweep immediately. Initial
+    /// failover does not depend on [`NatsConfig::auto_reconnect`].
+    ///
+    /// After establishment, reconnect starts at the next endpoint and wraps
+    /// through the configured list. Each attempted endpoint consumes one of
+    /// [`NatsConfig::max_reconnect_attempts`], with the existing backoff between
+    /// attempts. A successful reconnect replays active subscriptions. The
+    /// shared authentication, request limits, and reconnect settings stay
+    /// unchanged. Only the target address and minimum TLS requirement vary.
+    ///
+    /// Credentials are shared with every explicitly listed server; URLs
+    /// advertised by peers never expand that authorization. TLS remains
+    /// required after any attempted server or `tls://` URL requires it,
+    /// including attempts that fail before establishment.
+    ///
+    /// ```no_run
+    /// # async fn connect(cx: &asupersync::Cx) -> Result<(), asupersync::messaging::nats::NatsError> {
+    /// use asupersync::messaging::nats::{
+    ///     NatsClient, NatsConfig, NatsConnectPolicy, NatsServerPool,
+    /// };
+    /// use std::time::Duration;
+    ///
+    /// let config = NatsConfig::from_url("nats://nats-a:4222")?;
+    /// let servers = NatsServerPool::new()
+    ///     .with_server("nats://nats-b:4222")?
+    ///     .with_server("nats://nats-c:4222")?;
+    /// let policy = NatsConnectPolicy::new()
+    ///     .with_timeout(Duration::from_secs(5))
+    ///     .with_connect_confirmation(true);
+    /// let mut client = NatsClient::connect_with_server_pool(cx, config, servers, policy).await?;
+    /// client.close(cx).await
+    /// # }
+    /// ```
+    pub async fn connect_with_server_pool(
+        cx: &Cx,
+        config: NatsConfig,
+        pool: NatsServerPool,
+        policy: NatsConnectPolicy,
+    ) -> Result<Self, NatsError> {
+        nats_checkpoint(cx)?;
+        let mut rotation = NatsServerRotation::new(&config, pool);
+        let mut tls_floor = config.require_tls;
+        let mut last_error = NatsError::NotConnected;
+        for _ in 0..rotation.servers.len() {
+            nats_checkpoint(cx)?;
+            let mut candidate = config.clone();
+            rotation.select_next(&mut candidate, &mut tls_floor);
+            match nats_connect_attempt(
+                cx,
+                policy.timeout,
+                NatsConnection::connect_with_policy(cx, candidate, policy, &mut tls_floor),
+            )
+            .await
+            {
+                Ok(mut connection) => {
+                    connection.server_pool = Some(rotation);
+                    return Self::from_connection(cx, connection, policy);
+                }
+                Err(error) if pool_error_is_terminal(&error) => return Err(error),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+
+    fn from_connection(
+        cx: &Cx,
+        connection: NatsConnection,
+        policy: NatsConnectPolicy,
+    ) -> Result<Self, NatsError> {
         let config = connection.config.clone();
         let state = Arc::clone(&connection.state);
 

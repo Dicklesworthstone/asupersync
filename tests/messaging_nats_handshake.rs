@@ -52,7 +52,7 @@
 
 use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::messaging::nats::{
-    NatsClient, NatsConfig, NatsConnectPolicy, NatsError, NatsKeepalive,
+    NatsClient, NatsConfig, NatsConnectPolicy, NatsError, NatsKeepalive, NatsServerPool,
 };
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -959,6 +959,327 @@ fn closed_by_client(reader: &mut BufReader<std::net::TcpStream>, within: Duratio
             }
         }
     }
+}
+
+#[test]
+fn nats_server_pool_initial_failover_bounds_each_peer_and_ignores_discovery() {
+    let primary = TcpListener::bind("127.0.0.1:0").expect("primary listener");
+    let stalled = TcpListener::bind("127.0.0.1:0").expect("stalled listener");
+    let healthy = TcpListener::bind("127.0.0.1:0").expect("healthy listener");
+    let discovered = TcpListener::bind("127.0.0.1:0").expect("unapproved listener");
+    let primary_addr = primary.local_addr().unwrap();
+    let stalled_addr = stalled.local_addr().unwrap();
+    let healthy_addr = healthy.local_addr().unwrap();
+    let discovered_addr = discovered.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_within(&primary, Duration::from_secs(5)).expect("primary dial");
+        let info = format!(
+            "INFO {{\"server_id\":\"primary\",\"proto\":1,\"max_payload\":1048576,\"connect_urls\":[\"{discovered_addr}\"]}}\r\n"
+        );
+        stream.write_all(info.as_bytes()).expect("primary INFO");
+        let mut reader = BufReader::new(stream);
+        let first_connect = read_nats_line(&mut reader);
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        // The primary disappears before confirming CONNECT.
+        drop(reader);
+
+        let mut stream = accept_within(&stalled, Duration::from_secs(5)).expect("first fallback");
+        stream.write_all(b"INFO {").expect("partial INFO");
+        let stalled_closed = closed_by_client(&mut BufReader::new(stream), Duration::from_secs(5));
+
+        let mut stream = accept_within(&healthy, Duration::from_secs(5)).expect("second fallback");
+        send_info(&mut stream, "healthy-fallback");
+        let mut reader = BufReader::new(stream);
+        let last_connect = read_nats_line(&mut reader);
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        reader
+            .get_mut()
+            .write_all(b"PONG\r\n")
+            .expect("confirm fallback");
+        let healthy_closed = closed_by_client(&mut reader, Duration::from_secs(5));
+        let unapproved_dial = accept_within(&discovered, Duration::from_millis(150)).is_some();
+        (
+            first_connect,
+            last_connect,
+            stalled_closed,
+            healthy_closed,
+            unapproved_dial,
+        )
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{primary_addr}")).unwrap();
+        config.token = Some("explicit-pool-secret".to_string());
+        config.auto_reconnect = false;
+        let pool = NatsServerPool::new()
+            .with_server(&format!("nats://{stalled_addr}"))
+            .unwrap()
+            .with_server(&format!("nats://{healthy_addr}"))
+            .unwrap();
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_millis(500))
+            .with_connect_confirmation(true)
+            .with_keepalive(NatsKeepalive::disabled());
+        let result = async {
+            let mut client = NatsClient::connect_with_server_pool(&cx, config, pool, policy).await?;
+            let server_id = client.server_info().expect("selected server info").server_id;
+            client.close(&cx).await?;
+            Ok::<_, NatsError>(server_id)
+        }
+        .await;
+        let _ = done_tx.send(result);
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (first, last, stalled_closed, healthy_closed, unapproved_dial) =
+        server.join().expect("pool peer");
+    assert_eq!(
+        completed
+            .expect("initial sweep completes")
+            .expect("fallback connects"),
+        "healthy-fallback"
+    );
+    for connect in [first, last] {
+        assert!(connect.starts_with("CONNECT "));
+        assert!(connect.contains("\"auth_token\":\"explicit-pool-secret\""));
+    }
+    assert!(stalled_closed, "timed-out fallback transport stayed open");
+    assert!(healthy_closed, "successful client did not close");
+    assert!(!unapproved_dial, "peer discovery expanded the authorized pool");
+    assert!(drained, "pool runtime did not drain");
+}
+
+#[test]
+fn nats_server_pool_reconnect_rotates_and_replays_queue_subscriptions() {
+    let primary = TcpListener::bind("127.0.0.1:0").expect("primary listener");
+    let fallback = TcpListener::bind("127.0.0.1:0").expect("fallback listener");
+    let primary_addr = primary.local_addr().unwrap();
+    let fallback_addr = fallback.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut subscriptions = Vec::new();
+        for (index, listener) in [&primary, &fallback, &primary].into_iter().enumerate() {
+            let mut stream =
+                accept_within(listener, Duration::from_secs(5)).expect("next pool dial");
+            send_info(&mut stream, "rotating-pool");
+            let mut reader = BufReader::new(stream);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            assert_eq!(read_nats_line(&mut reader), "PING");
+            reader
+                .get_mut()
+                .write_all(b"PONG\r\n")
+                .expect("confirm CONNECT");
+            subscriptions.push(read_nats_line(&mut reader));
+            if index > 0 {
+                let payload = if index == 1 { "fallback" } else { "primary" };
+                let frame = format!("MSG events.pool 1 {}\r\n{payload}\r\n", payload.len());
+                reader
+                    .get_mut()
+                    .write_all(frame.as_bytes())
+                    .expect("post-replay delivery");
+            }
+            if index == 2 {
+                assert!(closed_by_client(&mut reader, Duration::from_secs(5)));
+            }
+            // Drop each earlier connection to force fallback, then wraparound.
+        }
+        subscriptions
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{primary_addr}")).unwrap();
+        config.max_reconnect_attempts = 1;
+        config.reconnect_delay = Duration::ZERO;
+        config.max_reconnect_delay = Duration::ZERO;
+        let pool = NatsServerPool::new()
+            .with_server(&format!("nats://{fallback_addr}"))
+            .unwrap();
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_secs(2))
+            .with_connect_confirmation(true)
+            .with_keepalive(NatsKeepalive::disabled());
+        let result = async {
+            let mut client = NatsClient::connect_with_server_pool(&cx, config, pool, policy).await?;
+            let mut subscription = client
+                .queue_subscribe(&cx, "events.pool", "workers")
+                .await?;
+            let first = subscription.next(&cx).await?.expect("fallback message");
+            let second = subscription.next(&cx).await?.expect("primary message");
+            client.close(&cx).await?;
+            Ok::<_, NatsError>((first.payload, second.payload))
+        }
+        .await;
+        let _ = done_tx.send(result);
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(8));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let subscriptions = server.join().expect("rotation peer");
+    let (first, second) = completed
+        .expect("rotation completes")
+        .expect("reconnected delivery");
+    assert_eq!(first, b"fallback");
+    assert_eq!(second, b"primary");
+    assert_eq!(subscriptions, vec!["SUB events.pool workers 1"; 3]);
+    assert!(drained, "rotation runtime did not drain");
+}
+
+fn assert_server_pool_stops_before_fallback(cancel: bool) {
+    let primary = TcpListener::bind("127.0.0.1:0").expect("primary listener");
+    let fallback = TcpListener::bind("127.0.0.1:0").expect("fallback listener");
+    let primary_addr = primary.local_addr().unwrap();
+    let fallback_addr = fallback.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream = accept_within(&primary, Duration::from_secs(5)).expect("primary dial");
+        if cancel {
+            stream.write_all(b"INFO {").expect("partial INFO");
+        } else {
+            send_info(&mut stream, "invalid-auth");
+        }
+        accepted_tx.send(()).expect("accepted witness");
+        let closed = closed_by_client(&mut BufReader::new(stream), Duration::from_secs(5));
+        let fallback_dial = accept_within(&fallback, Duration::from_millis(150)).is_some();
+        (closed, fallback_dial)
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("runtime");
+    let (owner_tx, owner_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("task context");
+        let owner = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("connection owner");
+        owner_tx.send(owner.cx().clone()).expect("publish owner");
+        let mut config = NatsConfig::from_url(&format!("nats://{primary_addr}")).unwrap();
+        if !cancel {
+            config.user_jwt = Some(String::new());
+        }
+        let pool = NatsServerPool::new()
+            .with_server(&format!("nats://{fallback_addr}"))
+            .unwrap();
+        let policy = NatsConnectPolicy::new().with_timeout(Duration::from_secs(3_600));
+        let result = NatsClient::connect_with_server_pool(owner.cx(), config, pool, policy)
+            .await
+            .map(drop);
+        owner.close().await.expect("connection owner quiescence");
+        let _ = done_tx.send(result);
+    });
+    let owner = owner_rx.recv_timeout(Duration::from_secs(3));
+    let accepted = accepted_rx.recv_timeout(Duration::from_secs(3));
+    if cancel
+        && let Ok(owner) = &owner
+    {
+        owner.cancel_with(
+            asupersync::types::CancelKind::User,
+            Some("cancel initial NATS pool sweep"),
+        );
+    }
+    let completed = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (closed, fallback_dial) = server.join().expect("terminal-error peer");
+    assert!(owner.is_ok(), "connection owner was not created");
+    assert!(accepted.is_ok(), "primary was never reached");
+    let error = completed
+        .expect("pool must stop")
+        .expect_err("terminal failure");
+    if cancel {
+        assert!(matches!(error, NatsError::Cancelled), "{error:?}");
+    } else {
+        assert!(matches!(error, NatsError::InvalidAuth(_)), "{error:?}");
+    }
+    assert!(closed, "failed attempt transport stayed open");
+    assert!(!fallback_dial, "terminal failure attempted another endpoint");
+    assert!(drained, "terminal-error runtime did not drain");
+}
+
+#[test]
+fn nats_server_pool_cancellation_stops_the_initial_sweep() {
+    assert_server_pool_stops_before_fallback(true);
+}
+
+#[test]
+fn nats_server_pool_invalid_auth_stops_the_initial_sweep() {
+    assert_server_pool_stops_before_fallback(false);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn nats_server_pool_failed_tls_handshake_cannot_downgrade_the_next_endpoint() {
+    let primary = TcpListener::bind("127.0.0.1:0").expect("TLS primary listener");
+    let fallback = TcpListener::bind("127.0.0.1:0").expect("plaintext fallback listener");
+    let primary_addr = primary.local_addr().unwrap();
+    let fallback_addr = fallback.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for (index, listener) in [&primary, &fallback].into_iter().enumerate() {
+            let mut stream =
+                accept_within(listener, Duration::from_secs(5)).expect("TLS pool dial");
+            let info = format!(
+                "INFO {{\"server_id\":\"tls-pool\",\"proto\":1,\"tls_required\":{}}}\r\n",
+                index == 0
+            );
+            stream
+                .write_all(info.as_bytes())
+                .expect("TLS requirement INFO");
+            let mut prefix = [0_u8; 5];
+            stream
+                .read_exact(&mut prefix)
+                .expect("TLS ClientHello prefix");
+            assert_eq!(prefix[0], 0x16, "plaintext CONNECT reached a pool endpoint");
+            assert_eq!(prefix[1], 0x03, "expected TLS record version");
+            // Closing without completing TLS fails this attempt. The second
+            // server advertises plaintext, but must still receive only TLS.
+        }
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{primary_addr}")).unwrap();
+        config.token = Some("never-plaintext-pool-secret".to_string());
+        let certificates = asupersync::tls::Certificate::from_pem(include_bytes!(
+            "fixtures/tls/postgres_ca.crt"
+        ))
+        .expect("fixture trust root");
+        config.tls_connector = Some(
+            asupersync::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certificates)
+                .build()
+                .expect("configured TLS connector"),
+        );
+        let pool = NatsServerPool::new()
+            .with_server(&format!("nats://{fallback_addr}"))
+            .unwrap();
+        let policy = NatsConnectPolicy::new().with_timeout(Duration::from_secs(2));
+        let result = NatsClient::connect_with_server_pool(&cx, config, pool, policy)
+            .await
+            .map(drop);
+        let _ = done_tx.send(result);
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    server.join().expect("TLS floor peer");
+    assert!(completed.expect("TLS sweep completes").is_err());
+    assert!(drained, "TLS floor runtime did not drain");
 }
 
 #[derive(Clone, Copy, Debug)]

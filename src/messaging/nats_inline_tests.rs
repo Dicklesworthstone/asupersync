@@ -650,6 +650,79 @@ fn nats_timeout_keeps_request_bounds_and_boundary_semantics_on_owner_clock() {
 }
 
 #[test]
+fn nats_server_pool_bounds_and_redacts_endpoint_configuration() {
+    let empty = NatsServerPool::new();
+    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
+    for url in [
+        "nats://user:password-secret@host:4222",
+        "wrong://token-secret@host",
+        "nats://",
+        "nats://:4222",
+        "nats://host:0",
+        "nats://host/path",
+        "nats://host?secret",
+        "nats://host#secret",
+        "nats://host\r\nCONNECT {}",
+        "nats://::1",
+        "nats://[not-ipv6]:4222",
+    ] {
+        let error = NatsServerPool::new().with_server(url).unwrap_err();
+        assert!(matches!(error, NatsError::InvalidUrl(_)));
+        assert!(!format!("{error:?}").contains("secret"));
+        assert!(!error.to_string().contains(url));
+    }
+    assert!(
+        NatsServerPool::new()
+            .with_server(&format!("nats://{}", "a".repeat(254)))
+            .is_err()
+    );
+    assert!(
+        NatsServerPool::new()
+            .with_server(&format!("nats://{}", "a".repeat(1025)))
+            .is_err()
+    );
+    let mut pool = NatsServerPool::new();
+    for port in 1..NatsServerPool::MAX_SERVERS {
+        pool = pool
+            .with_server(&format!("nats://127.0.0.1:{port}"))
+            .expect("bounded fallback");
+    }
+    assert_eq!(pool.len(), NatsServerPool::MAX_SERVERS - 1);
+    assert!(pool.with_server("nats://127.0.0.1:4222").is_err());
+}
+
+#[test]
+fn nats_server_pool_rotation_preserves_credentials_and_tls_floor() {
+    let mut config = NatsConfig {
+        host: "primary".to_string(),
+        port: 4222,
+        token: Some("shared-secret".to_string()),
+        ..NatsConfig::default()
+    };
+    let pool = NatsServerPool::new()
+        .with_server("tls://[::1]:4333")
+        .expect("IPv6 TLS fallback")
+        .with_server("nats://last:4444")
+        .expect("last fallback");
+    assert!(!format!("{pool:?}").contains("shared-secret"));
+    let mut rotation = NatsServerRotation::new(&config, pool);
+    let mut tls_floor = false;
+    for (host, port, tls_required) in [
+        ("primary", 4222, false),
+        ("[::1]", 4333, true),
+        ("last", 4444, true),
+        ("primary", 4222, true),
+    ] {
+        rotation.select_next(&mut config, &mut tls_floor);
+        assert_eq!(config.host, host);
+        assert_eq!(config.port, port);
+        assert_eq!(tls_floor, tls_required);
+        assert_eq!(config.token.as_deref(), Some("shared-secret"));
+    }
+}
+
+#[test]
 fn nats_connect_policy_defaults_and_zero_timeout_pm29wb() {
     use crate::sync::atomic::AtomicBool;
 
@@ -954,6 +1027,7 @@ fn nats_native_reconnect_timeout_and_backoff_keep_the_explicit_owner_clock() {
             read_buf: NatsReadBuffer::with_limit(config.max_read_buffer),
             config,
             connect_policy: NatsConnectPolicy::new().with_timeout(Duration::from_millis(100)),
+            server_pool: None,
             stream: NatsStream::Closed,
             state: Arc::new(SharedState::new()),
             next_sid: AtomicU64::new(1),
@@ -1337,6 +1411,7 @@ fn subscription_event_fixture(capacity: usize) -> (NatsConnection, Subscription)
     let connection = NatsConnection {
         config: NatsConfig::default(),
         connect_policy: NatsConnectPolicy::default(),
+        server_pool: None,
         stream: NatsStream::Closed,
         read_buf: NatsReadBuffer::new(),
         state: Arc::clone(&state),
@@ -2336,6 +2411,7 @@ fn reconnect_replay_zero_subscriptions_sends_no_sub_commands_jh9g1j() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -2379,6 +2455,7 @@ fn reconnect_replays_existing_subscriptions_sorted_with_queue_groups_jh9g1j() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state,
@@ -2430,6 +2507,7 @@ fn repeated_reconnect_replays_each_subscription_once_per_connection_jh9g1j() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: first_stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -2500,6 +2578,7 @@ fn reconnect_replay_failure_keeps_subscription_state_and_disconnects_jh9g1j() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -3580,6 +3659,7 @@ fn publish_request_with_headers_rejects_oversize_headers_before_wire_write_uu9ay
                 ..Default::default()
             },
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state,
@@ -3646,6 +3726,7 @@ fn unsubscribe_on_disconnected_client_skips_wire_write() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -3704,6 +3785,7 @@ fn received_reply_survives_unsubscribe_cleanup_failure_ne8jdw() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -3755,6 +3837,7 @@ fn ping_on_disconnected_client_skips_wire_write() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -3810,6 +3893,7 @@ fn ping_waits_past_the_pong_of_an_earlier_keepalive_ping_k6pxks() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -3865,6 +3949,7 @@ fn process_ping_write_failure_marks_client_disconnected() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -3945,6 +4030,7 @@ fn request_ping_write_failure_cleans_up_temporary_subscription() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -4090,6 +4176,7 @@ fn parse_hmsg_preserves_header_block_and_payload_72u8k4() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -4211,6 +4298,7 @@ fn parse_hmsg_accepts_nats_status_line_header_block_6xjxd7() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -4503,6 +4591,7 @@ fn handle_pending_messages_propagates_server_error() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -4577,6 +4666,7 @@ fn malformed_server_frame_poisoning_disconnects_client_ne8jdw() {
         let mut client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::new(SharedState::new()),
@@ -4644,6 +4734,7 @@ fn dropping_client_terminates_subscription_receivers_ne8jdw() {
         let client = NatsConnection {
             config: NatsConfig::default(),
             connect_policy: NatsConnectPolicy::default(),
+            server_pool: None,
             stream: stream.into(),
             read_buf: NatsReadBuffer::new(),
             state: Arc::clone(&state),
@@ -4692,7 +4783,8 @@ fn nats_connect_confirmation_counts_confirmation_ping_in_pings_sent() {
         let policy = NatsConnectPolicy::new()
             .with_connect_confirmation(true)
             .with_keepalive(NatsKeepalive::disabled());
-        let conn = NatsConnection::connect_with_policy(&cx, config, policy)
+        let mut tls_floor = false;
+        let conn = NatsConnection::connect_with_policy(&cx, config, policy, &mut tls_floor)
             .await
             .expect("connect with confirmation");
 
