@@ -731,6 +731,105 @@ fn abandoned_write_and_seek_are_not_credited_to_the_next_call() {
     assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
 }
 
+#[derive(Clone, Copy)]
+enum WriteObserver {
+    SyncAll,
+    SyncData,
+    Position,
+    Read,
+}
+
+/// An owned observer must preserve the result of the write it settles, not
+/// only a result that an earlier trait flush already preserved. Queueing the
+/// write behind an occupied pool worker proves the original call was Pending.
+fn check_owned_observer_preserves_write_retry(name: &str, observer: WriteObserver) {
+    let path = scratch_path(name);
+    std::fs::write(&path, b"prior_____tail").expect("write fixture");
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open write fixture");
+    let mut file = File::from_std(std_file);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with one blocking worker");
+    runtime.block_on(async move {
+        assert_eq!(file.seek(SeekFrom::Start(5)).await.expect("seek"), 5);
+        abandon_queued_io(file.write_all(b"hello")).await;
+        let position = match observer {
+            WriteObserver::SyncAll => {
+                file.sync_all().await.expect("sync settles pending write");
+                10
+            }
+            WriteObserver::SyncData => {
+                file.sync_data().await.expect("sync settles pending write");
+                10
+            }
+            WriteObserver::Position => {
+                assert_eq!(file.stream_position().await.expect("observe cursor"), 10);
+                10
+            }
+            WriteObserver::Read => {
+                let (bytes, read) = file.read_into_vec(vec![0; 4]).await.expect("owned read");
+                assert_eq!(read, 4);
+                assert_eq!(bytes, b"tail");
+                14
+            }
+        };
+        assert_eq!(std::fs::read(&path).expect("settled bytes"), b"priorhellotail");
+        assert_eq!(file.stream_position().await.expect("settled cursor"), position);
+
+        assert_eq!(file.write(b"hello").await.expect("retry original write"), 5);
+        file.flush().await.expect("flush retry");
+        assert_eq!(
+            std::fs::read(&path).expect("bytes after retry"),
+            b"priorhellotail",
+            "an observer must not cause the committed write to execute twice"
+        );
+        assert_eq!(file.stream_position().await.expect("retry cursor"), position);
+
+        // The receipt is consumed once. A second identical write really is
+        // new work and must reach the file at the current cursor.
+        file.write_all(b"hello").await.expect("new identical write");
+        file.flush().await.expect("flush new write");
+        let expected: &[u8] = if position == 14 {
+            b"priorhellotailhello"
+        } else {
+            b"priorhellohello"
+        };
+        assert_eq!(std::fs::read(&path).expect("new write bytes"), expected);
+        assert_eq!(file.stream_position().await.expect("new cursor"), position + 5);
+    });
+    let report = runtime.shutdown_drained(Duration::from_secs(5));
+    assert_eq!(report.outcome, asupersync::runtime::RootDrainOutcome::Quiescent);
+    assert_eq!(report.live_tasks, 0);
+    assert_eq!(report.pending_spawns, 0);
+    assert_eq!(report.pending_obligations, 0);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[test]
+fn sync_all_preserves_the_pending_write_it_settles() {
+    check_owned_observer_preserves_write_retry("pending-write-sync-all", WriteObserver::SyncAll);
+}
+
+#[test]
+fn sync_data_preserves_the_pending_write_it_settles() {
+    check_owned_observer_preserves_write_retry("pending-write-sync-data", WriteObserver::SyncData);
+}
+
+#[test]
+fn stream_position_preserves_the_pending_write_it_settles() {
+    check_owned_observer_preserves_write_retry("pending-write-position", WriteObserver::Position);
+}
+
+#[test]
+fn owned_read_preserves_the_pending_write_it_settles() {
+    check_owned_observer_preserves_write_retry("pending-write-owned-read", WriteObserver::Read);
+}
+
 /// Establish the native state behind br-asupersync-pxg07b/e66q35: a queued
 /// write loses its borrowing future, then flush settles its syscall while
 /// preserving the count for a possible retry. The public cursor and file

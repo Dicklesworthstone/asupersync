@@ -429,7 +429,7 @@ impl File {
         spawn_blocking_io(move || op(inner)).await
     }
 
-    async fn with_cursor_inner<R, F>(&mut self, op: F) -> io::Result<R>
+    async fn with_cursor_inner<R, F>(&mut self, retain_write: bool, op: F) -> io::Result<R>
     where
         R: Send + 'static,
         F: FnOnce(Arc<std::fs::File>) -> io::Result<R> + Send + 'static,
@@ -438,7 +438,7 @@ impl File {
         // bytes the caller never consumed; both move the OS cursor past where
         // the caller believes it is. Settle them first so this owned cursor
         // operation observes the caller's cursor.
-        self.settle_trait_pending().await?;
+        self.settle_trait_pending(retain_write).await?;
         let read_ahead = {
             let mut pending = self.pending.lock();
             if let Some(PendingIo::ReadAhead { bytes, consumed }) = pending.as_mut() {
@@ -502,7 +502,7 @@ impl File {
                 bytes,
                 consumed,
             });
-            self.settle_trait_pending().await?;
+            self.settle_trait_pending(retain_write).await?;
             let completed = result.lock().take();
             return completed.unwrap_or_else(|| {
                 Err(io::Error::other(
@@ -668,14 +668,14 @@ impl File {
     /// A started sync may finish after the returned future is dropped. A
     /// poll-trait write still in flight (its future dropped) lands first.
     pub async fn sync_all(&self) -> io::Result<()> {
-        self.settle_trait_pending().await?;
+        self.settle_trait_pending(true).await?;
         self.with_inner(|inner| inner.sync_all()).await
     }
 
     /// This function is similar to `sync_all`, except that it will not sync file metadata.
     /// A started sync may finish after the returned future is dropped.
     pub async fn sync_data(&self) -> io::Result<()> {
-        self.settle_trait_pending().await?;
+        self.settle_trait_pending(true).await?;
         self.with_inner(|inner| inner.sync_data()).await
     }
 
@@ -686,7 +686,7 @@ impl File {
     /// before the resize.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
         self.invalidate_settled_write();
-        self.settle_trait_pending().await?;
+        self.settle_trait_pending(false).await?;
         self.with_inner(move |inner| inner.set_len(size)).await
     }
 
@@ -739,7 +739,7 @@ impl File {
     /// complete. A later cursor operation waits for that completion.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.invalidate_settled_write();
-        self.with_cursor_inner(move |inner| {
+        self.with_cursor_inner(false, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::seek(&mut inner_ref, pos)
         })
@@ -748,7 +748,7 @@ impl File {
 
     /// Gets the current stream position.
     pub async fn stream_position(&mut self) -> io::Result<u64> {
-        self.with_cursor_inner(move |inner| {
+        self.with_cursor_inner(true, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::stream_position(&mut inner_ref)
         })
@@ -761,7 +761,7 @@ impl File {
     /// complete. A later cursor operation waits for that completion.
     pub async fn rewind(&mut self) -> io::Result<()> {
         self.invalidate_settled_write();
-        self.with_cursor_inner(move |inner| {
+        self.with_cursor_inner(false, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             Seek::rewind(&mut inner_ref)
         })
@@ -776,7 +776,7 @@ impl File {
     /// advance may still complete and the owned buffer is discarded. A later
     /// cursor operation waits for that completion before accessing the file.
     pub async fn read_into_vec(&mut self, mut buf: Vec<u8>) -> io::Result<(Vec<u8>, usize)> {
-        self.with_cursor_inner(move |inner| {
+        self.with_cursor_inner(true, move |inner| {
             let mut inner_ref: &std::fs::File = &inner;
             let bytes_read = Read::read(&mut inner_ref, buf.as_mut_slice())?;
             Ok((buf, bytes_read))
@@ -987,13 +987,22 @@ impl File {
 
     /// Settles outstanding syscalls without discarding read-ahead. Internal
     /// rewind futures remain owned by the file if the caller is dropped.
-    async fn settle_trait_pending(&self) -> io::Result<()> {
+    /// Reads, cursor observations, and syncs preserve a completed write for
+    /// its caller's retry, just like interleaved poll-trait reads and flushes.
+    /// Explicit seeks and resizes instead end that retry before changing the
+    /// cursor or extent; they must not revive an old write's credit here.
+    async fn settle_trait_pending(&self, retain_write: bool) -> io::Result<()> {
         let waiter = FileOwnedWaiter::new(Arc::clone(&self.waiters));
         let waker = Waker::from(Arc::clone(&self.waiters));
         std::future::poll_fn(|poll_cx| {
             waiter.register(poll_cx.waker());
             let mut pending = self.pending.lock();
-            Self::settle_foreign_pending(&mut pending, None, &mut Context::from_waker(&waker))
+            let mut settled = retain_write.then(|| self.settled_write.lock());
+            Self::settle_foreign_pending(
+                &mut pending,
+                settled.as_deref_mut(),
+                &mut Context::from_waker(&waker),
+            )
         })
         .await
     }
