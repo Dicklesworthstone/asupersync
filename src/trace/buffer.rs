@@ -390,6 +390,16 @@ impl TraceBufferHandle {
         self.inner.next_seq.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Read-only boundary for lab dispatch attribution. Unlike `next_seq`,
+    /// observing this cursor never allocates an event or changes its order.
+    pub(crate) fn sequence_cursor(&self) -> u64 {
+        self.inner.next_seq.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Pushes a pre-built trace event into the buffer.
     ///
     /// This preserves the event's existing sequence number and advances the

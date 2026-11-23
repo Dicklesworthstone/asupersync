@@ -199,7 +199,7 @@ fn same_obligation_events_are_dependent() {
 }
 
 #[test]
-fn different_obligation_events_are_independent() {
+fn obligations_in_different_regions_are_independent() {
     let a = TraceEvent::obligation_reserve(
         1,
         Time::ZERO,
@@ -211,6 +211,94 @@ fn different_obligation_events_are_independent() {
     let b =
         TraceEvent::obligation_reserve(2, Time::ZERO, oid(2), tid(2), rid(2), ObligationKind::Ack);
     assert!(independent(&a, &b));
+}
+
+fn obligation_quota_events(
+    seq: u64,
+    obligation: ObligationId,
+    task: TaskId,
+    region: RegionId,
+) -> [TraceEvent; 4] {
+    [
+        TraceEvent::obligation_reserve(
+            seq,
+            Time::ZERO,
+            obligation,
+            task,
+            region,
+            ObligationKind::Lease,
+        ),
+        TraceEvent::obligation_commit(
+            seq + 1,
+            Time::ZERO,
+            obligation,
+            task,
+            region,
+            ObligationKind::Lease,
+            1,
+        ),
+        TraceEvent::obligation_abort(
+            seq + 2,
+            Time::ZERO,
+            obligation,
+            task,
+            region,
+            ObligationKind::Lease,
+            1,
+            crate::record::ObligationAbortReason::Explicit,
+        ),
+        TraceEvent::obligation_leak(
+            seq + 3,
+            Time::ZERO,
+            obligation,
+            task,
+            region,
+            ObligationKind::Lease,
+            1,
+        ),
+    ]
+}
+
+#[test]
+fn distinct_obligations_in_one_region_share_quota_dependencies() {
+    let first = obligation_quota_events(1, oid(1), tid(1), rid(1));
+    let same_region = obligation_quota_events(5, oid(2), tid(2), rid(1));
+    let other_region = obligation_quota_events(9, oid(2), tid(2), rid(2));
+    for first in &first {
+        for second in &same_region {
+            assert!(!independent(first, second));
+            assert!(!independent(second, first));
+        }
+        for second in &other_region {
+            assert!(independent(first, second));
+            assert!(independent(second, first));
+        }
+    }
+}
+
+#[test]
+fn obligation_quota_mutations_conflict_with_sibling_task_observations() {
+    // A sibling whose admission was refused has no obligation event of its
+    // own. Its poll/complete still observes the region whose quota changed.
+    let mutations = obligation_quota_events(1, oid(1), tid(1), rid(1));
+    let siblings = [
+        TraceEvent::poll(5, Time::ZERO, tid(2), rid(1)),
+        TraceEvent::complete(6, Time::ZERO, tid(2), rid(1)),
+    ];
+    let unrelated = [
+        TraceEvent::poll(7, Time::ZERO, tid(2), rid(2)),
+        TraceEvent::complete(8, Time::ZERO, tid(2), rid(2)),
+    ];
+    for mutation in &mutations {
+        for sibling in &siblings {
+            assert!(!independent(mutation, sibling));
+            assert!(!independent(sibling, mutation));
+        }
+        for other in &unrelated {
+            assert!(independent(mutation, other));
+            assert!(independent(other, mutation));
+        }
+    }
 }
 
 #[test]
@@ -392,7 +480,7 @@ fn obligation_footprint_has_three_accesses() {
     assert_eq!(fp.len(), 3);
     assert_eq!(fp[0], ResourceAccess::write(Resource::Obligation(oid(5))));
     assert_eq!(fp[1], ResourceAccess::read(Resource::Task(tid(3))));
-    assert_eq!(fp[2], ResourceAccess::read(Resource::Region(rid(2))));
+    assert_eq!(fp[2], ResourceAccess::write(Resource::Region(rid(2))));
 }
 
 // === Conflict function ===

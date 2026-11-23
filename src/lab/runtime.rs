@@ -1423,6 +1423,9 @@ impl ProductionReplayState {
 struct ExactScheduleControl {
     requested: ExactSchedulePrefix,
     decisions: Vec<ExactScheduleDecision>,
+    /// Opt-in dispatch attribution for exact DPOR guidance. The ordinary exact
+    /// explorer neither allocates ranges nor samples the trace cursor.
+    trace_ranges: Option<Vec<std::ops::Range<u64>>>,
     limits: ExactScheduleLimits,
     stopped: Option<ExactScheduleTermination>,
     /// Full-generation heap entries removed by exact cancel dispatches.
@@ -2759,7 +2762,7 @@ impl LabRuntime {
         Ok(())
     }
 
-    // Only ExactScheduleExplorer invokes this after validating nonzero bounds.
+    // The bounded exact lab explorers validate nonzero bounds before entry.
     // Keep the selected dispatch in step_inner so command/timer/I/O preparation
     // is identical to ordinary execution and the forced-schedule recorder.
     pub(crate) fn run_exact_schedule_prefix(
@@ -2767,10 +2770,20 @@ impl LabRuntime {
         prefix: &ExactSchedulePrefix,
         limits: ExactScheduleLimits,
     ) -> ExactScheduleRun {
+        self.run_exact_schedule_prefix_with_trace(prefix, limits, false).0
+    }
+
+    pub(crate) fn run_exact_schedule_prefix_with_trace(
+        &mut self,
+        prefix: &ExactSchedulePrefix,
+        limits: ExactScheduleLimits,
+        capture_trace_ranges: bool,
+    ) -> (ExactScheduleRun, Vec<std::ops::Range<u64>>) {
         let start_steps = self.steps;
         let mut control = ExactScheduleControl {
             requested: prefix.clone(),
             decisions: Vec::new(),
+            trace_ranges: capture_trace_ranges.then(Vec::new),
             limits,
             stopped: None,
             discarded_cancel_copies: Vec::new(),
@@ -2832,6 +2845,12 @@ impl LabRuntime {
                     Ok(dispatched) => dispatched,
                     Err(error) => break ExactScheduleTermination::ReplayRejected(error),
                 };
+                if dispatched
+                    && let Some(ranges) = &mut control.trace_ranges
+                    && let Some(range) = ranges.last_mut()
+                {
+                    range.end = self.state.trace.sequence_cursor();
+                }
                 if let Some(reason) = control.stopped.take() {
                     break reason;
                 }
@@ -2881,14 +2900,16 @@ impl LabRuntime {
             config_hash: forced_schedule_config_hash(&self.config),
             decisions: control.decisions,
         };
-        ExactScheduleRun {
+        let trace_ranges = control.trace_ranges.unwrap_or_default();
+        let run = ExactScheduleRun {
             requested_prefix: control.requested,
             execution,
             termination,
             work_units,
             schedule,
             lab: self.report_with_steps_delta(self.steps.saturating_sub(start_steps)),
-        }
+        };
+        (run, trace_ranges)
     }
 
     /// Starts bounded capture of exact task/worker/lane/step/time dispatches.
@@ -4899,6 +4920,10 @@ impl LabRuntime {
                     control
                         .decisions
                         .push(ExactScheduleDecision { enabled, selected });
+                    if let Some(ranges) = &mut control.trace_ranges {
+                        let cursor = self.state.trace.sequence_cursor();
+                        ranges.push(cursor..cursor);
+                    }
                     (task_id, dispatch.lane, 0)
                 }
                 LabDispatchMode::Normal => {

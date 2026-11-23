@@ -15,7 +15,7 @@
 //! | Resource | Semantics |
 //! |----------|-----------|
 //! | `Task(id)` | Execution state of a single task |
-//! | `Region(id)` | Lifecycle state of a single region |
+//! | `Region(id)` | Lifecycle and obligation quota state of a single region |
 //! | `Obligation(id)` | Resolution state of a single obligation |
 //! | `Timer(id)` | A scheduled timer |
 //! | `IoToken(id)` | An I/O registration |
@@ -40,7 +40,7 @@ use crate::types::{ObligationId, RegionId, TaskId};
 pub enum Resource {
     /// Execution state of a specific task.
     Task(TaskId),
-    /// Lifecycle state of a specific region.
+    /// Lifecycle and obligation quota state of a specific region.
     Region(RegionId),
     /// Resolution state of a specific obligation.
     Obligation(ObligationId),
@@ -153,7 +153,12 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             vec![ResourceAccess::write(Resource::Region(*region))]
         }
 
-        // === Obligation events: write obligation, read task and region ===
+        // === Obligation events: write obligation and region quota, read holder ===
+        // Reservations and terminal settlements change shared region accounting.
+        // Even distinct obligations can compete for the last admission credit,
+        // and a refused admission may leave only the other task's poll/complete
+        // witness. The trace does not carry an unlimited-quota proof, so retain
+        // this dependency conservatively for every region.
         (
             ObligationReserve | ObligationCommit | ObligationAbort | ObligationLeak,
             TraceData::Obligation {
@@ -166,7 +171,7 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             vec![
                 ResourceAccess::write(Resource::Obligation(*obligation)),
                 ResourceAccess::read(Resource::Task(*task)),
-                ResourceAccess::read(Resource::Region(*region)),
+                ResourceAccess::write(Resource::Region(*region)),
             ]
         }
 

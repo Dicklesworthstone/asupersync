@@ -93,6 +93,7 @@ pub mod conformal;
 pub mod crashpack;
 pub mod deadlock_radar;
 pub mod dual_run;
+pub mod exact_dpor;
 pub mod exact_explorer;
 pub mod exploration_budget;
 pub mod explorer;
@@ -168,6 +169,10 @@ pub use dual_run::{
     check_core_invariants, compare_observables, normalize_lab_observable, normalize_lab_report,
     normalize_live_observable, promote_exploration_report, promote_fuzz_finding,
     promote_regression_case, promote_regression_corpus, run_live_adapter,
+};
+pub use exact_dpor::{
+    ExactDporAnalysis, ExactDporBacktrack, ExactDporConfigError, ExactDporExplorer,
+    ExactDporLimits, ExactDporReport, ExactDporRun, ExactDporStatistics, ExactDporTermination,
 };
 pub use exact_explorer::{
     ExactScheduleConfigError, ExactScheduleDecision, ExactScheduleExplorationReport,
