@@ -74,7 +74,7 @@ Outcome-shaped objects, are ordinary data. Select the new API explicitly.
 
 This is fail-fast processing with full cleanup, not all-settled collection,
 rollback, or a partial-success result. It does not undo completed remote writes
-and adds no retries, timer, or authority. Both APIs use the same batch driver
+and adds no retries, deadline timer, or authority. Both APIs use the same batch driver
 and retain the cancellation and resource boundaries below.
 
 ## Parent cancellation and caller-owned deadlines
@@ -103,8 +103,8 @@ into diagnostics: the cancellation message is `fetch batch cancelled by signal`.
 The first same-severity stop reason wins, including races with `batch.cancel()`.
 The observer is detached at settlement; later aborts cannot reclaim delivered
 values. Manual cancellation never aborts the supplied signal. Calls without a
-signal keep their existing host requirements. The batch itself creates no timer;
-the timeout in the example is explicitly owned by the caller.
+signal keep their existing host requirements. The timeout in the example is
+explicitly owned by the caller; the batch adds no deadline of its own.
 
 ## The slot is a lifecycle, not a header count
 
@@ -116,6 +116,14 @@ runtime's 64-request cap progress without admitting all requests at once.
 Existing unrelated work still shares that runtime cap; a scope admission
 refusal stops this batch rather than spinning, retrying, or cancelling other
 work to make room.
+
+When the host provides `setTimeout` and `clearTimeout`, all workers share a
+64-admission budget before yielding through one owned zero-delay timer. This
+lets host cancellation events run even when fetches, consumers, and stream
+sources repeatedly complete immediately. Cancellation clears a pending yield
+and releases its workers before cleanup drains. Host timer throttling can delay
+progress; this is a scheduling boundary, not a deadline. Embedders without both
+timer functions retain the existing timer-free behavior.
 
 Success returns a frozen array in **input order**, not completion order.
 Result payloads use ordinary JavaScript identity and are not deep-frozen.

@@ -78,6 +78,70 @@ function fixture(t, options = {}) {
 test("both streaming exports exist", () => {
   assert.equal(typeof api.streamMapFetches, "function"); assert.equal(typeof api.tryStreamMapFetches, "function");
 });
+for (const typed of [false, true]) test(`eager request and result streams yield to host cancellation (${typed ? "typed" : "untyped"})`, { timeout: 5000 }, async t => {
+  const methods = await load({ setTimeout, clearTimeout });
+  const f = fixture(t), parent = new AbortController(); let produced = 0, sourceCancels = 0, timer;
+  const requests = new ReadableStream({
+    pull(controller) {
+      if (produced < 257) controller.enqueue({ url: `https://example.test/${produced++}` });
+      else controller.close();
+    },
+    cancel() { sourceCancels++; },
+  }, { highWaterMark: 0 });
+  const admitted = (typed ? methods.tryStreamMapFetches : methods.streamMapFetches)(f.scope, requests, ({ index }) => {
+    if (index === 0) timer = setTimeout(() => parent.abort(), 0);
+    return typed ? ok(index) : index;
+  }, { concurrency: 4, signal: parent.signal });
+  assert.equal(admitted.outcome, "ok");
+  const stream = admitted.value, delivered = [];
+  t.after(async () => { clearTimeout(timer); await stream.cancel(); });
+  const consume = (async () => { for await (const item of stream.results) delivered.push(item.index); })();
+  await assert.rejects(consume, error => error.cause?.outcome === "cancelled");
+  assert.equal((await stream.closed).outcome, "cancelled");
+  assert.ok(f.calls.admit.length > 0 && f.calls.admit.length <= 64);
+  assert.equal(f.calls.terminal.length, f.calls.admit.length);
+  assert.equal(sourceCancels, 1);
+  assert.equal(requests.locked, false);
+  assert.ok(delivered.length <= f.calls.admit.length);
+});
+test("delayed request reads cannot carry admission reservations across host turns", { timeout: 5000 }, async t => {
+  const waits = [], f = fixture(t), gate = deferred(); let supplied = 0;
+  const methods = await load({
+    setTimeout(callback) { const timer = { callback, admitted: f.calls.admit.length }; waits.push(timer); return timer; },
+    clearTimeout() {},
+  });
+  const requests = new ReadableStream({
+    async pull(controller) {
+      if (supplied === 61) await gate.promise;
+      if (supplied < 200) controller.enqueue({ url: `https://example.test/${supplied++}` });
+      else controller.close();
+    },
+  }, { highWaterMark: 0 });
+  const admitted = methods.streamMapFetches(f.scope, requests, ({ index }) => index, { concurrency: 4 });
+  assert.equal(admitted.outcome, "ok");
+  const stream = admitted.value;
+  const consume = (async () => { for await (const item of stream.results) assert.ok(item.index < 200); })();
+  void consume.catch(() => {});
+  t.after(async () => { gate.resolve(); await stream.cancel(); await consume.catch(() => {}); });
+  await pending(stream.closed);
+  assert.equal(f.calls.admit.length, 61);
+  // An incorrectly reserved budget may yield while three source reads are
+  // still pending. Fire that turn before releasing them to expose spillover.
+  if (waits.length) waits[0].callback();
+  gate.resolve();
+  await pending(stream.closed);
+  const counts = [0, ...waits.map(timer => timer.admitted)];
+  for (let index = 1; index < counts.length; index++) {
+    assert.ok(counts[index] - counts[index - 1] <= 64,
+      `actual admissions exceeded the shared host-turn budget: ${counts}`);
+  }
+  assert.equal(waits.length, 1, "blocked source reads do not spend admission budget");
+  assert.equal(waits[0].admitted, 64);
+  await stream.cancel();
+  await assert.rejects(consume, error => error.cause?.outcome === "cancelled");
+  assert.equal(f.calls.terminal.length, f.calls.admit.length);
+  assert.equal(requests.locked, false);
+});
 for (const concurrency of [1, 2, 4, 64]) test(`result backpressure bounds admission at concurrency ${concurrency}`, { timeout: 5000 }, async t => {
   const f = fixture(t), stream = f.start(undefined, { concurrency }, concurrency + 5);
   await pending(stream.closed);

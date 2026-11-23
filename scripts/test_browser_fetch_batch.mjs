@@ -96,6 +96,95 @@ test("129 requests progress within four admission slots with ordered exact bodie
   assert.equal(result.outcome, "ok"); assert.deepEqual(Array.from(result.value, v => v[0]), Array.from({ length: 129 }, (_, i) => i));
   assert.equal(f.calls.fetch.length, 129); assert.equal(f.calls.join.length, 129); assert.ok(f.maxActive <= 4); assert.equal(f.maxActive, 4);
 });
+for (const concurrency of [1, 4, 64]) test(`ready fetch batches yield to host cancellation with concurrency ${concurrency}`, { timeout: 5000 }, async t => {
+  const controller = new AbortController();
+  const f = await fixture(t, { globals: { setTimeout, clearTimeout }, fetch: () => new Response(null) });
+  let timer;
+  const batch = f.map(257, item => {
+    if (item.index === 0) timer = setTimeout(() => controller.abort("host turn"), 0);
+    return item.index;
+  }, { concurrency, signal: controller.signal });
+  t.after(() => clearTimeout(timer));
+  const result = await batch.result;
+  assert.equal(result.outcome, "cancelled", "a ready batch must not monopolize the host event loop");
+  assert.equal(result.cancellation.kind, "fetch_batch_cancel");
+  assert.ok(f.calls.fetch.length > 0 && f.calls.fetch.length <= 64, "one shared admission budget bounds all workers");
+  assert.equal(f.calls.join.length, f.calls.fetch.length, "every admitted fetch retires before cancellation settles");
+  assert.ok(f.maxActive <= concurrency);
+});
+test("cancellation releases every worker sharing an unfired host turn and clears its timer", { timeout: 3000 }, async t => {
+  const waits = [], cleared = [];
+  const f = await fixture(t, { fetch: () => new Response(null), globals: {
+    setTimeout(callback, delay) { assert.equal(delay, 0); const timer = { callback }; waits.push(timer); return timer; },
+    clearTimeout(timer) { cleared.push(timer); },
+  } });
+  const batch = f.map(257, ({ index }) => index, { concurrency: 64 });
+  await pending(batch.result);
+  assert.equal(f.calls.fetch.length, 64);
+  assert.equal(waits.length, 1, "workers share one outstanding host turn");
+  assert.equal((await batch.cancel("stop while yielded")).outcome, "cancelled");
+  assert.deepEqual(cleared, waits);
+  waits[0].callback();
+  await turn();
+  assert.equal(f.calls.fetch.length, 64, "an obsolete timer cannot reopen admission");
+  assert.equal(f.calls.join.length, 64);
+});
+test("host scheduling failure fences admission and settles a typed failure after drain", { timeout: 3000 }, async t => {
+  const f = await fixture(t, { fetch: () => new Response(null), globals: {
+    setTimeout() { throw new Error("private scheduler detail"); }, clearTimeout() {},
+  } });
+  const result = await f.map(257, ({ index }) => index, { concurrency: 4 }).result;
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "internal_failure");
+  assert.equal(result.failure.message, "fetch batch host scheduling failed");
+  assert.equal(f.calls.fetch.length, 64);
+  assert.equal(f.calls.join.length, 64);
+});
+test("cancellation reentered by the scheduler clears its late handle and admits no more work", { timeout: 3000 }, async t => {
+  const timer = {}, cleared = []; let batch, cancellation;
+  const f = await fixture(t, { fetch: () => new Response(null), globals: {
+    setTimeout() { cancellation = batch.cancel("scheduler reentry"); return timer; },
+    clearTimeout(value) { cleared.push(value); },
+  } });
+  batch = f.map(257, ({ index }) => index, { concurrency: 4 });
+  assert.equal((await batch.result).outcome, "cancelled");
+  assert.equal((await cancellation).cancellation.message, "scheduler reentry");
+  assert.deepEqual(cleared, [timer]);
+  assert.equal(f.calls.fetch.length, 64);
+  assert.equal(f.calls.join.length, 64);
+});
+test("successful ready batches resume across host turns without reordering or duplicate admission", { timeout: 5000 }, async t => {
+  let scheduled = 0;
+  const f = await fixture(t, { fetch: () => new Response(null), globals: {
+    setTimeout(callback, delay) { scheduled++; return setTimeout(callback, delay); }, clearTimeout,
+  } });
+  const result = await f.map(129, ({ index }) => index, { concurrency: 4 }).result;
+  assert.equal(result.outcome, "ok");
+  assert.deepEqual(Array.from(result.value), Array.from({ length: 129 }, (_, index) => index));
+  assert.equal(scheduled, 2);
+  assert.equal(f.calls.fetch.length, 129);
+  assert.equal(f.calls.join.length, 129);
+});
+test("typed ready batches share the host cancellation budget", { timeout: 5000 }, async t => {
+  const controller = new AbortController(); let timer;
+  const f = await fixture(t, { globals: { setTimeout, clearTimeout }, fetch: () => new Response(null) });
+  const batch = f.tryMapFetches(f.scope, f.requests(257), ({ index }) => {
+    if (index === 0) timer = setTimeout(() => controller.abort(), 0);
+    return ok(index);
+  }, { concurrency: 4, signal: controller.signal }).value;
+  t.after(() => clearTimeout(timer));
+  const result = await batch.result;
+  assert.equal(result.outcome, "cancelled");
+  assert.ok(f.calls.fetch.length > 0 && f.calls.fetch.length <= 64);
+  assert.equal(f.calls.join.length, f.calls.fetch.length);
+});
+test("timer-free embedders keep ready batch support without invoking a partial timer pair", { timeout: 5000 }, async t => {
+  const f = await fixture(t, { globals: { setTimeout() { assert.fail("no complete host timer pair"); } }, fetch: () => new Response(null) });
+  const result = await f.map(129, ({ index }) => index).result;
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.value.length, 129);
+  assert.equal(f.calls.join.length, 129);
+});
 test("consumer completion, not header arrival, controls admission", { timeout: 3000 }, async t => {
   const gates = [deferred(), deferred()], started = [];
   const f = await fixture(t); f.cleanup.push(...gates.map(x => x.resolve));

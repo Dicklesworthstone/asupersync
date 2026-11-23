@@ -133,6 +133,7 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+type AdmissionTurn = ReturnType<typeof deferred<void>> & { timer?: ReturnType<typeof setTimeout> };
 
 const STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const GET_READER = STREAM?.prototype.getReader;
@@ -148,6 +149,9 @@ const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "abo
 const EVENT_TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
 const ADD_LISTENER = EVENT_TARGET?.prototype.addEventListener;
 const REMOVE_LISTENER = EVENT_TARGET?.prototype.removeEventListener;
+const SCHEDULE = typeof setTimeout === "function" ? setTimeout : undefined;
+const UNSCHEDULE = typeof clearTimeout === "function" ? clearTimeout : undefined;
+const ADMISSIONS_PER_HOST_TURN = 64;
 
 interface Member {
   index: number;
@@ -194,13 +198,19 @@ interface Member {
  * inspected or included in diagnostics. The observer is removed at settlement;
  * aborting afterward cannot reclaim returned values or mutate the parent signal.
  * Callers may supply AbortSignal.timeout for deadlines; this function creates
- * no timer. Unsignalled calls retain their existing host requirements.
+ * no deadline timer. Unsignalled calls retain their existing host requirements.
  *
  * The request array is snapshotted; option objects/bodies are read only when
  * admitted and must not be mutated while queued. Unstarted bodies remain with
  * the caller. The caller owns returned values and their memory; only request
  * count, active work and each underlying fetch's buffers are bounded here.
- * No retries, additional runtime task, timer, or fetch authority are created.
+ * Ready requests yield to the host after at most 64 admissions across all
+ * workers, using one owned zero-delay timer when the host supplies a timer pair.
+ * Cancellation clears the wait before draining active work. This permits host
+ * timers, signal delivery and UI events to run even when every fetch and
+ * consumer completes immediately; it is not a wall-clock deadline guarantee.
+ * Minimal timer-free embedders retain microtask-only scheduling. No retries,
+ * additional runtime task, or fetch authority are created.
  */
 export function mapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
   consume: (response: FetchBatchResponse) => T | PromiseLike<T>, options: FetchBatchOptions = {}): Outcome<FetchBatch<T>> {
@@ -455,9 +465,50 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   const results: T[] = delivery ? [] : new Array(inputs.length);
   let next = 0, stopped: Failure | undefined, finished = false;
   let cleanupFailure: { index: number; outcome: Failure } | undefined;
+  let readyAdmissions = 0;
+  let hostTurn: AdmissionTurn | undefined;
   // Recognize only errors created by THIS batch. Reading arbitrary .cause
   // properties would let a consumer forge a cancellation or run a getter.
   const ownedFailures = new WeakMap<object, Failure>();
+
+  function clearHostTurn(): void {
+    const wait = hostTurn;
+    hostTurn = undefined;
+    if (!wait) return;
+    try {
+      if (wait.timer !== undefined) Reflect.apply(UNSCHEDULE!, globalThis, [wait.timer]);
+    } catch {
+      noteCleanup(Infinity, failure("fetch batch host scheduling cleanup failed", "internal_failure"));
+    } finally {
+      // A cleared callback cannot wake its workers. Resolve their shared wait
+      // after stop has fenced admission, so cancellation never waits on a timer.
+      wait.resolve();
+    }
+  }
+  function admissionTurn(): Promise<void> | undefined {
+    if (!SCHEDULE || !UNSCHEDULE) return undefined;
+    if (hostTurn) return hostTurn.promise;
+    if (readyAdmissions < ADMISSIONS_PER_HOST_TURN) { readyAdmissions += 1; return undefined; }
+    const wait: AdmissionTurn = deferred<void>();
+    hostTurn = wait;
+    try {
+      const timer = Reflect.apply(SCHEDULE, globalThis, [() => {
+        if (hostTurn !== wait) return;
+        hostTurn = undefined;
+        readyAdmissions = 0;
+        wait.resolve();
+      }, 0]) as ReturnType<typeof setTimeout>;
+      if (hostTurn === wait) wait.timer = timer;
+      else Reflect.apply(UNSCHEDULE, globalThis, [timer]);
+    } catch {
+      // Keep this a typed batch failure, and release every worker even if a
+      // host scheduler throws or reenters cancellation during installation.
+      noteCleanup(Infinity, failure("fetch batch host scheduling failed", "internal_failure"));
+      if (hostTurn === wait) clearHostTurn();
+      wait.resolve();
+    }
+    return wait.promise;
+  }
 
   function retireRequests(): void {
     if (!requestReader || inputRetirement) return;
@@ -627,6 +678,7 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       return;
     }
     stopped = outcome; // Admission fence precedes every host/user callback.
+    clearHostTurn();
     results.fill(undefined as T);
     delivery?.stop();
     retireRequests();
@@ -660,9 +712,19 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   }
   async function worker(): Promise<void> {
     while (!stopped) {
+      if (requestEof || !requestReader && next >= inputs.length) break;
       let entry = requestReader ? await takeRequest()
         : next < inputs.length ? { index: next, request: inputs[next++] } : undefined;
       if (!entry || stopped) break;
+      // Charge actual admission after asynchronous source reads. Reserving a
+      // turn before the read lets delayed requests spill into a later budget.
+      // Each worker retains at most its own next entry while the host yields.
+      while (!stopped) {
+        const pause = admissionTurn();
+        if (!pause) break;
+        await pause;
+      }
+      if (stopped) break;
       const { index } = entry;
       const member: Member = { index, ready: deferred<void>(), controller: new CONTROLLER!(), ended: false, retiring: false };
       members.add(member);
@@ -765,6 +827,7 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
     // Native EOF does not certify the producer's task/cleanup retirement.
     if (requestOwner) await requestOwner.closed;
     if (inputRetirement) await inputRetirement;
+    clearHostTurn();
     finished = true;
     releaseRequests();
     detachSignal();
