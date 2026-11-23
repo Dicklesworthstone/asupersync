@@ -923,6 +923,30 @@ fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
     )
 }
 
+/// Stage sensitive crate-owned data with private new-file permissions.
+///
+/// Shares the ordinary atomic-write engine and cleanup semantics, while new
+/// files start with mode 0600 on Unix. Existing target permissions are retained.
+pub(crate) async fn stage_write_atomic_private(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> io::Result<StagedAtomicWrite> {
+    let path_ref = path.as_ref();
+    validate_safe_path(path_ref, true)?;
+    let path = path_ref.to_owned();
+    let contents = contents.as_ref().to_owned();
+    spawn_blocking_io(move || {
+        scoped_atomic::stage_with(
+            &path,
+            true,
+            || Ok(()),
+            |file| file.write_all(&contents),
+            OperationProbeHook::default(),
+        )
+    })
+    .await
+}
+
 #[cfg(test)]
 #[path = "path_ops_inline_tests.rs"]
 mod tests;

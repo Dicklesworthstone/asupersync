@@ -83,6 +83,7 @@ pub use file::FileCursorOperationProbe;
 pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
+pub(crate) use path_ops::stage_write_atomic_private;
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub use path_ops::{

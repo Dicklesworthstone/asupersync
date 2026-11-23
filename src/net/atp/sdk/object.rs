@@ -335,6 +335,16 @@ impl ObjectStore for MemoryObjectStore {
 }
 
 /// File system object store implementation.
+///
+/// Payloads and metadata are staged completely before publication, then each
+/// file is replaced atomically. The payload path is the visibility marker;
+/// an orphan metadata sidecar alone is not an object. The two replacements are
+/// not a cross-file crash transaction. A failed directory sync may occur after
+/// its file was replaced, and a started publication can finish after its future
+/// is dropped. Once publication starts, cancellation does not interrupt it.
+///
+/// The store directory must be trusted against concurrent path replacement.
+/// New files are private on Unix; existing file permissions are preserved.
 #[derive(Debug, Clone)]
 pub struct FileSystemObjectStore {
     base_path: PathBuf,
@@ -368,6 +378,32 @@ impl FileSystemObjectStore {
         name.len() == expected_len && name.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
     }
 
+    fn cancellation(cx: &Cx) -> Option<CancelReason> {
+        cx.checkpoint().err().map(|_| {
+            cx.cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled)
+        })
+    }
+
+    fn access_refusal<T>(cx: &Cx) -> Option<AtpOutcome<T>> {
+        if let Some(reason) = Self::cancellation(cx) {
+            Some(AtpOutcome::Cancelled(reason))
+        } else if !cx.capabilities().io {
+            Some(AtpOutcome::Err(AtpError::Disk(DiskError::PermissionDenied)))
+        } else {
+            None
+        }
+    }
+
+    async fn regular_file_metadata(path: &Path) -> Result<Option<crate::fs::Metadata>, AtpError> {
+        match crate::fs::metadata(path).await {
+            Ok(metadata) if metadata.is_file() => Ok(Some(metadata)),
+            Ok(_) => Err(AtpError::Disk(DiskError::CorruptedData)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(AtpError::Disk(DiskError::IoError)),
+        }
+    }
+
     fn current_time_nanos() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()
@@ -381,11 +417,14 @@ impl FileSystemObjectStore {
 impl ObjectStore for FileSystemObjectStore {
     async fn store_object(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         data: Vec<u8>,
         content_type: &str,
         metadata: ObjectMetadata,
     ) -> AtpOutcome<AtpObject> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
         let hash = ObjectHash::from_data(&data);
         let size_bytes = data.len() as u64;
 
@@ -400,6 +439,23 @@ impl ObjectStore for FileSystemObjectStore {
         let object_path = self.object_path(&hash);
         let metadata_path = self.metadata_path(&hash);
 
+        // Serialization and target validation cannot leave a truncated payload
+        // behind. Both files must be regular files or absent before staging.
+        let metadata_json = try_atp!(serde_json::to_vec_pretty(&object), |_| AtpError::Manifest(
+            ManifestError::InvalidFormat
+        ));
+        try_atp!(
+            Self::regular_file_metadata(&object_path).await,
+            std::convert::identity
+        );
+        try_atp!(
+            Self::regular_file_metadata(&metadata_path).await,
+            std::convert::identity
+        );
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
+
         // Create parent directories
         if let Some(parent) = object_path.parent() {
             try_atp!(crate::fs::create_dir_all(parent).await, |_| AtpError::Disk(
@@ -407,33 +463,65 @@ impl ObjectStore for FileSystemObjectStore {
             ));
         }
 
-        // Write object data
-        try_atp!(crate::fs::write(&object_path, &data).await, |_| {
-            AtpError::Disk(DiskError::IoError)
-        });
-
-        // Write object metadata
-        let metadata_json = try_atp!(serde_json::to_vec_pretty(&object), |_| AtpError::Manifest(
-            ManifestError::InvalidFormat
-        ));
-        try_atp!(
-            crate::fs::write(&metadata_path, metadata_json).await,
+        let staged_object = try_atp!(
+            crate::fs::stage_write_atomic_private(&object_path, &data).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
+        let staged_metadata = try_atp!(
+            crate::fs::stage_write_atomic_private(&metadata_path, metadata_json).await,
             |_| AtpError::Disk(DiskError::IoError)
         );
 
-        AtpOutcome::ok(object)
+        // One blocking job owns both commits. Check cancellation when it is
+        // actually claimed, then publish metadata before the payload marker.
+        // A same-hash replacement always has the same payload and size, so the
+        // metadata can also safely precede replacement of an existing object.
+        let publish_cx = cx.clone();
+        match crate::runtime::spawn_blocking_io(move || {
+            if let Some(reason) = Self::cancellation(&publish_cx) {
+                return Ok(Some(reason));
+            }
+            staged_metadata.commit()?;
+            staged_object.commit()?;
+            Ok(None)
+        })
+        .await
+        {
+            Ok(None) => AtpOutcome::ok(object),
+            Ok(Some(reason)) => AtpOutcome::Cancelled(reason),
+            Err(_) => AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+        }
     }
 
-    async fn get_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
+    async fn get_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
         let object_path = self.object_path(hash);
-
-        if !object_path.exists() {
+        if try_atp!(
+            Self::regular_file_metadata(&object_path).await,
+            std::convert::identity
+        )
+        .is_none()
+        {
             return AtpOutcome::ok(None);
         }
-
-        let data = try_atp!(crate::fs::read(&object_path).await, |_| AtpError::Disk(
-            DiskError::IoError
-        ));
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
+        let data = match crate::fs::read(&object_path).await {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return AtpOutcome::ok(None);
+            }
+            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+        };
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
 
         // Verify hash matches
         let computed_hash = ObjectHash::from_data(&data);
@@ -444,45 +532,84 @@ impl ObjectStore for FileSystemObjectStore {
         AtpOutcome::ok(Some(data))
     }
 
-    async fn get_object_info(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
-        let metadata_path = self.metadata_path(hash);
-
-        if !metadata_path.exists() {
-            return AtpOutcome::ok(None);
+    async fn get_object_info(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
         }
-
-        let metadata_json = try_atp!(crate::fs::read(&metadata_path).await, |_| AtpError::Disk(
-            DiskError::IoError
-        ));
+        let object_path = self.object_path(hash);
+        let Some(payload_metadata) = try_atp!(
+            Self::regular_file_metadata(&object_path).await,
+            std::convert::identity
+        ) else {
+            return AtpOutcome::ok(None);
+        };
+        let metadata_path = self.metadata_path(hash);
+        try_atp!(
+            Self::regular_file_metadata(&metadata_path).await,
+            std::convert::identity
+        );
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
+        let metadata_json = match crate::fs::read(&metadata_path).await {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return AtpOutcome::ok(None);
+            }
+            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+        };
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
 
         let object: AtpObject = try_atp!(serde_json::from_slice(&metadata_json), |_| {
             AtpError::Manifest(ManifestError::InvalidFormat)
         });
+        if object.hash != *hash || object.size_bytes != payload_metadata.len() {
+            return AtpOutcome::Err(AtpError::Manifest(ManifestError::HashMismatch));
+        }
 
         AtpOutcome::ok(Some(object))
     }
 
-    async fn has_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+    async fn has_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
         let object_path = self.object_path(hash);
-        AtpOutcome::ok(object_path.exists())
+        let metadata = try_atp!(
+            Self::regular_file_metadata(&object_path).await,
+            std::convert::identity
+        );
+        AtpOutcome::ok(metadata.is_some())
     }
 
-    async fn delete_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+    async fn delete_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
         let object_path = self.object_path(hash);
         let metadata_path = self.metadata_path(hash);
-
-        if !object_path.exists() {
-            return AtpOutcome::ok(false);
+        let removed = match crate::fs::remove_file(&object_path).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+        };
+        // Retrying a partially completed deletion also cleans its orphan
+        // sidecar. Do not checkpoint between removal and cleanup, or hide an
+        // actual cleanup failure behind a successful payload removal.
+        match crate::fs::remove_file(&metadata_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
         }
-
-        // Remove both object data and metadata
-        let _ = crate::fs::remove_file(&object_path).await;
-        let _ = crate::fs::remove_file(&metadata_path).await;
-
-        AtpOutcome::ok(true)
+        AtpOutcome::ok(removed)
     }
 
-    async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
+    async fn list_objects(&self, cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
+        if let Some(refusal) = Self::access_refusal(cx) {
+            return refusal;
+        }
         let mut hashes = Vec::new();
 
         let mut first_level = match crate::fs::read_dir(&self.base_path).await {
@@ -496,6 +623,9 @@ impl ObjectStore for FileSystemObjectStore {
         while let Some(dir1_entry) = try_atp!(first_level.next_entry().await, |_| {
             AtpError::Disk(DiskError::IoError)
         }) {
+            if let Some(refusal) = Self::access_refusal(cx) {
+                return refusal;
+            }
             let Some(dir1) = dir1_entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -517,6 +647,9 @@ impl ObjectStore for FileSystemObjectStore {
             while let Some(dir2_entry) = try_atp!(second_level.next_entry().await, |_| {
                 AtpError::Disk(DiskError::IoError)
             }) {
+                if let Some(refusal) = Self::access_refusal(cx) {
+                    return refusal;
+                }
                 let Some(dir2) = dir2_entry.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
@@ -539,6 +672,9 @@ impl ObjectStore for FileSystemObjectStore {
                 while let Some(object_entry) = try_atp!(object_entries.next_entry().await, |_| {
                     AtpError::Disk(DiskError::IoError)
                 }) {
+                    if let Some(refusal) = Self::access_refusal(cx) {
+                        return refusal;
+                    }
                     let Some(object_name) = object_entry.file_name().to_str().map(str::to_owned)
                     else {
                         continue;
