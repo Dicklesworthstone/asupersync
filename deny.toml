@@ -23,9 +23,7 @@ yanked = "deny"
 unmaintained = "workspace"
 unsound = "all"
 unused-ignored-advisory = "warn"
-ignore = [
-    { id = "RUSTSEC-2025-0134", reason = "Temporary direct-edge exception through 2026-10-01; CopperOak-delegated compatibility review asupersync-release-0411-retention-msh2l1 retains exact PEM selection/errors pending migration under asupersync-mnotoo.4.3." },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.93

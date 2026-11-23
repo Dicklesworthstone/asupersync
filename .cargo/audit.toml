@@ -5,7 +5,7 @@
 # recorded RustSec revision.
 
 [advisories]
-ignore = ["RUSTSEC-2025-0134"]
+ignore = []
 informational_warnings = ["unmaintained", "unsound"]
 severity_threshold = "low"
 
