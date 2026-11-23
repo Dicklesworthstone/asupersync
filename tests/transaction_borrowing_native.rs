@@ -10,8 +10,10 @@ use asupersync::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction}
 use asupersync::database::postgres::{PgConnection, PgError, PgTransaction};
 use asupersync::database::transaction::{
     RetryPolicy, TransactionFuture, TransactionReplaySafety, with_mysql_transaction_borrowed,
-    with_mysql_transaction_retry_borrowed, with_pg_transaction_borrowed,
-    with_pg_transaction_retry_borrowed,
+    with_mysql_transaction_retry_borrowed, with_mysql_transaction_retry_with_state,
+    with_mysql_transaction_with_state, with_pg_transaction_borrowed,
+    with_pg_transaction_retry_borrowed, with_pg_transaction_retry_with_state,
+    with_pg_transaction_with_state,
 };
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
 use asupersync::time::{TimerDriverHandle, VirtualClock};
@@ -284,6 +286,12 @@ fn retry_policy() -> RetryPolicy {
     }
 }
 
+struct BorrowedState<'a> {
+    sql: &'a str,
+    pending: &'a mpsc::Sender<()>,
+    attempts: &'a mut usize,
+}
+
 async fn pg_body(
     tx: &mut PgTransaction<'_>,
     cx: &Cx,
@@ -328,6 +336,30 @@ async fn mysql_body(
     }
 }
 
+async fn pg_state_body(
+    tx: &mut PgTransaction<'_>,
+    cx: &Cx,
+    state: &mut BorrowedState<'_>,
+    case: Case,
+) -> Outcome<u64, PgError> {
+    let result = pg_body(tx, cx, state.sql, state.pending, case).await;
+    // Mutate caller-owned state after the witnessed suspension. This borrow
+    // must remain usable across await and across rollback/retry attempts.
+    *state.attempts += 1;
+    result
+}
+
+async fn mysql_state_body(
+    tx: &mut MySqlTransaction<'_>,
+    cx: &Cx,
+    state: &mut BorrowedState<'_>,
+    case: Case,
+) -> Outcome<u64, MySqlError> {
+    let result = mysql_body(tx, cx, state.sql, state.pending, case).await;
+    *state.attempts += 1;
+    result
+}
+
 #[test]
 fn postgres_lending_callbacks_preserve_transaction_lifecycle() {
     for workers in [1, 2] {
@@ -345,41 +377,38 @@ fn postgres_lending_callbacks_preserve_transaction_lifecycle() {
                 .unwrap();
                 let sql = SQL.to_owned();
                 let mut attempts = 0;
-                // The callback lends both its arguments and independently
-                // captured stack data to its future. Neither the SQL nor the
-                // Pending sender is moved into the callback's async operation.
-                let borrowed_sql = sql.as_str();
-                let borrowed_pending = &pending;
-                let outcome = if case.retries() {
-                    with_pg_transaction_retry_borrowed(
-                        &mut connection,
-                        &cx,
-                        &retry_policy(),
-                        case.replay_safety(),
-                        |tx, tx_cx| {
-                            attempts += 1;
-                            TransactionFuture::new(pg_body(
-                                tx,
-                                tx_cx,
-                                borrowed_sql,
-                                borrowed_pending,
-                                case,
-                            ))
-                        },
-                    )
-                    .await
-                } else {
-                    with_pg_transaction_borrowed(&mut connection, &cx, |tx, tx_cx| {
-                        attempts += 1;
-                        TransactionFuture::new(pg_body(
-                            tx,
-                            tx_cx,
-                            borrowed_sql,
-                            borrowed_pending,
-                            case,
-                        ))
-                    })
-                    .await
+                // SQL, the Pending witness, and the mutable attempt counter
+                // remain caller-owned. Each invocation lends their state
+                // alongside its transaction; nothing is cloned or leaked.
+                let outcome = {
+                    let mut state = BorrowedState {
+                        sql: sql.as_str(),
+                        pending: &pending,
+                        attempts: &mut attempts,
+                    };
+                    if case.retries() {
+                        with_pg_transaction_retry_with_state(
+                            &mut connection,
+                            &cx,
+                            &retry_policy(),
+                            case.replay_safety(),
+                            &mut state,
+                            |tx, tx_cx, state| {
+                                TransactionFuture::new(pg_state_body(tx, tx_cx, state, case))
+                            },
+                        )
+                        .await
+                    } else {
+                        with_pg_transaction_with_state(
+                            &mut connection,
+                            &cx,
+                            &mut state,
+                            |tx, tx_cx, state| {
+                                TransactionFuture::new(pg_state_body(tx, tx_cx, state, case))
+                            },
+                        )
+                        .await
+                    }
                 };
                 assert_eq!(attempts, if case == Case::ReplaySafe { 2 } else { 1 });
                 match case {
@@ -429,38 +458,35 @@ fn mysql_lending_callbacks_preserve_transaction_lifecycle() {
                 .unwrap();
                 let sql = SQL.to_owned();
                 let mut attempts = 0;
-                let borrowed_sql = sql.as_str();
-                let borrowed_pending = &pending;
-                let outcome = if case.retries() {
-                    with_mysql_transaction_retry_borrowed(
-                        &mut connection,
-                        &cx,
-                        &retry_policy(),
-                        case.replay_safety(),
-                        |tx, tx_cx| {
-                            attempts += 1;
-                            TransactionFuture::new(mysql_body(
-                                tx,
-                                tx_cx,
-                                borrowed_sql,
-                                borrowed_pending,
-                                case,
-                            ))
-                        },
-                    )
-                    .await
-                } else {
-                    with_mysql_transaction_borrowed(&mut connection, &cx, |tx, tx_cx| {
-                        attempts += 1;
-                        TransactionFuture::new(mysql_body(
-                            tx,
-                            tx_cx,
-                            borrowed_sql,
-                            borrowed_pending,
-                            case,
-                        ))
-                    })
-                    .await
+                let outcome = {
+                    let mut state = BorrowedState {
+                        sql: sql.as_str(),
+                        pending: &pending,
+                        attempts: &mut attempts,
+                    };
+                    if case.retries() {
+                        with_mysql_transaction_retry_with_state(
+                            &mut connection,
+                            &cx,
+                            &retry_policy(),
+                            case.replay_safety(),
+                            &mut state,
+                            |tx, tx_cx, state| {
+                                TransactionFuture::new(mysql_state_body(tx, tx_cx, state, case))
+                            },
+                        )
+                        .await
+                    } else {
+                        with_mysql_transaction_with_state(
+                            &mut connection,
+                            &cx,
+                            &mut state,
+                            |tx, tx_cx, state| {
+                                TransactionFuture::new(mysql_state_body(tx, tx_cx, state, case))
+                            },
+                        )
+                        .await
+                    }
                 };
                 assert_eq!(attempts, if case == Case::ReplaySafe { 2 } else { 1 });
                 match case {
@@ -489,6 +515,138 @@ fn mysql_lending_callbacks_preserve_transaction_lifecycle() {
                 runtime.shutdown_drained(DEADLINE).outcome,
                 RootDrainOutcome::Quiescent
             );
+        }
+    }
+}
+
+fn pg_owned_body<'a>(
+    tx: &'a mut PgTransaction<'_>,
+    cx: &'a Cx,
+    pending: mpsc::Sender<()>,
+    case: Case,
+) -> TransactionFuture<'static, 'a, u64, PgError> {
+    TransactionFuture::new(async move { pg_body(tx, cx, SQL, &pending, case).await })
+}
+
+fn mysql_owned_body<'a>(
+    tx: &'a mut MySqlTransaction<'_>,
+    cx: &'a Cx,
+    pending: mpsc::Sender<()>,
+    case: Case,
+) -> TransactionFuture<'static, 'a, u64, MySqlError> {
+    TransactionFuture::new(async move { mysql_body(tx, cx, SQL, &pending, case).await })
+}
+
+#[test]
+fn existing_lending_apis_preserve_owned_callback_captures() {
+    for workers in [1, 2] {
+        for backend in [Backend::Postgres, Backend::MySql] {
+            for case in [Case::Commit, Case::ReplayUnsafe] {
+                let (address, pending, server) = peer(backend, case);
+                let runtime = runtime(workers);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let task = runtime.handle().spawn(async move {
+                    // Existing callbacks can own their captured witness and
+                    // borrow the transaction/context. The state-taking tests
+                    // above additionally borrow the caller's stack data.
+                    match backend {
+                        Backend::Postgres => {
+                            let mut connection = PgConnection::connect(
+                                &cx,
+                                &format!("postgres://test@{address}/test?sslmode=disable"),
+                            )
+                            .await
+                            .unwrap();
+                            let outcome = if case.retries() {
+                                let mut pending = Some(pending);
+                                with_pg_transaction_retry_borrowed(
+                                    &mut connection,
+                                    &cx,
+                                    &retry_policy(),
+                                    TransactionReplaySafety::ReplayUnsafe,
+                                    move |tx, tx_cx| {
+                                        pg_owned_body(
+                                            tx,
+                                            tx_cx,
+                                            pending.take().expect("ReplayUnsafe cannot replay"),
+                                            case,
+                                        )
+                                    },
+                                )
+                                .await
+                            } else {
+                                with_pg_transaction_borrowed(
+                                    &mut connection,
+                                    &cx,
+                                    move |tx, tx_cx| pg_owned_body(tx, tx_cx, pending, case),
+                                )
+                                .await
+                            };
+                            if case == Case::Commit {
+                                assert_eq!(outcome.unwrap(), 1 + u64::try_from(SQL.len()).unwrap());
+                            } else {
+                                assert!(matches!(outcome,
+                                    Outcome::Err(error) if error.is_serialization_failure()));
+                            }
+                            assert_eq!(
+                                connection.execute_unchecked(&cx, REUSE_SQL).await.unwrap(),
+                                1
+                            );
+                            connection.close().await.unwrap();
+                        }
+                        Backend::MySql => {
+                            let mut connection = MySqlConnection::connect(
+                                &cx,
+                                &format!("mysql://test:test@{address}/test?sslmode=disabled"),
+                            )
+                            .await
+                            .unwrap();
+                            let outcome = if case.retries() {
+                                let mut pending = Some(pending);
+                                with_mysql_transaction_retry_borrowed(
+                                    &mut connection,
+                                    &cx,
+                                    &retry_policy(),
+                                    TransactionReplaySafety::ReplayUnsafe,
+                                    move |tx, tx_cx| {
+                                        mysql_owned_body(
+                                            tx,
+                                            tx_cx,
+                                            pending.take().expect("ReplayUnsafe cannot replay"),
+                                            case,
+                                        )
+                                    },
+                                )
+                                .await
+                            } else {
+                                with_mysql_transaction_borrowed(
+                                    &mut connection,
+                                    &cx,
+                                    move |tx, tx_cx| mysql_owned_body(tx, tx_cx, pending, case),
+                                )
+                                .await
+                            };
+                            if case == Case::Commit {
+                                assert_eq!(outcome.unwrap(), 1 + u64::try_from(SQL.len()).unwrap());
+                            } else {
+                                assert!(matches!(outcome,
+                                    Outcome::Err(error) if error.is_deadlock()));
+                            }
+                            assert_eq!(
+                                connection.execute_static_sql(&cx, REUSE_SQL).await.unwrap(),
+                                1
+                            );
+                            connection.close().await.unwrap();
+                        }
+                    }
+                });
+                runtime.block_on(task);
+                server.join().unwrap();
+                assert_eq!(
+                    runtime.shutdown_drained(DEADLINE).outcome,
+                    RootDrainOutcome::Quiescent
+                );
+            }
         }
     }
 }
@@ -571,9 +729,12 @@ fn separate_request_cancellation_wakes_parked_transaction_backoff() {
                     max_delay: RETRY_BACKOFF,
                 };
                 let sql = SQL.to_owned();
-                let borrowed_sql = sql.as_str();
-                let borrowed_pending = &pending;
                 let mut attempts = 0;
+                let mut state = BorrowedState {
+                    sql: sql.as_str(),
+                    pending: &pending,
+                    attempts: &mut attempts,
+                };
                 match backend {
                     Backend::Postgres => {
                         let mut connection = PgConnection::connect(
@@ -582,18 +743,17 @@ fn separate_request_cancellation_wakes_parked_transaction_backoff() {
                         )
                         .await
                         .unwrap();
-                        let retry = with_pg_transaction_retry_borrowed(
+                        let retry = with_pg_transaction_retry_with_state(
                             &mut connection,
                             &request_cx,
                             &policy,
                             TransactionReplaySafety::ReplaySafe,
-                            |tx, cx| {
-                                attempts += 1;
-                                TransactionFuture::new(pg_body(
+                            &mut state,
+                            |tx, cx, state| {
+                                TransactionFuture::new(pg_state_body(
                                     tx,
                                     cx,
-                                    borrowed_sql,
-                                    borrowed_pending,
+                                    state,
                                     Case::ReplaySafe,
                                 ))
                             },
@@ -617,18 +777,17 @@ fn separate_request_cancellation_wakes_parked_transaction_backoff() {
                         )
                         .await
                         .unwrap();
-                        let retry = with_mysql_transaction_retry_borrowed(
+                        let retry = with_mysql_transaction_retry_with_state(
                             &mut connection,
                             &request_cx,
                             &policy,
                             TransactionReplaySafety::ReplaySafe,
-                            |tx, cx| {
-                                attempts += 1;
-                                TransactionFuture::new(mysql_body(
+                            &mut state,
+                            |tx, cx, state| {
+                                TransactionFuture::new(mysql_state_body(
                                     tx,
                                     cx,
-                                    borrowed_sql,
-                                    borrowed_pending,
+                                    state,
                                     Case::ReplaySafe,
                                 ))
                             },
