@@ -96,6 +96,7 @@ pub use cache::{
 pub use daemon_control::{
     DaemonControlCapability, DaemonControlResult, DaemonProcessInfo, DaemonState,
     SecureDaemonController, create_atp_daemon_controller,
+    create_atp_daemon_controller_with_executable,
 };
 pub use diagnostics::{
     ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA, ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA,
@@ -170,4 +171,7 @@ pub use transfer_brain::{
     ChunkId, DecisionFactors, ResourceUsage, ScheduledChunk, SchedulingDecision, SchedulingState,
     SystemPressure, TransferBrain, TransferBrainConfig, TransferMetrics, TransferPriority,
 };
-pub use upgrade_integration::{UpgradeDaemonController, create_upgrade_daemon_controller};
+pub use upgrade_integration::{
+    UpgradeDaemonController, create_upgrade_daemon_controller,
+    create_upgrade_daemon_controller_with_executable,
+};

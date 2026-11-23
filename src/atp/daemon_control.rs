@@ -7,9 +7,16 @@
 //!
 //! - All daemon operations require explicit capability authorization
 //! - Process control uses safe, non-privileged system interfaces
-//! - Signal handling follows secure patterns to prevent TOCTOU attacks
+//! - Owned children retain their OS handle until reaped
+//! - Externally discovered PIDs require a fresh executable identity check
 //! - State validation prevents privilege escalation through daemon manipulation
 //! - Audit logging for all control operations
+//!
+//! External PID files are discovery hints, not process handles. Executable and
+//! start-time checks reject stale targets and different executables, but cannot
+//! eliminate a PID-reuse race between inspection and signaling on every platform.
+//! A PID file must still be protected from replacement by another process using
+//! the same daemon executable.
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
@@ -115,6 +122,9 @@ pub struct SecureDaemonController {
     daemon_path: PathBuf,
     /// Path to daemon configuration.
     config_path: PathBuf,
+    /// Caller-selected configuration directory, also used for the PID claim
+    /// and child working directory when the configuration file is a symlink.
+    config_dir: PathBuf,
     /// Path to daemon PID file.
     pid_file: PathBuf,
     /// Process system interface.
@@ -161,8 +171,22 @@ impl SecureDaemonController {
             )));
         }
 
-        // The child runs beside its configuration. Resolve these paths before
-        // changing its working directory, including callers' relative paths.
+        // Resolve the caller's directory independently from the configuration
+        // target. A symlinked config must not relocate the daemon's PID claim
+        // or its working directory to the shared target's directory.
+        let config_dir = fs::canonicalize(
+            config_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new(".")),
+        )
+        .map_err(|e| {
+            Error::new(ErrorKind::ConfigError)
+                .with_message(format!("Cannot resolve configuration directory: {e}"))
+        })?;
+
+        // The child runs beside the caller's configuration. Resolve these
+        // paths before changing its working directory.
         let daemon_path = fs::canonicalize(&daemon_path).map_err(|e| {
             Error::new(ErrorKind::ConfigError)
                 .with_message(format!("Cannot resolve daemon executable: {e}"))
@@ -172,13 +196,7 @@ impl SecureDaemonController {
                 .with_message(format!("Cannot resolve daemon configuration: {e}"))
         })?;
 
-        let pid_file = config_path
-            .parent()
-            .ok_or_else(|| {
-                Error::new(ErrorKind::ConfigError)
-                    .with_message("Invalid config path: no parent directory")
-            })?
-            .join("daemon.pid");
+        let pid_file = config_dir.join("daemon.pid");
 
         let system = System::new_all().map_err(|e| {
             Error::new(ErrorKind::Internal)
@@ -190,6 +208,7 @@ impl SecureDaemonController {
             capabilities,
             daemon_path,
             config_path,
+            config_dir,
             pid_file,
             system,
             #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
@@ -204,6 +223,25 @@ impl SecureDaemonController {
     /// # Security
     /// Requires Status capability.
     pub fn status(&mut self, cx: &Cx) -> Result<DaemonProcessInfo, Error> {
+        self.status_with_policy(cx, false)
+    }
+
+    /// Checks daemon status without treating an inconclusive PID claim or
+    /// executable lookup as a stopped daemon.
+    ///
+    /// A missing PID file or an exited process is stopped. An unreadable or
+    /// malformed claim, or a live external process whose executable cannot be
+    /// identified, returns an error. A process with an identifiable different
+    /// executable is not this daemon. Owned children remain authoritative even
+    /// when optional system metadata is unavailable.
+    ///
+    /// # Security
+    /// Requires Status capability, like [`Self::status`].
+    pub fn status_strict(&mut self, cx: &Cx) -> Result<DaemonProcessInfo, Error> {
+        self.status_with_policy(cx, true)
+    }
+
+    fn status_with_policy(&mut self, cx: &Cx, strict: bool) -> Result<DaemonProcessInfo, Error> {
         self.require_capability(DaemonControlCapability::Status)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::Status)?;
 
@@ -213,13 +251,25 @@ impl SecureDaemonController {
         // Refresh system information
         self.system.refresh_processes(ProcessesToUpdate::All, true);
 
-        // Check PID file first
-        let pid = self.read_pid_file().ok();
+        // Prefer the owned process handle over the replaceable PID file.
+        let owned_pid = self.owned_pid();
+        let pid = match owned_pid {
+            Some(pid) => Some(pid),
+            None if strict => self.read_pid_claim()?,
+            None => self.read_pid_claim().ok().flatten(),
+        };
 
         if let Some(pid) = pid {
             // Verify process is still running and is our daemon
             if let Some(process) = self.system.process(Pid::from_u32(pid)) {
-                if self.is_our_daemon_process(process) {
+                let is_daemon = if owned_pid == Some(pid) {
+                    true
+                } else if strict {
+                    self.process_matches_daemon(process)?
+                } else {
+                    self.is_our_daemon_process(process)
+                };
+                if is_daemon {
                     return Ok(DaemonProcessInfo {
                         pid: Some(pid),
                         command: process
@@ -243,6 +293,19 @@ impl SecureDaemonController {
                     });
                 }
             }
+            if owned_pid == Some(pid) {
+                // The owned child handle proves liveness until try_wait reaps
+                // it. A missing sysinfo snapshot must not report it stopped.
+                return Ok(DaemonProcessInfo {
+                    pid: Some(pid),
+                    command: self.daemon_path.display().to_string(),
+                    working_dir: self.config_dir.clone(),
+                    user: "unknown".to_owned(),
+                    cpu_usage: 0.0,
+                    memory_usage: 0,
+                    start_time: None,
+                });
+            }
         }
 
         // The daemon owns its PID claim. A read-only status probe must not
@@ -251,10 +314,7 @@ impl SecureDaemonController {
         Ok(DaemonProcessInfo {
             pid: None,
             command: "Not running".to_string(),
-            working_dir: self
-                .config_path
-                .parent()
-                .map_or_else(platform_fallback_work_dir, Path::to_path_buf),
+            working_dir: self.config_dir.clone(),
             user: "none".to_string(),
             cpu_usage: 0.0,
             memory_usage: 0,
@@ -276,6 +336,10 @@ impl SecureDaemonController {
     pub fn start(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         self.require_capability(DaemonControlCapability::Start)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::Start)?;
+        self.start_authorized(cx)
+    }
+
+    fn start_authorized(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         cx.checkpoint()?;
 
         #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
@@ -328,11 +392,7 @@ impl SecureDaemonController {
             .stdin(crate::process::Stdio::Null);
 
         // SECURITY: Drop all unnecessary privileges and use safe working directory
-        let safe_work_dir = self
-            .config_path
-            .parent()
-            .map_or_else(platform_fallback_work_dir, Path::to_path_buf);
-        cmd.current_dir(&safe_work_dir);
+        cmd.current_dir(&self.config_dir);
 
         let child = match cmd.spawn() {
             Ok(child) => child,
@@ -404,66 +464,124 @@ impl SecureDaemonController {
     pub fn stop(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         self.require_capability(DaemonControlCapability::Stop)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::Stop)?;
+        cx.checkpoint()?;
+        self.stop_process(DaemonControlCapability::Stop, Signal::Term, false)
+    }
 
+    /// Stops the daemon after strict discovery of one process instance.
+    ///
+    /// Unlike [`Self::stop`], an unreadable or malformed PID claim, or an
+    /// unobservable external executable, is an error rather than evidence of
+    /// a stopped daemon. The discovered PID and start time are checked again
+    /// before signaling; a later PID-file replacement cannot redirect the
+    /// operation. Owned children are controlled through their retained handle.
+    ///
+    /// # Security
+    /// Requires Stop capability. Status capability is not additionally required.
+    pub fn stop_strict(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
+        self.require_capability(DaemonControlCapability::Stop)?;
+        self.validate_operation_authorized(cx, DaemonControlCapability::Stop)?;
+        cx.checkpoint()?;
+        self.stop_process(DaemonControlCapability::Stop, Signal::Term, true)
+    }
+
+    fn stop_process(
+        &mut self,
+        operation: DaemonControlCapability,
+        signal: Signal,
+        strict: bool,
+    ) -> Result<DaemonControlResult, Error> {
         let start_time = Instant::now();
-        let previous_state = self.get_daemon_state();
+        let (previous_state, pid, expected_start_time) = if strict {
+            let (previous_state, target) = self.strict_stop_target()?;
+            let Some(target) = target else {
+                return Ok(DaemonControlResult::Success {
+                    previous_state,
+                    new_state: DaemonState::Stopped,
+                    duration: start_time.elapsed(),
+                });
+            };
+            (previous_state, target.pid, target.start_time)
+        } else {
+            let owned_at_entry = self.owned_pid();
+            let previous_state = self.get_daemon_state();
 
-        // Check if daemon is already stopped
-        if previous_state == DaemonState::Stopped {
-            return Ok(DaemonControlResult::Success {
-                previous_state,
-                new_state: DaemonState::Stopped,
-                duration: start_time.elapsed(),
-            });
-        }
+            if (owned_at_entry.is_some() && self.owned_pid().is_none())
+                || (matches!(signal, Signal::Term) && previous_state == DaemonState::Stopped)
+            {
+                // A child reaped during the state check was the operation's
+                // target. Do not fall through to a replacement PID claim.
+                return Ok(DaemonControlResult::Success {
+                    previous_state,
+                    new_state: DaemonState::Stopped,
+                    duration: start_time.elapsed(),
+                });
+            }
 
-        // Get current PID
-        let pid = match self.read_pid_file() {
-            Ok(pid) => pid,
-            Err(_) => {
+            // The owned handle remains authoritative if the PID file is
+            // removed or replaced. Never redirect an in-progress control
+            // operation to a newly published PID.
+            let pid = match self.owned_pid().map_or_else(|| self.read_pid_file(), Ok) {
+                Ok(pid) => pid,
+                Err(error) => {
+                    return Ok(DaemonControlResult::Failed {
+                        operation,
+                        error: format!("Cannot identify the daemon to stop: {error}"),
+                        current_state: previous_state,
+                    });
+                }
+            };
+            (previous_state, pid, None)
+        };
+
+        let target = match self.send_signal_to_process(pid, signal, expected_start_time) {
+            Ok(target) => target,
+            Err(error) => {
                 return Ok(DaemonControlResult::Failed {
-                    operation: DaemonControlCapability::Stop,
-                    error: "No PID file found - daemon may already be stopped".to_string(),
-                    current_state: DaemonState::Stopped,
+                    operation,
+                    error: format!("Failed to signal daemon: {error}"),
+                    current_state: self.get_daemon_state(),
                 });
             }
         };
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        if self.owned_pid() == Some(pid) {
+            self.child_state = DaemonState::Stopping;
+        }
 
-        // Send SIGTERM for graceful shutdown
-        let stop_result = self.send_signal_to_process(pid, Signal::Term);
-
-        match stop_result {
-            Ok(()) => {
-                // Wait for graceful shutdown with timeout
-                let shutdown_timeout = Duration::from_secs(10);
-                let shutdown_start = Instant::now();
-
-                while shutdown_start.elapsed() < shutdown_timeout {
-                    if self.get_daemon_state() == DaemonState::Stopped {
-                        // Clean up PID file
-                        let _ = fs::remove_file(&self.pid_file);
-
-                        return Ok(DaemonControlResult::Success {
-                            previous_state,
-                            new_state: DaemonState::Stopped,
-                            duration: start_time.elapsed(),
-                        });
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
+        let timeout = match signal {
+            Signal::Term => Duration::from_secs(10),
+            Signal::Kill => Duration::from_secs(5),
+        };
+        let signalled_at = Instant::now();
+        loop {
+            match self.target_has_exited(target) {
+                Ok(true) => {
+                    // Only the daemon removes its own PID claim. In
+                    // particular, do not unlink a successor's claim here.
+                    return Ok(DaemonControlResult::Success {
+                        previous_state,
+                        new_state: DaemonState::Stopped,
+                        duration: start_time.elapsed(),
+                    });
                 }
-
-                // Graceful shutdown timed out
-                Ok(DaemonControlResult::Failed {
-                    operation: DaemonControlCapability::Stop,
-                    error: "Daemon did not shut down gracefully within timeout".to_string(),
-                    current_state: self.get_daemon_state(),
-                })
+                Ok(false) => {}
+                Err(error) => {
+                    return Ok(DaemonControlResult::Failed {
+                        operation,
+                        error: format!("Cannot confirm daemon exit: {error}"),
+                        current_state: DaemonState::Unknown,
+                    });
+                }
             }
-            Err(e) => Ok(DaemonControlResult::Failed {
-                operation: DaemonControlCapability::Stop,
-                error: format!("Failed to send stop signal: {}", e),
-                current_state: self.get_daemon_state(),
-            }),
+            if signalled_at.elapsed() >= timeout {
+                return Ok(DaemonControlResult::Failed {
+                    operation,
+                    error: format!("Daemon did not exit within {timeout:?} after {signal:?}"),
+                    current_state: DaemonState::Stopping,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -471,42 +589,14 @@ impl SecureDaemonController {
     ///
     /// # Security
     /// Requires ForceKill capability. Should only be used when graceful stop fails.
+    /// Success requires confirmed process exit; a sent signal alone is not
+    /// reported as `Stopped`. An abrupt exit can leave the daemon's stale PID
+    /// claim, which the next daemon start may replace.
     pub fn force_kill(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         self.require_capability(DaemonControlCapability::ForceKill)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::ForceKill)?;
-
-        let start_time = Instant::now();
-        let previous_state = self.get_daemon_state();
-
-        let pid = match self.read_pid_file() {
-            Ok(pid) => pid,
-            Err(_) => {
-                return Ok(DaemonControlResult::Failed {
-                    operation: DaemonControlCapability::ForceKill,
-                    error: "No PID file found - daemon may already be stopped".to_string(),
-                    current_state: DaemonState::Stopped,
-                });
-            }
-        };
-
-        // Send SIGKILL
-        let kill_result = self.send_signal_to_process(pid, Signal::Kill);
-
-        // Clean up PID file regardless of signal success
-        let _ = fs::remove_file(&self.pid_file);
-
-        match kill_result {
-            Ok(()) => Ok(DaemonControlResult::Success {
-                previous_state,
-                new_state: DaemonState::Stopped,
-                duration: start_time.elapsed(),
-            }),
-            Err(e) => Ok(DaemonControlResult::Failed {
-                operation: DaemonControlCapability::ForceKill,
-                error: format!("Failed to force kill daemon: {}", e),
-                current_state: self.get_daemon_state(),
-            }),
-        }
+        cx.checkpoint()?;
+        self.stop_process(DaemonControlCapability::ForceKill, Signal::Kill, false)
     }
 
     /// Restarts the daemon (stop + start).
@@ -524,20 +614,33 @@ impl SecureDaemonController {
         }
 
         self.validate_operation_authorized(cx, DaemonControlCapability::Restart)?;
+        cx.checkpoint()?;
 
         let start_time = Instant::now();
+        let owned_at_entry = self.owned_pid();
         let previous_state = self.get_daemon_state();
+        let owned_child_exited = owned_at_entry.is_some() && self.owned_pid().is_none();
 
-        // Stop first
-        if previous_state != DaemonState::Stopped {
-            let stop_result = self.stop(cx)?;
-            if let DaemonControlResult::Failed { .. } = stop_result {
+        // Authorization applies to the combined action, not to two nested
+        // public calls that would require extra Start and Stop grants.
+        // If that observation reaped our old child, it must not redirect the
+        // stop phase to another daemon that has replaced its PID claim.
+        if previous_state != DaemonState::Stopped && !owned_child_exited {
+            let stop_result =
+                self.stop_process(DaemonControlCapability::Stop, Signal::Term, false)?;
+            if !matches!(
+                stop_result,
+                DaemonControlResult::Success {
+                    new_state: DaemonState::Stopped,
+                    ..
+                }
+            ) {
                 return Ok(stop_result);
             }
         }
 
         // Then start
-        let start_result = self.start(cx)?;
+        let start_result = self.start_authorized(cx)?;
 
         // Return result with original previous state and final duration
         match start_result {
@@ -606,6 +709,77 @@ impl SecureDaemonController {
         DaemonState::Stopped
     }
 
+    fn owned_pid(&self) -> Option<u32> {
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        {
+            self.child.as_ref().and_then(crate::process::Child::id)
+        }
+        #[cfg(all(feature = "slim-runtime-profile", not(feature = "process")))]
+        {
+            None
+        }
+    }
+
+    fn strict_stop_target(&mut self) -> Result<(DaemonState, Option<ControlTarget>), Error> {
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        {
+            let owned_at_entry = self.owned_pid();
+            self.reap_owned_child()?;
+            if let Some(pid) = self.owned_pid() {
+                return Ok((
+                    self.child_state,
+                    Some(ControlTarget {
+                        pid,
+                        start_time: None,
+                    }),
+                ));
+            }
+            if owned_at_entry.is_some() {
+                // The owned instance already exited. A replacement claim
+                // belongs to a different lifecycle and must be left alone.
+                return Ok((DaemonState::Stopped, None));
+            }
+        }
+
+        let Some(pid) = self.read_pid_claim()? else {
+            return Ok((DaemonState::Stopped, None));
+        };
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        let Some(process) = self.system.process(Pid::from_u32(pid)) else {
+            return Ok((DaemonState::Stopped, None));
+        };
+        if !self.process_matches_daemon(process)? {
+            return Ok((DaemonState::Stopped, None));
+        }
+        Ok((
+            DaemonState::Running,
+            Some(ControlTarget {
+                pid,
+                start_time: Some(process.start_time()),
+            }),
+        ))
+    }
+
+    fn target_has_exited(&mut self, target: ControlTarget) -> Result<bool, Error> {
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        if self.owned_pid() == Some(target.pid) {
+            return self.reap_owned_child().map(|status| status.is_some());
+        }
+        let Some(start_time) = target.start_time else {
+            // An owned handle was already reaped. Its old PID is no longer
+            // ours to inspect or signal, even if the OS has reused it.
+            return Ok(true);
+        };
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        Ok(self
+            .system
+            .process(Pid::from_u32(target.pid))
+            .is_none_or(|process| {
+                process.status() == sysinfo::ProcessStatus::Zombie
+                    || process.start_time() != start_time
+            }))
+    }
+
     #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
     fn reap_owned_child(&mut self) -> Result<Option<crate::process::ExitStatus>, Error> {
         let Some(child) = self.child.as_mut() else {
@@ -645,45 +819,118 @@ impl SecureDaemonController {
     }
 
     fn read_pid_file(&self) -> Result<u32, Error> {
-        let contents = fs::read_to_string(&self.pid_file).map_err(|e| {
-            Error::new(ErrorKind::InvalidInput)
-                .with_message(format!("Failed to read PID file: {}", e))
-        })?;
-
-        contents.trim().parse::<u32>().map_err(|e| {
-            Error::new(ErrorKind::InvalidInput).with_message(format!("Invalid PID in file: {}", e))
+        self.read_pid_claim()?.ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput).with_message("Daemon PID file does not exist")
         })
     }
 
-    fn is_our_daemon_process(&self, process: &sysinfo::Process) -> bool {
-        // Check if the process command line matches our daemon
-        let cmd = process.cmd();
-        if cmd.is_empty() {
-            return false;
-        }
+    fn read_pid_claim(&self) -> Result<Option<u32>, Error> {
+        let contents = match fs::read_to_string(&self.pid_file) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::new(ErrorKind::InvalidInput)
+                    .with_message(format!("Failed to read PID file: {error}")));
+            }
+        };
 
-        // Verify the executable path matches ours
-        let exe_path = Path::new(&cmd[0]);
-        exe_path == self.daemon_path || exe_path.file_name() == self.daemon_path.file_name()
+        let pid = contents.trim().parse::<u32>().map_err(|e| {
+            Error::new(ErrorKind::InvalidInput).with_message(format!("Invalid PID in file: {}", e))
+        })?;
+        validate_daemon_pid(pid)?;
+        Ok(Some(pid))
     }
 
-    fn send_signal_to_process(&self, pid: u32, signal: Signal) -> Result<(), Error> {
+    fn is_our_daemon_process(&self, process: &sysinfo::Process) -> bool {
+        self.process_matches_daemon(process).unwrap_or(false)
+    }
+
+    fn process_matches_daemon(&self, process: &sysinfo::Process) -> Result<bool, Error> {
+        // argv[0] and a matching basename are both forgeable. If the platform
+        // cannot expose the executable path, refuse external control.
+        if process.status() == sysinfo::ProcessStatus::Zombie {
+            return Ok(false);
+        }
+        let executable = process
+            .exe()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Internal)
+                    .with_message("Cannot identify the executable of the live daemon PID")
+            })?;
+        if executable == self.daemon_path {
+            return Ok(true);
+        }
+        let executable = fs::canonicalize(executable).map_err(|error| {
+            Error::new(ErrorKind::Internal)
+                .with_message(format!("Cannot resolve the live PID's executable: {error}"))
+        })?;
+        Ok(executable == self.daemon_path)
+    }
+
+    fn send_signal_to_process(
+        &mut self,
+        pid: u32,
+        signal: Signal,
+        expected_start_time: Option<u64>,
+    ) -> Result<ControlTarget, Error> {
+        validate_daemon_pid(pid)?;
+
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        if let Some(child) = self.child.as_mut()
+            && child.id() == Some(pid)
+        {
+            let result = match signal {
+                Signal::Kill => Some(child.kill()),
+                #[cfg(unix)]
+                Signal::Term => Some(child.signal(libc::SIGTERM)),
+                #[cfg(not(unix))]
+                Signal::Term => None,
+            };
+            if let Some(result) = result {
+                result.map_err(|error| {
+                    Error::new(ErrorKind::Internal)
+                        .with_message(format!("Failed to signal the owned daemon child: {error}"))
+                })?;
+                return Ok(ControlTarget {
+                    pid,
+                    start_time: None,
+                });
+            }
+        }
+
+        let mut system = System::new_all().map_err(|e| {
+            Error::new(ErrorKind::Internal)
+                .with_message(format!("Failed to query system processes: {e}"))
+        })?;
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let process = system.process(Pid::from_u32(pid)).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput)
+                .with_message(format!("Daemon pid {pid} no longer exists"))
+        })?;
+        if expected_start_time.is_some_and(|expected| process.start_time() != expected) {
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "Refusing to signal pid {pid}: process identity changed after discovery"
+            )));
+        }
+        if !self.process_matches_daemon(process)? {
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "Refusing to signal pid {pid}: executable identity does not match the daemon"
+            )));
+        }
+        let target = ControlTarget {
+            pid,
+            start_time: Some(process.start_time()),
+        };
+
         #[cfg(unix)]
         {
             let signal = match signal {
                 Signal::Term => SysSignal::Term,
                 Signal::Kill => SysSignal::Kill,
             };
-            let mut system = System::new_all().map_err(|e| {
-                Error::new(ErrorKind::Internal)
-                    .with_message(format!("Failed to query system processes: {e}"))
-            })?;
-            system.refresh_processes(ProcessesToUpdate::All, true);
-            match system
-                .process(Pid::from_u32(pid))
-                .and_then(|process| process.kill_with(signal))
-            {
-                Some(true) => Ok(()),
+            match process.kill_with(signal) {
+                Some(true) => Ok(target),
                 Some(false) => Err(Error::new(ErrorKind::Internal)
                     .with_message(format!("Failed to send {:?} to pid {}", signal, pid))),
                 None => Err(Error::new(ErrorKind::Internal).with_message(format!(
@@ -707,7 +954,7 @@ impl SecureDaemonController {
             })?;
 
             if output.status.success() {
-                Ok(())
+                Ok(target)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 Err(Error::new(ErrorKind::Internal)
@@ -717,7 +964,7 @@ impl SecureDaemonController {
 
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = signal;
+            let _ = (signal, target);
             Err(Error::new(ErrorKind::Internal).with_message(format!(
                 "Process signalling is unsupported on this platform for pid {}",
                 pid
@@ -753,6 +1000,27 @@ impl SecureDaemonController {
             Ok(true)
         }
     }
+}
+
+/// A control operation follows one process instance, never a changing PID file.
+#[derive(Clone, Copy)]
+struct ControlTarget {
+    pid: u32,
+    /// Absent only for an owned child whose handle pins its identity until reap.
+    start_time: Option<u64>,
+}
+
+fn validate_daemon_pid(pid: u32) -> Result<(), Error> {
+    if pid <= 1 {
+        return Err(Error::new(ErrorKind::InvalidInput)
+            .with_message(format!("PID {pid} cannot identify a daemon process")));
+    }
+    #[cfg(unix)]
+    if i32::try_from(pid).is_err() {
+        return Err(Error::new(ErrorKind::InvalidInput)
+            .with_message(format!("PID {pid} exceeds the native process id range")));
+    }
+    Ok(())
 }
 
 fn platform_fallback_work_dir() -> PathBuf {
@@ -793,6 +1061,10 @@ enum Signal {
 
 /// Factory function to create a secure daemon controller with standard ATP daemon configuration.
 ///
+/// Uses the current executable as the daemon. This factory is intended for
+/// callers running inside `atpd`; embedding applications should select the
+/// daemon binary with [`create_atp_daemon_controller_with_executable`].
+///
 /// # Security
 ///
 /// Returns a controller with minimal required capabilities for the specified use case.
@@ -807,9 +1079,26 @@ pub fn create_atp_daemon_controller(
             .with_message(format!("Cannot determine daemon executable path: {}", e))
     })?;
 
-    let config_path = config_dir.join("config.toml");
+    create_atp_daemon_controller_with_executable(region_id, capabilities, config_dir, &daemon_path)
+}
 
-    SecureDaemonController::new(region_id, capabilities, daemon_path, config_path)
+/// Creates an ATP controller for an explicitly selected daemon executable.
+///
+/// Reads `config.toml` from `config_dir`. The executable and configuration are
+/// validated and resolved by [`SecureDaemonController::new`], and the supplied
+/// capabilities are preserved. Construction does not start the daemon.
+pub fn create_atp_daemon_controller_with_executable(
+    region_id: RegionId,
+    capabilities: Vec<DaemonControlCapability>,
+    config_dir: &Path,
+    daemon_path: &Path,
+) -> Result<SecureDaemonController, Error> {
+    SecureDaemonController::new(
+        region_id,
+        capabilities,
+        daemon_path.to_path_buf(),
+        config_dir.join("config.toml"),
+    )
 }
 
 #[cfg(test)]

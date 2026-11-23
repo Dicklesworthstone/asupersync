@@ -1575,7 +1575,7 @@ mod controller_lifecycle {
         root: PathBuf,
         data: PathBuf,
         diagnostics: SocketAddr,
-        _runtime: asupersync::runtime::Runtime,
+        runtime: asupersync::runtime::Runtime,
     }
 
     impl ControlledDaemon {
@@ -1671,7 +1671,7 @@ mod controller_lifecycle {
                 root,
                 data,
                 diagnostics,
-                _runtime: runtime,
+                runtime,
             }
         }
 
@@ -1841,5 +1841,294 @@ mod controller_lifecycle {
         );
         assert_eq!(controller.status(&cx).unwrap().pid, None);
         assert!(!root.join("daemon.pid").exists());
+    }
+
+    #[test]
+    fn restart_capability_alone_composes_the_real_stop_and_start_operations() {
+        let mut daemon = ControlledDaemon::new("controller-restart-only");
+        let mut restart_only = asupersync::atp::create_atp_daemon_controller_with_executable(
+            daemon.cx.region_id(),
+            vec![DaemonControlCapability::Restart],
+            &daemon.root,
+            Path::new(ATPD_BIN),
+        )
+        .expect("explicit daemon factory");
+        assert!(restart_only.start(&daemon.cx).is_err());
+        assert!(restart_only.stop(&daemon.cx).is_err());
+
+        let started = restart_only.restart(&daemon.cx).unwrap();
+        assert!(
+            matches!(
+                started,
+                DaemonControlResult::Success {
+                    previous_state: DaemonState::Stopped,
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ),
+            "Restart alone must be sufficient to start a stopped daemon: {started:?}"
+        );
+        daemon.wait_ready();
+        let first_pid = daemon.controller.status(&daemon.cx).unwrap().pid.unwrap();
+
+        let restarted = restart_only.restart(&daemon.cx).unwrap();
+        assert!(
+            matches!(
+                restarted,
+                DaemonControlResult::Success {
+                    previous_state: DaemonState::Running,
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ),
+            "Restart alone must stop and replace the running daemon: {restarted:?}"
+        );
+        daemon.wait_ready();
+        assert_eq!(
+            kill(Pid::from_raw(i32::try_from(first_pid).unwrap()), None),
+            Err(nix::errno::Errno::ESRCH),
+            "the previous child must be reaped before restart succeeds"
+        );
+        assert!(restart_only.start(&daemon.cx).is_err());
+        assert!(restart_only.stop(&daemon.cx).is_err());
+
+        // Dropping a controller transfers its child to the shared reaper;
+        // the full-capability fixture can then stop the replacement daemon.
+        drop(restart_only);
+        let stopped = daemon.controller.stop(&daemon.cx).unwrap();
+        assert!(matches!(
+            stopped,
+            DaemonControlResult::Success {
+                new_state: DaemonState::Stopped,
+                ..
+            }
+        ));
+        assert!(!daemon.root.join("daemon.pid").exists());
+    }
+
+    #[test]
+    fn explicit_upgrade_factory_controls_the_selected_daemon_binary() {
+        let mut daemon = ControlledDaemon::new("controller-upgrade-explicit");
+        let mut upgrade = asupersync::atp::create_upgrade_daemon_controller_with_executable(
+            daemon.cx.region_id(),
+            &daemon.root,
+            Path::new(ATPD_BIN),
+        )
+        .expect("upgrade controller for atpd, not the integration test executable");
+        assert!(
+            !daemon
+                .runtime
+                .block_on(upgrade.try_is_daemon_running(&daemon.cx))
+                .unwrap()
+        );
+
+        daemon
+            .runtime
+            .block_on(upgrade.start_daemon(&daemon.cx))
+            .expect("start the explicit daemon executable");
+        daemon.wait_ready();
+        let pid = daemon.controller.status(&daemon.cx).unwrap().pid.unwrap();
+        assert!(
+            daemon
+                .runtime
+                .block_on(upgrade.try_is_daemon_running(&daemon.cx))
+                .unwrap()
+        );
+        assert!(
+            daemon
+                .runtime
+                .block_on(upgrade.try_stop_daemon_if_running(&daemon.cx))
+                .unwrap()
+        );
+        assert!(
+            !daemon
+                .runtime
+                .block_on(upgrade.try_is_daemon_running(&daemon.cx))
+                .unwrap()
+        );
+        assert!(
+            !daemon
+                .runtime
+                .block_on(upgrade.try_stop_daemon_if_running(&daemon.cx))
+                .unwrap()
+        );
+        assert_eq!(
+            kill(Pid::from_raw(i32::try_from(pid).unwrap()), None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+        assert!(!daemon.root.join("daemon.pid").exists());
+    }
+
+    #[test]
+    fn owned_child_shutdown_preserves_a_replacement_pid_claim_and_its_process() {
+        for (label, force) in [
+            ("controller-stop-target", false),
+            ("controller-kill-target", true),
+        ] {
+            let mut daemon = ControlledDaemon::new(label);
+            let started = daemon.controller.start(&daemon.cx).unwrap();
+            assert!(matches!(
+                started,
+                DaemonControlResult::Success {
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ));
+            daemon.wait_ready();
+            let owned_pid = daemon.controller.status(&daemon.cx).unwrap().pid.unwrap();
+            let mut bystander =
+                Process::spawn("controller bystander", Command::new("sleep").arg("60"));
+            let replacement_claim = format!("{}\n", bystander.child.id());
+            let pid_file = daemon.root.join("daemon.pid");
+            write_file(&pid_file, replacement_claim.as_bytes());
+
+            let result = if force {
+                daemon.controller.force_kill(&daemon.cx)
+            } else {
+                daemon.controller.stop(&daemon.cx)
+            }
+            .unwrap();
+            assert!(
+                matches!(
+                    result,
+                    DaemonControlResult::Success {
+                        new_state: DaemonState::Stopped,
+                        ..
+                    }
+                ),
+                "owned shutdown must not follow a replaced PID file (force={force}): {result:?}"
+            );
+            assert_eq!(
+                kill(Pid::from_raw(i32::try_from(owned_pid).unwrap()), None),
+                Err(nix::errno::Errno::ESRCH),
+                "shutdown must settle the actual owned child"
+            );
+            assert!(
+                bystander.is_running(),
+                "shutdown signalled the replacement PID"
+            );
+            assert_eq!(
+                std::fs::read_to_string(pid_file).unwrap(),
+                replacement_claim
+            );
+            assert_eq!(daemon.controller.status(&daemon.cx).unwrap().pid, None);
+        }
+    }
+
+    #[test]
+    fn external_force_kill_rejects_a_bystander_without_changing_its_pid_claim() {
+        let mut daemon = ControlledDaemon::new("controller-external-bystander");
+        let mut bystander = Process::spawn(
+            "external controller bystander",
+            Command::new("sleep").arg("60"),
+        );
+        let claim = format!("{}\n", bystander.child.id());
+        let pid_file = daemon.root.join("daemon.pid");
+        write_file(&pid_file, claim.as_bytes());
+
+        let result = daemon.controller.force_kill(&daemon.cx).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                DaemonControlResult::Failed {
+                    operation: DaemonControlCapability::ForceKill,
+                    ..
+                }
+            ),
+            "an unowned PID with a different executable must be rejected: {result:?}"
+        );
+        assert!(
+            bystander.is_running(),
+            "external control signalled the bystander"
+        );
+        assert_eq!(std::fs::read_to_string(pid_file).unwrap(), claim);
+        assert_eq!(daemon.controller.status(&daemon.cx).unwrap().pid, None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn restart_reaps_its_exited_child_without_stopping_a_replacement_daemon() {
+        let mut original = ControlledDaemon::new("controller-restart-exited-owner");
+        let mut replacement = ControlledDaemon::new("controller-restart-replacement");
+        for daemon in [&mut original, &mut replacement] {
+            let started = daemon.controller.start(&daemon.cx).unwrap();
+            assert!(matches!(
+                started,
+                DaemonControlResult::Success {
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ));
+            daemon.wait_ready();
+        }
+        let original_pid = original
+            .controller
+            .status(&original.cx)
+            .unwrap()
+            .pid
+            .unwrap();
+        let replacement_pid = replacement
+            .controller
+            .status(&replacement.cx)
+            .unwrap()
+            .pid
+            .unwrap();
+        kill(
+            Pid::from_raw(i32::try_from(original_pid).unwrap()),
+            Signal::SIGKILL,
+        )
+        .expect("terminate the original child externally");
+
+        // The zombie is an explicit exit-before-reap witness. In particular,
+        // do not call original.controller.status here: it would reap the
+        // child and bypass the ownership transition this regression covers.
+        let mut system = sysinfo::System::new_all().expect("observe the exited child");
+        let deadline = Instant::now() + EXIT_LIMIT;
+        loop {
+            system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            if system
+                .process(sysinfo::Pid::from_u32(original_pid))
+                .is_some_and(|process| process.status() == sysinfo::ProcessStatus::Zombie)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the original child did not become an unreaped zombie within {EXIT_LIMIT:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let replacement_claim = format!("{replacement_pid}\n");
+        let original_claim_path = original.root.join("daemon.pid");
+        write_file(&original_claim_path, replacement_claim.as_bytes());
+
+        let result = original.controller.restart(&original.cx).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                DaemonControlResult::Success {
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ),
+            "restart should recognize the replacement without stopping it: {result:?}"
+        );
+        assert_eq!(
+            kill(Pid::from_raw(i32::try_from(original_pid).unwrap()), None),
+            Err(nix::errno::Errno::ESRCH),
+            "restart must reap its original child"
+        );
+        assert_eq!(
+            replacement.controller.status(&replacement.cx).unwrap().pid,
+            Some(replacement_pid),
+            "restart followed the substituted claim and stopped another atpd instance"
+        );
+        replacement.wait_ready();
+        assert_eq!(
+            std::fs::read_to_string(original_claim_path).unwrap(),
+            replacement_claim
+        );
     }
 }
