@@ -2232,6 +2232,104 @@ fn large_headers_use_continuation_frames() {
 }
 
 #[test]
+fn live_connection_headers_and_trailers_never_index_credentials() {
+    let mut client = Connection::client(Settings::client());
+    let mut server = Connection::server(Settings::server());
+    client.state = ConnectionState::Open;
+    server.state = ConnectionState::Open;
+    let public = Header::new("x-route", "ordinary");
+    let mut request = test_request_header_vec("/");
+    request.extend([
+        public.clone(),
+        Header::new("authorization", "Bearer client-token"),
+        Header::new("proxy-authorization", "Basic proxy-token"),
+        Header::new("cookie", "session=one"),
+        Header::new("cookie", "session=two"),
+    ]);
+    let expected_request_table = Header::new(":authority", "example.com").size() + public.size();
+    let response = vec![
+        Header::new(":status", "200"),
+        public.clone(),
+        Header::new("set-cookie", "session=three; HttpOnly"),
+        Header::new("set-cookie", "csrf=four; Secure"),
+    ];
+    let trailers = vec![Header::new("set-cookie", "session=five; HttpOnly")];
+
+    // A second request exercises a live compression context. Ordinary fields
+    // retain their indices, but no credential may ever enter either table.
+    for _ in 0..2 {
+        let id = client.open_stream(request.clone(), true).unwrap();
+        let frame = client.next_frame().expect("request HEADERS");
+        assert!(matches!(
+            server.process_frame(frame).unwrap(),
+            Some(ReceivedFrame::Headers { headers, stream_id, end_stream: true })
+                if headers == request && stream_id == id
+        ));
+        assert_eq!(
+            client.hpack_encoder.dynamic_table_size(),
+            expected_request_table
+        );
+        assert_eq!(
+            server.hpack_decoder.dynamic_table_size(),
+            expected_request_table
+        );
+
+        server.send_headers(id, response.clone(), false).unwrap();
+        let frame = server.next_frame().expect("response HEADERS");
+        assert!(matches!(
+            client.process_frame(frame).unwrap(),
+            Some(ReceivedFrame::Headers { headers, stream_id, end_stream: false })
+                if headers == response && stream_id == id
+        ));
+        assert_eq!(server.hpack_encoder.dynamic_table_size(), public.size());
+        assert_eq!(client.hpack_decoder.dynamic_table_size(), public.size());
+
+        server.send_headers(id, trailers.clone(), true).unwrap();
+        let frame = server.next_frame().expect("response trailers");
+        assert!(matches!(
+            client.process_frame(frame).unwrap(),
+            Some(ReceivedFrame::Headers { headers, stream_id, end_stream: true })
+                if headers == trailers && stream_id == id
+        ));
+        assert_eq!(server.hpack_encoder.dynamic_table_size(), public.size());
+        assert_eq!(client.hpack_decoder.dynamic_table_size(), public.size());
+    }
+}
+
+#[test]
+fn live_connection_push_promises_never_index_credentials() {
+    let mut conn = Connection::server(Settings::server());
+    conn.state = ConnectionState::Open;
+    conn.process_frame(Frame::Headers(HeadersFrame::new(
+        1,
+        test_request_headers("/"),
+        false,
+        true,
+    )))
+    .unwrap();
+    let mut request = test_request_header_vec("/");
+    request.extend([
+        Header::new("authorization", "Bearer push-token"),
+        Header::new("proxy-authorization", "Basic proxy-token"),
+        Header::new("cookie", "session=one"),
+        Header::new("set-cookie", "session=two"),
+    ]);
+    let expected_table = Header::new(":authority", "example.com").size();
+    let mut decoder = hpack::Decoder::new();
+    for _ in 0..2 {
+        let promised = conn.send_push_promise(1, request.clone()).unwrap();
+        let Frame::PushPromise(mut frame) = conn.next_frame().expect("PUSH_PROMISE") else {
+            panic!("expected a PUSH_PROMISE frame");
+        };
+        assert_eq!(frame.promised_stream_id, promised);
+        assert!(frame.end_headers);
+        assert_eq!(decoder.decode(&mut frame.header_block).unwrap(), request);
+        assert_eq!(conn.hpack_encoder.dynamic_table_size(), expected_table);
+        assert_eq!(decoder.dynamic_table_size(), expected_table);
+    }
+}
+
+#[test]
 fn send_push_promise_queues_frame_and_reserves_local_stream() {
     let mut conn = Connection::server(Settings::server());
     conn.state = ConnectionState::Open;

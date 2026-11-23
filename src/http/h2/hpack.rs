@@ -753,6 +753,33 @@ impl Encoder {
         }
     }
 
+    /// Encode HTTP fields without indexing standard credentials or cookies.
+    ///
+    /// `authorization`, `proxy-authorization`, `cookie`, and `set-cookie` use
+    /// RFC 7541 section 6.2.3's never-indexed representation, even when their
+    /// value already appears in the compression table. Names are matched
+    /// case-insensitively, as they are normalized on the wire. Other fields
+    /// retain the normal static and dynamic compression behavior.
+    ///
+    /// Native HTTP/2 connections use this policy for requests, responses,
+    /// trailers, and push promises. The generic [`Self::encode`] keeps its
+    /// original indexing policy. For application-specific secrets, use
+    /// [`Self::encode_sensitive`] instead of relying on this list of names.
+    pub fn encode_http(&mut self, headers: &[Header], dst: &mut BytesMut) {
+        self.emit_pending_size_update(dst);
+        for header in headers {
+            let sensitive = [
+                "authorization",
+                "proxy-authorization",
+                "cookie",
+                "set-cookie",
+            ]
+            .iter()
+            .any(|name| header.name.eq_ignore_ascii_case(name));
+            self.encode_header(header, dst, !sensitive);
+        }
+    }
+
     /// Encode headers as "never indexed" (for sensitive headers like auth tokens).
     ///
     /// Uses RFC 7541 §6.2.3 "Literal Header Field Never Indexed" representation,

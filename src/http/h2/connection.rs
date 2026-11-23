@@ -2485,7 +2485,7 @@ impl Connection {
                     }
                     // Encode headers
                     let mut encoded = BytesMut::new();
-                    self.hpack_encoder.encode(&headers, &mut encoded);
+                    self.hpack_encoder.encode_http(&headers, &mut encoded);
                     let encoded = encoded.freeze();
 
                     let max_frame_size = self.remote_settings.max_frame_size as usize;
@@ -2548,7 +2548,7 @@ impl Connection {
                     }
 
                     let mut encoded = BytesMut::new();
-                    self.hpack_encoder.encode(&headers, &mut encoded);
+                    self.hpack_encoder.encode_http(&headers, &mut encoded);
                     let encoded = encoded.freeze();
 
                     let max_frame_size = self.remote_settings.max_frame_size as usize;

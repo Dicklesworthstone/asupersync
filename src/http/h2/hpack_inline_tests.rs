@@ -2264,6 +2264,93 @@ fn sensitive_exact_dynamic_match_never_uses_indexed_representation() {
     assert_eq!(decoder.dynamic_table_size(), decoder_table_before);
 }
 
+#[test]
+fn http_credentials_never_index_static_or_dynamic_matches() {
+    for name in [
+        "authorization",
+        "Proxy-Authorization",
+        "COOKIE",
+        "Set-Cookie",
+    ] {
+        for value in ["", "private-session-value"] {
+            let header = Header::new(name, value);
+            let expected = Header::new(name.to_ascii_lowercase(), value);
+            let mut encoder = Encoder::new();
+            let mut decoder = Decoder::new();
+
+            // The generic encoder's established behavior is unchanged. Seed
+            // an exact dynamic match (or an exact static match for "") so
+            // the HTTP policy cannot accidentally take its indexed fast path.
+            let mut seed = BytesMut::new();
+            encoder.encode(std::slice::from_ref(&header), &mut seed);
+            assert_eq!(
+                decoder.decode(&mut seed.freeze()).unwrap(),
+                vec![expected.clone()]
+            );
+            let before = encoder.dynamic_table_size();
+            if value.is_empty() {
+                assert_eq!(before, 0);
+            } else {
+                assert_eq!(before, expected.size());
+            }
+
+            for _ in 0..2 {
+                let mut encoded = BytesMut::new();
+                encoder.encode_http(std::slice::from_ref(&header), &mut encoded);
+                assert_eq!(
+                    encoded[0] & 0xf0,
+                    0x10,
+                    "{name}: even an exact match must stay a never-indexed literal"
+                );
+                assert_eq!(
+                    decoder.decode(&mut encoded.freeze()).unwrap(),
+                    vec![expected.clone()]
+                );
+                assert_eq!(encoder.dynamic_table_size(), before);
+                assert_eq!(decoder.dynamic_table_size(), before);
+            }
+        }
+    }
+}
+
+#[test]
+fn http_credentials_leave_ordinary_header_compression_and_size_updates_intact() {
+    let public = Header::new("x-route", "ordinary-cacheable-value");
+    let headers = vec![
+        Header::new(":method", "GET"),
+        public.clone(),
+        Header::new("authorization", "Bearer private-token"),
+        Header::new("proxy-authorization", "Basic private-credentials"),
+        Header::new("cookie", "session=one"),
+        Header::new("cookie", "session=two"),
+        Header::new("set-cookie", "session=three; HttpOnly"),
+    ];
+    let mut encoder = Encoder::new();
+    let mut decoder = Decoder::new();
+    encoder.set_max_table_size(1024);
+    encoder.set_max_table_size(2048);
+    let mut first = BytesMut::new();
+    encoder.encode_http(&headers, &mut first);
+    assert_eq!(first[0] & 0xe0, 0x20, "table-size updates precede fields");
+    assert_eq!(decoder.decode(&mut first.freeze()).unwrap(), headers);
+    assert_eq!(encoder.dynamic_table_size(), public.size());
+    assert_eq!(decoder.dynamic_table_size(), public.size());
+    assert_eq!(encoder.dynamic_table_max_size(), 2048);
+
+    let mut repeated = BytesMut::new();
+    encoder.encode_http(&headers, &mut repeated);
+    assert_eq!(repeated[0], 0x82, "GET keeps its static table index");
+    assert_ne!(
+        repeated[1] & 0x80,
+        0,
+        "the public field reuses its dynamic index"
+    );
+    assert_eq!(repeated[2] & 0xf0, 0x10, "credentials are still literals");
+    assert_eq!(decoder.decode(&mut repeated.freeze()).unwrap(), headers);
+    assert_eq!(encoder.dynamic_table_size(), public.size());
+    assert_eq!(decoder.dynamic_table_size(), public.size());
+}
+
 /// Additional test: Static table index bounds checking
 #[test]
 fn conformance_static_table_bounds_checking() {
