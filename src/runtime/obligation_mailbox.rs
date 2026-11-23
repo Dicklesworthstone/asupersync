@@ -597,7 +597,19 @@ impl ObligationGateway {
 
     /// Invoke only after any primitive/adapter locks have been released.
     pub(crate) fn notify(&self) {
-        (self.notify)();
+        if std::thread::panicking() {
+            // A returned token can be released on an external thread while the
+            // runtime is parked. Its terminal post still needs a wake attempt,
+            // but a failing notifier must not replace the original unwind.
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.notify)()))
+            {
+                // A user panic payload can itself have a panicking destructor.
+                std::mem::forget(payload);
+            }
+        } else {
+            (self.notify)();
+        }
     }
 
     /// Mint a ticket and post its reservation.
@@ -614,7 +626,7 @@ impl ObligationGateway {
     ) -> Option<ObligationToken> {
         let ticket = self.mailbox.mint_ticket()?;
         let pending = pending.map(crate::record::region::PendingSpawnCounter::reserve);
-        let posted = self.post(ObligationPost {
+        let posted = self.post_deferred(ObligationPost {
             op: ObligationOp::Reserve,
             ticket,
             kind,
@@ -625,7 +637,9 @@ impl ObligationGateway {
         if !posted {
             return None;
         }
-        Some(ObligationToken {
+        // Once Reserve is published, cleanup must own its matching terminal
+        // post before arbitrary notification can unwind out of registration.
+        let mut token = ObligationToken {
             ticket,
             kind,
             holder,
@@ -634,8 +648,11 @@ impl ObligationGateway {
             _pending: pending,
             resolved: false,
             admission: None,
-            abort_on_drop: false,
-        })
+            abort_on_drop: true,
+        };
+        self.notify();
+        token.abort_on_drop = false;
+        Some(token)
     }
 
     pub(crate) fn register_checked(
@@ -689,7 +706,7 @@ impl ObligationGateway {
                 Some(Arc::clone(&admission)),
             );
         })?;
-        (self.notify)();
+        self.notify();
         token.abort_on_drop = false;
         Ok(token)
     }
@@ -947,7 +964,10 @@ impl ObligationToken {
             admission.finish_lineage_after_runtime_drop();
         }
         let accepted = won && gateway.is_some();
-        let notification = if won && !std::thread::panicking() {
+        // An unreturned registration/transfer is rolling back failed
+        // publication; do not reenter its notifier while preserving the panic.
+        // Returned tokens still wake the runtime through panic-safe notify.
+        let notification = if won && !(self.abort_on_drop && std::thread::panicking()) {
             gateway
         } else {
             None
@@ -1018,7 +1038,13 @@ impl Drop for ObligationToken {
             return;
         }
         if let Some(gateway) = self.gateway.upgrade() {
-            let _ = gateway.post(post);
+            if self.abort_on_drop && std::thread::panicking() {
+                // Registration has not returned ownership. Publish rollback
+                // without reentering the notifier whose panic interrupted it.
+                let _ = gateway.post_deferred(post);
+            } else {
+                let _ = gateway.post(post);
+            }
         }
     }
 }

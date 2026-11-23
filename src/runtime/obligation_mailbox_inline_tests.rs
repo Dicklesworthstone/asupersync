@@ -3208,6 +3208,366 @@ fn checked_publication_precedes_revoke_and_old_credit_still_resolves() {
 }
 
 #[test]
+fn unchecked_notify_panic_aborts_reservation_before_or_after_application() {
+    for apply_before_panic in [false, true] {
+        let (runtime, region, holder, cx) = checked_holder(1);
+        let mailbox = mailbox_of(&runtime);
+        let pending = runtime
+            .state
+            .region(region)
+            .unwrap()
+            .pending_obligation_post_handle();
+        let runtime = Arc::new(Mutex::new(runtime));
+        let liveness = Arc::new(());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let notify = {
+            let runtime = Arc::clone(&runtime);
+            let mailbox = Arc::clone(&mailbox);
+            let notifications = Arc::clone(&notifications);
+            Arc::new(move || {
+                notifications.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(mailbox.len(), 1, "Reserve precedes notification");
+                if apply_before_panic {
+                    let mut runtime = runtime.lock().unwrap();
+                    assert_eq!(runtime.state.drain_obligation_posts(64), 1);
+                    assert_eq!(runtime.state.pending_obligation_count(), 1);
+                }
+                panic!("original unchecked admission notification panic");
+            })
+        };
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(&mailbox),
+            notify,
+            Arc::downgrade(&liveness),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), Some(pending));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _token = cx.try_register_obligation(ObligationKind::SendPermit, holder);
+        }))
+        .expect_err("notifier panic must propagate");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"original unchecked admission notification panic")
+        );
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        let mut runtime = runtime.lock().unwrap();
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .pending_obligation_post_count(),
+            0
+        );
+        assert_eq!(
+            runtime.state.drain_obligation_posts(64),
+            if apply_before_panic { 1 } else { 2 }
+        );
+        let stats = mailbox.stats();
+        assert_eq!(stats.posted, 2);
+        assert_eq!(stats.applied, 2);
+        assert_eq!(stats.reserved, 1);
+        assert_eq!(stats.aborted, 1);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert_eq!(runtime.state.leak_count(), 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+    }
+}
+
+#[test]
+fn unchecked_returned_token_still_reports_a_leak_during_unwind() {
+    let (mut runtime, region, holder, cx) = checked_holder(1);
+    let mailbox = mailbox_of(&runtime);
+    let pending = runtime
+        .state
+        .region(region)
+        .unwrap()
+        .pending_obligation_post_handle();
+    let liveness = Arc::new(());
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notify = {
+        let notifications = Arc::clone(&notifications);
+        Arc::new(move || {
+            notifications.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let gateway = Arc::new(ObligationGateway::new(
+        Arc::clone(&mailbox),
+        notify,
+        Arc::downgrade(&liveness),
+    ));
+    let cx = cx.with_obligation_gateway(Some(gateway), Some(pending));
+    let token = cx
+        .try_register_obligation(ObligationKind::SendPermit, holder)
+        .unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _token = token;
+        panic!("original token owner panic");
+    }))
+    .expect_err("owner panic must propagate");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"original token owner panic")
+    );
+    assert_eq!(notifications.load(Ordering::SeqCst), 2);
+    assert_eq!(runtime.state.drain_obligation_posts(64), 2);
+    assert_eq!(mailbox.stats().reserved, 1);
+    assert_eq!(mailbox.stats().leaked, 1);
+    assert_eq!(mailbox.stats().aborted, 0);
+    assert_eq!(mailbox.stats().refused, 0);
+    assert_eq!(runtime.state.leak_count(), 1);
+    assert_eq!(runtime.state.pending_obligation_count(), 0);
+    assert_eq!(
+        runtime
+            .state
+            .region(region)
+            .unwrap()
+            .pending_obligation_post_count(),
+        0
+    );
+    assert_eq!(mailbox.open_tickets(), 0);
+}
+
+#[test]
+fn returned_tokens_wake_the_runtime_during_external_unwind() {
+    struct ResolveOnDrop {
+        token: Option<ObligationToken>,
+        abort: bool,
+    }
+
+    impl Drop for ResolveOnDrop {
+        fn drop(&mut self) {
+            if let Some(token) = self.token.take() {
+                if self.abort {
+                    assert!(token.abort(ObligationAbortReason::Cancel));
+                } else {
+                    drop(token);
+                }
+            }
+        }
+    }
+
+    for checked in [false, true] {
+        for abort in [false, true] {
+            let (mut runtime, region, holder, cx) = checked_holder(1);
+            let mailbox = mailbox_of(&runtime);
+            let pending = runtime
+                .state
+                .region(region)
+                .unwrap()
+                .pending_obligation_post_handle();
+            let liveness = Arc::new(());
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+            let notify = {
+                let notifications = Arc::clone(&notifications);
+                Arc::new(move || {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                    wake_tx.send(()).unwrap();
+                    if std::thread::panicking() {
+                        panic!("secondary external cleanup notification panic");
+                    }
+                })
+            };
+            let gateway = Arc::new(ObligationGateway::new(
+                Arc::clone(&mailbox),
+                notify,
+                Arc::downgrade(&liveness),
+            ));
+            let cx = cx.with_obligation_gateway(Some(gateway), Some(pending));
+            let token = if checked {
+                cx.try_register_obligation_checked(ObligationKind::SendPermit, holder)
+                    .unwrap()
+                    .unwrap()
+            } else {
+                cx.try_register_obligation(ObligationKind::SendPermit, holder)
+                    .unwrap()
+            };
+            wake_rx.try_recv().expect("reservation wakes the runtime");
+            assert_eq!(runtime.state.drain_obligation_posts(64), 1);
+            let producer = std::thread::spawn(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _cleanup = ResolveOnDrop {
+                        token: Some(token),
+                        abort,
+                    };
+                    panic!("original external token owner panic");
+                }))
+            });
+            // Wait for an actual notification, rather than polling a mailbox
+            // that could conceal a lost wake on an otherwise parked runtime.
+            wake_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("terminal cleanup must wake the waiting runtime");
+            let panic = producer
+                .join()
+                .expect("external thread catches its original panic")
+                .expect_err("the original owner panic must propagate");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"original external token owner panic")
+            );
+            assert_eq!(notifications.load(Ordering::SeqCst), 2);
+            assert_eq!(runtime.state.drain_obligation_posts(64), 1);
+            let stats = mailbox.stats();
+            assert_eq!(stats.reserved, 1);
+            assert_eq!(stats.aborted, u64::from(abort));
+            assert_eq!(stats.leaked, u64::from(!abort));
+            assert_eq!(stats.refused, 0);
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .pending_obligation_post_count(),
+                0
+            );
+            assert_eq!(mailbox.open_tickets(), 0);
+        }
+    }
+}
+
+#[test]
+fn unchecked_permit_cleanup_conserves_obligations_across_panic_boundaries() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    fn release<T>(permit: T, owner_panics: bool) {
+        if owner_panics {
+            let _permit = permit;
+            panic!("original permit owner panic");
+        }
+        drop(permit);
+    }
+
+    for primitive in ["mpsc", "oneshot", "broadcast", "semaphore"] {
+        for phase in ["admission_panic", "owner_panic", "drop", "settlement_panic"] {
+            let (mut runtime, region, _, cx) = checked_holder(1);
+            let mailbox = mailbox_of(&runtime);
+            let pending = runtime
+                .state
+                .region(region)
+                .unwrap()
+                .pending_obligation_post_handle();
+            let liveness = Arc::new(());
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let unwind_notifications = Arc::new(AtomicUsize::new(0));
+            let notify = {
+                let notifications = Arc::clone(&notifications);
+                let unwind_notifications = Arc::clone(&unwind_notifications);
+                Arc::new(move || {
+                    let call = notifications.fetch_add(1, Ordering::SeqCst);
+                    if std::thread::panicking() {
+                        unwind_notifications.fetch_add(1, Ordering::SeqCst);
+                        panic!("secondary permit notification panic");
+                    } else if (phase == "admission_panic" && call == 0)
+                        || (phase == "settlement_panic" && call == 1)
+                    {
+                        panic!("original permit notification panic");
+                    }
+                })
+            };
+            let gateway = Arc::new(ObligationGateway::new(
+                Arc::clone(&mailbox),
+                notify,
+                Arc::downgrade(&liveness),
+            ));
+            let cx = cx.with_obligation_gateway(Some(gateway), Some(pending));
+            let (mpsc_tx, mut mpsc_rx) = crate::channel::mpsc::channel::<u8>(1);
+            let (oneshot_tx, mut oneshot_rx) = crate::channel::oneshot::channel::<u8>();
+            let (broadcast_tx, mut broadcast_rx) = crate::channel::broadcast::channel::<u8>(1);
+            let semaphore = crate::sync::Semaphore::new(1);
+            let mut context = Context::from_waker(Waker::noop());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let owner_panics = phase == "owner_panic";
+                match primitive {
+                    "mpsc" => {
+                        let mut reserve = Box::pin(mpsc_tx.reserve(&cx));
+                        let Poll::Ready(Ok(permit)) = reserve.as_mut().poll(&mut context) else {
+                            panic!("available channel must grant its permit");
+                        };
+                        release(permit, owner_panics);
+                    }
+                    "oneshot" => release(oneshot_tx.reserve(&cx).unwrap(), owner_panics),
+                    "broadcast" => release(broadcast_tx.reserve(&cx).unwrap(), owner_panics),
+                    "semaphore" => {
+                        let mut acquire = Box::pin(semaphore.acquire(&cx, 1));
+                        let Poll::Ready(Ok(permit)) = acquire.as_mut().poll(&mut context) else {
+                            panic!("available semaphore must grant its permit");
+                        };
+                        release(permit, owner_panics);
+                    }
+                    _ => unreachable!(),
+                }
+            }));
+            if phase == "drop" {
+                result.expect("ordinary permit cleanup must succeed");
+            } else {
+                let panic = result.expect_err("the planted panic must propagate");
+                let expected = if phase == "owner_panic" {
+                    "original permit owner panic"
+                } else {
+                    "original permit notification panic"
+                };
+                assert_eq!(panic.downcast_ref::<&str>(), Some(&expected));
+            }
+            assert_eq!(
+                unwind_notifications.load(Ordering::SeqCst),
+                usize::from(phase == "owner_panic")
+            );
+            assert_eq!(
+                notifications.load(Ordering::SeqCst),
+                if phase == "admission_panic" {
+                    1
+                } else {
+                    2
+                },
+                "{primitive} {phase}"
+            );
+            assert_eq!(
+                mpsc_tx.telemetry_snapshot(0).reserved_uncommitted_obligations,
+                0
+            );
+            mpsc_tx.try_send(7).unwrap();
+            assert_eq!(mpsc_rx.try_recv(), Ok(7));
+            assert_eq!(
+                oneshot_rx.try_recv(),
+                Err(crate::channel::oneshot::TryRecvError::Closed)
+            );
+            assert_eq!(
+                broadcast_rx.try_recv(),
+                Err(crate::channel::broadcast::TryRecvError::Empty)
+            );
+            assert_eq!(semaphore.available_permits(), 1);
+            assert_eq!(runtime.state.drain_obligation_posts(64), 2);
+            let committed = u64::from(primitive == "semaphore" && phase != "admission_panic");
+            let stats = mailbox.stats();
+            assert_eq!(stats.posted, 2);
+            assert_eq!(stats.applied, 2);
+            assert_eq!(stats.reserved, 1);
+            assert_eq!(stats.committed, committed);
+            assert_eq!(stats.aborted, 1 - committed);
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+            assert_eq!(runtime.state.leak_count(), 0);
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .pending_obligation_post_count(),
+                0
+            );
+            assert_eq!(mailbox.open_tickets(), 0);
+        }
+    }
+}
+
+#[test]
 fn checked_notify_panic_aborts_unreturned_credit_without_double_panic() {
     let (mut runtime, region, holder, cx) = checked_holder(1);
     let mailbox = mailbox_of(&runtime);
