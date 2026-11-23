@@ -690,6 +690,174 @@ fn complete<F: Future>(future: F) -> F::Output {
     panic!("scripted connection step did not complete in bounded poll steps");
 }
 
+#[derive(Clone, Copy)]
+enum FinalRequestWrite {
+    Partial,
+    PendingFlush,
+    Complete,
+}
+
+/// A peer answers only after the final request frame reaches the transport.
+/// It can answer while that frame is partly written, or while a buffered
+/// transport has accepted it but has not finished flushing.
+struct EarlyResponseTransport {
+    incoming: crate::bytes::BytesMut,
+    response: crate::bytes::BytesMut,
+    mode: FinalRequestWrite,
+    final_write_seen: bool,
+    final_flush_finished: bool,
+}
+
+impl AsyncRead for EarlyResponseTransport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut crate::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let input = if !this.incoming.is_empty() {
+            &mut this.incoming
+        } else if this.final_write_seen {
+            &mut this.response
+        } else {
+            return Poll::Pending;
+        };
+        if input.is_empty() {
+            return Poll::Pending;
+        }
+        let count = buf.remaining().min(input.len());
+        buf.put_slice(&input.split_to(count));
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for EarlyResponseTransport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.final_write_seen && matches!(this.mode, FinalRequestWrite::Partial) {
+            return Poll::Pending;
+        }
+        // All writes before the tested frame are accepted in full. A DATA
+        // frame, or HEADERS for an empty request, carries END_STREAM (0x1).
+        if bytes.len() >= 9 && matches!(bytes[3], 0 | 1) && bytes[4] & 1 != 0 {
+            assert!(!this.final_write_seen, "only one request is sent");
+            this.final_write_seen = true;
+            if matches!(this.mode, FinalRequestWrite::Partial) {
+                return Poll::Ready(Ok(bytes.len() / 2));
+            }
+        }
+        Poll::Ready(Ok(bytes.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.final_write_seen {
+            if matches!(this.mode, FinalRequestWrite::PendingFlush) {
+                return Poll::Pending;
+            }
+            this.final_flush_finished = true;
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+fn early_response_after_final_request_write(
+    mode: FinalRequestWrite,
+    with_body: bool,
+) -> (Http2Conn<EarlyResponseTransport>, bool) {
+    use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
+
+    let mut response_headers = crate::bytes::BytesMut::new();
+    crate::http::h2::hpack::Encoder::new().encode(
+        &[
+            Header::new(":status", "413"),
+            Header::new("content-length", "6"),
+        ],
+        &mut response_headers,
+    );
+    let transport = EarlyResponseTransport {
+        incoming: server_frames([Frame::Settings(SettingsFrame::new(vec![]))]),
+        response: server_frames([
+            Frame::Headers(HeadersFrame::new(1, response_headers.freeze(), false, true)),
+            Frame::Data(DataFrame::new(1, Bytes::from_static(b"denied"), true)),
+        ]),
+        mode,
+        final_write_seen: false,
+        final_flush_finished: false,
+    };
+    let body = if with_body {
+        Bytes::from_static(b"request-payload")
+    } else {
+        Bytes::new()
+    };
+    let request = Http2Client::new()
+        .post("http://localhost/upload")
+        .body(body.clone())
+        .prepare()
+        .unwrap();
+    let mut conn = complete(Http2Conn::start(transport, DEFAULT_BODY_LIMIT, 100))
+        .expect("write client preface");
+    let (response, reusable) = complete(conn.request(request, body, DEFAULT_BODY_LIMIT))
+        .map_err(|failure| failure.error)
+        .expect("an early final response must remain visible");
+    assert_eq!(response.status, 413);
+    assert_eq!(response.body.as_ref(), b"denied");
+    assert!(
+        conn.wire.get_mut().inner.final_write_seen,
+        "the test must reach the final outgoing frame before the peer answers"
+    );
+    (conn, reusable)
+}
+
+#[test]
+fn buffered_client_does_not_reuse_a_partly_written_upload_after_an_early_response() {
+    let (mut conn, reusable) =
+        early_response_after_final_request_write(FinalRequestWrite::Partial, true);
+    assert!(
+        !conn.wire.write_buffer().is_empty(),
+        "the upload suffix must still be owned by Framed"
+    );
+    assert!(!conn.wire.get_mut().inner.final_flush_finished);
+    assert!(
+        !reusable,
+        "a subsequent request must not inherit the rejected upload's pending suffix"
+    );
+}
+
+#[test]
+fn buffered_client_does_not_reuse_a_transport_with_a_pending_final_flush() {
+    for with_body in [false, true] {
+        let (mut conn, reusable) =
+            early_response_after_final_request_write(FinalRequestWrite::PendingFlush, with_body);
+        assert!(
+            conn.wire.write_buffer().is_empty(),
+            "the transport accepted the frame: checking Framed's buffer alone is insufficient"
+        );
+        assert!(!conn.wire.get_mut().inner.final_flush_finished);
+        assert!(!reusable, "the last transport flush is still pending");
+    }
+}
+
+#[test]
+fn buffered_client_can_reuse_a_fully_flushed_request() {
+    for with_body in [false, true] {
+        let (mut conn, reusable) =
+            early_response_after_final_request_write(FinalRequestWrite::Complete, with_body);
+        assert!(conn.wire.write_buffer().is_empty());
+        assert!(conn.wire.get_mut().inner.final_flush_finished);
+        assert!(reusable, "a completely flushed request remains poolable");
+        assert!(conn.reusable());
+    }
+}
+
 #[test]
 fn max_overhead_frames_enforces_empty_data_flood() {
     use crate::bytes::BytesMut;

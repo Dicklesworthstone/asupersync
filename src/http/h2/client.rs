@@ -1310,6 +1310,7 @@ where
         let mut headers = Some(request.headers);
         let mut stream_id = None;
         let mut sent = 0;
+        let mut flushed = false;
         let mut response = ResponseState::new(request.head, limit);
         poll_fn(|task| -> Poll<Result<(), AttemptFailure>> {
             for _ in 0..POLL_STEPS {
@@ -1460,9 +1461,12 @@ where
                 }
                 let buffered = !wire.write_buffer().is_empty();
                 match wire.poll_flush(task) {
-                    Poll::Ready(Ok(())) => progress |= buffered,
+                    Poll::Ready(Ok(())) => {
+                        flushed = true;
+                        progress |= buffered;
+                    }
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                    Poll::Pending => {}
+                    Poll::Pending => flushed = false,
                 }
                 if !progress {
                     return Poll::Pending;
@@ -1472,7 +1476,14 @@ where
             Poll::Pending
         })
         .await?;
-        let closed_both_ways = sent == body.len()
+        // `sent` counts DATA queued in Connection, not bytes accepted by the
+        // peer. `next_frame` also removes a frame before Framed finishes its
+        // write, and a buffered transport can still have a pending flush when
+        // Framed's own buffer is empty. An early response remains valid, but
+        // neither kind of unfinished upload may enter the idle pool.
+        let closed_both_ways = flushed
+            && wire.write_buffer().is_empty()
+            && sent == body.len()
             && stream_id.is_some_and(|id| !connection.has_pending_frames_for_stream(id));
         Ok((response.response, closed_both_ways))
     }
