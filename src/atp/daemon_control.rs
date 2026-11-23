@@ -28,7 +28,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use sysinfo::Signal as SysSignal;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// Daemon control capability required for process management operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,9 +248,6 @@ impl SecureDaemonController {
         #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
         self.reap_owned_child()?;
 
-        // Refresh system information
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-
         // Prefer the owned process handle over the replaceable PID file.
         let owned_pid = self.owned_pid();
         let pid = match owned_pid {
@@ -260,6 +257,23 @@ impl SecureDaemonController {
         };
 
         if let Some(pid) = pid {
+            // A daemon started after this controller's initial snapshot has
+            // no cached cwd, command line, or user. The default process
+            // refresh omits those fields, so request all status metadata for
+            // this PID explicitly. Refresh mutable metadata on every probe;
+            // a process can change directory or exec without changing PID.
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory()
+                    .with_exe(UpdateKind::Always)
+                    .with_cmd(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always)
+                    .with_user(UpdateKind::Always)
+                    .without_tasks(),
+            );
             // Verify process is still running and is our daemon
             if let Some(process) = self.system.process(Pid::from_u32(pid)) {
                 let is_daemon = if owned_pid == Some(pid) {
@@ -278,9 +292,16 @@ impl SecureDaemonController {
                             .map(|s| s.to_string_lossy().into_owned())
                             .collect::<Vec<_>>()
                             .join(" "),
-                        working_dir: process
-                            .cwd()
-                            .map_or_else(platform_fallback_work_dir, Path::to_path_buf),
+                        working_dir: process.cwd().map_or_else(
+                            || {
+                                if owned_pid == Some(pid) {
+                                    self.config_dir.clone()
+                                } else {
+                                    platform_fallback_work_dir()
+                                }
+                            },
+                            Path::to_path_buf,
+                        ),
                         user: format!(
                             "{:?}",
                             process

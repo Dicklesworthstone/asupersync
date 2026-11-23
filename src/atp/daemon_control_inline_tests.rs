@@ -142,6 +142,47 @@ fn exhausted_cost_budget_still_denies_control() {
     assert!(controller.status(&cx).is_err());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn status_loads_metadata_for_a_process_missing_from_the_initial_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    std::fs::write(&config_path, "# test config").unwrap();
+    let mut controller = SecureDaemonController::new(
+        RegionId::new_for_test(1, 0),
+        vec![DaemonControlCapability::Status],
+        std::env::current_exe().unwrap(),
+        config_path,
+    )
+    .unwrap();
+
+    // A newly spawned daemon is absent from the controller's construction
+    // snapshot. An empty snapshot reproduces that state without spawning a
+    // second test harness or changing this process's working directory.
+    controller.system = System::new().unwrap();
+    let pid = std::process::id();
+    std::fs::write(&controller.pid_file, pid.to_string()).unwrap();
+    let expected_dir = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let info = controller.status_strict(&Cx::for_testing()).unwrap();
+
+    assert_eq!(info.pid, Some(pid));
+    assert_eq!(info.working_dir, expected_dir);
+    assert!(
+        !info.command.is_empty(),
+        "status must load the command line"
+    );
+    let process = controller.system.process(Pid::from_u32(pid)).unwrap();
+    assert_eq!(
+        process.cwd(),
+        Some(expected_dir.as_path()),
+        "the directory must be observed, not the caller's fallback"
+    );
+    assert!(
+        process.user_id().is_some(),
+        "status must load the process user"
+    );
+}
+
 #[test]
 fn relative_configuration_is_resolved_before_changing_child_directory() {
     let current_dir = std::env::current_dir().unwrap();
