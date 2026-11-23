@@ -16,7 +16,8 @@ use crate::error::{Error, ErrorKind};
 use crate::types::RegionId;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::process::Command;
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use sysinfo::Signal as SysSignal;
@@ -118,6 +119,12 @@ pub struct SecureDaemonController {
     pid_file: PathBuf,
     /// Process system interface.
     system: System,
+    /// Retain the spawned child until it is reaped. On Unix, dropping the
+    /// controller transfers a live child to the process module's shared reaper.
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    child: Option<crate::process::Child>,
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    child_state: DaemonState,
 }
 
 impl SecureDaemonController {
@@ -154,6 +161,17 @@ impl SecureDaemonController {
             )));
         }
 
+        // The child runs beside its configuration. Resolve these paths before
+        // changing its working directory, including callers' relative paths.
+        let daemon_path = fs::canonicalize(&daemon_path).map_err(|e| {
+            Error::new(ErrorKind::ConfigError)
+                .with_message(format!("Cannot resolve daemon executable: {e}"))
+        })?;
+        let config_path = fs::canonicalize(&config_path).map_err(|e| {
+            Error::new(ErrorKind::ConfigError)
+                .with_message(format!("Cannot resolve daemon configuration: {e}"))
+        })?;
+
         let pid_file = config_path
             .parent()
             .ok_or_else(|| {
@@ -174,6 +192,10 @@ impl SecureDaemonController {
             config_path,
             pid_file,
             system,
+            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+            child: None,
+            #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+            child_state: DaemonState::Stopped,
         })
     }
 
@@ -184,6 +206,9 @@ impl SecureDaemonController {
     pub fn status(&mut self, cx: &Cx) -> Result<DaemonProcessInfo, Error> {
         self.require_capability(DaemonControlCapability::Status)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::Status)?;
+
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        self.reap_owned_child()?;
 
         // Refresh system information
         self.system.refresh_processes(ProcessesToUpdate::All, true);
@@ -220,11 +245,8 @@ impl SecureDaemonController {
             }
         }
 
-        // Process not found or PID file stale, clean up
-        if pid.is_some() {
-            let _ = fs::remove_file(&self.pid_file); // Clean stale PID file
-        }
-
+        // The daemon owns its PID claim. A read-only status probe must not
+        // unlink a claim that another daemon may have replaced in the meantime.
         // Return stopped state
         Ok(DaemonProcessInfo {
             pid: None,
@@ -242,12 +264,37 @@ impl SecureDaemonController {
 
     /// Starts the daemon process.
     ///
+    /// `Running` confirms that the child survived its initial startup check
+    /// and published its PID claim. It does not prove that every transfer
+    /// listener has finished binding; use a service-specific readiness check.
+    /// This synchronous method may wait up to ten seconds
+    /// for the PID claim. The explicit process-less slim profile cannot start
+    /// a daemon unless the `process` feature is also enabled.
+    ///
     /// # Security
     /// Requires Start capability. Uses safe process spawning without privilege escalation.
     pub fn start(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         self.require_capability(DaemonControlCapability::Start)?;
         self.validate_operation_authorized(cx, DaemonControlCapability::Start)?;
+        cx.checkpoint()?;
 
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        {
+            self.start_process(cx)
+        }
+        #[cfg(all(feature = "slim-runtime-profile", not(feature = "process")))]
+        {
+            Ok(DaemonControlResult::Failed {
+                operation: DaemonControlCapability::Start,
+                error: "Daemon startup requires the process feature in the slim runtime profile"
+                    .to_owned(),
+                current_state: self.get_daemon_state(),
+            })
+        }
+    }
+
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    fn start_process(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         let start_time = Instant::now();
         let previous_state = self.get_daemon_state();
 
@@ -259,15 +306,26 @@ impl SecureDaemonController {
                 duration: start_time.elapsed(),
             });
         }
+        if !matches!(previous_state, DaemonState::Stopped | DaemonState::Failed) {
+            return Ok(DaemonControlResult::Failed {
+                operation: DaemonControlCapability::Start,
+                error: "The previous daemon child has not completed its lifecycle".to_owned(),
+                current_state: previous_state,
+            });
+        }
 
-        // Start daemon process with safe parameters
-        let mut cmd = Command::new(&self.daemon_path);
+        // Use the actual atpd CLI. The daemon, not this controller, claims the
+        // PID path exclusively and removes its own claim on a clean exit.
+        let mut cmd = crate::process::Command::new(&self.daemon_path);
         cmd.arg("--config")
             .arg(&self.config_path)
-            .arg("--daemon")
-            .stdout(Stdio::null()) // Prevent output capture attacks
-            .stderr(Stdio::null())
-            .stdin(Stdio::null()); // No stdin to prevent input injection
+            .arg("--pid-file")
+            .arg(&self.pid_file)
+            .arg("--foreground")
+            .arg("start")
+            .stdout(crate::process::Stdio::Null)
+            .stderr(crate::process::Stdio::Null)
+            .stdin(crate::process::Stdio::Null);
 
         // SECURITY: Drop all unnecessary privileges and use safe working directory
         let safe_work_dir = self
@@ -276,29 +334,66 @@ impl SecureDaemonController {
             .map_or_else(platform_fallback_work_dir, Path::to_path_buf);
         cmd.current_dir(&safe_work_dir);
 
-        // Spawn the process
-        match cmd.spawn() {
-            Ok(child) => {
-                let pid = child.id();
-
-                // Write PID file securely
-                self.write_pid_file(pid)?;
-
-                // Wait a moment to verify the process started successfully
-                std::thread::sleep(Duration::from_millis(100));
-                let new_state = self.get_daemon_state();
-
-                Ok(DaemonControlResult::Success {
-                    previous_state,
-                    new_state,
-                    duration: start_time.elapsed(),
-                })
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Ok(DaemonControlResult::Failed {
+                    operation: DaemonControlCapability::Start,
+                    error: format!("Failed to start daemon: {error}"),
+                    current_state: self.get_daemon_state(),
+                });
             }
-            Err(e) => Ok(DaemonControlResult::Failed {
-                operation: DaemonControlCapability::Start,
-                error: format!("Failed to start daemon: {}", e),
-                current_state: self.get_daemon_state(),
-            }),
+        };
+        let pid = child.id().expect("a newly spawned child has a process id");
+        self.child = Some(child);
+        self.child_state = DaemonState::Starting;
+
+        loop {
+            match self.reap_owned_child() {
+                Ok(Some(status)) => {
+                    return Ok(DaemonControlResult::Failed {
+                        operation: DaemonControlCapability::Start,
+                        error: format!("Daemon exited during startup ({status})"),
+                        current_state: DaemonState::Failed,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let current_state = self.terminate_startup_child();
+                    return Ok(DaemonControlResult::Failed {
+                        operation: DaemonControlCapability::Start,
+                        error: format!("Cannot observe daemon startup: {error}"),
+                        current_state,
+                    });
+                }
+            }
+
+            if let Err(error) = cx.checkpoint() {
+                self.terminate_startup_child();
+                return Err(error);
+            }
+
+            // Retain the old minimum observation window, but wait for the
+            // child's own PID publication instead of manufacturing a claim.
+            if start_time.elapsed() >= Duration::from_millis(100)
+                && self.read_pid_file().ok() == Some(pid)
+            {
+                self.child_state = DaemonState::Running;
+                return Ok(DaemonControlResult::Success {
+                    previous_state,
+                    new_state: DaemonState::Running,
+                    duration: start_time.elapsed(),
+                });
+            }
+            if start_time.elapsed() >= Duration::from_secs(10) {
+                let current_state = self.terminate_startup_child();
+                return Ok(DaemonControlResult::Failed {
+                    operation: DaemonControlCapability::Start,
+                    error: "Daemon did not publish its PID claim within ten seconds".to_owned(),
+                    current_state,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -475,7 +570,7 @@ impl SecureDaemonController {
     ) -> Result<(), Error> {
         // Validate the operation is authorized by the region's capability context
         // This ensures the operation is running in the proper security context
-        if cx.budget().remaining_cost().unwrap_or(0) == 0 {
+        if cx.budget().remaining_cost() == Some(0) {
             return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
                 "Daemon control operation for region {:?} not authorized by capability context",
                 self.region_id
@@ -488,6 +583,17 @@ impl SecureDaemonController {
     }
 
     fn get_daemon_state(&mut self) -> DaemonState {
+        #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+        {
+            if self.reap_owned_child().is_err() {
+                return DaemonState::Unknown;
+            }
+            // A live child still belongs to this controller even if someone
+            // removes its PID file. Do not start a duplicate in that case.
+            if self.child.is_some() {
+                return self.child_state;
+            }
+        }
         self.system.refresh_processes(ProcessesToUpdate::All, true);
 
         if let Ok(pid) = self.read_pid_file() {
@@ -500,6 +606,44 @@ impl SecureDaemonController {
         DaemonState::Stopped
     }
 
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    fn reap_owned_child(&mut self) -> Result<Option<crate::process::ExitStatus>, Error> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait().map_err(|error| {
+            Error::new(ErrorKind::Internal)
+                .with_message(format!("Cannot query the owned daemon child: {error}"))
+        })?;
+        if status.is_some() {
+            // Child::try_wait consumes its OS handle once it reaps. Never
+            // poll that completed handle again, or signal its reusable PID.
+            self.child = None;
+            self.child_state = DaemonState::Stopped;
+        }
+        Ok(status)
+    }
+
+    #[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+    fn terminate_startup_child(&mut self) -> DaemonState {
+        let Some(child) = self.child.as_mut() else {
+            return DaemonState::Failed;
+        };
+        let state = match child.kill() {
+            Ok(()) => DaemonState::Stopping,
+            Err(_) => DaemonState::Unknown,
+        };
+        self.child_state = state;
+        // Do not wait unboundedly after a failed start. Retain the child if it
+        // has not exited yet; on Unix, controller drop transfers it to the reaper.
+        let _ = self.reap_owned_child();
+        if self.child.is_some() {
+            state
+        } else {
+            DaemonState::Failed
+        }
+    }
+
     fn read_pid_file(&self) -> Result<u32, Error> {
         let contents = fs::read_to_string(&self.pid_file).map_err(|e| {
             Error::new(ErrorKind::InvalidInput)
@@ -508,13 +652,6 @@ impl SecureDaemonController {
 
         contents.trim().parse::<u32>().map_err(|e| {
             Error::new(ErrorKind::InvalidInput).with_message(format!("Invalid PID in file: {}", e))
-        })
-    }
-
-    fn write_pid_file(&self, pid: u32) -> Result<(), Error> {
-        fs::write(&self.pid_file, pid.to_string()).map_err(|e| {
-            Error::new(ErrorKind::AdmissionDenied)
-                .with_message(format!("Failed to write PID file: {}", e))
         })
     }
 

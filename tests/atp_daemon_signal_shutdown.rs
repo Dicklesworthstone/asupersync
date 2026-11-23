@@ -1558,3 +1558,288 @@ fn atpd_sigterm_exits_while_a_diagnostics_client_is_idle() {
         stop.log
     );
 }
+
+// Exercise the public controller against the same real daemon as the signal
+// tests. Process startup and listener readiness have separate witnesses.
+#[cfg(any(not(feature = "slim-runtime-profile"), feature = "process"))]
+mod controller_lifecycle {
+    use super::*;
+    use asupersync::atp::daemon_control::{
+        DaemonControlCapability, DaemonControlResult, DaemonState, SecureDaemonController,
+    };
+    use asupersync::types::Budget;
+
+    struct ControlledDaemon {
+        controller: SecureDaemonController,
+        cx: Cx,
+        root: PathBuf,
+        data: PathBuf,
+        diagnostics: SocketAddr,
+        _runtime: asupersync::runtime::Runtime,
+    }
+
+    impl ControlledDaemon {
+        fn new(label: &str) -> Self {
+            let root = scratch_root(label);
+            let data = init_atpd(&root);
+            let reservation = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("reserve controller diagnostics address");
+            let diagnostics = reservation.local_addr().expect("diagnostics address");
+            let config = serde_json::json!({
+                "identity": {
+                    "peer_id": "peer-uninitialized",
+                    "private_key_path": data.join("identity/private.key"),
+                    "device_name": "controller-lifecycle-test",
+                    "team_memberships": [],
+                },
+                "network": {
+                    "bind_addr": "127.0.0.1:0",
+                    "enable_quic": false,
+                    "enable_relay": false,
+                    "enable_mailbox": false,
+                    "discovery": {
+                        "enable_local": false,
+                        "enable_relay_discovery": false,
+                        "relay_servers": [],
+                        "bootstrap_peers": [],
+                    },
+                },
+                "storage": {
+                    "data_dir": data,
+                    "cache_dir": data.join("cache"),
+                    "max_cache_size": 1048576,
+                    "cache_retention_secs": 60,
+                    "journal": {
+                        "enable": true,
+                        "journal_path": data.join("journal"),
+                        "max_journal_size": 1048576,
+                        "rotation_policy": "daily",
+                    },
+                },
+                "transfers": {
+                    "max_concurrent": 2,
+                    "default_timeout_secs": 30,
+                    "max_transfer_size": 1048576,
+                    "enable_bandwidth_limit": false,
+                },
+                "service": {
+                    "auto_start": false,
+                    "restart_policy": "Never",
+                    "shutdown_timeout_secs": 2,
+                    "health_check": {
+                        "enable": false,
+                        "interval_secs": 30,
+                        "timeout_secs": 1,
+                        "failure_threshold": 1,
+                    },
+                },
+                "diagnostics": {
+                    "enable_metrics": true,
+                    "metrics_bind": diagnostics,
+                    "enable_debug": false,
+                    "logging": { "level": "info", "format": "json" },
+                },
+            });
+            let config_path = root.join("config.toml");
+            write_file(
+                &config_path,
+                toml::to_string(&config)
+                    .expect("serialize daemon config")
+                    .as_bytes(),
+            );
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("controller runtime");
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let controller = SecureDaemonController::new(
+                cx.region_id(),
+                vec![
+                    DaemonControlCapability::Status,
+                    DaemonControlCapability::Start,
+                    DaemonControlCapability::Stop,
+                    DaemonControlCapability::ForceKill,
+                ],
+                PathBuf::from(ATPD_BIN),
+                config_path,
+            )
+            .expect("create controller for real atpd");
+            drop(reservation);
+            Self {
+                controller,
+                cx,
+                root,
+                data,
+                diagnostics,
+                _runtime: runtime,
+            }
+        }
+
+        fn wait_ready(&mut self) -> Value {
+            let deadline = Instant::now() + READY_LIMIT;
+            loop {
+                assert!(
+                    self.controller.status(&self.cx).unwrap().pid.is_some(),
+                    "controller child exited before listener readiness; scratch root: {}",
+                    self.root.display()
+                );
+                if let Ok(mut stream) =
+                    TcpStream::connect_timeout(&self.diagnostics, Duration::from_millis(100))
+                {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    stream
+                        .write_all(
+                            b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("request daemon health");
+                    let mut response = String::new();
+                    stream
+                        .read_to_string(&mut response)
+                        .expect("read daemon health");
+                    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+                    let (_, body) = response.split_once("\r\n\r\n").expect("HTTP body");
+                    let snapshot: Value = serde_json::from_str(body).expect("daemon health JSON");
+                    assert_eq!(snapshot["status"], "running");
+                    assert_eq!(snapshot["data_dir"], self.data.to_string_lossy().as_ref());
+                    let listener: SocketAddr = snapshot["transfer_listener_addr"]
+                        .as_str()
+                        .expect("bound transfer listener")
+                        .parse()
+                        .unwrap();
+                    assert!(listener.ip().is_loopback());
+                    assert_ne!(listener.port(), 0);
+                    return snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "controller child did not serve health within {READY_LIMIT:?}; scratch root: {}",
+                    self.root.display()
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    impl Drop for ControlledDaemon {
+        fn drop(&mut self) {
+            // Keep a failed assertion from leaving a real daemon running. A
+            // controller normally lets its child outlive it, so cleanup is
+            // explicit here. Status polls reap the owned child after SIGKILL.
+            let pid = std::fs::read_to_string(self.root.join("daemon.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            let _ = self.controller.force_kill(&self.cx);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while let Some(pid) = pid {
+                let _ = self.controller.status(&self.cx);
+                if kill(Pid::from_raw(pid), None) == Err(nix::errno::Errno::ESRCH)
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn public_controller_starts_serves_and_reaps_the_real_daemon() {
+        let mut daemon = ControlledDaemon::new("controller-lifecycle");
+        assert_eq!(daemon.cx.budget().remaining_cost(), None);
+        assert_eq!(daemon.controller.status(&daemon.cx).unwrap().pid, None);
+
+        let started = daemon.controller.start(&daemon.cx).unwrap();
+        assert!(
+            matches!(
+                started,
+                DaemonControlResult::Success {
+                    previous_state: DaemonState::Stopped,
+                    new_state: DaemonState::Running,
+                    ..
+                }
+            ),
+            "real atpd startup failed: {started:?}"
+        );
+        let info = daemon.controller.status(&daemon.cx).unwrap();
+        let pid = info.pid.expect("running daemon PID");
+        let claim = std::fs::read_to_string(daemon.root.join("daemon.pid")).unwrap();
+        assert_eq!(claim.trim().parse::<u32>().unwrap(), pid);
+        assert_eq!(info.working_dir, daemon.root);
+        daemon.wait_ready();
+
+        let started_again = daemon.controller.start(&daemon.cx).unwrap();
+        assert!(matches!(
+            started_again,
+            DaemonControlResult::Success {
+                previous_state: DaemonState::Running,
+                new_state: DaemonState::Running,
+                ..
+            }
+        ));
+        assert_eq!(daemon.controller.status(&daemon.cx).unwrap().pid, Some(pid));
+
+        let stopped = daemon.controller.stop(&daemon.cx).unwrap();
+        assert!(
+            matches!(
+                stopped,
+                DaemonControlResult::Success {
+                    previous_state: DaemonState::Running,
+                    new_state: DaemonState::Stopped,
+                    ..
+                }
+            ),
+            "real atpd shutdown failed: {stopped:?}"
+        );
+        assert_eq!(daemon.controller.status(&daemon.cx).unwrap().pid, None);
+        assert!(!daemon.root.join("daemon.pid").exists());
+        assert_eq!(
+            kill(Pid::from_raw(i32::try_from(pid).unwrap()), None),
+            Err(nix::errno::Errno::ESRCH),
+            "stop must reap its child before reporting Stopped"
+        );
+    }
+
+    #[test]
+    fn public_controller_reports_failure_before_any_daemon_pid_claim() {
+        let root = scratch_root("controller-start-failure");
+        let config_path = root.join("config.toml");
+        write_file(&config_path, b"# not read by the failing executable\n");
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("controller runtime");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut controller = SecureDaemonController::new(
+            cx.region_id(),
+            vec![
+                DaemonControlCapability::Start,
+                DaemonControlCapability::Status,
+            ],
+            // The Rust test harness rejects atpd's --config argument before
+            // running any tests, giving a portable immediate failure fixture.
+            std::env::current_exe().unwrap(),
+            config_path,
+        )
+        .unwrap();
+
+        let result = controller.start(&cx).unwrap();
+        assert!(
+            matches!(
+                result,
+                DaemonControlResult::Failed {
+                    operation: DaemonControlCapability::Start,
+                    current_state: DaemonState::Failed,
+                    ..
+                }
+            ),
+            "an executable that exits immediately cannot be a successful start: {result:?}"
+        );
+        assert_eq!(controller.status(&cx).unwrap().pid, None);
+        assert!(!root.join("daemon.pid").exists());
+    }
+}
