@@ -12,6 +12,274 @@ fn worker_config(mode: ManagedRestartMode) -> DynamicWorkerConfig {
     )
 }
 
+async fn drop_pending_replacement(replacement: impl Future) {
+    let mut replacement = std::pin::pin!(replacement);
+    poll_fn(|task| {
+        assert!(replacement.as_mut().poll(task).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+async fn abandoned_replacement_admission_keeps_predecessor(cx: Cx, worker: bool, resume: bool) {
+    let mut owner = cx
+        .open_dynamic_supervisor(DynamicSupervisorConfig::new(1))
+        .await
+        .unwrap();
+    let old = owner
+        .start_child(
+            "service",
+            managed(
+                |_: Cx, _: ManagedGeneration| async {
+                    Outcome::Err(String::from("previous generation's exact error"))
+                },
+                ManagedRestartMode::Temporary,
+            ),
+        )
+        .await
+        .unwrap();
+    // Complete the real controller and region without consuming their receipt.
+    // The replacement's next Pending must then be its own region admission.
+    owner.wait_child_terminal(&old).await.unwrap();
+    owner.require_reusable(&old).unwrap();
+    let before_admission = owner.generation;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let factory = move |_: Cx, _: ManagedGeneration| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        async { Outcome::<(), String>::Ok(()) }
+    };
+    // Lab and the native current-thread scheduler apply region commands only
+    // after this task yields, so this witnesses a genuinely pending admission.
+    if worker {
+        drop_pending_replacement(owner.replace_worker(
+            &old,
+            worker_config(ManagedRestartMode::Temporary),
+            factory,
+        ))
+        .await;
+    } else {
+        drop_pending_replacement(
+            owner.replace_child(&old, managed(factory, ManagedRestartMode::Temporary)),
+        )
+        .await;
+    }
+
+    assert_eq!(owner.generation, before_admission + 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.len(), 1);
+    assert_eq!(owner.children()[0].id, old);
+    assert_eq!(owner.children()[0].state, DynamicChildState::Draining);
+    assert!(matches!(owner.child_result(&old), Ok(Some(Ok(_)))));
+    assert!(matches!(
+        owner.start_child("service", done()).await,
+        Err(DynamicSupervisorError::DuplicateName)
+    ));
+    assert!(matches!(
+        owner.start_child("other", done()).await,
+        Err(DynamicSupervisorError::Capacity)
+    ));
+
+    let previous = if resume {
+        let replaced = owner.replace_child(&old, done()).await.unwrap();
+        let new = replaced.replacement.unwrap();
+        assert_eq!(new.name(), old.name());
+        assert!(new.generation() > before_admission + 1);
+        assert_ne!(new.region_id(), old.region_id());
+        assert!(matches!(
+            owner.request_stop(&old),
+            Err(DynamicSupervisorError::StaleChild)
+        ));
+        assert!(!owner.child(&new).unwrap().stop_requested);
+        assert!(owner.wait_child(&new).await.unwrap().close.is_ok());
+        replaced.previous
+    } else {
+        owner.wait_child(&old).await.unwrap()
+    };
+    assert_eq!(previous.id, old);
+    assert!(previous.close.is_ok());
+    let report = previous.supervisor.unwrap();
+    assert_eq!((report.started, report.joined), (1, 1));
+    assert!(matches!(
+        &report.children[0].outcome,
+        Outcome::Err(message) if message == "previous generation's exact error"
+    ));
+    assert!(owner.is_empty());
+    assert!(owner.shutdown().await.close.is_ok());
+}
+
+#[test]
+fn dropped_replacement_admission_retains_old_result_for_reap_or_retry() {
+    for worker in [false, true] {
+        for resume in [false, true] {
+            run_case(move |cx| abandoned_replacement_admission_keeps_predecessor(cx, worker, resume));
+        }
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn native_dropped_replacement_admission_retains_old_result_for_reap_or_retry() {
+    for worker in [false, true] {
+        for resume in [false, true] {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let cx = Cx::current().expect("native runtime installs an owner context");
+                abandoned_replacement_admission_keeps_predecessor(cx, worker, resume).await;
+            });
+            assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
+        }
+    }
+}
+
+#[test]
+fn replacement_preserves_identity_and_owner_refusal_precedence() {
+    for sealed in [false, true] {
+        run_case(move |cx| async move {
+            let mut owner = cx
+                .open_dynamic_supervisor(DynamicSupervisorConfig::new(1))
+                .await
+                .unwrap();
+            let old = owner.start_child("service", done()).await.unwrap();
+            owner.wait_child_terminal(&old).await.unwrap();
+            let sequence = owner.generation;
+            let mut stale = old.clone();
+            stale.generation += 1;
+            let mut invalid = worker_config(ManagedRestartMode::Temporary);
+            invalid.supervision.storm_threshold = Some(f64::NAN);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&calls);
+            let factory = move |_: Cx, _: ManagedGeneration| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { Outcome::<(), String>::Ok(()) }
+            };
+            assert!(matches!(
+                owner
+                    .replace_worker(&stale, invalid.clone(), factory.clone())
+                    .await,
+                Err(DynamicSupervisorError::StaleChild)
+            ));
+            assert_eq!(owner.len(), 1);
+            assert!(!owner.child(&old).unwrap().stop_requested);
+            if sealed {
+                owner.begin_shutdown();
+            }
+            let replaced = owner.replace_worker(&old, invalid, factory).await.unwrap();
+            if sealed {
+                assert!(matches!(
+                    replaced.replacement,
+                    Err(DynamicSupervisorError::Closing)
+                ));
+            } else {
+                assert!(matches!(
+                    replaced.replacement,
+                    Err(DynamicSupervisorError::WorkerConfiguration(
+                        crate::supervision::ManagedSupervisorBindError::InvalidStormThreshold
+                    ))
+                ));
+            }
+            assert_eq!(replaced.previous.id, old);
+            assert!(replaced.previous.close.is_ok());
+            assert_eq!(owner.generation, sequence);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(owner.is_empty());
+            assert!(owner.shutdown().await.close.is_ok());
+        });
+    }
+}
+
+#[test]
+#[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
+fn unpolled_replacement_drop_preserves_outer_unwind() {
+    const CHILD_ENV: &str = "ASUPERSYNC_UNPOLLED_REPLACEMENT_UNWIND_CHILD";
+    const CHILD_PASS_EXIT: i32 = 77;
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // The regression aborts instead of unwinding, so isolate it from the
+        // rest of the test binary and bound a possible stalled child process.
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let test = format!("{module}::unpolled_replacement_drop_preserves_outer_unwind");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test)
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                // A zero-test subprocess exits zero; the distinct success code
+                // also proves that the requested regression actually ran.
+                assert_eq!(
+                    status.code(),
+                    Some(CHILD_PASS_EXIT),
+                    "unpolled replacement child failed: {status}"
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("unpolled replacement child exceeded 30 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    struct PanickingFactory(Arc<AtomicUsize>);
+
+    impl ManagedChildFactory<String> for PanickingFactory {
+        fn start(&self, _: Cx, _: ManagedGeneration) -> crate::supervision::ManagedChildFuture<String> {
+            panic!("unpolled replacement must never invoke its factory");
+        }
+    }
+
+    impl Drop for PanickingFactory {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("replacement factory destructor");
+        }
+    }
+
+    for worker in [false, true] {
+        run_case(move |cx| async move {
+            let mut owner = cx
+                .open_dynamic_supervisor(DynamicSupervisorConfig::new(1))
+                .await
+                .unwrap();
+            let old = owner.start_child("service", done()).await.unwrap();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let factory = PanickingFactory(Arc::clone(&drops));
+                if worker {
+                    let _replacement = owner.replace_worker(
+                        &old,
+                        worker_config(ManagedRestartMode::Temporary),
+                        factory,
+                    );
+                    panic!("original owner unwind");
+                } else {
+                    let _replacement = owner.replace_child(
+                        &old,
+                        managed(factory, ManagedRestartMode::Temporary),
+                    );
+                    panic!("original owner unwind");
+                }
+            }))
+            .unwrap_err();
+            assert_eq!(caught.downcast_ref::<&str>(), Some(&"original owner unwind"));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(owner.len(), 1);
+            assert!(!owner.child(&old).unwrap().stop_requested);
+            assert!(owner.wait_child(&old).await.unwrap().close.is_ok());
+            assert!(owner.shutdown().await.close.is_ok());
+        });
+    }
+    std::process::exit(CHILD_PASS_EXIT);
+}
+
 #[test]
 fn direct_worker_restarts_real_generations_without_restarting_an_independent_tree() {
     run_case(|cx| async move {

@@ -767,7 +767,7 @@ impl<E> DynamicSupervisor<E> {
         }
     }
 
-    fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
+    fn check_owner_admission(&mut self) -> Result<(), DynamicSupervisorError> {
         if let Some(refusal) = self
             .shared_restarts
             .as_ref()
@@ -787,6 +787,11 @@ impl<E> DynamicSupervisor<E> {
                     .unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
             ));
         }
+        Ok(())
+    }
+
+    fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
+        self.check_owner_admission()?;
         if name.is_empty() || name.len() > 255 {
             return Err(DynamicSupervisorError::InvalidName);
         }
@@ -839,9 +844,24 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     pub(super) async fn start_child_guarded(
         &mut self,
         name: ChildName,
-        mut supervisor: UnstartedManagedSupervisor<E>,
+        supervisor: UnstartedManagedSupervisor<E>,
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
         self.check_admission(&name)?;
+        let child = self.prepare_child_guarded(name.clone(), supervisor).await?;
+        let id = child.id.clone();
+        // No await after submission and before retaining ownership/publication.
+        self.children.insert(name, child);
+        Ok(id)
+    }
+
+    // The caller owns the name reservation throughout this admission. A
+    // replacement keeps its completed predecessor in `children` until this
+    // returns, so dropping an admission wait cannot lose that terminal result.
+    async fn prepare_child_guarded(
+        &mut self,
+        name: ChildName,
+        mut supervisor: UnstartedManagedSupervisor<E>,
+    ) -> Result<Child<E>, DynamicSupervisorError> {
         let generation = self
             .generation
             .checked_add(1)
@@ -889,27 +909,19 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
             generation,
             name: name.clone(),
         };
-        // No await after submission and before retaining ownership/publication.
-        self.children.insert(
-            name,
-            Child {
-                id: id.clone(),
-                handle: Some(handle),
-                region: Some(region),
-                joined: None,
-                closing: None,
-                closed: None,
-                stop_requested: false,
-                unclean_reported: false,
-            },
-        );
-        Ok(id)
+        Ok(Child {
+            id,
+            handle: Some(handle),
+            region: Some(region),
+            joined: None,
+            closing: None,
+            closed: None,
+            stop_requested: false,
+            unclean_reported: false,
+        })
     }
 
-    fn reap(
-        &mut self,
-        id: &DynamicChildId,
-    ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
+    fn require_reusable(&mut self, id: &DynamicChildId) -> Result<(), DynamicSupervisorError> {
         let child = self.child(id)?;
         let failure = if let Some(Err(error)) = &child.closed {
             Some(DynamicSupervisorError::Region(Arc::clone(error)))
@@ -930,6 +942,14 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
                 .unclean_reported = true;
             return Err(error);
         }
+        Ok(())
+    }
+
+    fn reap(
+        &mut self,
+        id: &DynamicChildId,
+    ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
+        self.require_reusable(id)?;
         Ok(self
             .children
             .remove(id.name.as_str())
@@ -948,6 +968,14 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         &mut self,
         id: &DynamicChildId,
     ) -> Result<DynamicChildCompletion<E>, DynamicSupervisorError> {
+        self.wait_child_terminal(id).await?;
+        self.reap(id)
+    }
+
+    async fn wait_child_terminal(
+        &mut self,
+        id: &DynamicChildId,
+    ) -> Result<(), DynamicSupervisorError> {
         self.child(id)?;
         poll_fn(|cx| {
             self.observe_cancellation(cx);
@@ -957,7 +985,49 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
                 .poll_terminal(cx)
         })
         .await;
-        self.reap(id)
+        Ok(())
+    }
+
+    pub(super) async fn replace_child_with(
+        &mut self,
+        id: &DynamicChildId,
+        build: impl FnOnce() -> Result<UnstartedManagedSupervisor<E>, DynamicSupervisorError>,
+    ) -> Result<super::dynamic_replacement::DynamicChildReplacement<E>, DynamicSupervisorError>
+    {
+        self.request_stop(id)?;
+        self.wait_child_terminal(id).await?;
+        self.require_reusable(id)?;
+
+        // Preserve the existing contract: invalid replacement configuration or
+        // sealed admission is reported alongside the clean old completion.
+        // The old record, name and capacity remain retained until the attempt
+        // completes, including while a new region admission/rollback is Pending.
+        let prepared = self.check_owner_admission().and_then(|()| build());
+        let replacement = match prepared {
+            Ok(supervisor) => {
+                self.prepare_child_guarded(id.name.clone(), supervisor)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let (previous, replacement) = match replacement {
+            Ok(child) => {
+                let replacement = child.id.clone();
+                // This swap and receipt publication have no intervening await.
+                // A stale ID can therefore never reach the new controller.
+                let previous = self
+                    .children
+                    .insert(id.name.clone(), child)
+                    .expect("replacement retains its predecessor until publication")
+                    .into_completion();
+                (previous, Ok(replacement))
+            }
+            Err(error) => (self.reap(id)?, Err(error)),
+        };
+        Ok(super::dynamic_replacement::DynamicChildReplacement {
+            previous,
+            replacement,
+        })
     }
 
     /// Request cancellation, then await actual controller AND region termination.

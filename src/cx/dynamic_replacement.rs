@@ -2,15 +2,21 @@
 //!
 //! Replacement is deliberately not expressed as a detached stop followed by a
 //! later admission. The old controller and its enclosing region are joined and
-//! closed first; only a clean reap releases the name and reaches replacement
-//! admission. The returned receipt keeps the old generation's full terminal
-//! evidence even when the replacement itself cannot be admitted.
+//! closed first; the old name reservation and completion remain owned until
+//! replacement admission finishes. An abandoned wait can be resumed or reaped
+//! using the old identity. A returned receipt keeps the old generation's full
+//! terminal evidence even when the replacement itself cannot be admitted.
 
 use super::{
     DynamicChildCompletion, DynamicChildId, DynamicSupervisor, DynamicSupervisorError,
     DynamicWorkerConfig,
 };
-use crate::supervision::{ManagedChildFactory, ManagedSupervisor};
+use crate::supervision::{
+    ManagedChildFactory, ManagedChildFuture, ManagedGeneration, ManagedSupervisor,
+    UnstartedManagedSupervisor,
+};
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Receipt for one exact-generation replacement attempt.
 ///
@@ -48,30 +54,35 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// under the same name.
     ///
     /// The stale-generation check, stop request, controller join, descendant
-    /// drain, finalizers, boundary close, and name release all complete before
-    /// `replacement` can execute any managed factory. If cleanup fails, the
-    /// name remains quarantined, this returns the original lifecycle error, and
-    /// the replacement value is dropped without submission. If later admission
-    /// fails, the returned [`DynamicChildReplacement`] still contains the old
-    /// generation's complete receipt and the name remains free unless the
-    /// admission path retained a new child.
+    /// drain, finalizers, and boundary close all complete before `replacement`
+    /// can execute any managed factory. The name reservation transfers to the
+    /// new admission when its identity and the old receipt are published. If
+    /// cleanup fails, the name remains quarantined, this returns the original
+    /// lifecycle error, and the replacement value is dropped without submission.
+    /// If later admission fails, the returned [`DynamicChildReplacement`] still
+    /// contains the old generation's complete receipt and the name remains free
+    /// unless the admission path retained a new child.
+    ///
+    /// Dropping this wait keeps the old child's exact ID, name reservation and
+    /// terminal result in the owner, even if replacement region admission has
+    /// already begun. Resume with another `replace_child` / `replace_worker`
+    /// call using the same ID, or retrieve the previous completion with
+    /// [`Self::wait_child`]. An abandoned replacement never starts a factory.
+    /// No additional completion history is retained after a returned receipt.
     ///
     /// This is an explicit operator replacement, not an automatic restart, so
     /// it consumes no shared automatic-restart slot. Automatic restarts inside
     /// the newly admitted tree continue to use all configured local/shared
     /// restart policies.
-    pub async fn replace_child(
+    pub fn replace_child(
         &mut self,
         id: &DynamicChildId,
         replacement: ManagedSupervisor<E>,
-    ) -> Result<DynamicChildReplacement<E>, DynamicSupervisorError> {
-        let name = id.name().to_owned();
-        let previous = self.terminate_child(id).await?;
-        let replacement = self.start_child(name, replacement).await;
-        Ok(DynamicChildReplacement {
-            previous,
-            replacement,
-        })
+    ) -> impl Future<Output = Result<DynamicChildReplacement<E>, DynamicSupervisorError>> {
+        // Establish isolated ownership before even the first poll. An unpolled
+        // replacement can contain several independent panicking destructors.
+        let replacement = UnstartedManagedSupervisor::new(replacement);
+        self.replace_child_with(id, move || Ok(replacement))
     }
 
     /// Drain one exact direct worker tree, then attempt to admit a new retained
@@ -81,18 +92,55 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// quiescent and reusable. Invalid replacement configuration, cancellation,
     /// a sealed owner, or region admission failure is returned in the inner
     /// `replacement` result while preserving the previous completion receipt.
-    pub async fn replace_worker(
+    /// Dropping this wait retains the old admission and completion exactly as
+    /// [`Self::replace_child`] does; use the same ID to resume or reap it.
+    pub fn replace_worker(
         &mut self,
         id: &DynamicChildId,
         config: DynamicWorkerConfig,
         factory: impl ManagedChildFactory<E>,
-    ) -> Result<DynamicChildReplacement<E>, DynamicSupervisorError> {
+    ) -> impl Future<Output = Result<DynamicChildReplacement<E>, DynamicSupervisorError>> {
         let name = id.name().to_owned();
-        let previous = self.terminate_child(id).await?;
-        let replacement = self.start_worker(name, config, factory).await;
-        Ok(DynamicChildReplacement {
-            previous,
-            replacement,
+        let factory = ReplacementFactory(Some(factory));
+        self.replace_child_with(id, move || {
+            Self::bind_worker(name.into(), config, factory).map(UnstartedManagedSupervisor::new)
         })
+    }
+}
+
+// A direct-worker factory is not yet part of an UnstartedManagedSupervisor
+// while the old child drains. Retire it without replacing an active unwind.
+// A destructor panic during an ordinary drop is still surfaced to the caller.
+struct ReplacementFactory<F>(Option<F>);
+
+impl<E, F: ManagedChildFactory<E>> ManagedChildFactory<E> for ReplacementFactory<F> {
+    fn start(&self, cx: super::Cx, generation: ManagedGeneration) -> ManagedChildFuture<E> {
+        self.0
+            .as_ref()
+            .expect("replacement factory is owned")
+            .start(cx, generation)
+    }
+
+    fn retired(&self) {
+        self.0
+            .as_ref()
+            .expect("replacement factory is owned")
+            .retired();
+    }
+}
+
+impl<F> Drop for ReplacementFactory<F> {
+    fn drop(&mut self) {
+        let Some(factory) = self.0.take() else {
+            return;
+        };
+        let already_unwinding = std::thread::panicking();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(factory))) {
+            if already_unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }

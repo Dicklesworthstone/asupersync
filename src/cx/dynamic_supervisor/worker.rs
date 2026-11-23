@@ -5,7 +5,7 @@ use crate::cx::{Cx, Scope};
 use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{
     ChildName, ChildSpec, ChildStart, ManagedChildBinding, ManagedChildFactory, ManagedRestartMode,
-    ManagedSupervisorBindError, SupervisionConfig, SupervisorBuilder,
+    ManagedSupervisor, ManagedSupervisorBindError, SupervisionConfig, SupervisorBuilder,
 };
 use crate::types::{Budget, TaskId, policy::FailFast};
 
@@ -99,6 +99,15 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
         let name = name.into();
         self.check_admission(&name)?;
+        let managed = Self::bind_worker(name.clone(), config, factory)?;
+        self.start_child(name, managed).await
+    }
+
+    pub(in crate::cx) fn bind_worker(
+        name: ChildName,
+        config: DynamicWorkerConfig,
+        factory: impl ManagedChildFactory<E>,
+    ) -> Result<ManagedSupervisor<E>, DynamicSupervisorError> {
         let mut builder = SupervisorBuilder::new(name.clone())
             .with_restart_policy(config.supervision.restart_policy)
             .child(
@@ -111,7 +120,7 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         let compiled = builder.compile().map_err(|error| {
             DynamicSupervisorError::WorkerConfiguration(ManagedSupervisorBindError::Topology(error))
         })?;
-        let managed = compiled
+        compiled
             .bind_managed(
                 vec![ManagedChildBinding::new(
                     name.clone(),
@@ -120,7 +129,6 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
                 )],
                 config.supervision,
             )
-            .map_err(DynamicSupervisorError::WorkerConfiguration)?;
-        self.start_child(name, managed).await
+            .map_err(DynamicSupervisorError::WorkerConfiguration)
     }
 }
