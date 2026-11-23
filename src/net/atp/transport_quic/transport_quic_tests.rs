@@ -5661,6 +5661,908 @@ mod tests {
         assert_eq!(repair_esis, vec![4, 5, 6, 7, 8]);
     }
 
+    fn multi_peer_test_path(
+        cx: &Cx,
+        config: &QuicConfig,
+        manifest: &TransferManifest,
+        path_id: PathId,
+    ) -> (
+        NativeQuicConnection,
+        NativeQuicFrameTransport,
+        QuicReceivePeer,
+    ) {
+        let (_, client, server) = established_pair();
+        let mut sender = client.inner().clone();
+        let mut control =
+            NativeQuicFrameTransport::open(cx, &mut sender).expect("open sender control");
+        control
+            .send_json(
+                cx,
+                &mut sender,
+                FrameType::Handshake,
+                &sender_hello("shared-sender", config, true),
+            )
+            .expect("queue hello");
+        send_native_manifest(cx, &mut sender, &mut control, manifest).expect("queue manifest");
+        (
+            sender,
+            control,
+            QuicReceivePeer {
+                path_id,
+                connection: server.inner().clone(),
+                peer: "127.0.0.1:4433".parse().expect("peer address"),
+            },
+        )
+    }
+
+    fn queue_multi_peer_source_symbols(
+        cx: &Cx,
+        sender: &mut NativeQuicConnection,
+        config: &QuicConfig,
+        manifest: &TransferManifest,
+        payload: &[u8],
+        esis: &[u32],
+    ) {
+        let object_id =
+            decoders_from_manifest(manifest, config).expect("fixture decoders")[0].object_id;
+        let auth = config
+            .symbol_auth_context()
+            .expect("valid auth")
+            .expect("multi-peer requires auth");
+        let symbol_size = usize::from(config.symbol_size);
+        for &esi in esis {
+            let start = usize::try_from(esi).expect("small ESI") * symbol_size;
+            let symbol = Symbol::from_slice(
+                SymbolId::new(object_id, 0, esi),
+                &payload[start..start + symbol_size],
+                SymbolKind::Source,
+            );
+            let tag = *auth.sign_symbol_tag(&symbol).as_bytes();
+            send_native_symbol(
+                cx,
+                sender,
+                &symbol,
+                transfer_tag(&manifest.transfer_id),
+                0,
+                Some(tag),
+            )
+            .expect("queue authenticated symbol");
+        }
+    }
+
+    #[test]
+    fn multi_peer_receiver_admits_senders_waiting_for_ack_before_manifest() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            ..auth_quic_config(0xA7_13_07)
+        };
+        let mut sender_config = config.clone();
+        sender_config.max_block_size = 512;
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 48))];
+        let manifest = manifest_from_entries("multi-peer-admission", true, &entries);
+        let hello = sender_hello_with_source_stream(
+            "shared-sender",
+            &sender_config,
+            true,
+            Some(StreamId::local(
+                StreamRole::Client,
+                StreamDirection::Bidirectional,
+                1,
+            )),
+            manifest.total_bytes,
+            None,
+        );
+        let hello_wire = json_frame(FrameType::Handshake, &hello)
+            .expect("hello frame")
+            .to_wire_bytes()
+            .expect("encoded hello");
+        let hello_split = hello_wire.len() / 2;
+        let mut peers = Vec::new();
+        let mut senders = Vec::new();
+        for path in 1..=2 {
+            let (_, client, server) = established_pair();
+            let mut sender = client.inner().clone();
+            let control = NativeQuicFrameTransport::open(&cx, &mut sender).expect("open control");
+            peers.push(QuicReceivePeer {
+                path_id: PathId::new(path),
+                connection: server.inner().clone(),
+                peer: "127.0.0.1:4433".parse().expect("peer address"),
+            });
+            senders.push((sender, control, 0_u64, 0_u64));
+        }
+        let mut receiver = QuicMultiPeerReceiver::start(&mut peers, config, "receiver-peer")
+            .expect("start before any peer supplies control data");
+        assert!(receiver.manifest().is_none());
+        assert!(
+            !receiver
+                .admit(&cx)
+                .expect("empty control queues are pending")
+        );
+
+        // Path 2 arrives before the geometry-authoritative path 1. Path 1's
+        // Hello then arrives split across two packets and two admit calls.
+        for index in [1_usize, 0] {
+            let end = if index == 0 {
+                hello_split
+            } else {
+                hello_wire.len()
+            };
+            let (sender, control, outgoing_packet_number, _) = &mut senders[index];
+            sender
+                .write_stream_bytes(
+                    &cx,
+                    control.stream,
+                    Bytes::from(hello_wire[..end].to_vec()),
+                    false,
+                )
+                .expect("queue hello bytes");
+            pump_native_until_idle(
+                &cx,
+                sender,
+                receiver
+                    .connection_mut(PathId::new(u64::try_from(index + 1).expect("path id")))
+                    .expect("known path"),
+                outgoing_packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                25_000,
+            )
+            .expect("deliver hello bytes");
+            assert!(
+                !receiver
+                    .admit(&cx)
+                    .expect("admission retains partial progress")
+            );
+            assert!(receiver.manifest().is_none());
+        }
+        let (sender, control, outgoing_packet_number, _) = &mut senders[0];
+        sender
+            .write_stream_bytes(
+                &cx,
+                control.stream,
+                Bytes::from(hello_wire[hello_split..].to_vec()),
+                false,
+            )
+            .expect("complete fragmented hello");
+        pump_native_until_idle(
+            &cx,
+            sender,
+            receiver.connection_mut(PathId::new(1)).expect("first path"),
+            outgoing_packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            25_100,
+        )
+        .expect("deliver remaining hello bytes");
+        assert!(!receiver.admit(&cx).expect("both peers now await manifests"));
+
+        for (index, (sender, control, _, reply_packet_number)) in senders.iter_mut().enumerate() {
+            let path = PathId::new(u64::try_from(index + 1).expect("path id"));
+            pump_native_until_idle(
+                &cx,
+                receiver.connection_mut(path).expect("known path"),
+                sender,
+                reply_packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                25_200,
+            )
+            .expect("deliver handshake acknowledgement");
+            let ack = receive_native_sender_hello_ack(&cx, sender, control)
+                .expect("sender receives acceptance before sending its manifest");
+            assert_eq!(ack.peer_id, "receiver-peer");
+            assert!(
+                !ack.source_stream,
+                "multi-peer admission declines source streams"
+            );
+            assert!(ack.source_stream_recv_window.is_none());
+            send_native_manifest(&cx, sender, control, &manifest)
+                .expect("send manifest only after accepted acknowledgement");
+        }
+
+        for index in [1_usize, 0] {
+            let (sender, _, outgoing_packet_number, _) = &mut senders[index];
+            pump_native_until_idle(
+                &cx,
+                sender,
+                receiver
+                    .connection_mut(PathId::new(u64::try_from(index + 1).expect("path id")))
+                    .expect("known path"),
+                outgoing_packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                25_300,
+            )
+            .expect("deliver manifest after acknowledgement");
+            assert_eq!(
+                receiver.admit(&cx).expect("admit matching manifest"),
+                index == 0,
+                "every peer must agree before admission completes"
+            );
+        }
+        assert_eq!(receiver.manifest(), Some(&manifest));
+        assert!(
+            !receiver.is_complete(),
+            "admission does not claim decoded data"
+        );
+    }
+
+    #[test]
+    fn multi_peer_receiver_commits_union_and_delivers_identical_proofs() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..auth_quic_config(0xA7_13_01)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 42))];
+        let manifest = manifest_from_entries("multi-peer", true, &entries);
+        let mut peers = Vec::new();
+        let mut senders = Vec::new();
+        // Both paths share an address and sender label. Neither path alone
+        // contains all four source symbols; ESI 1 appears on both paths.
+        for (index, esis) in [&[0_u32, 1][..], &[1_u32, 2, 3][..]].iter().enumerate() {
+            let path_id = PathId::new(u64::try_from(index + 1).expect("path id"));
+            let (mut sender, mut control, mut peer) =
+                multi_peer_test_path(&cx, &config, &manifest, path_id);
+            queue_multi_peer_source_symbols(
+                &cx,
+                &mut sender,
+                &config,
+                &manifest,
+                &entries[0].1,
+                esis,
+            );
+            send_native_object_complete(
+                &cx,
+                &mut sender,
+                &mut control,
+                u64::try_from(esis.len()).expect("symbol count"),
+            )
+            .expect("queue completion");
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut sender,
+                &mut peer.connection,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                20_000,
+            )
+            .expect("deliver peer payload");
+            peers.push(peer);
+            senders.push((sender, control));
+        }
+        let dest = canon_tempdir();
+        let mut receiver = QuicMultiPeerReceiver::new(&cx, &mut peers, config, "receiver-peer")
+            .expect("admit agreed manifests");
+        assert_eq!(receiver.manifest(), Some(&manifest));
+        assert!(!receiver.is_complete());
+        assert!(block_on(receiver.receive_round(&cx)).expect("union decodes"));
+        assert!(receiver.is_complete());
+        assert_eq!(
+            quic_pending_decode_jobs(&receiver.decoders),
+            0,
+            "completed rounds retain no background decode jobs"
+        );
+        let report = block_on(receiver.commit(&cx, dest.path())).expect("commit once");
+        let local_receipt = receiver
+            .receipt()
+            .expect("retain local publication receipt")
+            .clone();
+        assert!(local_receipt.committed);
+        assert!(report.transfer.committed);
+        assert_eq!(
+            report.transfer.symbols_accepted, 4,
+            "cross-peer duplicate must not inflate accepted count"
+        );
+        assert_eq!(report.transfer.bytes_received, 256);
+        assert_eq!(report.transfer.files, 1);
+        assert_eq!(report.peers.len(), 2);
+        assert_eq!(
+            std::fs::read(dest.path().join("multi-peer/payload.bin"))
+                .expect("read committed payload"),
+            entries[0].1
+        );
+        assert!(
+            block_on(receiver.commit(&cx, dest.path())).is_err(),
+            "terminal commit must not run twice"
+        );
+        drop(receiver);
+
+        let mut receipts = Vec::new();
+        for (peer, (sender, control)) in peers.iter_mut().zip(senders.iter_mut()) {
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut peer.connection,
+                sender,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                20_100,
+            )
+            .expect("deliver retained terminal replies");
+            let ack = receive_native_sender_hello_ack(&cx, sender, control)
+                .expect("receive accepted hello ack");
+            assert!(!ack.source_stream);
+            let receipt = match receive_native_proof_or_need_more(&cx, sender, control)
+                .expect("receive terminal proof")
+            {
+                QuicControlReply::Proof(receipt) => receipt,
+                QuicControlReply::NeedMore(_) => panic!("complete union needs no repair"),
+            };
+            assert!(receipt.committed && receipt.sha_ok && receipt.merkle_ok);
+            assert_eq!(
+                next_native_control_frame(&cx, sender, control, "receive terminal close")
+                    .expect("close")
+                    .frame_type(),
+                FrameType::Close
+            );
+            receipts.push(receipt);
+        }
+        assert_eq!(
+            receipts[0], receipts[1],
+            "all paths receive the same durable result"
+        );
+        assert_eq!(receipts[0], local_receipt);
+    }
+
+    #[test]
+    fn multi_peer_receiver_repairs_after_caller_pumps_each_path() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            max_feedback_rounds: 2,
+            ..auth_quic_config(0xA7_13_02)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 43))];
+        let manifest = manifest_from_entries("multi-peer-repair", true, &entries);
+        let mut peers = Vec::new();
+        let mut senders = Vec::new();
+        for esi in 0_u32..2 {
+            let path_id = PathId::new(u64::from(esi) + 1);
+            let (mut sender, mut control, mut peer) =
+                multi_peer_test_path(&cx, &config, &manifest, path_id);
+            queue_multi_peer_source_symbols(
+                &cx,
+                &mut sender,
+                &config,
+                &manifest,
+                &entries[0].1,
+                &[esi],
+            );
+            send_native_object_complete(&cx, &mut sender, &mut control, 1).expect("initial marker");
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut sender,
+                &mut peer.connection,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                21_000,
+            )
+            .expect("deliver partial source");
+            peers.push(peer);
+            senders.push((sender, control, packet_number));
+        }
+        let mut receiver =
+            QuicMultiPeerReceiver::new(&cx, &mut peers, config.clone(), "receiver-peer")
+                .expect("admit transfer");
+        assert!(!block_on(receiver.receive_round(&cx)).expect("queue repair request"));
+        assert!(!receiver.is_complete());
+        let mut requests = Vec::new();
+        for (index, (sender, control, outgoing_packet_number)) in senders.iter_mut().enumerate() {
+            let path_id = PathId::new(u64::try_from(index + 1).expect("path id"));
+            let mut reply_packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                receiver.connection_mut(path_id).expect("known path"),
+                sender,
+                &mut reply_packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                21_100,
+            )
+            .expect("deliver ack and repair request");
+            receive_native_sender_hello_ack(&cx, sender, control).expect("ack");
+            let need = match receive_native_proof_or_need_more(&cx, sender, control)
+                .expect("repair feedback")
+            {
+                QuicControlReply::NeedMore(need) => need,
+                QuicControlReply::Proof(_) => {
+                    panic!("two source symbols cannot decode four")
+                }
+            };
+            assert_eq!(need.feedback_round, 1);
+            queue_multi_peer_source_symbols(
+                &cx,
+                sender,
+                &config,
+                &manifest,
+                &entries[0].1,
+                &[u32::try_from(index + 2).expect("repair source ESI")],
+            );
+            control
+                .send_json(
+                    &cx,
+                    sender,
+                    FrameType::ObjectComplete,
+                    &QuicRoundComplete {
+                        round: need.feedback_round,
+                        round_symbols_sent: 1,
+                    },
+                )
+                .expect("matching repair-round marker");
+            requests.push(need);
+            pump_native_until_idle(
+                &cx,
+                sender,
+                receiver.connection_mut(path_id).expect("known path"),
+                outgoing_packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                21_200,
+            )
+            .expect("deliver requested source repair");
+        }
+        assert_eq!(requests[0], requests[1], "all paths see identical feedback");
+        assert!(block_on(receiver.receive_round(&cx)).expect("repair union decodes"));
+        let dest = canon_tempdir();
+        let report = block_on(receiver.commit(&cx, dest.path())).expect("repaired commit");
+        assert_eq!(report.transfer.feedback_rounds, 1);
+        assert_eq!(report.transfer.symbols_accepted, 4);
+        assert_eq!(
+            std::fs::read(dest.path().join("multi-peer-repair/payload.bin"))
+                .expect("committed file"),
+            entries[0].1
+        );
+    }
+
+    #[test]
+    fn multi_peer_receiver_native_sender_repair_markers_preserve_round() {
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            max_feedback_rounds: 8,
+            ..auth_quic_config(0xA7_13_09)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 50))];
+        let manifest = manifest_from_entries("multi-peer-sender-round", true, &entries);
+        let symbol_auth = config.symbol_auth_context().expect("valid authentication");
+        for with_source in [false, true] {
+            let (cx, client, server) = established_pair();
+            let mut sender = client.inner().clone();
+            let mut receiver = server.inner().clone();
+            let mut sender_control =
+                NativeQuicFrameTransport::open(&cx, &mut sender).expect("open control");
+            let mut receiver_control =
+                NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+            let mut encoders =
+                encoders_from_entries(&manifest, &entries, &config).expect("sender encoders");
+            let mut need = QuicNeedMore {
+                feedback_round: 7,
+                ..QuicNeedMore::default()
+            };
+            if with_source {
+                need.pending.push(0);
+                need.source_symbols.push(QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 0,
+                    esi: 2,
+                });
+            }
+            let sent = block_on(send_native_repair_round_and_object_complete(
+                &cx,
+                &mut sender,
+                &mut sender_control,
+                &manifest,
+                &mut encoders,
+                &need,
+                &config,
+                symbol_auth.as_ref(),
+            ))
+            .expect("actual native sender replies to targeted feedback");
+            assert_eq!(sent, u64::from(with_source));
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut sender,
+                &mut receiver,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                27_000,
+            )
+            .expect("deliver actual sender reply");
+            let complete =
+                receive_native_object_complete(&cx, &mut receiver, &mut receiver_control)
+                    .expect("receive sender's completion marker");
+            assert_eq!(complete.round, need.feedback_round);
+            assert_eq!(complete.round_symbols_sent, sent);
+            let symbol = recv_native_symbol_envelope(&mut receiver, true).expect("read datagram");
+            if with_source {
+                let symbol = symbol.expect("targeted source symbol");
+                assert_eq!(symbol.esi, 2);
+                assert_eq!(symbol.payload.as_ref(), &entries[0].1[128..192]);
+                verified_authenticated_symbol_from_envelope(
+                    &symbol,
+                    encoders[0].object_id,
+                    symbol_auth.as_ref(),
+                )
+                .expect("source repair retains its authentication");
+            } else {
+                assert!(
+                    symbol.is_none(),
+                    "empty repair response carries only its marker"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_peer_receiver_retains_staggered_round_markers() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..auth_quic_config(0xA7_13_08)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 49))];
+        let manifest = manifest_from_entries("multi-peer-ready", true, &entries);
+        let mut peers = Vec::new();
+        let mut senders = Vec::new();
+        for (index, esis) in [&[0_u32, 1][..], &[2_u32, 3][..]].iter().enumerate() {
+            let path = PathId::new(u64::try_from(index + 1).expect("path id"));
+            let (mut sender, mut control, mut peer) =
+                multi_peer_test_path(&cx, &config, &manifest, path);
+            queue_multi_peer_source_symbols(
+                &cx,
+                &mut sender,
+                &config,
+                &manifest,
+                &entries[0].1,
+                esis,
+            );
+            if index == 0 {
+                send_native_object_complete(&cx, &mut sender, &mut control, 2)
+                    .expect("first path completes its round");
+            }
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut sender,
+                &mut peer.connection,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                26_000,
+            )
+            .expect("deliver initial peer data");
+            peers.push(peer);
+            senders.push((sender, control, packet_number));
+        }
+        let mut receiver = QuicMultiPeerReceiver::new(&cx, &mut peers, config, "receiver-peer")
+            .expect("admit manifests");
+        assert!(!receiver.round_ready(&cx).expect("second marker is pending"));
+        assert!(
+            !receiver
+                .round_ready(&cx)
+                .expect("first marker remains cached")
+        );
+        assert_eq!(
+            block_on(receiver.receive_available(&cx)).expect("drain before every peer finishes"),
+            4
+        );
+        assert_eq!(
+            block_on(receiver.receive_available(&cx)).expect("already drained queues are empty"),
+            0
+        );
+        assert_eq!(quic_pending_decode_jobs(&receiver.decoders), 0);
+        assert!(!receiver.is_complete());
+
+        let (sender, control, packet_number) = &mut senders[1];
+        send_native_object_complete(&cx, sender, control, 2).expect("second path completes later");
+        pump_native_until_idle(
+            &cx,
+            sender,
+            receiver
+                .connection_mut(PathId::new(2))
+                .expect("second path"),
+            packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            26_100,
+        )
+        .expect("caller delivers late marker");
+        assert!(receiver.round_ready(&cx).expect("both markers are cached"));
+        assert!(
+            receiver
+                .round_ready(&cx)
+                .expect("readiness check is repeatable")
+        );
+        assert!(
+            block_on(receiver.receive_round(&cx))
+                .expect("receive consumes cached markers and decodes the union")
+        );
+        assert!(receiver.is_complete());
+        let dest = canon_tempdir();
+        let report = block_on(receiver.commit(&cx, dest.path())).expect("publish completed round");
+        assert_eq!(
+            report.transfer.symbols_accepted, 4,
+            "symbols drained before completion markers are counted exactly once"
+        );
+        assert_eq!(
+            std::fs::read(dest.path().join("multi-peer-ready/payload.bin"))
+                .expect("read incrementally received bytes"),
+            entries[0].1
+        );
+    }
+
+    #[test]
+    fn multi_peer_receiver_bounds_paths_and_requires_symbol_authentication() {
+        let cx = Cx::for_testing();
+        let config = auth_quic_config(0xA7_13_03);
+        let entries = vec![("payload.bin".to_string(), varied_bytes(64, 44))];
+        let manifest = manifest_from_entries("multi-peer", true, &entries);
+        for case in [
+            "empty",
+            "duplicate-path",
+            "connection-limit",
+            "zero-connection-limit",
+            "transport-auth",
+            "disabled-auth",
+            "permissive-auth",
+        ] {
+            let mut receiver_config = config.clone();
+            let mut peers = Vec::new();
+            if case != "empty" {
+                let count = if case == "zero-connection-limit" {
+                    1
+                } else {
+                    2
+                };
+                for index in 0..count {
+                    let path = if case == "duplicate-path" {
+                        1
+                    } else {
+                        index + 1
+                    };
+                    let (_, _, peer) =
+                        multi_peer_test_path(&cx, &config, &manifest, PathId::new(path));
+                    peers.push(peer);
+                }
+            }
+            if case == "connection-limit" {
+                receiver_config.max_active_connections = 1;
+            }
+            if case == "zero-connection-limit" {
+                receiver_config.max_active_connections = 0;
+            }
+            if case == "transport-auth" {
+                receiver_config = trusted_quic_config();
+            }
+            if case == "disabled-auth" || case == "permissive-auth" {
+                let mode = if case == "disabled-auth" {
+                    AuthMode::Disabled
+                } else {
+                    AuthMode::Permissive
+                };
+                receiver_config = receiver_config
+                    .with_symbol_auth(SecurityContext::for_testing_with_mode(0xA7_13_03, mode));
+            }
+            let error =
+                QuicMultiPeerReceiver::new(&cx, &mut peers, receiver_config, "receiver-peer")
+                    .err()
+                    .expect("invalid admission must fail before consuming control frames");
+            assert!(
+                matches!(error, QuicTransportError::Config(_)),
+                "{case}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_peer_receiver_requires_exact_manifest_and_block_geometry_agreement() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            ..auth_quic_config(0xA7_13_04)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 45))];
+        let manifest = manifest_from_entries("multi-peer", true, &entries);
+        for case in ["root-name", "relative-path", "block-geometry"] {
+            let mut other_manifest = manifest.clone();
+            let mut other_config = config.clone();
+            match case {
+                "root-name" => other_manifest.root_name = "different-root".to_string(),
+                "relative-path" => {
+                    other_manifest.entries[0].rel_path = "different.bin".to_string();
+                }
+                "block-geometry" => other_config.max_block_size = 512,
+                _ => unreachable!(),
+            }
+            let mut peers = Vec::new();
+            for (index, (sender_config, sender_manifest)) in
+                [(&config, &manifest), (&other_config, &other_manifest)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let path = PathId::new(u64::try_from(index + 1).expect("path id"));
+                let (mut sender, _, mut peer) =
+                    multi_peer_test_path(&cx, sender_config, sender_manifest, path);
+                let mut packet_number = 0;
+                pump_native_until_idle(
+                    &cx,
+                    &mut sender,
+                    &mut peer.connection,
+                    &mut packet_number,
+                    DEFAULT_MAX_PACKET_BYTES,
+                    22_000,
+                )
+                .expect("deliver disagreeing admission data");
+                peers.push(peer);
+            }
+            assert!(
+                QuicMultiPeerReceiver::new(&cx, &mut peers, config.clone(), "receiver-peer")
+                    .is_err(),
+                "{case} differs even though the advertised content merkle root agrees"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_peer_receiver_refuses_commit_without_every_matching_round_marker() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..auth_quic_config(0xA7_13_05)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 46))];
+        let manifest = manifest_from_entries("multi-peer", true, &entries);
+        for case in ["missing", "wrong-round", "eof"] {
+            let mut peers = Vec::new();
+            for (index, esis) in [&[0_u32, 1][..], &[2_u32, 3][..]].iter().enumerate() {
+                let path = PathId::new(u64::try_from(index + 1).expect("path id"));
+                let (mut sender, mut control, mut peer) =
+                    multi_peer_test_path(&cx, &config, &manifest, path);
+                queue_multi_peer_source_symbols(
+                    &cx,
+                    &mut sender,
+                    &config,
+                    &manifest,
+                    &entries[0].1,
+                    esis,
+                );
+                if index == 0 || case == "wrong-round" {
+                    control
+                        .send_json(
+                            &cx,
+                            &mut sender,
+                            FrameType::ObjectComplete,
+                            &QuicRoundComplete {
+                                round: u32::try_from(index).expect("small round"),
+                                round_symbols_sent: 2,
+                            },
+                        )
+                        .expect("queue marker");
+                }
+                if index == 1 && case == "eof" {
+                    sender
+                        .write_stream_bytes(&cx, control.stream, Bytes::new(), true)
+                        .expect("close the control stream without its round marker");
+                }
+                let mut packet_number = 0;
+                pump_native_until_idle(
+                    &cx,
+                    &mut sender,
+                    &mut peer.connection,
+                    &mut packet_number,
+                    DEFAULT_MAX_PACKET_BYTES,
+                    23_000,
+                )
+                .expect("deliver complete symbol union");
+                peers.push(peer);
+            }
+            let mut receiver =
+                QuicMultiPeerReceiver::new(&cx, &mut peers, config.clone(), "receiver-peer")
+                    .expect("admit manifests");
+            if case == "eof" {
+                assert!(
+                    matches!(receiver.round_ready(&cx), Err(QuicTransportError::Frame(_))),
+                    "readiness polling must fail on a clean FIN rather than wait forever"
+                );
+            } else {
+                assert!(
+                    block_on(receiver.receive_round(&cx)).is_err(),
+                    "decodable union cannot hide a missing or out-of-round peer marker"
+                );
+            }
+            assert!(!receiver.is_complete());
+            let dest = canon_tempdir();
+            assert!(block_on(receiver.commit(&cx, dest.path())).is_err());
+            assert!(
+                std::fs::read_dir(dest.path())
+                    .expect("read destination")
+                    .next()
+                    .is_none(),
+                "failed round must not publish any destination entry"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_peer_receiver_authenticates_late_peer_even_after_union_decodes() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..auth_quic_config(0xA7_13_06)
+        };
+        let entries = vec![("payload.bin".to_string(), varied_bytes(256, 47))];
+        let manifest = manifest_from_entries("multi-peer", true, &entries);
+        let object_id = decoders_from_manifest(&manifest, &config).expect("decoders")[0].object_id;
+        let mut peers = Vec::new();
+        for index in 0_u64..2 {
+            let (mut sender, mut control, mut peer) =
+                multi_peer_test_path(&cx, &config, &manifest, PathId::new(index + 1));
+            let sent = if index == 0 {
+                queue_multi_peer_source_symbols(
+                    &cx,
+                    &mut sender,
+                    &config,
+                    &manifest,
+                    &entries[0].1,
+                    &[0, 1, 2, 3],
+                );
+                4
+            } else {
+                let forged = Symbol::from_slice(
+                    SymbolId::new(object_id, 0, 0),
+                    &entries[0].1[..64],
+                    SymbolKind::Source,
+                );
+                send_native_symbol(
+                    &cx,
+                    &mut sender,
+                    &forged,
+                    transfer_tag(&manifest.transfer_id),
+                    0,
+                    Some(*AuthenticationTag::zero().as_bytes()),
+                )
+                .expect("queue forged duplicate");
+                1
+            };
+            send_native_object_complete(&cx, &mut sender, &mut control, sent)
+                .expect("queue marker");
+            let mut packet_number = 0;
+            pump_native_until_idle(
+                &cx,
+                &mut sender,
+                &mut peer.connection,
+                &mut packet_number,
+                DEFAULT_MAX_PACKET_BYTES,
+                24_000,
+            )
+            .expect("deliver authenticated and forged paths");
+            peers.push(peer);
+        }
+        let mut receiver = QuicMultiPeerReceiver::new(&cx, &mut peers, config, "receiver-peer")
+            .expect("admit manifests");
+        let error = block_on(receiver.receive_round(&cx)).expect_err("forged tag must fail");
+        assert!(matches!(error, QuicTransportError::Integrity(message)
+            if message.contains("authentication failed")));
+        assert!(!receiver.is_complete());
+        let dest = canon_tempdir();
+        assert!(block_on(receiver.commit(&cx, dest.path())).is_err());
+        assert!(
+            std::fs::read_dir(dest.path())
+                .expect("read destination")
+                .next()
+                .is_none()
+        );
+    }
+
     #[test]
     fn receive_connection_commits_established_native_quic_transfer() {
         let (cx, mut client, mut server) = established_pair();

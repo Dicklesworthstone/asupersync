@@ -6640,6 +6640,28 @@ fn feed_aggregated_symbol_for_entry_deferred(
     config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<u64, QuicTransportError> {
+    feed_aggregated_symbol_for_entry_with_decode_policy(
+        cx,
+        decoders,
+        entry,
+        auth_symbol,
+        receive,
+        config,
+        decode_stats,
+        true,
+    )
+}
+
+fn feed_aggregated_symbol_for_entry_with_decode_policy(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    entry: u32,
+    auth_symbol: AuthenticatedSymbol,
+    receive: QuicReceiveAggregation<'_>,
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+    allow_parallel_decode: bool,
+) -> Result<u64, QuicTransportError> {
     let decoder_index = decoders
         .iter()
         .position(|decoder| decoder.index == entry)
@@ -6665,7 +6687,8 @@ fn feed_aggregated_symbol_for_entry_deferred(
         }
         let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
         let transfer_decode_width = quic_transfer_decode_width(decoders, config);
-        let allow_spawn_decode = quic_pending_decode_jobs(decoders) < transfer_decode_width;
+        let allow_spawn_decode =
+            allow_parallel_decode && quic_pending_decode_jobs(decoders) < transfer_decode_width;
         if feed_authenticated_symbol_deferred(
             cx,
             &mut decoders[decoder_index],
@@ -8582,13 +8605,23 @@ fn send_native_object_complete(
     control: &mut NativeQuicFrameTransport,
     round_symbols_sent: u64,
 ) -> Result<(), QuicTransportError> {
+    send_native_object_complete_for_round(cx, conn, control, 0, round_symbols_sent)
+}
+
+fn send_native_object_complete_for_round(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    round: u32,
+    round_symbols_sent: u64,
+) -> Result<(), QuicTransportError> {
     control.send_json(
         cx,
         conn,
         FrameType::ObjectComplete,
         &QuicRoundComplete {
+            round,
             round_symbols_sent,
-            ..QuicRoundComplete::default()
         },
     )
 }
@@ -9177,7 +9210,7 @@ async fn send_native_repair_round_and_object_complete(
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
     if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
-        send_native_object_complete(cx, conn, control, 0)?;
+        send_native_object_complete_for_round(cx, conn, control, need.feedback_round, 0)?;
         return Ok(0);
     }
     validate_need_more_feedback(manifest, config, need)?;
@@ -9215,7 +9248,7 @@ async fn send_native_repair_round_and_object_complete(
             "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
         )));
     }
-    send_native_object_complete(cx, conn, control, sent)?;
+    send_native_object_complete_for_round(cx, conn, control, need.feedback_round, sent)?;
     Ok(sent)
 }
 
@@ -11246,7 +11279,6 @@ async fn receive_native_symbol_round(
     Ok(Some(need))
 }
 
-#[allow(dead_code)]
 async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
     cx: &Cx,
     peers: &mut [(PathId, &mut NativeQuicConnection)],
@@ -11262,13 +11294,18 @@ async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
     let mut stats = QuicRoundSymbolStats::default();
     let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
 
-    for (path_id, conn) in peers.iter_mut() {
-        let receive = QuicReceiveAggregation::new(aggregator, *path_id, cx.now()).with_trace(cx);
-        loop {
+    loop {
+        let mut progressed = false;
+        for (path_id, conn) in peers.iter_mut() {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let receive =
+                QuicReceiveAggregation::new(aggregator, *path_id, cx.now()).with_trace(cx);
             if conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams) == 0 {
-                break;
+                continue;
             }
+            progressed = true;
             while let Some(bytes) = datagrams.pop_front() {
+                cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
                 if envelope.transfer_tag != tag {
                     return Err(QuicTransportError::Integrity(format!(
@@ -11298,27 +11335,29 @@ async fn drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
                     decoder.object_id,
                     symbol_auth.as_ref(),
                 )?;
-                stats.accepted =
-                    stats
-                        .accepted
-                        .saturating_add(feed_aggregated_symbol_for_entry_deferred(
-                            cx,
-                            decoders,
-                            envelope.entry,
-                            auth_symbol,
-                            receive,
-                            config,
-                            decode_stats,
-                        )?);
+                stats.accepted = stats.accepted.saturating_add(
+                    feed_aggregated_symbol_for_entry_with_decode_policy(
+                        cx,
+                        decoders,
+                        envelope.entry,
+                        auth_symbol,
+                        receive,
+                        config,
+                        decode_stats,
+                        false,
+                    )?,
+                );
                 let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
             }
+        }
+        if !progressed {
+            break;
         }
     }
     let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
     Ok(stats)
 }
 
-#[allow(dead_code)]
 async fn receive_native_multi_peer_symbol_round(
     cx: &Cx,
     peers: &mut [(
@@ -11326,6 +11365,8 @@ async fn receive_native_multi_peer_symbol_round(
         &mut NativeQuicConnection,
         &mut NativeQuicFrameTransport,
     )],
+    completions: &[QuicRoundComplete],
+    buffered_stats: QuicRoundSymbolStats,
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
@@ -11335,11 +11376,20 @@ async fn receive_native_multi_peer_symbol_round(
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    if completions.len() != peers.len()
+        || completions
+            .iter()
+            .any(|complete| complete.round != *feedback_rounds)
+    {
+        return Err(QuicTransportError::Control(
+            "every QUIC peer must complete the current symbol round".to_string(),
+        ));
+    }
     let mut connection_pairs: Vec<(PathId, &mut NativeQuicConnection)> = peers
         .iter_mut()
         .map(|(path_id, conn, _)| (*path_id, &mut **conn))
         .collect();
-    let round_stats = drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
+    let drained = drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
         cx,
         &mut connection_pairs,
         manifest,
@@ -11349,14 +11399,15 @@ async fn receive_native_multi_peer_symbol_round(
         decode_stats,
     )
     .await?;
+    let round_stats = QuicRoundSymbolStats {
+        observed: buffered_stats.observed.saturating_add(drained.observed),
+        accepted: buffered_stats.accepted.saturating_add(drained.accepted),
+    };
     *symbols_accepted = (*symbols_accepted).saturating_add(round_stats.accepted);
 
-    let mut total_symbols_sent = 0u64;
-    for (_, conn, control) in peers.iter_mut() {
-        if let Ok(complete) = receive_native_object_complete(cx, conn, control) {
-            total_symbols_sent = total_symbols_sent.saturating_add(complete.round_symbols_sent);
-        }
-    }
+    let total_symbols_sent = completions.iter().fold(0u64, |total, complete| {
+        total.saturating_add(complete.round_symbols_sent)
+    });
 
     let _ = join_all_quic_decodes(cx, decoders, decode_stats).await?;
     decode_stats.add(assemble_completed_entries(decoders));
@@ -11403,12 +11454,623 @@ async fn receive_native_multi_peer_symbol_round(
         pending_decode_jobs: Some(progress.pending_decode_jobs),
     };
 
-    // Broadcast NeedMore feedback to all peers
+    // Every admitted path must receive the same repair request. A failed send
+    // is a failed round, even when another peer accepted its request.
     for (_, conn, control) in peers.iter_mut() {
-        let _ = send_native_need_more(cx, conn, control, &need);
+        send_native_need_more(cx, conn, control, &need)?;
     }
     *feedback_rounds = round;
     Ok(Some(need))
+}
+
+/// One established native QUIC connection contributing to a shared transfer.
+///
+/// Path identifiers must be distinct. Paths may share an address or sender
+/// identity. The caller retains the connections and drives their packet I/O,
+/// including delivery of queued terminal replies after committing.
+pub struct QuicReceivePeer {
+    /// Stable, unique identifier for this receive path.
+    pub path_id: PathId,
+    /// Established native connection owned by the caller.
+    pub connection: NativeQuicConnection,
+    /// Remote address included in the transfer report.
+    pub peer: SocketAddr,
+}
+
+impl std::fmt::Debug for QuicReceivePeer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuicReceivePeer")
+            .field("path_id", &self.path_id)
+            .field("peer", &self.peer)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A shared transfer and all the peer paths admitted to it.
+#[derive(Debug)]
+pub struct QuicMultiPeerReceiveReport {
+    /// Existing receive report; its primary peer is the first admitted path.
+    pub transfer: ReceiveReport,
+    /// Admitted path identifiers and remote addresses, in input order.
+    pub peers: Vec<(PathId, SocketAddr)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuicMultiPeerReceiveState {
+    Admitting,
+    Receiving,
+    Decoded,
+    Committed,
+    Failed,
+}
+
+/// Stateful fountain reception from several established native connections.
+///
+/// All paths must agree on the complete validated manifest and block geometry.
+/// Symbols require a strict shared authentication context. One aggregator
+/// deduplicates across paths before a single set of entry decoders consumes
+/// their union. Source streams and delta modes are not negotiated here.
+///
+/// This type handles ATP over caller-driven connections; it does not own UDP
+/// sockets or run a network pump. Use [Self::start], pump packets through
+/// [Self::connection_mut], and call [Self::admit] until every sender has received
+/// its HelloAck and supplied its manifest. For each round, pump until
+/// [Self::round_ready] returns true, then call [Self::receive_round]. Call
+/// [Self::receive_available] after each packet pump to drain symbols before
+/// the bounded native datagram queues fill. Pump repair
+/// requests before the next round. Once decoded, [Self::commit] publishes using
+/// the existing durable receive path and queues the same receipt on every
+/// connection. Continue pumping those retained connections to deliver replies.
+///
+/// Block decoding is synchronous on this path: no background decode jobs can
+/// outlive a failed or dropped receive operation. Cancellation is checked
+/// between symbols; a block decode is not a wall-clock cancellation bound.
+/// Protocol errors terminate the receiver. An interrupted or failed commit
+/// cannot be retried on the same instance.
+///
+/// Every admitted peer must finish each round; there is no automatic peer
+/// eviction. The caller drives connection timers and admission/round deadlines.
+/// This state machine does not itself apply the config's network timeouts.
+pub struct QuicMultiPeerReceiver<'a> {
+    peers: &'a mut [QuicReceivePeer],
+    controls: Vec<NativeQuicFrameTransport>,
+    hellos: Vec<Option<QuicHello>>,
+    hellos_acked: bool,
+    manifests_received: Vec<bool>,
+    round_completions: Vec<Option<QuicRoundComplete>>,
+    round_stats: QuicRoundSymbolStats,
+    manifest: Option<TransferManifest>,
+    receipt: Option<ReceiveReceipt>,
+    decoders: Vec<QuicEntryDecoder>,
+    aggregator: MultipathAggregator,
+    config: QuicConfig,
+    options: QuicReceiveOptions,
+    peer_id: String,
+    symbols_accepted: u64,
+    feedback_rounds: u32,
+    decode_stats: QuicDecodeStats,
+    state: QuicMultiPeerReceiveState,
+}
+
+impl std::fmt::Debug for QuicMultiPeerReceiver<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QuicMultiPeerReceiver")
+            .field("peers", &self.peers.len())
+            .field("state", &self.state)
+            .field("symbols_accepted", &self.symbols_accepted)
+            .field("feedback_rounds", &self.feedback_rounds)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> QuicMultiPeerReceiver<'a> {
+    /// Start admission before any control frames have arrived.
+    ///
+    /// The peer count must be nonzero and no greater than
+    /// [QuicConfig::max_active_connections]; a zero connection cap rejects admission.
+    pub fn start(
+        peers: &'a mut [QuicReceivePeer],
+        config: QuicConfig,
+        peer_id: &str,
+    ) -> Result<Self, QuicTransportError> {
+        Self::start_with_options(peers, config, peer_id, QuicReceiveOptions::default())
+    }
+
+    /// Start admission with receiver filesystem reconstruction options.
+    ///
+    /// Delta/resume options require the separate native UDP receiver and are
+    /// rejected before any peer frames are consumed.
+    pub fn start_with_options(
+        peers: &'a mut [QuicReceivePeer],
+        config: QuicConfig,
+        peer_id: &str,
+        options: QuicReceiveOptions,
+    ) -> Result<Self, QuicTransportError> {
+        options.validate_detached()?;
+        let config = effective_quic_receiver_config(&config)?;
+        if !config
+            .symbol_auth_context()?
+            .is_some_and(|context| context.mode() == AuthMode::Strict)
+        {
+            return Err(QuicTransportError::Config(
+                "multi-peer QUIC reception requires strict per-symbol authentication".to_string(),
+            ));
+        }
+        if peers.is_empty() || peers.len() > config.max_active_connections {
+            return Err(QuicTransportError::Config(
+                "multi-peer QUIC reception requires a nonempty, bounded peer set".to_string(),
+            ));
+        }
+        if peer_id.trim().is_empty() {
+            return Err(QuicTransportError::Config(
+                "multi-peer QUIC receiver identity must not be empty".to_string(),
+            ));
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        if peers.iter().any(|peer| !paths.insert(peer.path_id)) {
+            return Err(QuicTransportError::Config(
+                "multi-peer QUIC path identifiers must be unique".to_string(),
+            ));
+        }
+        let count = peers.len();
+        let aggregator = multi_peer_quic_receive_aggregator(
+            peers
+                .iter()
+                .map(|peer| (peer.path_id, peer.peer.to_string())),
+        );
+        Ok(Self {
+            peers,
+            controls: (0..count)
+                .map(|_| NativeQuicFrameTransport::for_stream(first_client_bidi_stream()))
+                .collect(),
+            hellos: vec![None; count],
+            hellos_acked: false,
+            manifests_received: vec![false; count],
+            round_completions: vec![None; count],
+            round_stats: QuicRoundSymbolStats::default(),
+            manifest: None,
+            receipt: None,
+            decoders: Vec::new(),
+            aggregator,
+            config,
+            options,
+            peer_id: peer_id.to_string(),
+            symbols_accepted: 0,
+            feedback_rounds: 0,
+            decode_stats: QuicDecodeStats::default(),
+            state: QuicMultiPeerReceiveState::Admitting,
+        })
+    }
+
+    /// Admit peers whose complete Hello and Manifest are already buffered.
+    ///
+    /// Live senders normally wait for HelloAck before sending Manifest; use
+    /// [Self::start] and [Self::admit] for that exchange.
+    pub fn new(
+        cx: &Cx,
+        peers: &'a mut [QuicReceivePeer],
+        config: QuicConfig,
+        peer_id: &str,
+    ) -> Result<Self, QuicTransportError> {
+        let mut receiver = Self::start(peers, config, peer_id)?;
+        if !receiver.admit(cx)? {
+            return Err(QuicTransportError::Frame(
+                "multi-peer admission needs more packets; use start and admit".to_string(),
+            ));
+        }
+        Ok(receiver)
+    }
+
+    /// Process available admission frames, preserving partial progress.
+    ///
+    /// Returns false while any Hello or Manifest is pending. Pump queued
+    /// acknowledgements before expecting a compliant sender's Manifest.
+    pub fn admit(&mut self, cx: &Cx) -> Result<bool, QuicTransportError> {
+        match self.state {
+            QuicMultiPeerReceiveState::Admitting => {}
+            QuicMultiPeerReceiveState::Failed => {
+                return Err(QuicTransportError::Control(
+                    "multi-peer receiver has failed".to_string(),
+                ));
+            }
+            _ => return Ok(true),
+        }
+        self.state = QuicMultiPeerReceiveState::Failed;
+        let admitted = self.admit_available(cx)?;
+        self.state = if admitted {
+            QuicMultiPeerReceiveState::Receiving
+        } else {
+            QuicMultiPeerReceiveState::Admitting
+        };
+        Ok(admitted)
+    }
+
+    fn send_admission_ack(
+        &mut self,
+        cx: &Cx,
+        index: usize,
+        reason: Option<String>,
+    ) -> Result<(), QuicTransportError> {
+        let ack = QuicHelloAck {
+            accepted: reason.is_none(),
+            peer_id: self.peer_id.clone(),
+            source_stream: false,
+            source_stream_recv_window: None,
+            reason,
+            delta_transfer_nonce: None,
+            delta_receiver_nonce: None,
+            delta_destination_root: None,
+        };
+        self.controls[index].send_json(
+            cx,
+            &mut self.peers[index].connection,
+            FrameType::HandshakeAck,
+            &ack,
+        )
+    }
+
+    fn admit_available(&mut self, cx: &Cx) -> Result<bool, QuicTransportError> {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        for index in 0..self.peers.len() {
+            if self.hellos[index].is_some() {
+                continue;
+            }
+            let Some(frame) = self.try_peer_frame(cx, index)? else {
+                continue;
+            };
+            let hello: QuicHello = parse_json_frame(&frame, FrameType::Handshake, "Handshake")?;
+            let reason = reject_hello_reason(&hello, &self.config, true).or_else(|| {
+                (hello.role != "sender" || hello.peer_id.trim().is_empty())
+                    .then(|| "multi-peer path requires a named sender".to_string())
+            });
+            if let Some(reason) = reason {
+                self.send_admission_ack(cx, index, Some(reason.clone()))?;
+                return Err(QuicTransportError::HandshakeRejected(reason));
+            }
+            self.hellos[index] = Some(hello);
+        }
+        if self.hellos.iter().any(Option::is_none) {
+            return Ok(false);
+        }
+        if !self.hellos_acked {
+            let block_size = self.hellos[0]
+                .as_ref()
+                .ok_or_else(|| QuicTransportError::Control("missing primary Hello".to_string()))?
+                .max_block_size;
+            for index in 0..self.peers.len() {
+                if self.hellos[index]
+                    .as_ref()
+                    .is_some_and(|hello| hello.max_block_size != block_size)
+                {
+                    let reason = "multi-peer block geometry must agree exactly".to_string();
+                    self.send_admission_ack(cx, index, Some(reason.clone()))?;
+                    return Err(QuicTransportError::HandshakeRejected(reason));
+                }
+            }
+            self.config.max_block_size = usize::try_from(block_size).map_err(|_| {
+                QuicTransportError::Config("multi-peer block size overflows usize".to_string())
+            })?;
+            for index in 0..self.peers.len() {
+                self.send_admission_ack(cx, index, None)?;
+            }
+            self.hellos_acked = true;
+        }
+        for index in 0..self.peers.len() {
+            if self.manifests_received[index] {
+                continue;
+            }
+            let Some(frame) = self.try_peer_frame(cx, index)? else {
+                continue;
+            };
+            let manifest: TransferManifest =
+                parse_json_frame(&frame, FrameType::ObjectManifest, "ObjectManifest")?;
+            validate_quic_manifest(&manifest, &self.config)?;
+            if self.hellos[index].as_ref().is_some_and(|hello| {
+                hello.total_bytes != 0 && hello.total_bytes != manifest.total_bytes
+            }) {
+                return Err(QuicTransportError::Integrity(
+                    "multi-peer Hello size does not match its manifest".to_string(),
+                ));
+            }
+            if self
+                .manifest
+                .as_ref()
+                .is_some_and(|agreed| agreed != &manifest)
+            {
+                return Err(QuicTransportError::Integrity(
+                    "multi-peer transfer manifests must agree exactly".to_string(),
+                ));
+            }
+            if self.manifest.is_none() {
+                self.manifest = Some(manifest);
+            }
+            self.manifests_received[index] = true;
+        }
+        if self.manifests_received.iter().any(|received| !received) {
+            return Ok(false);
+        }
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            QuicTransportError::Control("missing agreed multi-peer manifest".to_string())
+        })?;
+        self.decoders = decoders_from_manifest(manifest, &self.config)?;
+        Ok(true)
+    }
+}
+
+impl QuicMultiPeerReceiver<'_> {
+    fn try_peer_frame(
+        &mut self,
+        cx: &Cx,
+        index: usize,
+    ) -> Result<Option<Frame>, QuicTransportError> {
+        let connection = &mut self.peers[index].connection;
+        let control = &mut self.controls[index];
+        let frame = control.try_recv(cx, connection)?;
+        if frame.is_some() {
+            return Ok(frame);
+        }
+        let eof = match connection.is_stream_read_eof(control.stream) {
+            Ok(eof) => eof,
+            Err(NativeQuicConnectionError::StreamTable(StreamTableError::UnknownStream(
+                stream,
+            ))) if stream == control.stream && self.hellos[index].is_none() => false,
+            Err(error) => return Err(error.into()),
+        };
+        if eof
+            || matches!(
+                connection.state(),
+                crate::net::quic_native::QuicConnectionState::Draining
+                    | crate::net::quic_native::QuicConnectionState::Closed
+            )
+        {
+            return Err(QuicTransportError::Frame(
+                "multi-peer control stream ended before its expected frame".to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
+    /// The complete manifest, available only after every peer has agreed.
+    #[must_use]
+    pub fn manifest(&self) -> Option<&TransferManifest> {
+        match self.state {
+            QuicMultiPeerReceiveState::Admitting | QuicMultiPeerReceiveState::Failed => None,
+            _ => self.manifest.as_ref(),
+        }
+    }
+
+    /// Access a retained connection to drive packet input and output.
+    ///
+    /// Leave the ATP control stream and symbol datagram queue to this receiver.
+    /// Packet pumping remains possible after commit or failure.
+    pub fn connection_mut(&mut self, path_id: PathId) -> Option<&mut NativeQuicConnection> {
+        self.peers
+            .iter_mut()
+            .find(|peer| peer.path_id == path_id)
+            .map(|peer| &mut peer.connection)
+    }
+
+    /// Whether decoding completed, including after successful local publication.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        matches!(
+            self.state,
+            QuicMultiPeerReceiveState::Decoded | QuicMultiPeerReceiveState::Committed
+        )
+    }
+
+    /// Local receipt, even if queuing a peer's reply subsequently failed.
+    #[must_use]
+    pub fn receipt(&self) -> Option<&ReceiveReceipt> {
+        self.receipt.as_ref()
+    }
+
+    /// Cache available completion markers and report whether every path is ready.
+    ///
+    /// Repeated calls preserve markers already received. Missing markers mean
+    /// more packets are needed; malformed or wrong-round markers fail the receiver.
+    pub fn round_ready(&mut self, cx: &Cx) -> Result<bool, QuicTransportError> {
+        if self.state != QuicMultiPeerReceiveState::Receiving {
+            return Err(QuicTransportError::Control(
+                "multi-peer receiver is not awaiting a symbol round".to_string(),
+            ));
+        }
+        self.state = QuicMultiPeerReceiveState::Failed;
+        for index in 0..self.peers.len() {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if self.round_completions[index].is_some() {
+                continue;
+            }
+            let Some(frame) = self.try_peer_frame(cx, index)? else {
+                continue;
+            };
+            if frame.frame_type() != FrameType::ObjectComplete {
+                return Err(QuicTransportError::Unexpected {
+                    got: frame.frame_type(),
+                    expected: "ObjectComplete",
+                });
+            }
+            let complete = parse_quic_round_complete(&frame)?;
+            if complete.round != self.feedback_rounds {
+                return Err(QuicTransportError::Control(format!(
+                    "path {} completed round {}, expected {}",
+                    self.peers[index].path_id.0, complete.round, self.feedback_rounds
+                )));
+            }
+            self.round_completions[index] = Some(complete);
+        }
+        self.state = QuicMultiPeerReceiveState::Receiving;
+        Ok(self.round_completions.iter().all(Option::is_some))
+    }
+
+    /// Drain currently buffered symbols while a spray round is still arriving.
+    ///
+    /// Call this after packet pumping, even before every completion marker has
+    /// arrived, so a large spray does not fill the bounded native datagram
+    /// queues. Returns the number of newly accepted unique symbols. Counts are
+    /// retained for the complete round's feedback and final receipt.
+    ///
+    /// Decoding all entries here does not authorize publication: every peer
+    /// must still supply its matching marker before [Self::receive_round].
+    pub async fn receive_available(&mut self, cx: &Cx) -> Result<u64, QuicTransportError> {
+        if self.state != QuicMultiPeerReceiveState::Receiving {
+            return Err(QuicTransportError::Control(
+                "multi-peer receiver is not accepting a symbol round".to_string(),
+            ));
+        }
+        self.state = QuicMultiPeerReceiveState::Failed;
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            QuicTransportError::Control("multi-peer manifest was not admitted".to_string())
+        })?;
+        let mut peers: Vec<_> = self
+            .peers
+            .iter_mut()
+            .map(|peer| (peer.path_id, &mut peer.connection))
+            .collect();
+        let drained = drain_native_multi_peer_symbol_datagrams_with_aggregator_deferred(
+            cx,
+            &mut peers,
+            manifest,
+            &mut self.decoders,
+            &self.config,
+            &self.aggregator,
+            &mut self.decode_stats,
+        )
+        .await?;
+        self.round_stats.observed = self.round_stats.observed.saturating_add(drained.observed);
+        self.round_stats.accepted = self.round_stats.accepted.saturating_add(drained.accepted);
+        self.state = QuicMultiPeerReceiveState::Receiving;
+        Ok(drained.accepted)
+    }
+
+    /// Decode one complete spray round, or queue shared repair feedback.
+    ///
+    /// True means the union decoded every entry. False means a NeedMore request
+    /// was queued on every path; pump it before the next round. Call
+    /// [Self::round_ready] while pumping first: invoking this method with a
+    /// missing completion marker is a terminal protocol error.
+    pub async fn receive_round(&mut self, cx: &Cx) -> Result<bool, QuicTransportError> {
+        if !self.round_ready(cx)? {
+            self.state = QuicMultiPeerReceiveState::Failed;
+            return Err(QuicTransportError::Frame(
+                "multi-peer symbol round is missing a peer completion marker".to_string(),
+            ));
+        }
+        // A dropped or failed future cannot resume a partially consumed round.
+        self.state = QuicMultiPeerReceiveState::Failed;
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            QuicTransportError::Control("multi-peer manifest was not admitted".to_string())
+        })?;
+        let completions: Vec<_> = self.round_completions.iter().flatten().copied().collect();
+        let mut peers: Vec<_> = self
+            .peers
+            .iter_mut()
+            .zip(self.controls.iter_mut())
+            .map(|(peer, control)| (peer.path_id, &mut peer.connection, control))
+            .collect();
+        let need = receive_native_multi_peer_symbol_round(
+            cx,
+            &mut peers,
+            &completions,
+            self.round_stats,
+            manifest,
+            &mut self.decoders,
+            &self.config,
+            &self.aggregator,
+            &mut self.symbols_accepted,
+            &mut self.feedback_rounds,
+            &mut self.decode_stats,
+        )
+        .await?;
+        self.round_completions.fill(None);
+        self.round_stats = QuicRoundSymbolStats::default();
+        self.state = if need.is_none() {
+            QuicMultiPeerReceiveState::Decoded
+        } else {
+            QuicMultiPeerReceiveState::Receiving
+        };
+        Ok(need.is_none())
+    }
+
+    /// Verify and publish decoded entries once, then queue each peer's receipt.
+    ///
+    /// Publication uses the existing integrity and filesystem durability path.
+    /// A reply-queue failure can occur after local publication; inspect
+    /// [Self::receipt] in that case. Connections remain available for pumping.
+    /// This method never republishes a committed or interrupted transfer.
+    pub async fn commit(
+        &mut self,
+        cx: &Cx,
+        dest_dir: &Path,
+    ) -> Result<QuicMultiPeerReceiveReport, QuicTransportError> {
+        if self.state != QuicMultiPeerReceiveState::Decoded {
+            return Err(QuicTransportError::Control(
+                "multi-peer transfer is not ready for its first commit".to_string(),
+            ));
+        }
+        self.state = QuicMultiPeerReceiveState::Failed;
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            QuicTransportError::Control("multi-peer manifest was not admitted".to_string())
+        })?;
+        let (receipt, committed_paths) = commit_decoded_entries_with_options(
+            cx,
+            dest_dir,
+            manifest,
+            &self.decoders,
+            self.symbols_accepted,
+            self.feedback_rounds,
+            self.decode_stats,
+            &self.config,
+            &self.options,
+        )
+        .await?;
+        self.receipt = Some(receipt.clone());
+        if receipt.committed {
+            self.state = QuicMultiPeerReceiveState::Committed;
+        }
+        let mut reply_error = None;
+        for (peer, control) in self.peers.iter_mut().zip(self.controls.iter_mut()) {
+            let result = send_native_proof(cx, &mut peer.connection, control, &receipt)
+                .and_then(|()| send_native_close(cx, &mut peer.connection, control));
+            if let Err(error) = result {
+                if reply_error.is_none() {
+                    reply_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = reply_error {
+            return Err(error);
+        }
+        if !receipt.committed {
+            return Err(QuicTransportError::Integrity(
+                receipt
+                    .reason
+                    .unwrap_or_else(|| "receiver did not commit".to_string()),
+            ));
+        }
+        Ok(QuicMultiPeerReceiveReport {
+            transfer: ReceiveReport {
+                transfer_id: manifest.transfer_id.clone(),
+                bytes_received: receipt.bytes_received,
+                files: receipt.files,
+                committed: true,
+                symbols_accepted: receipt.symbols_accepted,
+                feedback_rounds: receipt.feedback_rounds,
+                decode_count: receipt.decode_count,
+                decode_micros: receipt.decode_micros,
+                committed_paths,
+                peer: self.peers[0].peer,
+            },
+            peers: self
+                .peers
+                .iter()
+                .map(|peer| (peer.path_id, peer.peer))
+                .collect(),
+        })
+    }
 }
 
 async fn receive_established_native_connection(
