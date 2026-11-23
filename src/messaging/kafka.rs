@@ -59,6 +59,12 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::{Poll, Waker};
 
+mod admin;
+pub use admin::{
+    KafkaAdmin, KafkaAdminError, KafkaAdminOperation, KafkaAdminReport, KafkaNewTopic,
+    KafkaTopicAdminResult, KafkaTopicBrokerError,
+};
+
 /// Error type for Kafka operations.
 #[derive(Debug)]
 pub enum KafkaError {
