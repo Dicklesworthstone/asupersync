@@ -557,15 +557,27 @@ impl CancelWakeEffects {
         }
     }
 
-    /// Stamps the drain start of every cancelled region this token reports,
-    /// running no callback. A scheduler that makes cancelled tasks runnable
-    /// before it dispatches this token calls it first: otherwise another
-    /// worker could finish the drain and close the region before its stamp
-    /// is written, and the drain would go unreported (br-asupersync-x9mmxl).
-    /// The dispatch that follows keeps the earlier stamp.
+    /// Stamps the drain start of every cancelled region this token reports.
+    /// A scheduler that makes cancelled tasks runnable before it dispatches
+    /// this token calls it first: otherwise another worker could finish the
+    /// drain and close the region before its stamp is written, and the drain
+    /// would go unreported (br-asupersync-x9mmxl). The dispatch that follows
+    /// keeps the earlier stamp.
+    ///
+    /// Clock reads run outside runtime locks and are isolated individually,
+    /// just like the observers in `dispatch`. A panicking injected clock must
+    /// not abandon this batch's cancellation lanes or the batches behind it.
+    /// Its missing timestamp stays unavailable; later regions keep their own
+    /// clock readings rather than inheriting a fabricated fallback time.
     pub(crate) fn stamp_drains(&self) {
         for stamp in self.drain_stamps() {
-            stamp.record();
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stamp.record()))
+            {
+                // Arbitrary panic payloads can panic again when destroyed.
+                // Match the existing cancellation observer containment policy.
+                std::mem::forget(payload);
+            }
         }
     }
 

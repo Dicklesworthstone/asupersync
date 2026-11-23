@@ -13794,6 +13794,169 @@ fn deferred_cancel_batch_still_wakes_its_tasks_when_one_already_finished() {
     );
 }
 
+/// The worker takes every deferred batch before stamping its regions. An
+/// injected clock used to unwind out of that pre-publication step, abandoning
+/// both the current batch and every later batch (br-asupersync-wcc1f5). These
+/// checks retain the real region stamps and cancellation routes and exercise
+/// both a controlled dispatch and the native worker loop on another thread.
+fn deferred_cancel_clock_panic_fixture(native_worker: bool) {
+    #[derive(Debug, Default)]
+    struct PanicClock {
+        armed: AtomicBool,
+        panics: AtomicUsize,
+    }
+
+    impl crate::time::TimeSource for PanicClock {
+        fn now(&self) -> Time {
+            if self.armed.load(Ordering::Acquire) {
+                self.panics.fetch_add(1, Ordering::AcqRel);
+                panic!("deferred cancellation report clock panic");
+            }
+            Time::ZERO
+        }
+    }
+
+    struct PublicationProbe {
+        state: Weak<ContendedMutex<RuntimeState>>,
+        global: Arc<GlobalInjector>,
+        later_region: RegionId,
+        calls: AtomicUsize,
+        published_routes: AtomicUsize,
+        visible_stamps: AtomicUsize,
+    }
+
+    impl std::task::Wake for PublicationProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            if self.global.cancel_count() == 2 {
+                self.published_routes.fetch_add(1, Ordering::AcqRel);
+            }
+            if let Some(state) = self.state.upgrade()
+                && let Ok(state) = state.try_lock()
+                && let Some(stamp) = state
+                    .region(self.later_region)
+                    .and_then(crate::record::RegionRecord::cancel_reported_at)
+                && stamp.load(Ordering::Acquire) == 37
+            {
+                self.visible_stamps.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let clock = Arc::new(PanicClock::default());
+    let bad_timer = TimerDriverHandle::new(Arc::new(crate::time::TimerDriver::with_clock(
+        Arc::clone(&clock),
+    )));
+    let good_timer = TimerDriverHandle::new(Arc::new(crate::time::TimerDriver::with_clock(
+        Arc::new(VirtualClock::starting_at(Time::from_nanos(37))),
+    )));
+    let (first, second, mut first_handle, mut second_handle, probe, unavailable_stamp) = {
+        let mut runtime = state.lock().unwrap();
+        let root = runtime.create_root_region(Budget::INFINITE);
+        let first_region = runtime
+            .create_child_region(root, Budget::INFINITE)
+            .expect("first child region");
+        let second_region = runtime
+            .create_child_region(root, Budget::INFINITE)
+            .expect("second child region");
+        let (first, first_handle) = runtime
+            .create_task(first_region, Budget::INFINITE, async {})
+            .expect("first cancelled task");
+        let (second, second_handle) = runtime
+            .create_task(second_region, Budget::INFINITE, async {})
+            .expect("second cancelled task");
+        let probe = Arc::new(PublicationProbe {
+            state: Arc::downgrade(&state),
+            global: Arc::clone(&scheduler.global),
+            later_region: second_region,
+            calls: AtomicUsize::new(0),
+            published_routes: AtomicUsize::new(0),
+            visible_stamps: AtomicUsize::new(0),
+        });
+        for task in [first, second] {
+            let inner = runtime.task(task).unwrap().cx_inner.as_ref().unwrap();
+            inner.write().cancel_waker = Some(Arc::new(
+                crate::types::task_context::CancelWaker::new(Waker::from(Arc::clone(&probe))),
+            ));
+        }
+        runtime.set_timer_driver(bad_timer);
+        let first_batch = runtime.cancel_request(first_region, &CancelReason::shutdown(), None);
+        runtime.defer_cancel_dispatch(first_batch);
+        let unavailable_stamp = runtime
+            .region(first_region)
+            .unwrap()
+            .cancel_reported_at()
+            .expect("first region's real cancellation stamp");
+        runtime.set_timer_driver(good_timer);
+        let second_batch = runtime.cancel_request(second_region, &CancelReason::shutdown(), None);
+        runtime.defer_cancel_dispatch(second_batch);
+        assert!(runtime.has_deferred_cancel_dispatches());
+        assert!(runtime.has_outstanding_cancel_dispatches());
+        assert_eq!(runtime.live_task_count(), 2);
+        assert_eq!(unavailable_stamp.load(Ordering::Acquire), u64::MAX);
+        (
+            first,
+            second,
+            first_handle,
+            second_handle,
+            probe,
+            unavailable_stamp,
+        )
+    };
+    assert_eq!(probe.calls.load(Ordering::Acquire), 0);
+    assert_eq!(scheduler.global.cancel_count(), 0);
+    clock.armed.store(true, Ordering::Release);
+    let mut worker = scheduler.take_workers().remove(0);
+    if native_worker {
+        thread::spawn(move || worker.run_loop_until(&mut || false, true))
+            .join()
+            .expect("a cancellation report clock must not terminate the native worker");
+    } else {
+        worker.drain_deferred_cancel_dispatches();
+        assert_eq!(worker.global.cancel_count(), 2);
+        assert!(worker.run_pump_step());
+        assert!(worker.run_pump_step());
+        assert!(!worker.run_pump_step());
+    }
+    assert!(clock.panics.load(Ordering::Acquire) > 0);
+    assert_eq!(probe.calls.load(Ordering::Acquire), 2);
+    assert_eq!(probe.published_routes.load(Ordering::Acquire), 2);
+    assert_eq!(probe.visible_stamps.load(Ordering::Acquire), 2);
+    assert_eq!(
+        unavailable_stamp.load(Ordering::Acquire),
+        u64::MAX,
+        "a clock failure cannot fabricate a successful timing observation"
+    );
+    for handle in [&mut first_handle, &mut second_handle] {
+        let Err(crate::runtime::JoinError::Cancelled(reason)) = handle.try_join() else {
+            panic!("both tasks must retire with their original cancellation");
+        };
+        assert_eq!(reason.kind, CancelKind::Shutdown);
+    }
+    let runtime = state.lock().unwrap();
+    assert!(!runtime.has_deferred_cancel_dispatches());
+    assert!(!runtime.has_outstanding_cancel_dispatches());
+    assert!(runtime.task(first).is_none());
+    assert!(runtime.task(second).is_none());
+    assert!(runtime.is_quiescent());
+}
+
+#[test]
+fn deferred_cancel_clock_panic_preserves_later_batches_and_stamps() {
+    deferred_cancel_clock_panic_fixture(false);
+}
+
+#[test]
+fn native_worker_survives_a_deferred_cancel_clock_panic() {
+    deferred_cancel_clock_panic_fixture(true);
+}
+
 /// A region cancelled by a `RegionCommand` (`ChildRegion::cancel`) has its
 /// drain stamped while the worker applies the command, with a time read
 /// before the state lock (br-asupersync-x9mmxl). Before, the stamp waited
