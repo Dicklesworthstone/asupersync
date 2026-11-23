@@ -2770,7 +2770,8 @@ impl LabRuntime {
         prefix: &ExactSchedulePrefix,
         limits: ExactScheduleLimits,
     ) -> ExactScheduleRun {
-        self.run_exact_schedule_prefix_with_trace(prefix, limits, false).0
+        self.run_exact_schedule_prefix_with_trace(prefix, limits, false)
+            .0
     }
 
     pub(crate) fn run_exact_schedule_prefix_with_trace(
@@ -3177,7 +3178,13 @@ impl LabRuntime {
     }
 
     pub(crate) fn has_pending_dispatch_commands(&self) -> bool {
-        !self.spawn_mailbox.is_empty() || self.state.has_deferred_cancel_dispatches()
+        !self.spawn_mailbox.is_empty()
+            || self.state.has_deferred_cancel_dispatches()
+            // Completing the last child can make a finalizer ready without
+            // posting a mailbox command or waking another task. The next step
+            // must publish that cleanup before declaring idle, waiting for an
+            // external wake, or advancing virtual time (GH #89).
+            || self.state.has_ready_async_finalizers()
     }
 
     /// True when nothing inside the lab can make progress, yet it is not quiescent:

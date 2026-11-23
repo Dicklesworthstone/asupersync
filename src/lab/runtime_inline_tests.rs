@@ -26,6 +26,89 @@ use std::time::Duration;
 struct TestFdSource;
 
 #[test]
+fn run_until_idle_drives_finalizers_without_spinning_on_parked_cleanup() {
+    let mut lab = LabRuntime::new(LabConfig::new(0x0089_0001).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    let oldest_events = Arc::clone(&events);
+    assert!(lab.state.register_sync_finalizer(root, move || {
+        oldest_events.lock().push("oldest");
+    }));
+    let (release, mut gate) = crate::channel::oneshot::channel::<()>();
+    let async_events = Arc::clone(&events);
+    assert!(lab.state.register_async_finalizer(root, async move {
+        async_events.lock().push("waiting");
+        gate.recv_uninterruptible().await.unwrap();
+        async_events.lock().push("released");
+    }));
+    let newest_events = Arc::clone(&events);
+    assert!(lab.state.register_sync_finalizer(root, move || {
+        newest_events.lock().push("newest");
+    }));
+    lab.state
+        .close_region_command(root, &CancelReason::user("idle finalizer regression"));
+
+    // Completing the newest callback leaves no runnable task, but the next
+    // callback still needs its cleanup task admitted before the lab is idle.
+    assert!(lab.run_until_idle() < 128);
+    assert_eq!(*events.lock(), ["newest", "waiting"]);
+    assert_eq!(lab.state.live_task_count(), 1);
+    assert_eq!(lab.state.regions_len(), 1);
+
+    // The older callback cannot bypass the parked async callback's LIFO
+    // barrier, and its presence must not keep an otherwise idle lab spinning.
+    assert_eq!(lab.run_until_idle(), 0);
+    assert_eq!(*events.lock(), ["newest", "waiting"]);
+
+    release.send_blocking(()).unwrap();
+    assert!(lab.run_until_idle() < 128);
+    assert_eq!(*events.lock(), ["newest", "waiting", "released", "oldest"]);
+    assert_eq!(lab.state.live_task_count(), 0);
+    assert_eq!(lab.state.regions_len(), 0);
+    assert_eq!(lab.state.pending_obligation_count(), 0);
+    assert!(lab.is_quiescent());
+}
+
+#[test]
+fn auto_advance_runs_ready_finalizers_before_later_timers() {
+    let mut lab = LabRuntime::new(LabConfig::new(0x0089_0002).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let timer = lab.state.timer_driver_handle().unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    for name in ["oldest", "newest"] {
+        let observed = Arc::clone(&observed);
+        let timer = timer.clone();
+        assert!(lab.state.register_sync_finalizer(root, move || {
+            observed.lock().push((name, timer.now()));
+        }));
+    }
+    let mut later = Box::pin(crate::time::Sleep::with_timer_driver(
+        Time::from_secs(10),
+        timer,
+    ));
+    assert!(
+        later
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    lab.state
+        .close_region_command(root, &CancelReason::user("finalizer time ordering"));
+
+    // The second callback becomes ready at the first callback's retirement.
+    // A temporarily empty task queue must not let virtual time skip ahead.
+    let report = lab.run_with_auto_advance();
+    assert_eq!(
+        *observed.lock(),
+        [("newest", Time::ZERO), ("oldest", Time::ZERO)]
+    );
+    assert_eq!(lab.state.live_task_count(), 0);
+    assert_eq!(lab.state.regions_len(), 0);
+    assert!(lab.is_quiescent(), "{report:?}");
+}
+
+#[test]
 fn lab_teardown_releases_parked_task_join_barrier() {
     use crate::sync::atomic::{AtomicBool, Ordering};
     struct Retired(Arc<AtomicBool>);

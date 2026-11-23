@@ -3038,7 +3038,8 @@ pub struct RuntimeState {
     leak_count: u64,
     /// Opt-in anytime-valid leak monitor, fed one age per resolved
     /// obligation (br-asupersync-bi2462.150.2). `None` by default.
-    obligation_leak_monitor: Option<crate::sync::pl::Mutex<crate::obligation::eprocess::LeakMonitor>>,
+    obligation_leak_monitor:
+        Option<crate::sync::pl::Mutex<crate::obligation::eprocess::LeakMonitor>>,
     /// Leaks that the `Recover` policy is aborting while a monitor is
     /// enabled: their abort effect must not feed the monitor an on-time age.
     leak_recovered_obligations: HashSet<ObligationId>,
@@ -3807,7 +3808,9 @@ impl RuntimeState {
     /// Gets a reference to the cancel protocol validator.
     #[inline]
     #[must_use]
-    pub fn cancel_protocol_validator(&self) -> &Arc<crate::sync::pl::Mutex<CancelProtocolValidator>> {
+    pub fn cancel_protocol_validator(
+        &self,
+    ) -> &Arc<crate::sync::pl::Mutex<CancelProtocolValidator>> {
         &self.cancel_protocol_validator
     }
 
@@ -10474,6 +10477,33 @@ impl RuntimeState {
         !self.finalizing_regions.is_empty()
     }
 
+    /// Whether the embedded scheduler has finalizer work ready for admission.
+    ///
+    /// Finalizer callbacks become runnable only when the scheduler mints their
+    /// cleanup tasks. An empty task queue therefore does not establish idleness
+    /// while one of these callbacks is ready. A parked async or externally
+    /// driven manual finalizer still owns its region's LIFO barrier and must not
+    /// make the scheduler spin on the callbacks waiting behind it.
+    #[must_use]
+    pub(crate) fn has_ready_async_finalizers(&self) -> bool {
+        self.finalizing_regions.iter().any(|&region_id| {
+            self.region_finalizer_is_ready(&AdmissionRegionTarget::Embedded, region_id)
+        })
+    }
+
+    fn region_finalizer_is_ready(
+        &self,
+        regions: &AdmissionRegionTarget<'_>,
+        region_id: RegionId,
+    ) -> bool {
+        !self.active_async_finalizers.contains_key(&region_id)
+            && !self.active_manual_finalizers.contains_key(&region_id)
+            && regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+                .is_some_and(|region| !region.finalizers_empty())
+    }
+
     /// Finalizer drain with explicit region- and task-table targets
     /// (br-asupersync-sched-hot-path-perf-bt4y5f.2.2 / E1.2 for the task
     /// side; br-asupersync-m9wsza / E2 S4c-2c-i for the region side).
@@ -10501,18 +10531,8 @@ impl RuntimeState {
         let mut regions_to_process = SmallVec::<[RegionId; 8]>::new();
 
         for &region_id in &self.finalizing_regions {
-            if self.active_async_finalizers.contains_key(&region_id)
-                || self.active_manual_finalizers.contains_key(&region_id)
-            {
-                continue;
-            }
-            if let Some(region) = regions
-                .resolve_ref(&self.regions)
-                .get(region_id.arena_index())
-            {
-                if !region.finalizers_empty() {
-                    regions_to_process.push(region_id);
-                }
+            if self.region_finalizer_is_ready(regions, region_id) {
+                regions_to_process.push(region_id);
             }
         }
 
@@ -12973,10 +12993,9 @@ impl RuntimeState {
         #[cfg(not(feature = "full-runtime"))]
         {
             let should_shed = match (composite_level, priority) {
-                (
-                    DegradationLevel::Heavy | DegradationLevel::Emergency,
-                    RegionPriority::Normal,
-                ) => true,
+                (DegradationLevel::Heavy | DegradationLevel::Emergency, RegionPriority::Normal) => {
+                    true
+                }
                 (
                     DegradationLevel::Moderate
                     | DegradationLevel::Heavy
