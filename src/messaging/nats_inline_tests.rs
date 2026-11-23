@@ -1805,6 +1805,56 @@ fn nats_request_deadline_survives_queueing_and_preserves_committed_replies() {
 }
 
 #[test]
+fn nats_cancelled_request_cleanup_defers_only_an_unmodified_supervised_transport() {
+    for supervised in [false, true] {
+        for connected in [false, true] {
+            let (mut connection, subscription) = subscription_event_fixture(1);
+            let state = Arc::clone(&connection.state);
+            state.supervised.store(supervised, Ordering::Release);
+            state.connected.store(connected, Ordering::Release);
+            connection.connected = connected;
+            let owner: Cx = Cx::for_testing();
+            owner.cancel_with(
+                crate::types::CancelKind::User,
+                Some("request owner stopped"),
+            );
+
+            // Drive cleanup directly so receiver abandonment cannot drop
+            // the operation first. This forces the scheduler ordering that
+            // previously closed a healthy socket before any UNSUB write.
+            let sid = subscription.sid();
+            let deadline = timeout_now(&owner) + Duration::from_secs(60);
+            {
+                let mut cleanup =
+                    std::pin::pin!(connection.cleanup_request_subscription(&owner, sid, deadline));
+                let mut task_cx = std::task::Context::from_waker(Waker::noop());
+                assert!(matches!(
+                    cleanup.as_mut().poll(&mut task_cx),
+                    Poll::Ready(())
+                ));
+            }
+            assert!(state.subscriptions.lock().is_empty());
+            let can_defer = supervised && connected;
+            assert_eq!(connection.connected, can_defer);
+            assert_eq!(state.connected.load(Ordering::Acquire), can_defer);
+            let expected_sids = if can_defer { vec![sid] } else { Vec::new() };
+            assert_eq!(
+                state.dropped_sids.lock().as_slice(),
+                expected_sids.as_slice(),
+                "only a live supervisor can retire an untouched UNSUB"
+            );
+            drop(subscription);
+            assert_eq!(
+                state.dropped_sids.lock().len(),
+                usize::from(can_defer),
+                "dropping the request must not duplicate the queued UNSUB"
+            );
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }
+    }
+}
+
+#[test]
 fn nats_running_request_preserves_parsed_reply_when_cleanup_reaches_deadline() {
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, RegionId, TaskId};

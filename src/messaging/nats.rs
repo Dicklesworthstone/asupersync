@@ -2515,9 +2515,9 @@ impl NatsConnection {
     }
 
     async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, deadline: Time) {
-        // Retire the inbox even when cancellation or an expired deadline
-        // prevents the first UNSUB poll. Its Drop must not enqueue another,
-        // unbounded cleanup after this bounded attempt has finished.
+        // Retire the local inbox immediately. A started UNSUB write keeps
+        // the original request budget; if cancellation prevents it from
+        // starting, a live supervisor can take over remote cleanup below.
         self.remove_local_subscription(sid);
         let result = {
             let mut cleanup = std::pin::pin!(self.unsubscribe(cx, sid));
@@ -2537,6 +2537,17 @@ impl NatsConnection {
             .await
         };
         if result.is_err() {
+            // Cancellation can reject unsubscribe at its entry checkpoint,
+            // before it marks the transport unusable or writes anything.
+            // The request owner has no remaining authority to send UNSUB,
+            // but a supervised connection still has a live cleanup owner.
+            // Queue that SID just as Subscription::drop would, because the
+            // local entry was already removed above. The supervisor flushes
+            // it before starting another command on this same connection.
+            if self.connected && self.state.supervised.load(Ordering::Acquire) {
+                self.state.dropped_sids.lock().push(sid);
+                return;
+            }
             // A pending/failed UNSUB may have written a prefix. Closing the
             // transport retires the remote inbox and prevents the next command
             // from completing that partial frame.
@@ -4900,8 +4911,9 @@ fn fail_process_waiters(waiters: &mut Vec<ProcessWaiter>) {
 /// Dropping the operation preserves the connection's existing cancellation
 /// fences: a partial write or unfinished PING leaves it unusable, while a
 /// request waiting for a reply drops its inbox and queues the required UNSUB.
-/// Unsubscribe and Close bypass this helper because their cleanup must finish
-/// even after the caller has stopped waiting.
+/// Unsubscribe and Close bypass this helper to finish cleanup. A PING with a
+/// keepalive response bound also keeps its queue position until the exchange
+/// completes or reaches that bound.
 async fn complete_supervisor_command<T>(
     mut reply: oneshot::Sender<Result<T, NatsError>>,
     operation: impl Future<Output = Result<T, NatsError>>,
@@ -5042,17 +5054,29 @@ async fn handle_supervisor_command(
             // window never will: the PING leaves the connection unusable and
             // the supervisor replaces it, rather than waiting (and keeping
             // the keepalive from ticking) until TCP gives up.
-            complete_supervisor_command(reply, async {
-                match ping_bound {
-                    Some(bound) => {
-                        let ping = connection.ping(&cx);
-                        nats_timeout_at(&cx, timeout_now(&cx) + bound, stale_connection_error, ping)
-                            .await
-                    }
-                    None => connection.ping(&cx).await,
+            match ping_bound {
+                Some(bound) => {
+                    // Dropping only the reply receiver does not cancel its
+                    // owner. Finish this bounded exchange so a late PONG can
+                    // restore the healthy transport and queued abandoned
+                    // commands are discarded before any further wire write.
+                    // Explicit owner cancellation still interrupts nats_io.
+                    let ping = connection.ping(&cx);
+                    let result = nats_timeout_at(
+                        &cx,
+                        timeout_now(&cx) + bound,
+                        stale_connection_error,
+                        ping,
+                    )
+                    .await;
+                    let _ = reply.send_blocking(result);
                 }
-            })
-            .await;
+                None => {
+                    // Without a response bound, a silent peer could retain
+                    // the supervisor forever after this caller disappears.
+                    complete_supervisor_command(reply, connection.ping(&cx)).await;
+                }
+            }
         }
         NatsSupervisorCommand::Process { after_epoch, reply } => {
             // The supervisor's own frame loop answers it. Reading the socket
