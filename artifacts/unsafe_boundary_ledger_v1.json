@@ -4283,47 +4283,47 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2025,
+          "line": 2029,
           "pattern": "let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2030,
+          "line": 2034,
           "pattern": "let owned = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2716,
+          "line": 2720,
           "pattern": "let pushed = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2811,
+          "line": 2815,
           "pattern": "let stale_fd = unsafe { libc::dup(old_sock.as_raw_fd()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2824,
+          "line": 2828,
           "pattern": "unsafe { libc::dup2(new_sock.as_raw_fd(), stale_fd) },"
         },
         {
           "kind": "unsafe_block",
-          "line": 2845,
+          "line": 2849,
           "pattern": "let _ = unsafe { libc::close(stale_fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3471,
+          "line": 3475,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3498,
+          "line": 3502,
           "pattern": "let n = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4947,
+          "line": 5037,
           "pattern": "let descriptor = unsafe {"
         }
       ]

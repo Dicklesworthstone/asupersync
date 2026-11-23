@@ -26,8 +26,8 @@ mod imp {
         Event, Events, Interest, IoUringCapability, IoUringCapabilityPolicy, IoUringProbeOutcome,
         Reactor, Source, Token,
     };
-    use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
     use crate::sync::pl::Mutex;
+    use io_uring::{IoUring, Probe, cqueue, opcode, squeue, types};
     use smallvec::SmallVec;
     use std::collections::{HashMap, VecDeque};
     use std::io::{self, Write};
@@ -1967,8 +1967,8 @@ mod imp {
     /// registration table. A completion with `IORING_CQE_F_MORE` comes from a
     /// multishot poll that stays armed, and so does its registration; any other
     /// completion disarms it until `modify`, except that a persistent edge
-    /// registration whose multishot poll the kernel ended with readiness is
-    /// pushed onto `ended_multishots` to be re-armed (asupersync-ubwvb0).
+    /// registration ended with readiness or an external cancellation is pushed
+    /// onto `ended_multishots` to be re-armed (asupersync-46kfli).
     fn process_completion_batch_locked(
         state: &mut ReactorState,
         completions: impl IntoIterator<Item = (u64, i32, u32)>,
@@ -2004,8 +2004,12 @@ mod imp {
                         ended_multishots.push(token);
                     }
                 }
-                // Nothing in the reactor cancels a live multishot poll, so such
-                // a cancellation is reported below like any other poll error.
+                // Reactor-initiated cancellations have already replaced or removed
+                // their registration. A final cancellation of the active multishot
+                // poll is external (for example, its submitting thread exited).
+                Some(errno) if is_poll_cancellation_errno(errno) && multishot && !more => {
+                    ended_multishots.push(token);
+                }
                 Some(errno) if is_poll_cancellation_errno(errno) && !multishot => {}
                 Some(errno) if is_terminal_fd_errno(errno) => {
                     // The fd was closed out from under an in-flight poll
@@ -4000,6 +4004,84 @@ mod imp {
         }
 
         #[test]
+        fn test_cancelled_multishot_poll_is_rearmed_without_error_or_spin() {
+            let Some(reactor) = edge_reactor_or_skip() else {
+                return;
+            };
+
+            let (left, mut right) = nonblocking_pair();
+            let key = Token::new(8_008);
+            reactor
+                .register(&left, key, edge_interest())
+                .expect("an edge registration should be accepted");
+            let original = active_poll_user_data_for_token(&reactor, key).expect("multishot");
+
+            // Cancel the real kernel request without retiring its registration.
+            // Its final ECANCELED is equivalent to an external cancellation.
+            reactor
+                .submit_poll_remove(original, true)
+                .expect("the kernel should accept cancellation");
+            let deadline = std::time::Instant::now() + EDGE_WAIT;
+            let mut events = Events::with_capacity(8);
+            let rearmed = loop {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the cancelled poll {original} for {key:?} was not re-armed"
+                );
+                reactor
+                    .poll(&mut events, Some(Duration::from_millis(20)))
+                    .expect("poll should consume the cancellation");
+                assert!(
+                    events.is_empty(),
+                    "cancellation must not become socket readiness: {events:?}"
+                );
+                if let Some(active) = active_poll_user_data_for_token(&reactor, key)
+                    && active != original
+                {
+                    break active;
+                }
+            };
+            assert_eq!(tracked_poll_op_count(&reactor), 1);
+
+            let idle = readiness_for(&reactor, key, EDGE_QUIET, false);
+            assert!(
+                idle.is_empty(),
+                "a re-armed idle socket must stay quiet: {idle:?}"
+            );
+            for byte in [b'x', b'y'] {
+                std::io::Write::write_all(&mut right, &[byte]).expect("write should succeed");
+                let ready = readiness_for(&reactor, key, EDGE_WAIT, true);
+                assert!(
+                    readable_seen(&ready) && ready.iter().all(|interest| !interest.is_error()),
+                    "the re-armed poll must deliver the next edge: {ready:?}"
+                );
+                assert_eq!(drain_readable(&left), 1);
+                let quiet = readiness_for(&reactor, key, EDGE_QUIET, false);
+                assert!(
+                    quiet.is_empty(),
+                    "a drained socket must not spin: {quiet:?}"
+                );
+                assert_eq!(
+                    active_poll_user_data_for_token(&reactor, key),
+                    Some(rearmed),
+                    "the same multishot poll must deliver both edges without modify"
+                );
+            }
+
+            reactor.deregister(key).expect("deregister should succeed");
+            let after = readiness_for(&reactor, key, EDGE_QUIET, false);
+            assert!(
+                after.is_empty(),
+                "deregistration must not re-arm: {after:?}"
+            );
+            assert_eq!(tracked_poll_op_count(&reactor), 0);
+            eprintln!(
+                "io_uring_cancel_rearm token={key:?} original={original} rearmed={rearmed} \
+                 edges=2 terminal_poll_ops=0"
+            );
+        }
+
+        #[test]
         fn test_ended_multishot_poll_on_a_changed_descriptor_is_not_rearmed() {
             let Some(reactor) = new_or_skip() else {
                 return;
@@ -4117,44 +4199,52 @@ mod imp {
         }
 
         #[test]
-        fn test_multishot_bookkeeping_ignores_replaced_polls_and_reports_cancellation() {
-            let token = Token::new(8_103);
-            let readable = i32::from(libc::POLLIN);
-            // 601 is a replaced multishot poll whose cancellation is in flight.
-            let mut state = seeded_state(token, edge_interest(), 602);
-            state.poll_ops.insert(601, token);
+        fn test_multishot_bookkeeping_ignores_replaced_polls_and_rearms_cancellation() {
+            for errno in [libc::ECANCELED, libc::ENOENT] {
+                let token = Token::new(8_103);
+                let readable = i32::from(libc::POLLIN);
+                // 601 is a replaced multishot poll whose cancellation is in flight.
+                let mut state = seeded_state(token, edge_interest(), 602);
+                state.poll_ops.insert(601, token);
 
-            let (events, ended) = apply_batch(&mut state, &[(601, readable, CQE_F_MORE)]);
-            assert!(
-                events.is_empty() && ended.is_empty(),
-                "a replaced poll is stale"
-            );
-            assert_eq!(
-                state.poll_ops.get(&601),
-                Some(&token),
-                "a replaced multishot poll stays reserved until its last completion"
-            );
-            let (events, _) = apply_batch(&mut state, &[(601, -libc::ECANCELED, 0)]);
-            assert!(events.is_empty());
-            assert!(!state.poll_ops.contains_key(&601));
-            assert_eq!(state.registrations[&token].active_poll_user_data, Some(602));
+                let (events, ended) = apply_batch(&mut state, &[(601, readable, CQE_F_MORE)]);
+                assert!(
+                    events.is_empty() && ended.is_empty(),
+                    "a replaced poll is stale"
+                );
+                assert_eq!(
+                    state.poll_ops.get(&601),
+                    Some(&token),
+                    "a replaced multishot poll stays reserved until its last completion"
+                );
+                let (events, ended) = apply_batch(&mut state, &[(601, -errno, 0)]);
+                assert!(events.is_empty() && ended.is_empty());
+                assert!(!state.poll_ops.contains_key(&601));
+                assert_eq!(state.registrations[&token].active_poll_user_data, Some(602));
 
-            // Nothing in the reactor cancels the live multishot poll, so a
-            // cancellation from outside ends its edges and is reported.
-            let (events, ended) = apply_batch(&mut state, &[(602, -libc::ECANCELED, 0)]);
-            assert_eq!(events.len(), 1);
-            assert!(events[0].ready.is_error());
-            assert!(
-                ended.is_empty(),
-                "a cancelled poll is reported, not re-armed"
-            );
-            assert_eq!(state.registrations[&token].active_poll_user_data, None);
+                // An external cancellation ends the active poll, not the
+                // persistent registration. A duplicate final CQE is stale.
+                let (events, ended) =
+                    apply_batch(&mut state, &[(602, -errno, 0), (602, -errno, 0)]);
+                assert!(
+                    events.is_empty(),
+                    "cancellation is not socket failure: {errno}"
+                );
+                assert_eq!(ended, vec![token], "exactly one re-arm for errno={errno}");
+                assert_eq!(state.registrations[&token].active_poll_user_data, None);
+                assert!(state.poll_ops.is_empty());
 
-            // A one-shot registration's cancellation stays silent, as before.
-            let oneshot = Token::new(8_104);
-            let mut state = seeded_state(oneshot, Interest::READABLE, 701);
-            let (events, ended) = apply_batch(&mut state, &[(701, -libc::ECANCELED, 0)]);
-            assert!(events.is_empty() && ended.is_empty());
+                // Ordinary and explicit edge one-shot registrations retain
+                // their silent cancellation and are never automatically re-armed.
+                for interest in [Interest::READABLE, edge_interest() | Interest::ONESHOT] {
+                    let oneshot = Token::new(8_104);
+                    let mut state = seeded_state(oneshot, interest, 701);
+                    let (events, ended) = apply_batch(&mut state, &[(701, -errno, 0)]);
+                    assert!(events.is_empty() && ended.is_empty());
+                    assert_eq!(state.registrations[&oneshot].active_poll_user_data, None);
+                    assert!(state.poll_ops.is_empty());
+                }
+            }
         }
 
         fn assert_peer_eof_after_cleanup(reactor: &IoUringReactor, peer: &mut UnixStream) {
@@ -4722,8 +4812,8 @@ mod imp {
 
         /// Applies one batch of poll completions under the state lock, then
         /// re-arms every persistent edge registration whose multishot poll the
-        /// kernel ended while it still reported readiness. The re-arm holds the
-        /// same state lock, as `register` and `modify` do, so a concurrent
+        /// kernel ended with readiness or external cancellation. The re-arm holds
+        /// the same state lock, as `register` and `modify` do, so a concurrent
         /// `deregister` either runs first and leaves nothing to re-arm, or runs
         /// after and cancels the new poll.
         fn complete_poll_batch_locked(
