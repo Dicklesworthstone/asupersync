@@ -1840,6 +1840,18 @@ pub struct IncomingRequestBodyWriter {
     discarded_bytes: u64,
 }
 
+/// Observe whether a produced response still owns its incoming body without
+/// retaining the consumer itself or the writer's checked obligation.
+pub(super) struct IncomingBodyConsumer {
+    shared: Arc<IncomingBodyShared>,
+}
+
+impl IncomingBodyConsumer {
+    pub(super) fn dropped(&self) -> bool {
+        self.shared.consumer_dropped()
+    }
+}
+
 /// Cumulative protocol-driver progress while discarding an unread H1 body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IncomingBodyDrainProgress {
@@ -1948,6 +1960,12 @@ impl IncomingRequestBodyWriter {
     #[must_use]
     pub fn consumer_dropped(&self) -> bool {
         self.shared.consumer_dropped()
+    }
+
+    pub(super) fn consumer_observer(&self) -> IncomingBodyConsumer {
+        IncomingBodyConsumer {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Takes bytes parsed past synchronized body EOF.

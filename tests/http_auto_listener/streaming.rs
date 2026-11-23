@@ -769,6 +769,61 @@ fn shared_port_streams_both_protocols_before_upload_eof() {
 }
 
 #[test]
+fn shared_port_duplex_truncated_upload_never_publishes_successful_completion() {
+    for workers in [1, 2] {
+        run_lifecycle(
+            native_runtime(workers).build().unwrap(),
+            |handle| async move {
+                let cx = Cx::current().unwrap();
+                let retired = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::clone(&retired);
+                let listener = HttpAutoStreamingListener::bind(
+                    "127.0.0.1:0",
+                    move |cx, request| h1_echo(cx, request, None, Some(Arc::clone(&observed))),
+                    h2_handler,
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_http1_streaming_config(h1_config());
+                let address = listener.local_addr().unwrap();
+                let shutdown = listener.shutdown_signal();
+                let body_stats = listener.stats_handle();
+                let mut serving = cx
+                    .spawn(move |_| async move { listener.run(&handle).await })
+                    .unwrap();
+
+                let stream = bounded(TcpStream::connect(address)).await.unwrap();
+                let mut peer = WireH1::new(stream).await;
+                // Observe an actual response prefix before ending a nine-byte
+                // upload after only three bytes. A buffered implementation
+                // cannot reach this witness, and an eager terminator would
+                // incorrectly report a successful response after it.
+                peer.prefix().await;
+                bounded(AsyncWriteExt::shutdown(&mut peer.stream))
+                    .await
+                    .unwrap();
+                let mut tail = std::mem::take(&mut peer.input);
+                bounded(peer.stream.read_to_end(&mut tail)).await.unwrap();
+                assert!(
+                    tail.is_empty(),
+                    "failed upload published response bytes: {tail:?}"
+                );
+                assert_eq!(peer.body, b"one");
+                assert!(!peer.done);
+
+                assert!(shutdown.begin_drain(Duration::from_secs(2)));
+                let stats = bounded(serving.join(&cx)).await.unwrap().unwrap();
+                assert!(stats.http1.drain_report.unwrap().reached_quiescence);
+                assert!(stats.http2.drain_report.unwrap().reached_quiescence);
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                assert_eq!(body_stats.reserved_streaming_request_bytes(), 0);
+            },
+        );
+    }
+}
+
+#[test]
 fn shared_port_preserves_both_streaming_admission_policies() {
     for workers in [1, 2] {
         run_lifecycle(

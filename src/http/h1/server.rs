@@ -1979,7 +1979,9 @@ impl StreamingRequestOutcome {
         match joined {
             Ok(Some((hop, writer))) => Self::Complete {
                 hop,
-                drain: writer.as_ref().map(IncomingRequestBodyWriter::drain_progress),
+                drain: writer
+                    .as_ref()
+                    .map(IncomingRequestBodyWriter::drain_progress),
             },
             Ok(None) => Self::Closed,
             Err(error) => Self::BodyFailed(error),
@@ -3108,6 +3110,11 @@ where
     Ok((io, hop))
 }
 
+enum ProducedFlowProgress {
+    Waiting(Http1ProducedResponse),
+    Complete(Result<ProducedCompletion, HttpError>),
+}
+
 #[allow(clippy::too_many_lines)]
 async fn execute_produced_request_flow<F, Fut, T>(
     request_cx: &Cx,
@@ -3196,27 +3203,60 @@ where
         config.incoming_body_frame_capacity,
         config.incoming_body_queued_bytes,
     );
+    let consumer = writer.consumer_observer();
     let mut request = StreamingServerRequest::new(streaming.head, body);
     request.peer_addr = streaming.peer_addr;
     let handler = handler(request_cx.clone(), request);
-    let handler = async move { Some(handler.await) };
     async {
-        let body_driver = drive_incoming_body(
-            request_cx,
-            io,
-            read_buffer,
-            writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
-            &config,
-        );
-        let (produced, writer) = match join_streaming_handler_and_body(
-            request_cx,
-            handler,
-            body_driver,
-            &config,
-            shutdown_signal.as_ref(),
-        )
-        .await
-        {
+        let joined = {
+            // A response producer may own the request body. Waiting for upload
+            // EOF before polling that producer deadlocks a duplex exchange.
+            // Split only the borrow: both halves stay in this request task and
+            // return the original transport before the retirement barrier.
+            let (mut input, mut output) = crate::io::split_owned(&mut *io);
+            let handler = async {
+                let produced = handler.await;
+                Some(if consumer.dropped() {
+                    // Preserve the existing drain-before-response policy when
+                    // the handler abandoned its incoming body.
+                    ProducedFlowProgress::Waiting(produced)
+                } else {
+                    // Even legacy serving defers the successful final bytes
+                    // until ingress reaches EOF (or its bounded drain ends).
+                    ProducedFlowProgress::Complete(
+                        execute_ready_produced_response(
+                            request_cx,
+                            &mut output,
+                            produced,
+                            request_version,
+                            request_method.clone(),
+                            policy,
+                            config.request_drain_grace,
+                            response_write,
+                            &head_committed,
+                            true,
+                        )
+                        .await,
+                    )
+                })
+            };
+            let body_driver = drive_incoming_body(
+                request_cx,
+                &mut input,
+                read_buffer,
+                writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
+                &config,
+            );
+            join_streaming_handler_and_body(
+                request_cx,
+                handler,
+                body_driver,
+                &config,
+                shutdown_signal.as_ref(),
+            )
+            .await
+        };
+        let (progress, writer) = match joined {
             Ok(Some(joined)) => joined,
             Ok(None) => {
                 return Err(HttpError::Io(std::io::Error::new(
@@ -3226,6 +3266,15 @@ where
             }
             Err(body_error) => {
                 record_incoming_body_failure(&body_error);
+                if head_committed.load(Ordering::Acquire) {
+                    // A duplex response may already have a visible prefix.
+                    // Never append a second status or successful final chunk
+                    // after its upload fails validation or disconnects.
+                    return Err(HttpError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        body_error,
+                    )));
+                }
                 // br-asupersync-hw83se: mirror the buffered path — a
                 // DrainLimitExceeded body error (mapped to None by
                 // incoming_body_failure_response) still owes the client an
@@ -3277,6 +3326,12 @@ where
             && !preserve_completed_response(&config, &error)
         {
             record_incoming_body_failure(&error);
+            if head_committed.load(Ordering::Acquire) {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    error,
+                )));
+            }
             let mut response = incoming_body_failure_response(request_version, &error)
                 .unwrap_or_else(|| {
                     hop_error_response(
@@ -3300,86 +3355,27 @@ where
             .await;
         }
 
-        let rejected_method = match policy {
-            ProducedResponsePolicy::Sse => {
-                request_method != Method::Get && request_method != Method::Head
+        let produced = match progress {
+            ProducedFlowProgress::Waiting(produced) => produced,
+            ProducedFlowProgress::Complete(result) => {
+                let completion = result?;
+                if defer_completion {
+                    return Ok(completion);
+                }
+                // This may publish a buffered rejection or an empty fixed
+                // body's head. A partial write must fence outer fallbacks too.
+                head_committed.store(true, Ordering::Release);
+                completion.publish(request_cx, io, response_write).await?;
+                return Ok(ProducedCompletion::Complete);
             }
-            ProducedResponsePolicy::Generic => request_method == Method::Connect,
         };
-        if rejected_method {
-            let message = match policy {
-                ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
-                ProducedResponsePolicy::Generic => {
-                    "generic produced responses do not support CONNECT tunnels"
-                }
-            };
-            let mut response = hop_error_response(request_version, 405, message);
-            if policy == ProducedResponsePolicy::Sse {
-                response
-                    .headers
-                    .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
-            }
-            add_connection_close(&mut response);
-            return write_or_defer_produced_response(
-                request_cx,
-                io,
-                response,
-                response_write,
-                &head_committed,
-                defer_completion,
-            )
-            .await;
-        }
-
-        if request_version != Version::Http11 {
-            let message = match policy {
-                ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
-                ProducedResponsePolicy::Generic => {
-                    "generic produced responses require HTTP/1.1 framing"
-                }
-            };
-            let mut response = hop_error_response(request_version, 505, message);
-            add_connection_close(&mut response);
-            if request_method == Method::Head {
-                suppress_response_body_for_head(&mut response);
-            }
-            return write_or_defer_produced_response(
-                request_cx,
-                io,
-                response,
-                response_write,
-                &head_committed,
-                defer_completion,
-            )
-            .await;
-        }
-
-        if request_method == Method::Head {
-            let response = match policy {
-                ProducedResponsePolicy::Sse => live_sse_head_only_response(request_version),
-                ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
-            };
-            return write_or_defer_produced_response(
-                request_cx,
-                io,
-                response,
-                response_write,
-                &head_committed,
-                defer_completion,
-            )
-            .await;
-        }
-
-        let mut produced = produced;
-        let body_kind = produced.body_kind();
-        validate_produced_response_head(produced.head_mut(), body_kind)?;
-        let (response, producer) = produced.into_parts(request_cx);
-        drive_produced_response(
+        execute_ready_produced_response(
             request_cx,
             io,
-            response,
-            producer,
-            policy == ProducedResponsePolicy::Generic,
+            produced,
+            request_version,
+            request_method,
+            policy,
             config.request_drain_grace,
             response_write,
             &head_committed,
@@ -3387,6 +3383,110 @@ where
         )
         .await
     }
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_ready_produced_response<T>(
+    request_cx: &Cx,
+    io: &mut T,
+    produced: Http1ProducedResponse,
+    request_version: Version,
+    request_method: Method,
+    policy: ProducedResponsePolicy,
+    drain_grace: Duration,
+    response_write: ResponseWritePolicy<'_>,
+    head_committed: &AtomicBool,
+    defer_completion: bool,
+) -> Result<ProducedCompletion, HttpError>
+where
+    T: AsyncWrite + Unpin,
+{
+    let rejected_method = match policy {
+        ProducedResponsePolicy::Sse => {
+            request_method != Method::Get && request_method != Method::Head
+        }
+        ProducedResponsePolicy::Generic => request_method == Method::Connect,
+    };
+    if rejected_method {
+        let message = match policy {
+            ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
+            ProducedResponsePolicy::Generic => {
+                "generic produced responses do not support CONNECT tunnels"
+            }
+        };
+        let mut response = hop_error_response(request_version, 405, message);
+        if policy == ProducedResponsePolicy::Sse {
+            response
+                .headers
+                .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
+        }
+        add_connection_close(&mut response);
+        return write_or_defer_produced_response(
+            request_cx,
+            io,
+            response,
+            response_write,
+            head_committed,
+            defer_completion,
+        )
+        .await;
+    }
+
+    if request_version != Version::Http11 {
+        let message = match policy {
+            ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
+            ProducedResponsePolicy::Generic => {
+                "generic produced responses require HTTP/1.1 framing"
+            }
+        };
+        let mut response = hop_error_response(request_version, 505, message);
+        add_connection_close(&mut response);
+        if request_method == Method::Head {
+            suppress_response_body_for_head(&mut response);
+        }
+        return write_or_defer_produced_response(
+            request_cx,
+            io,
+            response,
+            response_write,
+            head_committed,
+            defer_completion,
+        )
+        .await;
+    }
+
+    if request_method == Method::Head {
+        let response = match policy {
+            ProducedResponsePolicy::Sse => live_sse_head_only_response(request_version),
+            ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
+        };
+        return write_or_defer_produced_response(
+            request_cx,
+            io,
+            response,
+            response_write,
+            head_committed,
+            defer_completion,
+        )
+        .await;
+    }
+
+    let mut produced = produced;
+    let body_kind = produced.body_kind();
+    validate_produced_response_head(produced.head_mut(), body_kind)?;
+    let (response, producer) = produced.into_parts(request_cx);
+    drive_produced_response(
+        request_cx,
+        io,
+        response,
+        producer,
+        policy == ProducedResponsePolicy::Generic,
+        drain_grace,
+        response_write,
+        head_committed,
+        defer_completion,
+    )
     .await
 }
 
