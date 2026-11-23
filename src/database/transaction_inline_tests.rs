@@ -472,7 +472,7 @@ fn retry_delay_observes_a_restricted_owners_internal_deadline_once_under_a_mask(
 
     let clock = Arc::new(VirtualClock::new());
     let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
-    let owner = Cx::new_with_drivers(
+    let owner: Cx = Cx::new_with_drivers(
         RegionId::new_for_test(0, 1),
         TaskId::new_for_test(0, 0),
         Budget::INFINITE.with_deadline(Time::from_millis(10)),

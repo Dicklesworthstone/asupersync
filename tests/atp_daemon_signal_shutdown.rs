@@ -1978,7 +1978,10 @@ mod controller_lifecycle {
             let owned_pid = daemon.controller.status(&daemon.cx).unwrap().pid.unwrap();
             let mut bystander =
                 Process::spawn("controller bystander", Command::new("sleep").arg("60"));
-            let replacement_claim = format!("{}\n", bystander.child.id());
+            let replacement_claim = format!(
+                "{}\n",
+                bystander.child.as_ref().expect("bystander is owned").id()
+            );
             let pid_file = daemon.root.join("daemon.pid");
             write_file(&pid_file, replacement_claim.as_bytes());
 
@@ -2022,7 +2025,10 @@ mod controller_lifecycle {
             "external controller bystander",
             Command::new("sleep").arg("60"),
         );
-        let claim = format!("{}\n", bystander.child.id());
+        let claim = format!(
+            "{}\n",
+            bystander.child.as_ref().expect("bystander is owned").id()
+        );
         let pid_file = daemon.root.join("daemon.pid");
         write_file(&pid_file, claim.as_bytes());
 

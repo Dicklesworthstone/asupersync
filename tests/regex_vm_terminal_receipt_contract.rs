@@ -18,6 +18,14 @@ mod observability {
     pub use crate::regex_semantics;
 }
 
+// Path-included VM code uses the same synchronization facade as production.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/sync/pl.rs"]
+pub(crate) mod sync_pl;
+mod sync {
+    pub(crate) use crate::sync_pl as pl;
+}
+
 use std::fs;
 use std::hint::black_box;
 use std::panic::{AssertUnwindSafe, catch_unwind};

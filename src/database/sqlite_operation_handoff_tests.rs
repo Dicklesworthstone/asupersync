@@ -9,6 +9,7 @@
 use super::*;
 use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::mpsc as std_mpsc;
 use std::task::{Context, Waker};
 

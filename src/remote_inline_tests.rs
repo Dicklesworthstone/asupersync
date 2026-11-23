@@ -5670,10 +5670,10 @@ fn native_rollback_retires_resources_before_notifying_drain() {
             cancel_reason: None,
         })]
     );
-    assert_eq!(
+    assert!(matches!(
         result_rx.poll_recv_uninterruptible(&mut context),
         Poll::Ready(Err(oneshot::RecvError::Closed))
-    );
+    ));
     assert_eq!(drain.try_recv(), Ok(()));
     let state = shared.state.lock();
     assert!(state.active.is_empty());
@@ -5712,10 +5712,10 @@ fn native_driver_contexts_retire_outside_state_lock() {
             })]
         );
     }
-    assert_eq!(
+    assert!(matches!(
         result_rx.try_recv(),
-        Ok(Ok(RemoteOutcome::Success(vec![7])))
-    );
+        Ok(Ok(RemoteOutcome::Success(payload))) if payload.as_slice() == [7]
+    ));
     assert!(shared.state.lock().active.is_empty());
 }
 

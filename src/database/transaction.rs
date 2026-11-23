@@ -86,7 +86,7 @@ impl<T, E> std::fmt::Debug for TransactionFuture<'_, '_, T, E> {
     }
 }
 
-impl<'env, 'borrow, T, E> TransactionFuture<'env, 'borrow, T, E> {
+impl<'borrow, T, E> TransactionFuture<'_, 'borrow, T, E> {
     /// Box a callback future without requiring its captures to be `'static`.
     pub fn new<F>(future: F) -> Self
     where

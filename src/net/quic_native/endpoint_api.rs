@@ -194,13 +194,11 @@ impl QuicConnection {
     ///
     /// This stays crate-private so application code cannot bypass the
     /// role-aware stream API or replay handshake transitions manually.
-    // The production callers live on the `tls`-gated UDP connection driver;
-    // the other callers are the HTTP/3 adapter's and web router's `http3`
-    // tests and this module's own stream-credit test. Gating it on `tls`
-    // alone broke those tests' build without `tls` (asupersync-j6c2l7). Every
-    // `test` build now has a caller in `endpoint_api_inline_tests.rs`, so
-    // `test` no longer trips `deny(dead_code)` (main was red from ccb5af622).
-    #[cfg(any(feature = "tls", test))]
+    // Production callers include the TLS UDP driver and HTTP/3's QPACK
+    // critical-stream closure waiters. HTTP/3 also builds without TLS, so
+    // both feature gates must retain this accessor. This module's own
+    // stream-credit tests use it in every test build.
+    #[cfg(any(feature = "tls", feature = "http3", test))]
     pub(crate) fn inner_mut(&mut self) -> &mut NativeQuicConnection {
         &mut self.inner
     }

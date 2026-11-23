@@ -3486,7 +3486,8 @@ fn streaming_unread_drain_policy_preserves_completed_response_and_closes() {
                 assert_eq!(state.requests_served, 1, "{case}");
                 assert_eq!(state.phase, ConnectionPhase::Closing, "{case}");
                 assert!(
-                    wire.to_ascii_lowercase().contains("\r\nconnection: close\r\n"),
+                    wire.to_ascii_lowercase()
+                        .contains("\r\nconnection: close\r\n"),
                     "{case}"
                 );
                 assert!(
@@ -3536,7 +3537,7 @@ fn produced_unread_drain_policy_preserves_completed_response_and_closes() {
                 let observed_handlers = Arc::clone(&handler_calls);
                 let observed_producers = Arc::clone(&producer_calls);
                 let server = Http1StreamingServer::with_config_produced(
-                    move |_cx, request| {
+                    move |_cx, request: StreamingServerRequest| {
                         observed_handlers.fetch_add(1, Ordering::SeqCst);
                         assert_eq!(request.head.uri, "/first");
                         let producer_calls = Arc::clone(&observed_producers);
@@ -3587,7 +3588,8 @@ fn produced_unread_drain_policy_preserves_completed_response_and_closes() {
                 assert_eq!(state.requests_served, 1, "{case}");
                 assert_eq!(state.phase, ConnectionPhase::Closing, "{case}");
                 assert!(
-                    wire.to_ascii_lowercase().contains("\r\nconnection: close\r\n"),
+                    wire.to_ascii_lowercase()
+                        .contains("\r\nconnection: close\r\n"),
                     "{case}"
                 );
                 assert!(
