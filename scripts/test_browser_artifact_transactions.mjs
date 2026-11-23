@@ -266,6 +266,125 @@ async function corruptStoredValue(env, store, logical = "__artifact_index__") {
 }
 
 for (const backend of ["localstorage", "indexeddb"]) {
+  test(`${backend}: storage.set owns accepted bytes before asynchronous host admission`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    const bytes = Uint8Array.of(1, 2, 3);
+    const openings = [];
+    if (backend === "indexeddb") {
+      const open = env.host.indexedDB.open;
+      env.host.indexedDB.open = function (...args) {
+        const request = open.apply(this, args);
+        openings.push(request);
+        return request;
+      };
+    }
+    const pending = storage.set("storage-snapshots", "value", bytes);
+    if (backend === "indexeddb") {
+      assert.equal(openings.length, 1, "the write must reach database admission");
+      assert.equal(openings[0].readyState, "pending", "mutate before database open completes");
+    }
+    bytes.fill(9);
+    await pending;
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "value")), [1, 2, 3]);
+  });
+
+  test(`${backend}: storage.set snapshots exact subview bytes before caller transfer`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    for (const [name, makeValue, expected] of [
+      ["uint8", bytes => bytes.subarray(2, 6), [1, 2, 3, 4]],
+      ["uint16", bytes => new Uint16Array(bytes.buffer, 2, 2), [1, 2, 3, 4]],
+      ["dataview", bytes => new DataView(bytes.buffer, 2, 4), [1, 2, 3, 4]],
+      ["buffer", bytes => bytes.buffer, [91, 92, 1, 2, 3, 4, 93, 94]],
+    ]) {
+      const bytes = Uint8Array.of(91, 92, 1, 2, 3, 4, 93, 94);
+      const pending = storage.set("storage-snapshots", name, makeValue(bytes));
+      bytes.fill(9);
+      structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+      assert.equal(bytes.buffer.byteLength, 0, "the caller really detached its buffer");
+      await pending;
+      const stored = await storage.get("storage-snapshots", name);
+      assert.deepEqual(Array.from(stored), expected, name);
+      assert.equal(stored.byteOffset, 0, "stored values own compact buffers");
+      assert.equal(stored.buffer.byteLength, expected.length, "adjacent bytes must not persist");
+    }
+  });
+
+  test(`${backend}: storage.set snapshots each write when a producer reuses one buffer`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    const bytes = Uint8Array.of(0, 7, 8);
+    const pending = [];
+    for (let index = 1; index <= 4; index += 1) {
+      bytes[0] = index;
+      pending.push(storage.set("storage-snapshots", `chunk-${index}`, bytes));
+    }
+    bytes.fill(9);
+    await Promise.all(pending);
+    for (let index = 1; index <= 4; index += 1) {
+      assert.deepEqual(Array.from(await storage.get("storage-snapshots", `chunk-${index}`)), [index, 7, 8]);
+    }
+  });
+
+  test(`${backend}: storage.set refuses already detached inputs without changing persisted data`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    await storage.set("storage-snapshots", "value", [4, 5]);
+    const bytes = Uint8Array.of(1, 2, 3);
+    const view = new DataView(bytes.buffer);
+    const buffer = bytes.buffer;
+    structuredClone(buffer, { transfer: [buffer] });
+    for (const value of [bytes, view, buffer]) {
+      await assert.rejects(storage.set("storage-snapshots", "value", value), error => error.name === "TypeError");
+    }
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "value")), [4, 5]);
+    assert.deepEqual(Array.from(await storage.listKeys("storage-snapshots")), ["value"]);
+  });
+
+  test(`${backend}: storage.set write refusal preserves the old value and later snapshots`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    await storage.set("storage-snapshots", "value", [4, 5]);
+    let refused = 0;
+    env.failSet(key => {
+      if (key !== "value") return false;
+      refused += 1;
+      return true;
+    });
+    const bytes = Uint8Array.of(1, 2, 3);
+    const pending = storage.set("storage-snapshots", "value", bytes);
+    structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+    await assert.rejects(pending, error => {
+      assert.equal(error.code, "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED");
+      assert.equal(error.diagnostics.operation, "set");
+      return true;
+    });
+    assert.equal(refused, 1, "exercise the host write refusal, not a detached-buffer error");
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "value")), [4, 5]);
+    const next = Uint8Array.of(6, 7);
+    const retry = storage.set("storage-snapshots", "value", next);
+    next.fill(9);
+    await retry;
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "value")), [6, 7]);
+  });
+
+  test(`${backend}: storage.set preserves foreign-realm views and owned byte arrays`, async () => {
+    const env = await environment(backend);
+    const storage = env.store().storage;
+    const foreign = runInNewContext("new Uint8Array([91, 1, 2, 3, 92])");
+    const array = [4, 5, 6];
+    const pending = [
+      storage.set("storage-snapshots", "foreign", foreign.subarray(1, 4)),
+      storage.set("storage-snapshots", "array", array),
+    ];
+    foreign.fill(9);
+    array.fill(9);
+    await Promise.all(pending);
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "foreign")), [1, 2, 3]);
+    assert.deepEqual(Array.from(await storage.get("storage-snapshots", "array")), [4, 5, 6]);
+  });
+
   test(`${backend}: concurrent independent writers preserve every successful artifact and sequence`, async () => {
     const env = await environment(backend);
     const first = env.store();
@@ -1286,6 +1405,28 @@ test("indexeddb: broker lifecycle updates cannot resurrect a concurrently cleare
   assert.ok(clearing, "start the clear while the lifecycle update is reading its registration");
   assert.equal(await clearing, true);
   assert.equal(await env.broker().readRegistration(), null);
+});
+
+test("indexeddb: storage.set awaits transaction abort without publishing its owned snapshot", async () => {
+  const env = await environment("indexeddb");
+  const storage = env.store().storage;
+  await storage.set("storage-snapshots", "value", [4, 5]);
+  let aborts = 0;
+  env.abortAfterPut(key => {
+    if (key !== "value") return false;
+    aborts += 1;
+    return true;
+  });
+  const bytes = Uint8Array.of(1, 2, 3);
+  const pending = storage.set("storage-snapshots", "value", bytes);
+  structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+  await assert.rejects(pending, error => {
+    assert.equal(error.code, "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED");
+    assert.equal(error.diagnostics.reason, "transaction_aborted");
+    return true;
+  });
+  assert.equal(aborts, 1, "the owned write must reach the transaction's asynchronous abort");
+  assert.deepEqual(Array.from(await storage.get("storage-snapshots", "value")), [4, 5]);
 });
 
 test("indexeddb: broker asynchronous transaction abort cannot publish or advance a lease", async () => {

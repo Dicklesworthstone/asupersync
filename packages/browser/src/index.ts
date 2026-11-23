@@ -8140,6 +8140,7 @@ export class BrowserStorage {
     }
   }
 
+  /** Persist a snapshot of the value's visible bytes before waiting for storage. */
   async set(namespace: string, key: string, value: BrowserStorageValue): Promise<void> {
     const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);
     const normalizedKey = normalizeBrowserStorageKey(key);
@@ -8148,6 +8149,11 @@ export class BrowserStorage {
 
     try {
       if (this.backend === "indexeddb") {
+        // Opening the database suspends before IndexedDB can structured-clone
+        // the value. Own exactly its visible bytes now so buffer reuse or
+        // transfer by the caller cannot change an already accepted write.
+        // Plain byte arrays were already copied by normalization.
+        const ownedValue = Array.isArray(value) ? normalizedValue : new Uint8Array(normalizedValue);
         const database = await openIndexedDbDatabase(
           this.globalObject,
           this.dbName,
@@ -8158,7 +8164,7 @@ export class BrowserStorage {
         try {
           const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
           store.put(
-            compactIndexedDbBytes(normalizedValue),
+            ownedValue,
             encodeIndexedDbStorageKey(normalizedNamespace, normalizedKey, this.globalObject),
           );
           await awaitIndexedDbTransaction(transaction);
