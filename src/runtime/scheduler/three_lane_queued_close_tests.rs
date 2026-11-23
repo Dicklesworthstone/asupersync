@@ -353,6 +353,80 @@ fn queued_native_close_and_cancel_wakers_run_after_all_runtime_locks() {
 }
 
 #[test]
+fn single_step_dispatch_runs_finalizers_from_queued_empty_region_closes() {
+    use std::sync::atomic::AtomicUsize;
+
+    for layout in [
+        TableLayout::Embedded,
+        TableLayout::Sharded,
+        TableLayout::ExternalOnly,
+    ] {
+        for command in [
+            CloseCommand::Close,
+            CloseCommand::Cancel,
+            CloseCommand::CancelWithBudget,
+        ] {
+            let mut fixture = Fixture::new(layout);
+            let child = fixture.open_child();
+            let child_id = child.region_id();
+            // Retire unrelated ready work before close is queued; otherwise
+            // its completion could mint cleanup and hide a single-step gap.
+            fixture.finish_healthy();
+
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&finalized);
+            let finalizer_state = Arc::clone(&fixture.state);
+            let finalizer_table = fixture.table.clone();
+            assert!(
+                fixture
+                    .state
+                    .lock()
+                    .unwrap()
+                    .register_sync_finalizer(child_id, move || {
+                        assert!(finalizer_state.try_lock().is_ok());
+                        if let Some(table) = finalizer_table {
+                            assert!(table.try_lock().is_ok());
+                        }
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    })
+            );
+            match command {
+                CloseCommand::Close => {}
+                CloseCommand::Cancel => child
+                    .cancel(CancelReason::user("single-step cancellation"))
+                    .unwrap(),
+                CloseCommand::CancelWithBudget => child
+                    .cancel_with_budget(
+                        CancelReason::user("single-step bounded cancellation"),
+                        Budget::INFINITE.with_poll_quota(17),
+                    )
+                    .unwrap(),
+            }
+            let mut close = std::pin::pin!(child.close_with_outcome());
+            let mut poll = Context::from_waker(Waker::noop());
+            assert!(close.as_mut().poll(&mut poll).is_pending());
+            assert_eq!(finalized.load(Ordering::SeqCst), 0);
+
+            assert!(
+                fixture.worker.run_once(),
+                "a lifecycle command made cleanup runnable without a body task"
+            );
+            assert_eq!(finalized.load(Ordering::SeqCst), 1);
+            assert!(matches!(close.as_mut().poll(&mut poll), Poll::Ready(Ok(_))));
+            assert!(
+                !fixture.worker.run_once(),
+                "completed cleanup is not rescheduled"
+            );
+            let state = fixture.state.lock().unwrap();
+            assert!(state.region_was_closed(child_id));
+            assert!(state.region(child_id).is_none());
+            assert_eq!(state.region(fixture.root).unwrap().child_count(), 0);
+            assert_eq!(state.pending_obligation_count(), 0);
+        }
+    }
+}
+
+#[test]
 fn queued_child_close_keeps_earlier_notifications_when_a_parent_leak_panics() {
     for layout in [TableLayout::Embedded, TableLayout::Sharded] {
         let mut fixture = Fixture::new(layout);

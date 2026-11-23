@@ -9145,7 +9145,18 @@ impl ThreeLaneWorker {
         // Keep the budget on the worker so repeated single turns cannot reset it.
         self.poll_busy_io_if_due();
         self.scheduler_ticks.resolve(&self.state);
-        if let Some(task) = self.next_task() {
+        let task = self.next_task().or_else(|| {
+            // Lifecycle commands can close a region after its last body task
+            // has already retired. A self-waking current-thread root only
+            // drives this single-step path, so it cannot rely on the idle
+            // dispatch loop to admit that region's finalizers (GH #89).
+            if self.schedule_ready_finalizers() {
+                self.next_task()
+            } else {
+                None
+            }
+        });
+        if let Some(task) = task {
             self.execute(task);
             self.publish_preemption_fairness_certificate_if_due();
             return true;

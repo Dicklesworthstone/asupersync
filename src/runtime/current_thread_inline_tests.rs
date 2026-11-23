@@ -1,6 +1,61 @@
 use super::*;
 use crate::evidence_sink::{CollectorSink, EvidenceSink};
 
+#[test]
+fn self_waking_root_drives_finalizers_after_the_last_child_has_retired() {
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::AtomicUsize;
+
+    struct Retained(Arc<AtomicUsize>);
+    impl Drop for Retained {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let retired = Arc::new(AtomicUsize::new(0));
+    runtime.block_on(async {
+        let cx = Cx::current().expect("current-thread root context");
+        let child = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .unwrap();
+        child
+            .retain_until_finalized(Retained(Arc::clone(&retired)))
+            .await
+            .unwrap();
+        let mut body = child.cx().spawn(|_| async {}).unwrap();
+        body.join(&cx).await.unwrap();
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+
+        // Queue close only after the last body has actually retired. There
+        // is no subsequent body completion to admit the retained finalizer.
+        // Self-waking keeps the driver on run_once rather than its idle loop.
+        let mut close = std::pin::pin!(child.close_with_outcome());
+        let mut polls = 0;
+        poll_fn(|task| {
+            polls += 1;
+            let result = close.as_mut().poll(task);
+            if result.is_pending() {
+                assert!(
+                    polls < 128,
+                    "ready cleanup starved behind a self-waking root"
+                );
+                task.waker().wake_by_ref();
+            }
+            result
+        })
+        .await
+        .unwrap();
+        assert_eq!(retired.load(Ordering::SeqCst), 1);
+    });
+    assert_eq!(retired.load(Ordering::SeqCst), 1);
+    assert!(runtime.is_quiescent());
+}
+
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn assert_root_io_registration_releases_runtime(retain_stale_waker: bool) {
     use crate::runtime::RuntimeBuilder;
