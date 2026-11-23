@@ -262,7 +262,6 @@ expression: inventory
 2	Time	grpc/server/duplex/tests.rs	std::time::Instant::now()
 1	Time	grpc/server/server_streaming.rs	Instant::now()
 2	Time	grpc/web_client/tests.rs	Instant::now()
-1	Time	messaging/jetstream.rs	SystemTime::now()
 1	Time	messaging/nats.rs	std::time::SystemTime::now()
 3	Time	net/atp/chunk/dedupe.rs	std::time::SystemTime::now()
 1	Time	net/atp/chunk/stream.rs	std::time::SystemTime::now()
@@ -783,7 +782,6 @@ expression: inventory
 1	Time	grpc/server/server_streaming.rs	Instant::now()	let wall_now = Instant::now();
 1	Time	grpc/web_client/tests.rs	Instant::now()	assert!(Instant::now() < deadline, );
 1	Time	grpc/web_client/tests.rs	Instant::now()	let deadline = Instant::now() + Duration::from_secs(5);
-1	Time	messaging/jetstream.rs	SystemTime::now()	let now_ns = SystemTime::now()
 1	Time	messaging/nats.rs	std::time::SystemTime::now()	let now_secs = std::time::SystemTime::now()
 1	Time	net/atp/chunk/dedupe.rs	std::time::SystemTime::now()	chunk.last_accessed = std::time::SystemTime::now();
 1	Time	net/atp/chunk/dedupe.rs	std::time::SystemTime::now()	last_accessed: std::time::SystemTime::now(),

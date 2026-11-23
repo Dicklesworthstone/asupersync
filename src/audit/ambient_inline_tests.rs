@@ -616,7 +616,11 @@ const PRISTINE_MODULES: &[&str] = &["cx", "obligation", "plan"];
 // grpc/web_client/tests.rs, cx saga tests.rs and spork event_manager
 // tests.rs. No scanner exemption, detection pattern, or numerical
 // threshold changed.
-const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 841;
+// 841 -> 840 (br-asupersync-messaging-client-audit-k6pxks): JetStream's
+// process-wide pull quotas now use the existing monotonic process clock,
+// removing their SystemTime read. Request deadlines retain their Cx clock.
+// No scanner exemptions or detection patterns changed.
+const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 840;
 
 fn src_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

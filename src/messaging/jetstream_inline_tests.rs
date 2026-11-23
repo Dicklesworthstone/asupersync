@@ -3583,6 +3583,159 @@ mod pull_dos_protection_audit {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn pull_admission_accepts_time_zero_and_refuses_clock_regression() {
+        let at_start = PullRateLimiter::new();
+        assert!(at_start.check_pull_request(0).is_ok());
+        assert!(at_start.check_pull_request(0).is_err());
+        assert!(at_start.check_pull_request(100_000_000).is_ok());
+
+        let limiter = PullRateLimiter::new();
+        assert!(limiter.check_pull_request(5_000_000_000).is_ok());
+        assert_eq!(
+            limiter.check_pull_request(4_000_000_000),
+            Err(Duration::from_millis(100)),
+            "an older timestamp cannot panic or bypass the admission interval"
+        );
+        assert!(limiter.check_pull_request(5_100_000_000).is_ok());
+        assert!(limiter.check_pull_request(6_000_000_000).is_ok());
+        assert!(!limiter.is_rate_limiting_active());
+    }
+
+    #[test]
+    fn concurrent_pull_admission_accepts_only_one_caller_per_interval() {
+        let limiter = PullRateLimiter::new();
+        let barrier = std::sync::Barrier::new(16);
+        let accepted = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        limiter.check_pull_request(5_000_000_000).is_ok()
+                    })
+                })
+                .collect();
+            // Spawn every barrier participant before joining any of them.
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("admission caller did not panic"))
+                .filter(|accepted| *accepted)
+                .count()
+        });
+        assert_eq!(accepted, 1);
+        assert!(limiter.is_rate_limiting_active());
+    }
+
+    #[test]
+    fn pull_admission_samples_clock_under_the_admission_lock() {
+        let limiter = PullRateLimiter::new();
+        let clock = || {
+            assert!(
+                matches!(
+                    limiter.state.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "a caller waiting for admission must sample time after acquiring the lock"
+            );
+            5_000_000_000
+        };
+        assert!(limiter.check_pull_request_with_clock(clock).is_ok());
+        assert!(limiter.check_pull_request_with_clock(clock).is_err());
+    }
+
+    #[test]
+    fn pull_backoff_cannot_wrap_below_the_cap() {
+        for count in [10, u64::from(u32::MAX), u64::MAX] {
+            assert_eq!(
+                PullRateLimiter::calculate_backoff(count),
+                MAX_PULL_BACKOFF_MS
+            );
+        }
+        let limiter = PullRateLimiter::new();
+        let mut state = limiter.state.lock().unwrap();
+        state.last_pull_ns = Some(1_000_000_000);
+        state.rapid_request_count = u64::MAX;
+        drop(state);
+        assert_eq!(
+            limiter.check_pull_request(1_000_000_001),
+            Err(Duration::from_millis(MAX_PULL_BACKOFF_MS))
+        );
+        assert_eq!(limiter.state.lock().unwrap().rapid_request_count, u64::MAX);
+    }
+
+    #[test]
+    fn global_pull_window_counts_time_zero_and_expires_at_one_second() {
+        let mut tracker = GlobalPullRateTracker::new();
+        for _ in 0..GLOBAL_PULL_RATE_LIMIT {
+            assert!(tracker.check_global_pull_request(0, 0).is_ok());
+        }
+        assert!(tracker.check_global_pull_request(0, 0).is_err());
+        assert!(tracker.check_global_pull_request(999_999_999, 0).is_err());
+        assert_eq!(tracker.recent_pulls.len(), GLOBAL_PULL_RATE_LIMIT as usize);
+        assert!(tracker.check_global_pull_request(1_000_000_000, 0).is_ok());
+        assert_eq!(tracker.recent_pulls.len(), 1);
+        assert_eq!(tracker.estimated_memory_usage, 0);
+    }
+
+    #[test]
+    fn global_pull_window_does_not_expire_reordered_admissions_early() {
+        let mut tracker = GlobalPullRateTracker::new();
+        assert!(tracker.check_global_pull_request(5_000_000_000, 0).is_ok());
+        // This caller started earlier but reached admission after the first.
+        assert!(tracker.check_global_pull_request(4_000_000_000, 0).is_ok());
+        assert_eq!(
+            tracker.recent_pulls.iter().copied().collect::<Vec<_>>(),
+            vec![5_000_000_000, 5_000_000_000]
+        );
+        for _ in 2..GLOBAL_PULL_RATE_LIMIT {
+            assert!(tracker.check_global_pull_request(5_000_000_000, 0).is_ok());
+        }
+        assert!(tracker.check_global_pull_request(5_999_999_999, 0).is_err());
+        assert!(tracker.check_global_pull_request(6_000_000_000, 0).is_ok());
+        assert_eq!(tracker.recent_pulls.len(), 1);
+    }
+
+    #[test]
+    fn global_pull_overflow_refuses_without_spending_credit() {
+        let mut tracker = GlobalPullRateTracker::new();
+        assert!(
+            tracker
+                .check_global_pull_request(5_000_000_000, 1024)
+                .is_ok()
+        );
+        assert!(
+            tracker
+                .check_global_pull_request(4_000_000_000, u64::MAX)
+                .is_err()
+        );
+        assert_eq!(tracker.recent_pulls.len(), 1);
+        assert_eq!(tracker.estimated_memory_usage, 1024);
+        tracker.release(1024);
+        assert_eq!(tracker.estimated_memory_usage, 0);
+    }
+
+    #[test]
+    fn pull_pressure_never_increases_the_requested_batch() {
+        let consumer = fuzz_create_test_consumer(1000);
+        assert!(consumer.pull_rate_limiter.check_pull_request(0).is_ok());
+        assert!(consumer.pull_rate_limiter.check_pull_request(1).is_err());
+        for requested in 1..=MAX_PULL_BATCH {
+            let actual = validate_and_clamp_pull_batch_size(requested, &consumer).unwrap();
+            assert!((1..=requested).contains(&actual), "{requested} -> {actual}");
+            for pressure in [0, 257, 512, u64::MAX] {
+                let actual = clamp_pull_batch_for_pressure(requested, false, pressure);
+                assert!(
+                    (1..=requested).contains(&actual),
+                    "batch {requested}, pressure {pressure} MiB -> {actual}"
+                );
+            }
+        }
+        assert_eq!(validate_and_clamp_pull_batch_size(1, &consumer).unwrap(), 1);
+        assert_eq!(clamp_pull_batch_for_pressure(1, false, 512), 1);
+        assert_eq!(clamp_pull_batch_for_pressure(100, true, 0), 50);
+        assert_eq!(clamp_pull_batch_for_pressure(100, false, 512), 50);
+    }
+
+    #[test]
     fn audit_pull_rate_limiter_enforces_minimum_interval() {
         let limiter = PullRateLimiter::new();
         let now_ns = SystemTime::now()

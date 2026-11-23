@@ -43,12 +43,12 @@ use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
 use crate::types::Time;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
@@ -109,23 +109,29 @@ fn pull_inbox_capacity(batch: usize) -> usize {
 /// Implements per-consumer rate limiting with exponential backoff.
 #[derive(Debug)]
 struct PullRateLimiter {
-    /// Timestamp of last pull request (nanoseconds since UNIX_EPOCH)
-    last_pull_ns: AtomicU64,
+    // A Consumer can be shared by callers using different NATS clients. The
+    // interval check and its update must be one admission decision, otherwise
+    // simultaneous callers can all observe the same expired interval.
+    state: Mutex<PullRateState>,
+}
+
+#[derive(Debug, Default)]
+struct PullRateState {
+    /// Last accepted pull on the shared process monotonic clock.
+    last_pull_ns: Option<u64>,
     /// Current backoff interval (milliseconds)
-    current_backoff_ms: AtomicU64,
+    current_backoff_ms: u64,
     /// Number of consecutive rapid requests
-    rapid_request_count: AtomicU64,
+    rapid_request_count: u64,
     /// Whether rate limiting is currently active
-    rate_limiting_active: AtomicBool,
+    rate_limiting_active: bool,
 }
 
 /// System-wide pull rate tracker to prevent global DoS attacks
 #[derive(Debug)]
 struct GlobalPullRateTracker {
-    /// Pull request timestamps for the last second (circular buffer)
-    recent_pulls: Vec<u64>,
-    /// Current position in the circular buffer
-    buffer_position: usize,
+    /// Accepted pull timestamps in nanoseconds; at most the global rate cap.
+    recent_pulls: VecDeque<u64>,
     /// Total system memory usage estimate (bytes)
     estimated_memory_usage: u64,
 }
@@ -137,73 +143,99 @@ static GLOBAL_PULL_RATE_TRACKER: std::sync::LazyLock<Mutex<GlobalPullRateTracker
 impl PullRateLimiter {
     fn new() -> Self {
         Self {
-            last_pull_ns: AtomicU64::new(0),
-            current_backoff_ms: AtomicU64::new(0),
-            rapid_request_count: AtomicU64::new(0),
-            rate_limiting_active: AtomicBool::new(false),
+            state: Mutex::new(PullRateState::default()),
         }
+    }
+
+    /// Admit against the process clock sampled at the serialized boundary.
+    fn check_pull_request_now(&self) -> Result<(), Duration> {
+        self.check_pull_request_with_clock(|| crate::time::raw_wall_now().as_nanos())
+    }
+
+    #[cfg(test)]
+    fn check_pull_request(&self, now_ns: u64) -> Result<(), Duration> {
+        self.check_pull_request_with_clock(|| now_ns)
     }
 
     /// Check if a pull request is allowed and update rate limiting state.
     /// Returns Ok(()) if allowed, Err with delay duration if rate limited.
-    fn check_pull_request(&self, now_ns: u64) -> Result<(), Duration> {
-        let last_pull_ns = self.last_pull_ns.load(Ordering::Relaxed);
-        let time_since_last_ms = (now_ns - last_pull_ns) / 1_000_000; // Convert to milliseconds
+    fn check_pull_request_with_clock(&self, clock: impl FnOnce() -> u64) -> Result<(), Duration> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Sampling before the lock would let a delayed caller enter with an
+        // already-expired admission interval, or run behind a newer sample.
+        let now_ns = clock();
+        let Some(last_pull_ns) = state.last_pull_ns else {
+            // Zero is a valid monotonic timestamp, not a previous request.
+            state.last_pull_ns = Some(now_ns);
+            return Ok(());
+        };
+        let time_since_last_ms = now_ns.saturating_sub(last_pull_ns) / 1_000_000;
 
         // Check minimum interval
         if time_since_last_ms < MIN_PULL_INTERVAL_MS {
             // Rapid request detected - apply exponential backoff
-            let rapid_count = self.rapid_request_count.fetch_add(1, Ordering::Relaxed);
-            let backoff_ms = self.calculate_backoff(rapid_count);
-            self.current_backoff_ms.store(backoff_ms, Ordering::Relaxed);
-            self.rate_limiting_active.store(true, Ordering::Relaxed);
+            let rapid_count = state.rapid_request_count;
+            let backoff_ms = Self::calculate_backoff(rapid_count);
+            state.rapid_request_count = rapid_count.saturating_add(1);
+            state.current_backoff_ms = backoff_ms;
+            state.rate_limiting_active = true;
+            drop(state);
 
             warn!(
                 "JetStream pull rate limit exceeded - backoff required: {}ms (rapid requests: {})",
                 backoff_ms,
-                rapid_count + 1
+                rapid_count.saturating_add(1)
             );
 
             return Err(Duration::from_millis(backoff_ms));
         }
 
         // Check if we need to wait for backoff
-        let current_backoff_ms = self.current_backoff_ms.load(Ordering::Relaxed);
+        let current_backoff_ms = state.current_backoff_ms;
         if current_backoff_ms > 0 && time_since_last_ms < current_backoff_ms {
             let remaining_backoff = current_backoff_ms - time_since_last_ms;
             return Err(Duration::from_millis(remaining_backoff));
         }
 
         // Request is allowed - update state
-        self.last_pull_ns.store(now_ns, Ordering::Relaxed);
+        state.last_pull_ns = Some(now_ns);
 
         // Reset backoff if we've waited long enough
         if time_since_last_ms > current_backoff_ms * 2 {
-            self.rapid_request_count.store(0, Ordering::Relaxed);
-            self.current_backoff_ms.store(0, Ordering::Relaxed);
-            self.rate_limiting_active.store(false, Ordering::Relaxed);
+            state.rapid_request_count = 0;
+            state.current_backoff_ms = 0;
+            state.rate_limiting_active = false;
         }
 
         Ok(())
     }
 
-    fn calculate_backoff(&self, rapid_count: u64) -> u64 {
+    fn calculate_backoff(rapid_count: u64) -> u64 {
         let base_backoff = MIN_PULL_INTERVAL_MS * 2; // Start with 2x minimum interval
+        // 100 * 1.5^10 already exceeds the five-second cap. Bounding the
+        // exponent also prevents a large counter wrapping to a negative i32
+        // exponent and turning sustained pressure into a zero-delay retry.
+        let exponent = i32::try_from(rapid_count.min(10)).unwrap_or(10);
         let exponential_backoff =
-            (base_backoff as f64 * PULL_BACKOFF_MULTIPLIER.powi(rapid_count as i32)) as u64;
+            (base_backoff as f64 * PULL_BACKOFF_MULTIPLIER.powi(exponent)) as u64;
         exponential_backoff.min(MAX_PULL_BACKOFF_MS)
     }
 
     fn is_rate_limiting_active(&self) -> bool {
-        self.rate_limiting_active.load(Ordering::Relaxed)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rate_limiting_active
     }
 }
 
 impl GlobalPullRateTracker {
     fn new() -> Self {
         Self {
-            recent_pulls: vec![0; 2000], // Track up to 2000 requests (2x the rate limit)
-            buffer_position: 0,
+            recent_pulls: VecDeque::with_capacity(GLOBAL_PULL_RATE_LIMIT as usize),
             estimated_memory_usage: 0,
         }
     }
@@ -214,15 +246,23 @@ impl GlobalPullRateTracker {
         now_ns: u64,
         estimated_batch_memory: u64,
     ) -> Result<(), Duration> {
-        let now_ms = now_ns / 1_000_000; // Convert to milliseconds
-        let one_second_ago = now_ms.saturating_sub(1000);
-
-        // Count recent pulls in the last second
-        let recent_count = self
+        // Keep the FIFO ordered even if an injected clock regresses. Production
+        // also samples its process clock while holding the global tracker lock.
+        let now_ns = self
             .recent_pulls
-            .iter()
-            .filter(|&&timestamp| timestamp > one_second_ago)
-            .count();
+            .back()
+            .map_or(now_ns, |&last| now_ns.max(last));
+        // Each timestamp is inserted and removed once. Unlike scanning a
+        // zero-filled ring, this counts requests at time zero and does not
+        // scan the entire quota for every normal pull.
+        while self
+            .recent_pulls
+            .front()
+            .is_some_and(|&at| now_ns.saturating_sub(at) >= 1_000_000_000)
+        {
+            let _ = self.recent_pulls.pop_front();
+        }
+        let recent_count = self.recent_pulls.len();
 
         // Check global rate limit
         if recent_count >= GLOBAL_PULL_RATE_LIMIT as usize {
@@ -234,7 +274,12 @@ impl GlobalPullRateTracker {
         }
 
         // Check memory pressure
-        let new_memory_usage = self.estimated_memory_usage + estimated_batch_memory;
+        let Some(new_memory_usage) = self
+            .estimated_memory_usage
+            .checked_add(estimated_batch_memory)
+        else {
+            return Err(Duration::from_millis(500));
+        };
         if new_memory_usage > MEMORY_PRESSURE_THRESHOLD_MB * 1_024 * 1_024 {
             warn!(
                 "JetStream memory pressure detected: {}MB estimated usage (threshold: {}MB)",
@@ -245,8 +290,7 @@ impl GlobalPullRateTracker {
         }
 
         // Update tracking
-        self.recent_pulls[self.buffer_position] = now_ms;
-        self.buffer_position = (self.buffer_position + 1) % self.recent_pulls.len();
+        self.recent_pulls.push_back(now_ns);
         self.estimated_memory_usage = new_memory_usage;
 
         Ok(())
@@ -329,7 +373,7 @@ fn validate_and_clamp_pull_batch_size(
 
     // Check if rate limiting is active - reduce batch size under pressure
     let clamped_batch = if consumer.pull_rate_limiter.is_rate_limiting_active() {
-        let reduced_batch = (requested_batch / 2).max(MIN_BATCH_SIZE_UNDER_PRESSURE);
+        let reduced_batch = clamp_pull_batch_for_pressure(requested_batch, true, 0);
         warn!(
             stream = %consumer.stream,
             consumer = %consumer.name,
@@ -340,15 +384,15 @@ fn validate_and_clamp_pull_batch_size(
         reduced_batch
     } else {
         // Check global memory pressure
-        let global_tracker = GLOBAL_PULL_RATE_TRACKER.lock().unwrap();
+        let global_tracker = GLOBAL_PULL_RATE_TRACKER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current_memory_mb = global_tracker.estimated_memory_usage / (1_024 * 1_024);
+        drop(global_tracker);
 
         if current_memory_mb > MEMORY_PRESSURE_THRESHOLD_MB / 2 {
-            // Under moderate memory pressure - reduce batch size
-            let pressure_factor =
-                (current_memory_mb as f64 / MEMORY_PRESSURE_THRESHOLD_MB as f64).min(1.0);
-            let reduced_batch = ((requested_batch as f64 * (1.0 - pressure_factor * 0.5)) as usize)
-                .max(MIN_BATCH_SIZE_UNDER_PRESSURE);
+            let reduced_batch =
+                clamp_pull_batch_for_pressure(requested_batch, false, current_memory_mb);
 
             if reduced_batch < requested_batch {
                 warn!(
@@ -367,6 +411,25 @@ fn validate_and_clamp_pull_batch_size(
     };
 
     Ok(clamped_batch)
+}
+
+/// Pressure may reduce demand, but it must never increase the caller's maximum.
+/// The minimum viable batch is only a floor for requests that already allow it.
+fn clamp_pull_batch_for_pressure(
+    requested_batch: usize,
+    rate_limited: bool,
+    current_memory_mb: u64,
+) -> usize {
+    let minimum = requested_batch.min(MIN_BATCH_SIZE_UNDER_PRESSURE);
+    if rate_limited {
+        (requested_batch / 2).max(minimum)
+    } else if current_memory_mb > MEMORY_PRESSURE_THRESHOLD_MB / 2 {
+        let pressure_factor =
+            (current_memory_mb as f64 / MEMORY_PRESSURE_THRESHOLD_MB as f64).min(1.0);
+        ((requested_batch as f64 * (1.0 - pressure_factor * 0.5)) as usize).max(minimum)
+    } else {
+        requested_batch
+    }
 }
 
 /// br-asupersync-dpdmsy: a single `JetStreamContext` publishes through
@@ -1737,7 +1800,7 @@ impl Consumer {
     // 2. Dynamic Batch Size Clamping:
     //    - Reduces batch sizes by up to 50% under rate limiting pressure
     //    - Monitors global memory usage and clamps batches under memory pressure
-    //    - Maintains minimum viable batch size (16 messages) for functionality
+    //    - Keeps the 16-message pressure floor within the caller's batch limit
     //
     // 3. Global Rate Limiting:
     //    - System-wide limit of 1000 pull requests/second across all consumers
@@ -1892,14 +1955,15 @@ impl Consumer {
         pull_timeout: Duration,
     ) -> Result<Vec<JsMessage>, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        // Invalid input must not spend a consumer's next admission interval.
+        validate_pull_batch_size(batch)?;
 
         // DoS Protection Step 1: Rate limiting check
-        let now_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-
-        if let Err(delay) = self.pull_rate_limiter.check_pull_request(now_ns) {
+        // Both quotas are shared across clients and runtimes, so they require
+        // one monotonic process clock. An unrelated caller's virtual clock
+        // must not expire another consumer's global window. Collection below
+        // retains the request's own timer/deadline semantics.
+        if let Err(delay) = self.pull_rate_limiter.check_pull_request_now() {
             return Err(JsError::InvalidConfig(format!(
                 "JetStream pull request rate limited - retry after {}ms",
                 delay.as_millis()
@@ -1912,7 +1976,10 @@ impl Consumer {
         // DoS Protection Step 3: Global rate limiting and memory pressure check
         let estimated_batch_memory = effective_batch as u64 * 2048; // Rough estimate: 2KB per message
         {
-            let mut global_tracker = GLOBAL_PULL_RATE_TRACKER.lock().unwrap();
+            let mut global_tracker = GLOBAL_PULL_RATE_TRACKER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now_ns = crate::time::raw_wall_now().as_nanos();
             if let Err(delay) =
                 global_tracker.check_global_pull_request(now_ns, estimated_batch_memory)
             {
