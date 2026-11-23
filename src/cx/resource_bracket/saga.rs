@@ -5,22 +5,29 @@
 //! BEFORE invoking its forward action. The action's returned value becomes the
 //! compensation's exclusive owner without an intervening cancellation checkpoint
 //! or await. Typed keys borrow these heterogeneous values during subsequent work.
+//! [`AsyncSagaScope::step_with_undo`] instead installs a caller-prepared undo
+//! token before invoking forward work. It covers uncertain effects, such as a
+//! remote write whose acknowledgement never arrives, using caller-defined
+//! idempotent compensation or reconciliation.
 //!
 //! Commit is decided only after the work task and its entire child region have
 //! drained, including finalizers. Any failed, cancelled, panicked or abandoned
 //! step makes rollback sticky, even if the body catches its error. A failed body,
 //! cancelled task in the work region, retained descendant panic, finalizer
 //! failure, or controller cancellation observed before the decision also requires
-//! rollback. Each successful step is then compensated once
-//! in reverse order; a compensation failure never skips the older entries.
+//! rollback. Each registered undo is then compensated once in reverse order;
+//! a compensation failure never skips the older entries. Prepared undo remains
+//! registered even when its forward action failed or never started.
 //! Ordinary errors/cancellation in explicitly nested regions are not folded into
 //! the runtime's parent close receipt; the body must propagate them as failure
 //! when they should abort the saga. Nested task panics ARE retained separately.
 //!
 //! This is an in-memory saga, not an atomic transaction or durable/cross-node
-//! obligation protocol. An action that never returns a successful undo value
-//! remains responsible for its own partial effects. Cleanup callbacks must drain
-//! any work they start. Cancellation masking does not reopen a Closing ancestor
+//! obligation protocol. With `step`, an action that never returns a successful
+//! undo value remains responsible for its own partial effects. Prepared undo
+//! must tolerate an absent, partial or completed effect and does not prove that
+//! a remote process stopped. Cleanup callbacks must drain any work they start.
+//! Cancellation masking does not reopen a Closing ancestor
 //! for task, region, or obligation admission: a remote undo can still be refused,
 //! and that error is retained. Runtime hard-abort/process exit and callbacks that
 //! do not return remain outside the completion guarantee.
@@ -32,16 +39,62 @@
 //! undo it; the decision and any later lifecycle cancellation are reported
 //! independently. The synchronous [`crate::remote::Saga`] is unchanged.
 
-use super::stack::{ResourceCleanupReport, ResourceKey, ResourceStack, ResourceStackError};
+use super::stack::{
+    ResourceCleanupReport, ResourceInsertError, ResourceKey, ResourceStack, ResourceStackError,
+};
 use super::{
     BracketConfig, BracketHandle, BracketPhase, BracketReport, BracketUseFuture, Cx, Outcome,
+    cancel_reason, evaluate,
 };
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::{PanicPayload, TaskId};
 use crate::sync::pl::Mutex;
+use crate::types::{PanicPayload, TaskId};
 use std::fmt;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+
+// Guard independently owned arguments before returning an unpolled step future.
+// Normal destructor panics still propagate (and evaluate records future
+// retirement panics), but no secondary destructor replaces an active unwind.
+struct PreparedOwner<T>(Option<T>);
+
+impl<T> PreparedOwner<T> {
+    fn take(&mut self) -> T {
+        self.0.take().expect("prepared saga owner is present")
+    }
+}
+
+impl<T> Drop for PreparedOwner<T> {
+    fn drop(&mut self) {
+        let Some(value) = self.0.take() else {
+            return;
+        };
+        let unwinding = std::thread::panicking();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(value))) {
+            if unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+impl<F: Future + ?Sized> Future for PreparedOwner<Pin<Box<F>>> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut()
+            .0
+            .as_mut()
+            .expect("prepared saga future is present")
+            .as_mut()
+            .poll(task)
+    }
+}
 
 /// Body future borrowing a controller-owned saga scope.
 pub type AsyncSagaFuture<'a, T, E> = BracketUseFuture<'a, T, E>;
@@ -61,7 +114,7 @@ pub enum AsyncSagaStepState {
 /// One admitted forward action, in invocation order.
 #[derive(Debug)]
 pub struct AsyncSagaStep {
-    /// Matches the undo key and compensation report index on successful return.
+    /// Matches the key and compensation report index whenever undo was registered.
     pub index: usize,
     /// Caller-supplied diagnostic name; not a remote idempotency key.
     pub description: String,
@@ -283,6 +336,127 @@ impl<C: Send + 'static> AsyncSagaScope<'_, C> {
             });
         }
         Ok(phase)
+    }
+
+    /// Install undo ownership before attempting a possibly uncertain effect.
+    ///
+    /// Use this when a timeout, cancellation, panic or lost remote acknowledgement
+    /// can hide whether the effect occurred. `undo` should identify the logical
+    /// attempt (for example, an application idempotency key). `compensate` must
+    /// safely reconcile or undo an absent, partial OR completed effect. It runs
+    /// on rollback even if cancellation prevented the forward factory from
+    /// starting. This does not add durable or cross-node exactly-once semantics.
+    ///
+    /// All registration storage and the undo/compensation owner are installed
+    /// before `forward` is invoked. Forward borrows the retained undo mutably;
+    /// updates survive failure, panic or abandonment of its wait. Resources
+    /// explicitly extracted from that value remain the caller's responsibility.
+    /// An admitted failed or abandoned step makes rollback sticky. Compensation starts only
+    /// after the existing saga controller has drained its entire work subtree,
+    /// newest registration first, and only whole-saga commit disarms it.
+    ///
+    /// `Err` returns the untouched undo value and compensation factory; forward
+    /// was not invoked. `Ok(phase)` retains the exact forward outcome and future
+    /// retirement panic. Success returns both an undo key and the forward value.
+    /// An unpolled wait admits nothing and performs no asynchronous cleanup;
+    /// its captured owners are retired independently during unwinding.
+    pub fn step_with_undo<R, T, E, A, F, FF>(
+        &mut self,
+        description: impl Into<String>,
+        undo: R,
+        forward: A,
+        compensate: F,
+    ) -> impl Future<
+        Output = Result<BracketPhase<(ResourceKey<R>, T), E>, ResourceInsertError<R, F>>,
+    >
+    where
+        R: Send + 'static,
+        A: for<'a> FnOnce(Cx, &'a mut R) -> BracketUseFuture<'a, T, E>,
+        F: FnOnce(Cx, R) -> FF + Send + 'static,
+        FF: Future<Output = Outcome<(), C>> + Send + 'static,
+    {
+        let mut description = PreparedOwner(Some(description));
+        let mut undo = PreparedOwner(Some(undo));
+        let mut forward = PreparedOwner(Some(forward));
+        let mut compensate = PreparedOwner(Some(compensate));
+        async move {
+            if self.saga.abort.is_some() {
+                // Retire unused callbacks before transferring unguarded owners
+                // into the refusal. A destructor panic must leave those owners
+                // protected while unwinding this method.
+                drop(description);
+                drop(forward);
+                return Err(ResourceInsertError {
+                    error: ResourceStackError::Closed,
+                    resource: undo.take(),
+                    release: compensate.take(),
+                });
+            }
+            let index = self.saga.steps.len();
+            let description = description.take().into();
+            let reserve = self
+                .saga
+                .steps
+                .try_reserve(1)
+                .and_then(|()| self.saga.disposals.try_reserve(index + 1));
+            let slot = match reserve {
+                Ok(()) => self.saga.stack.reserve(),
+                Err(_) => Err(ResourceStackError::Allocation),
+            };
+            let slot = match slot {
+                Ok(slot) => slot,
+                Err(error) => {
+                    self.saga.abort = Some(AsyncSagaAbort {
+                        step: index,
+                        reason: AsyncSagaAbortReason::Registration(error),
+                    });
+                    drop(forward);
+                    return Err(ResourceInsertError {
+                        error,
+                        resource: undo.take(),
+                        release: compensate.take(),
+                    });
+                }
+            };
+            let key = slot.insert(undo.take(), compensate.take());
+            self.saga.steps.push(AsyncSagaStep {
+                index,
+                description,
+                state: AsyncSagaStepState::Pending,
+            });
+            self.saga.abort = Some(AsyncSagaAbort {
+                step: index,
+                reason: AsyncSagaAbortReason::IncompleteStep,
+            });
+            let phase = if self.cx.checkpoint().is_err() {
+                BracketPhase {
+                    outcome: Outcome::Cancelled(cancel_reason(&self.cx)),
+                    retirement_panic: None,
+                }
+            } else {
+                let forward_cx = self.cx.clone();
+                let resource = self.saga.stack.get_mut(&key).expect("registered undo");
+                evaluate(
+                    move || PreparedOwner(Some(forward.take()(forward_cx, resource))),
+                    None,
+                )
+                .await
+            };
+            if phase.is_success() {
+                self.saga.steps[index].state = AsyncSagaStepState::Succeeded;
+                self.saga.abort = None;
+            } else {
+                self.saga.steps[index].state = AsyncSagaStepState::Failed;
+                self.saga.abort = Some(AsyncSagaAbort {
+                    step: index,
+                    reason: AsyncSagaAbortReason::FailedStep,
+                });
+            }
+            Ok(BracketPhase {
+                outcome: phase.outcome.map(|value| (key, value)),
+                retirement_panic: phase.retirement_panic,
+            })
+        }
     }
 
     /// Borrow an earlier undo value through its unforgeable, saga-specific key.

@@ -13,6 +13,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+mod prepared;
+
 fn run_case<F, Fut>(factory: F)
 where
     F: FnOnce(Cx) -> Fut + Send + 'static,
@@ -690,7 +692,7 @@ mod native {
     }
 
     // Bounds a failed test's wait, not the saga's cleanup contract.
-    fn bounded(test: impl FnOnce() + Send + 'static) {
+    pub(super) fn bounded(test: impl FnOnce() + Send + 'static) {
         let (send, receive) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
