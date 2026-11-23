@@ -4416,8 +4416,10 @@ fn qpack_resolve_field<'a>(
     }
 }
 
-/// Count resolved field occurrences without cloning dynamic table entries.
-#[cfg(feature = "http3")]
+/// Count resolved field occurrences without allocating owned header fields.
+///
+/// Resolve the whole plan before checking a size limit so an invalid reference
+/// after an oversized prefix still reports its QPACK decoding error.
 pub(crate) fn qpack_plan_field_section_size(
     plan: &[QpackFieldPlan],
     qpack_context: Option<&QpackContext>,
@@ -4434,25 +4436,6 @@ pub(crate) fn qpack_plan_field_section_size(
                 "decoded field section exceeds addressable range",
             ))?;
         Ok(size)
-    })
-}
-
-fn decoded_field_section_size(fields: &[(String, String)]) -> Result<u64, H3NativeError> {
-    fields.iter().try_fold(0u64, |acc, (name, value)| {
-        let field_size = name
-            .len()
-            .checked_add(value.len())
-            .and_then(|size| size.checked_add(32))
-            .ok_or(H3NativeError::QpackPolicy(
-                "decoded field section exceeds addressable range",
-            ))?;
-        let field_size = u64::try_from(field_size).map_err(|_| {
-            H3NativeError::QpackPolicy("decoded field section exceeds addressable range")
-        })?;
-        acc.checked_add(field_size)
-            .ok_or(H3NativeError::QpackPolicy(
-                "decoded field section exceeds addressable range",
-            ))
     })
 }
 
@@ -4475,7 +4458,8 @@ pub fn qpack_decode_request_field_section(
 ///
 /// This applies QPACK decode rules for the configured mode and then enforces
 /// HTTP/3 pseudo-header semantics. If `max_field_section_size` is Some, the total
-/// size of all decoded headers (names + values) is checked against the limit.
+/// size of all decoded headers (names + values + 32 bytes per field) is checked
+/// against the limit before expanding table references into owned fields.
 pub fn qpack_decode_request_field_section_with_limit(
     input: &[u8],
     mode: H3QpackMode,
@@ -4508,15 +4492,15 @@ pub fn qpack_decode_request_field_section_with_settings(
     enable_connect_protocol: bool,
 ) -> Result<H3RequestHead, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
-    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
-    if let Some(max_size) = max_field_section_size {
-        if decoded_field_section_size(&fields)? > max_size {
-            return Err(H3NativeError::QpackPolicy(
-                "decoded field section exceeds maximum size limit",
-            ));
-        }
+    if let Some(max_size) = max_field_section_size
+        && qpack_plan_field_section_size(&plan, qpack_context)? > max_size
+    {
+        return Err(H3NativeError::QpackPolicy(
+            "decoded field section exceeds maximum size limit",
+        ));
     }
+    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
     if enable_connect_protocol {
         header_fields_to_request_head_with_settings(&fields, true)
@@ -4576,7 +4560,8 @@ pub(crate) fn validate_trailer_fields(fields: &[(String, String)]) -> Result<(),
 ///
 /// This applies QPACK decode rules for the configured mode and then enforces
 /// HTTP/3 pseudo-header semantics. If `max_field_section_size` is Some, the total
-/// size of all decoded headers (names + values) is checked against the limit.
+/// size of all decoded headers (names + values + 32 bytes per field) is checked
+/// against the limit before expanding table references into owned fields.
 pub fn qpack_decode_response_field_section_with_limit(
     input: &[u8],
     mode: H3QpackMode,
@@ -4584,15 +4569,15 @@ pub fn qpack_decode_response_field_section_with_limit(
     max_field_section_size: Option<u64>,
 ) -> Result<H3ResponseHead, H3NativeError> {
     let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
-    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
-    if let Some(max_size) = max_field_section_size {
-        if decoded_field_section_size(&fields)? > max_size {
-            return Err(H3NativeError::QpackPolicy(
-                "decoded field section exceeds maximum size limit",
-            ));
-        }
+    if let Some(max_size) = max_field_section_size
+        && qpack_plan_field_section_size(&plan, qpack_context)? > max_size
+    {
+        return Err(H3NativeError::QpackPolicy(
+            "decoded field section exceeds maximum size limit",
+        ));
     }
+    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
 
     header_fields_to_response_head(&fields)
 }

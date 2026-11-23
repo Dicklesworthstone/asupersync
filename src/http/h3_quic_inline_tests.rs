@@ -1627,6 +1627,75 @@ fn client_field_limit_applies_separately_to_informational_final_and_trailer_sect
 }
 
 #[test]
+fn field_limit_rejects_indexed_expansion_and_preserves_the_next_request() {
+    use crate::http::h3_native::{
+        QpackFieldPlan, qpack_encode_field_section, qpack_static_plan_for_request,
+    };
+
+    let head = field_limit_request();
+    let base_plan = qpack_static_plan_for_request(&head);
+    let limit = qpack_plan_field_section_size(&base_plan, None).unwrap();
+    let mut oversized_plan = base_plan.clone();
+    for _ in 0..512 {
+        // Static accept-encoding fits in one encoded byte, but every
+        // occurrence counts its complete name, value and 32-byte overhead.
+        oversized_plan.push(QpackFieldPlan::StaticIndex(31));
+    }
+    let section = qpack_encode_field_section(&oversized_plan).unwrap();
+    let expanded_size = qpack_plan_field_section_size(&oversized_plan, None).unwrap();
+    assert!(u64::try_from(section.len()).unwrap() < expanded_size / 16);
+
+    for streaming in [false, true] {
+        let cx = Cx::for_testing();
+        let (mut session, mut connection) =
+            field_limit_fixture(&cx, true, streaming, Some(limit));
+        let rejected = StreamId(0);
+        connection
+            .inner_mut()
+            .accept_remote_stream(&cx, rejected)
+            .unwrap();
+        inject_field_frame(&cx, &mut connection, rejected, 0, section.clone(), false);
+        assert_eq!(
+            next_field_limit_event(&cx, &mut session, &mut connection),
+            NativeH3Event::StreamReset {
+                stream_id: rejected,
+                error_code: H3_EXCESSIVE_LOAD,
+                final_size: 0,
+            }
+        );
+        assert!(!session.incoming.contains_key(&rejected));
+        assert!(connection.can_send_app_data());
+
+        let survivor = StreamId(4);
+        connection
+            .inner_mut()
+            .accept_remote_stream(&cx, survivor)
+            .unwrap();
+        inject_field_frame(
+            &cx,
+            &mut connection,
+            survivor,
+            0,
+            qpack_encode_field_section(&base_plan).unwrap(),
+            true,
+        );
+        assert_eq!(
+            next_field_limit_event(&cx, &mut session, &mut connection),
+            NativeH3Event::RequestHeaders {
+                stream_id: survivor,
+                head: head.clone(),
+            }
+        );
+        assert_eq!(
+            next_field_limit_event(&cx, &mut session, &mut connection),
+            NativeH3Event::Finished {
+                stream_id: survivor,
+            }
+        );
+    }
+}
+
+#[test]
 fn field_limit_does_not_turn_invalid_qpack_into_an_application_refusal() {
     let cx = Cx::for_testing();
     let (mut session, mut connection) = field_limit_fixture(&cx, true, false, Some(0));

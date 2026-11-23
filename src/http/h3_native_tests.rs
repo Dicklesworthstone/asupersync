@@ -2624,7 +2624,6 @@ mod tests {
             qpack_plan_to_header_fields(&resumed, Some(&context)).is_err(),
             "an evicted original reference must fail instead of yielding new data"
         );
-        #[cfg(feature = "http3")]
         assert!(qpack_plan_field_section_size(&resumed, Some(&context)).is_err());
     }
 
@@ -8991,6 +8990,183 @@ mod tests {
             err,
             H3NativeError::QpackPolicy("decoded field section exceeds maximum size limit")
         );
+    }
+
+    #[test]
+    fn qpack_bounded_request_counts_every_static_reference_at_exact_limit() {
+        let repeated = QPACK_MAX_DECODED_HEADERS - 3;
+        let mut plan = vec![
+            QpackFieldPlan::StaticIndex(17), // :method GET: 7 + 3 + 32
+            QpackFieldPlan::StaticIndex(23), // :scheme https: 7 + 5 + 32
+            QpackFieldPlan::StaticIndex(1),  // :path /: 5 + 1 + 32
+        ];
+        plan.extend((0..repeated).map(|_| QpackFieldPlan::StaticIndex(58)));
+        let wire = qpack_encode_field_section(&plan).expect("encode indexed request");
+        // Index 58 occupies one wire byte but contributes its full name,
+        // value, and per-occurrence overhead to the decoded section size.
+        let exact_limit = 42 + 44 + 38 + (25 + 44 + 32) * repeated as u64;
+        assert_eq!(wire.len(), QPACK_MAX_DECODED_HEADERS + 2);
+        for limit in [0, wire.len() as u64, exact_limit - 1] {
+            assert_eq!(
+                qpack_decode_request_field_section_with_limit(
+                    &wire,
+                    H3QpackMode::StaticOnly,
+                    None,
+                    Some(limit),
+                ),
+                Err(H3NativeError::QpackPolicy(
+                    "decoded field section exceeds maximum size limit"
+                )),
+                "indexed request must not fit decoded limit {limit}",
+            );
+        }
+
+        let head = qpack_decode_request_field_section_with_limit(
+            &wire,
+            H3QpackMode::StaticOnly,
+            None,
+            Some(exact_limit),
+        )
+        .expect("the exact decoded limit must be inclusive");
+        assert_eq!(head.pseudo.method.as_deref(), Some("GET"));
+        assert_eq!(head.headers.len(), repeated);
+        assert!(head.headers.iter().all(|(name, value)| {
+            name == "strict-transport-security"
+                && value == "max-age=31536000; includesubdomains; preload"
+        }));
+    }
+
+    #[test]
+    fn qpack_bounded_response_counts_repeated_dynamic_fields_and_name_literals() {
+        let mut context = QpackContext::new(4096);
+        let value = "a".repeat(1000);
+        let index = context
+            .insert_dynamic_entry("x-dynamic".to_string(), value.clone())
+            .expect("insert a large shared dynamic entry");
+        let repeated = QPACK_MAX_DECODED_HEADERS - 2;
+        let mut plan = vec![QpackFieldPlan::StaticIndex(25)]; // :status 200
+        plan.extend((0..repeated).map(|_| QpackFieldPlan::DynamicIndex(index)));
+        plan.push(QpackFieldPlan::DynamicNameLiteral {
+            name_index: index,
+            value: "tail".to_string(),
+        });
+        let wire = qpack_encode_field_section_with_context(&plan, Some(&context))
+            .expect("encode indexed response");
+        // The table value is counted for every full reference; the name-only
+        // reference contributes its own literal value, not the table value.
+        let exact_limit = 42 + (9 + 1000 + 32) * repeated as u64 + (9 + 4 + 32);
+        for limit in [0, wire.len() as u64, exact_limit - 1] {
+            assert_eq!(
+                qpack_decode_response_field_section_with_limit(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    Some(&context),
+                    Some(limit),
+                ),
+                Err(H3NativeError::QpackPolicy(
+                    "decoded field section exceeds maximum size limit"
+                )),
+                "indexed response must not fit decoded limit {limit}",
+            );
+        }
+
+        let head = qpack_decode_response_field_section_with_limit(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+            Some(exact_limit),
+        )
+        .expect("the exact decoded limit must be inclusive");
+        assert_eq!(head.status, 200);
+        assert_eq!(head.headers.len(), repeated + 1);
+        assert!(
+            head.headers[..repeated]
+                .iter()
+                .all(|(name, field_value)| name == "x-dynamic" && field_value == &value)
+        );
+        assert_eq!(
+            head.headers.last(),
+            Some(&("x-dynamic".to_string(), "tail".to_string()))
+        );
+    }
+
+    #[test]
+    fn qpack_bounded_decoders_preserve_invalid_static_reference_errors() {
+        let mut wire = vec![0x00, 0x00];
+        wire.extend(std::iter::repeat_n(0xc0 | 58, 512));
+        // Unknown static index 99 follows an already oversized valid prefix.
+        wire.extend_from_slice(&[0xff, 0x24]);
+        let expected = Err(H3NativeError::InvalidFrame("unknown static qpack index"));
+        assert_eq!(
+            qpack_decode_request_field_section_with_limit(
+                &wire,
+                H3QpackMode::StaticOnly,
+                None,
+                Some(0),
+            )
+            .map(|_| ()),
+            expected,
+        );
+        assert_eq!(
+            qpack_decode_response_field_section_with_limit(
+                &wire,
+                H3QpackMode::StaticOnly,
+                None,
+                Some(0),
+            )
+            .map(|_| ()),
+            expected,
+        );
+    }
+
+    #[test]
+    fn qpack_bounded_decoders_preserve_evicted_dynamic_reference_errors() {
+        let mut context = QpackContext::new(64);
+        context
+            .insert_dynamic_entry("x-old".to_string(), "a".to_string())
+            .expect("insert old entry");
+        context
+            .insert_dynamic_entry("x-current".to_string(), "b".to_string())
+            .expect("evict old entry");
+        assert!(qpack_dynamic_entry(context.dynamic_table(), 0).is_none());
+
+        for (suffix, error) in [
+            (
+                vec![0x81],
+                H3NativeError::InvalidFrame("unknown dynamic qpack index"),
+            ),
+            (
+                vec![0x41, 0x00],
+                H3NativeError::InvalidFrame("unknown dynamic qpack name index"),
+            ),
+        ] {
+            // RIC=2, Base=2. A live absolute-index-1 reference establishes the
+            // required count; the suffix references the evicted absolute 0.
+            let mut wire = vec![0x03, 0x00];
+            wire.extend(std::iter::repeat_n(0xc0 | 58, 512));
+            wire.push(0x80);
+            wire.extend_from_slice(&suffix);
+            assert_eq!(
+                qpack_decode_request_field_section_with_limit(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    Some(&context),
+                    Some(0),
+                )
+                .map(|_| ()),
+                Err(error.clone()),
+            );
+            assert_eq!(
+                qpack_decode_response_field_section_with_limit(
+                    &wire,
+                    H3QpackMode::DynamicTableAllowed,
+                    Some(&context),
+                    Some(0),
+                )
+                .map(|_| ()),
+                Err(error),
+            );
+        }
     }
 
     /// Appends a QPACK string literal with a 7-bit length prefix (a field

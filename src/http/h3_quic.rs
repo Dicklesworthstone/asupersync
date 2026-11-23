@@ -2822,15 +2822,18 @@ impl NativeH3Session {
                 H3QpackMode::StaticOnly,
                 None,
             )?;
+            // Validate the complete QPACK plan before applying HTTP policy,
+            // but do not expand a refused section into owned header strings.
+            // A compact indexed section can otherwise allocate far beyond
+            // the receive limit before we reject its stream.
+            if let Some(limit) = self.max_field_section_size
+                && qpack_plan_field_section_size(&plan, None)? > limit
+            {
+                self.reject_request_stream(stream_id, H3_EXCESSIVE_LOAD)?;
+                return Ok(None);
+            }
             qpack_plan_to_header_fields(&plan, None)?
         };
-        if self
-            .max_field_section_size
-            .is_some_and(|limit| !received_field_section_fits(&fields, limit))
-        {
-            self.reject_request_stream(stream_id, H3_EXCESSIVE_LOAD)?;
-            return Ok(None);
-        }
         Ok(Some(fields))
     }
 
@@ -3166,6 +3169,7 @@ impl NativeH3Session {
 /// RFC 9114 section 4.2.2 counts occurrences, not unique header names.
 /// Subtract from the remaining budget rather than summing potentially
 /// overflowing lengths. This does not allocate another header representation.
+#[cfg(test)]
 fn received_field_section_fits(fields: &[(String, String)], limit: u64) -> bool {
     field_section_lengths_fit(
         fields.iter().map(|(name, value)| (name.len(), value.len())),
