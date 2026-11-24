@@ -2532,6 +2532,15 @@ enum SqliteConnectionOpPhase {
     Completed,
 }
 
+/// Ordinary operations require a live engine and retain the transaction
+/// handle's generation check. Final close may also finish an already closed
+/// connection when another caller won the close race.
+#[derive(Clone, Copy)]
+enum SqliteConnectionOpKind {
+    Statement { expected_generation: Option<u64> },
+    Close,
+}
+
 enum SqliteConnectionOpCompletion<R, E> {
     Finished(Result<R, E>),
     Cancelled,
@@ -2858,6 +2867,40 @@ impl SqliteConnection {
         E: SqliteConnectionOpError,
         F: FnOnce(&mut rusqlite::Connection) -> Result<R, E> + Send + 'static,
     {
+        self.run_connection_state_op(
+            cx,
+            op_name,
+            operation,
+            SqliteConnectionOpKind::Statement {
+                expected_generation,
+            },
+            move |inner| {
+                let conn = inner
+                    .get_mut()
+                    .map_err(|error| E::from_legacy(operation, error))?;
+                f(conn)
+            },
+        )
+        .await
+    }
+
+    /// Share worker admission, cancellation, and result publication with
+    /// operations that must remove the engine from its connection state.
+    /// The worker owns `inner` through hook retirement and phase completion,
+    /// including when final close destroys the engine itself.
+    async fn run_connection_state_op<R, E, F>(
+        &self,
+        cx: &Cx,
+        op_name: &'static str,
+        operation: SqliteOperation,
+        kind: SqliteConnectionOpKind,
+        f: F,
+    ) -> Outcome<R, E>
+    where
+        R: Send + 'static,
+        E: SqliteConnectionOpError,
+        F: FnOnce(&mut SqliteConnectionInner) -> Result<R, E> + Send + 'static,
+    {
         /// SQLite VM instructions between cancellation/deadline checks in the
         /// progress handler — small enough for prompt aborts, large enough
         /// to keep the per-op overhead negligible.
@@ -2936,6 +2979,9 @@ impl SqliteConnection {
                 // caused is relabelled as a timeout below.
                 let deadline_fired = Arc::new(AtomicBool::new(false));
                 let result = (|| {
+                    if let SqliteConnectionOpKind::Statement {
+                        expected_generation,
+                    } = kind
                     {
                         let conn = worker_guard
                             .guard
@@ -2956,40 +3002,41 @@ impl SqliteConnection {
                     let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
                     let fired = Arc::clone(&deadline_fired);
                     let callback_control = Arc::clone(&worker_control);
-                    worker_guard.progress_armed = true;
-                    worker_control
-                        .progress_active
-                        .store(true, Ordering::Release);
-                    let conn = worker_guard
-                        .guard
-                        .get_mut()
-                        .map_err(|error| E::from_legacy(operation, error))?;
-                    conn.progress_handler(
-                        TIMEOUT_PROGRESS_OPS,
-                        Some(move || {
-                            if !callback_control.progress_active.load(Ordering::Acquire) {
-                                return false;
-                            }
-                            if callback_control.cancel_requested.load(Ordering::Acquire) {
-                                return true;
-                            }
-                            if deadline
-                                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-                            {
-                                fired.store(true, Ordering::Release);
-                                return true;
-                            }
-                            false
-                        }),
-                    )
-                    .map_err(|e| {
-                        E::from_legacy(
-                            operation,
-                            SqliteError::Sqlite(format!(
-                                "failed to arm statement progress handler: {e}"
-                            )),
+                    let interruptible = if let Some(conn) = worker_guard.guard.conn.as_mut() {
+                        worker_guard.progress_armed = true;
+                        worker_control
+                            .progress_active
+                            .store(true, Ordering::Release);
+                        conn.progress_handler(
+                            TIMEOUT_PROGRESS_OPS,
+                            Some(move || {
+                                if !callback_control.progress_active.load(Ordering::Acquire) {
+                                    return false;
+                                }
+                                if callback_control.cancel_requested.load(Ordering::Acquire) {
+                                    return true;
+                                }
+                                if deadline
+                                    .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                                {
+                                    fired.store(true, Ordering::Release);
+                                    return true;
+                                }
+                                false
+                            }),
                         )
-                    })?;
+                        .map_err(|e| {
+                            E::from_legacy(
+                                operation,
+                                SqliteError::Sqlite(format!(
+                                    "failed to arm statement progress handler: {e}"
+                                )),
+                            )
+                        })?;
+                        conn.is_autocommit()
+                    } else {
+                        false
+                    };
                     {
                         let mut phase = worker_phase.lock();
                         match *phase {
@@ -2998,7 +3045,7 @@ impl SqliteConnection {
                                 // drop cannot observe an unclassified operation.
                                 worker_control
                                     .interruptible
-                                    .store(conn.is_autocommit(), Ordering::Release);
+                                    .store(interruptible, Ordering::Release);
                                 *phase = SqliteConnectionOpPhase::Running;
                             }
                             SqliteConnectionOpPhase::CancelRequested => return Ok(None),
@@ -3008,7 +3055,7 @@ impl SqliteConnection {
                             }
                         }
                     }
-                    f(conn).map(Some)
+                    f(&mut worker_guard.guard).map(Some)
                 })();
                 // Handler removal, phase completion, and any racing interrupt
                 // all retire before releasing the connection to another job.
@@ -4650,11 +4697,10 @@ impl SqliteConnection {
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         }
 
-        // Close the connection (skip WAL checkpoint since already done)
-        match self.close_without_checkpoint() {
-            Ok(()) => Outcome::Ok(()),
-            Err(e) => Outcome::Err(e),
-        }
+        // Final mutex acquisition, rollback, cache flush, and engine drop
+        // can also block. Keep them on the connection's worker pool even if
+        // another operation acquired the connection after the checkpoint.
+        self.close_without_checkpoint(cx).await
     }
 
     /// Closes the connection asynchronously with structured cleanup
@@ -4865,19 +4911,31 @@ impl SqliteConnection {
         }
     }
 
-    /// Close connection without performing WAL checkpoint (for use after async checkpoint)
-    fn close_without_checkpoint(&self) -> Result<(), SqliteError> {
-        let mut guard = self.inner.lock();
-        if let Some(conn) = guard.conn.as_ref() {
-            let _ = rollback_orphaned_transaction_mutex_guarded::<SqliteError>(
-                conn,
-                self.transaction_state.as_ref(),
-            );
-            conn.flush_prepared_statement_cache();
-        }
-        *self.transaction_state.lock() = TransactionState::Autocommit;
-        guard.close();
-        Ok(())
+    /// Close after an asynchronous checkpoint without blocking the polling
+    /// runtime worker (br-asupersync-pj1q40). Queued cancellation uses the same
+    /// admission guard as statements, so an abandoned close cannot run later
+    /// against a connection its caller has resumed using.
+    async fn close_without_checkpoint(&self, cx: &Cx) -> Outcome<(), SqliteError> {
+        let transaction_state = Arc::clone(&self.transaction_state);
+        self.run_connection_state_op(
+            cx,
+            "sqlite close",
+            SqliteOperation::Close,
+            SqliteConnectionOpKind::Close,
+            move |inner| {
+                if let Some(conn) = inner.conn.as_ref() {
+                    let _ = rollback_orphaned_transaction_mutex_guarded::<SqliteError>(
+                        conn,
+                        transaction_state.as_ref(),
+                    );
+                    conn.flush_prepared_statement_cache();
+                }
+                *transaction_state.lock() = TransactionState::Autocommit;
+                inner.close();
+                Ok(())
+            },
+        )
+        .await
     }
 }
 

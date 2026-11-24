@@ -5,6 +5,10 @@
 //! A finite query makes the old lost interrupt fail on its actual result rather
 //! than relying on a watchdog to manufacture an interruption. Each scenario
 //! retires its dedicated worker pool and the native runtime's root resources.
+//!
+//! asupersync-pj1q40: final async-close cleanup must also use the blocking
+//! pool. Its regressions witness the real connection mutex and require the
+//! closing future to yield before that mutex's owner can be released.
 
 use super::*;
 use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
@@ -180,6 +184,278 @@ fn poll_pending<F: Future>(future: Pin<&mut F>) {
         future.poll(&mut context).is_pending(),
         "operation must be pending at its worker gate"
     );
+}
+
+/// A host deadline, independent of the executor under test, bounds the close
+/// tail regressions. Teardown always precedes timeout or task-panic propagation.
+fn native_close<F, Fut>(workers: usize, scenario: F)
+where
+    F: FnOnce(Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    struct CompletionSignal(std_mpsc::Sender<()>);
+
+    impl Drop for CompletionSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    let runtime = RuntimeBuilder::multi_thread()
+        .worker_threads(workers)
+        .build()
+        .expect("native close runtime");
+    let request_cx = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+    let timeout_cx = request_cx.clone();
+    let (completed_tx, completed_rx) = std_mpsc::channel();
+    let completion = CompletionSignal(completed_tx);
+    let task = runtime.handle().spawn(async move {
+        let _completion = completion;
+        assert!(Cx::current().is_some(), "close must run on a native worker");
+        scenario(request_cx).await;
+    });
+    let completed = completed_rx.recv_timeout(WAIT_LIMIT);
+    if completed.is_err() {
+        timeout_cx.cancel_with_reason(CancelReason::user("SQLite close test deadline"));
+    }
+    drop(timeout_cx);
+    let drain = runtime.shutdown_drained(WAIT_LIMIT);
+    let stopped = runtime.shutdown_timeout(WAIT_LIMIT);
+    let mut task = std::pin::pin!(task);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        task.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    }));
+    assert!(
+        completed.is_ok(),
+        "{workers} workers: close timed out: {completed:?}; drain: {drain:?}"
+    );
+    assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
+    assert_eq!(drain.live_tasks, 0, "{drain:?}");
+    assert_eq!(drain.live_regions, 0, "{drain:?}");
+    assert_eq!(drain.pending_spawns, 0, "{drain:?}");
+    assert_eq!(drain.pending_obligations, 0, "{drain:?}");
+    assert_eq!(drain.queued_finalizers, 0, "{drain:?}");
+    assert!(!drain.has_pending_obligation_posts, "{drain:?}");
+    assert!(stopped, "native close workers must retire");
+    match result {
+        Ok(std::task::Poll::Ready(())) => {}
+        Ok(std::task::Poll::Pending) => panic!("close task must be terminal after teardown"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Occupy the fixture's sole blocking worker, optionally while holding the
+/// actual connection mutex. The release guard also opens during unwinding.
+struct CloseGate {
+    release: Release,
+    handle: crate::runtime::blocking_pool::BlockingTaskHandle,
+    result: std_mpsc::Receiver<Result<(), SqliteError>>,
+}
+
+impl CloseGate {
+    fn new(fixture: &Fixture, hold_connection: bool) -> Self {
+        let (worker_gate, entered, release) = gate();
+        let inner = hold_connection.then(|| Arc::clone(&fixture.connection.inner));
+        let (completed, result) = std_mpsc::channel();
+        let handle = fixture.pool.handle().spawn(move || {
+            let _connection = inner.as_ref().map(|inner| inner.lock());
+            let outcome = worker_gate.wait();
+            let _ = completed.send(outcome);
+        });
+        entered
+            .recv_timeout(WAIT_LIMIT)
+            .expect("blocking worker must own the close gate");
+        Self {
+            release,
+            handle,
+            result,
+        }
+    }
+
+    fn open(self) {
+        self.release.open();
+        assert!(
+            self.handle.wait_timeout(WAIT_LIMIT),
+            "released blocking worker must finish"
+        );
+        self.result
+            .recv_timeout(WAIT_LIMIT)
+            .expect("blocking worker must publish its gate result")
+            .expect("gate release must precede its independent deadline");
+    }
+}
+
+/// A successful checkpoint has two independently gated jobs: RESTART and
+/// verification. Leave the verification result ready without polling close
+/// again, so the next poll reaches precisely the final cleanup boundary.
+fn finish_close_checkpoints<F: Future>(fixture: &Fixture, mut closing: Pin<&mut F>) {
+    for _ in 0..2 {
+        let gate = CloseGate::new(fixture, false);
+        poll_pending(closing.as_mut());
+        assert_eq!(
+            fixture.pool.pending_count(),
+            1,
+            "each checkpoint phase must be queued behind its worker gate"
+        );
+        gate.open();
+        fixture.fence();
+    }
+}
+
+async fn public_close(
+    connection: &SqliteConnection,
+    cx: &Cx,
+    diagnosed: bool,
+) -> Outcome<(), SqliteError> {
+    if diagnosed {
+        connection
+            .close_async_diagnosed(cx)
+            .await
+            .map_err(|error| SqliteError::Sqlite(error.to_string()))
+    } else {
+        connection.close_async(cx).await
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CloseDisposition {
+    Complete,
+    DropQueued,
+    CancelQueued,
+    CancelAfterCompletion,
+    ConcurrentClose,
+}
+
+async fn run_close_case(cx: Cx, diagnosed: bool, disposition: CloseDisposition) {
+    let active_cx = Cx::current().expect("native close worker context");
+    let fixture = Fixture::new();
+    let mut closing = Box::pin(public_close(&fixture.connection, &cx, diagnosed));
+    finish_close_checkpoints(&fixture, closing.as_mut());
+
+    // Both callers finish their checkpoints before either final close runs.
+    // The second tail must tolerate the first caller removing the engine.
+    let mut contender = if matches!(disposition, CloseDisposition::ConcurrentClose) {
+        let mut contender = Box::pin(public_close(&fixture.connection, &cx, diagnosed));
+        finish_close_checkpoints(&fixture, contender.as_mut());
+        Some(contender)
+    } else {
+        None
+    };
+
+    let gate = CloseGate::new(&fixture, true);
+    // This is an actual mutex ownership witness, not a manufactured yield.
+    // A synchronous final-close tail blocks this poll until the gate deadline.
+    poll_pending(closing.as_mut());
+    assert_eq!(
+        fixture.pool.pending_count(),
+        1,
+        "final close must be queued on the blocking pool"
+    );
+    if let Some(contender) = contender.as_mut() {
+        poll_pending(contender.as_mut());
+        assert_eq!(fixture.pool.pending_count(), 2);
+    }
+
+    match disposition {
+        CloseDisposition::DropQueued => {
+            drop(closing);
+            gate.open();
+            fixture.fence();
+        }
+        CloseDisposition::CancelQueued => {
+            let reason = CancelReason::user("cancel queued final close");
+            cx.cancel_with_reason(reason.clone());
+            let first = closing
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
+            gate.open();
+            let outcome = match first {
+                std::task::Poll::Ready(outcome) => {
+                    drop(closing);
+                    outcome
+                }
+                std::task::Poll::Pending => closing.await,
+            };
+            assert!(
+                matches!(outcome, Outcome::Cancelled(observed) if observed == reason),
+                "queued close must preserve the caller's cancellation reason"
+            );
+            fixture.fence();
+        }
+        CloseDisposition::Complete
+        | CloseDisposition::CancelAfterCompletion
+        | CloseDisposition::ConcurrentClose => {
+            gate.open();
+            if matches!(disposition, CloseDisposition::CancelAfterCompletion) {
+                fixture.fence();
+                assert!(!fixture.connection.is_open(), "worker already closed the engine");
+                cx.cancel_with_reason(CancelReason::user("cancel after final close completed"));
+            }
+            let outcome = closing.await;
+            assert!(
+                matches!(outcome, Outcome::Ok(())),
+                "{disposition:?}, diagnosed={diagnosed}: close must succeed: {outcome:?}"
+            );
+            if let Some(contender) = contender.take() {
+                let outcome = contender.await;
+                assert!(
+                    matches!(outcome, Outcome::Ok(())),
+                    "the competing final close must remain idempotent: {outcome:?}"
+                );
+            }
+            fixture.fence();
+        }
+    }
+
+    if matches!(
+        disposition,
+        CloseDisposition::DropQueued | CloseDisposition::CancelQueued
+    ) {
+        assert!(fixture.connection.is_open(), "queued abandonment cannot close later");
+        fixture.assert_handler_retired();
+        fixture.finish(&active_cx).await;
+    } else {
+        assert!(!fixture.connection.is_open(), "successful close removes the engine");
+        assert!(matches!(
+            fixture.connection.query(&active_cx, "SELECT 1 AS one", &[]).await,
+            Outcome::Err(SqliteError::ConnectionClosed)
+        ));
+        fixture.fence();
+        assert!(fixture.pool.shutdown_and_wait(WAIT_LIMIT));
+        assert_eq!(fixture.pool.pending_count(), 0);
+        assert_eq!(fixture.pool.busy_threads(), 0);
+        assert_eq!(fixture.pool.active_threads(), 0);
+    }
+}
+
+fn close_matrix(dispositions: &[CloseDisposition]) {
+    for workers in [1, 2] {
+        for diagnosed in [false, true] {
+            for &disposition in dispositions {
+                native_close(workers, move |cx| run_close_case(cx, diagnosed, disposition));
+            }
+        }
+    }
+}
+
+#[test]
+fn sqlite_async_close_final_cleanup_runs_on_the_blocking_pool() {
+    close_matrix(&[CloseDisposition::Complete]);
+}
+
+#[test]
+fn sqlite_async_close_queued_abandonment_preserves_connection_reuse() {
+    close_matrix(&[CloseDisposition::DropQueued, CloseDisposition::CancelQueued]);
+}
+
+#[test]
+fn sqlite_async_close_completed_result_wins_late_cancellation() {
+    close_matrix(&[CloseDisposition::CancelAfterCompletion]);
+}
+
+#[test]
+fn sqlite_async_close_concurrent_finalizers_are_idempotent() {
+    close_matrix(&[CloseDisposition::ConcurrentClose]);
 }
 
 #[derive(Debug)]
