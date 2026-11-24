@@ -531,6 +531,176 @@ fn poll_with_time_elapsed_wins_late_poll_before_later_ready_inner() {
 }
 
 #[test]
+fn manual_clock_timeout_rebases_wakes_and_ignores_other_clock_epochs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // Exercise both epoch directions and the same-clock case. Even when the
+    // epochs agree initially, a timer wake is not a later manual-time sample.
+    for (driver_secs, manual_secs) in [(100, 0), (0, 100), (0, 0)] {
+        for custom_getter in [false, true] {
+            let clock = Arc::new(VirtualClock::new());
+            clock.set(Time::from_secs(driver_secs));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let owner = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 123),
+                TaskId::new_for_test(0, 123),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(owner));
+            // An explicit sample must also take precedence over an unrelated
+            // getter passed at construction.
+            set_current_time(Time::from_secs(10_000).as_nanos());
+            let now = Time::from_secs(manual_secs);
+            let deadline = Time::from_secs(manual_secs + 5);
+            let mut timeout = if custom_getter {
+                TimeoutFuture::with_time_getter(pending::<()>(), deadline, test_now)
+            } else {
+                TimeoutFuture::new(pending::<()>(), deadline)
+            };
+            let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut cx = Context::from_waker(&waker);
+
+            assert!(timeout.poll_with_time(&mut cx, now).is_pending());
+            assert_eq!(timer.next_deadline(), Some(Time::from_secs(driver_secs + 5)));
+            assert_eq!(timer.pending_count(), 1);
+
+            clock.set(Time::from_secs(driver_secs + 5));
+            assert_eq!(timer.process_timers(), 1);
+            assert_eq!(wakes.0.load(Ordering::Acquire), 1);
+            assert!(
+                timeout.poll_with_time(&mut cx, now).is_pending(),
+                "a delivered runtime wake must not advance the manual clock"
+            );
+            assert_eq!(
+                timer.next_deadline(),
+                Some(Time::from_secs(driver_secs + 10))
+            );
+            assert_eq!(timer.pending_count(), 1);
+
+            assert_eq!(
+                timeout.poll_with_time(&mut cx, deadline),
+                Poll::Ready(Err(Elapsed::new(deadline)))
+            );
+            assert_eq!(timer.pending_count(), 0, "terminal timeout retires its wake");
+        }
+    }
+}
+
+#[test]
+fn manual_clock_timeout_preserves_exact_boundary_and_rejects_late_work() {
+    for late in [false, true] {
+        let clock = Arc::new(VirtualClock::new());
+        clock.set(Time::from_secs(100));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let owner = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 124),
+            TaskId::new_for_test(0, 124),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(owner));
+        let deadline = Time::from_secs(5);
+        let mut timeout = TimeoutFuture::new(
+            CountingFuture {
+                count: 0,
+                ready_at: 2,
+            },
+            deadline,
+        );
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(timeout.poll_with_time(&mut cx, Time::ZERO).is_pending());
+        clock.set(Time::from_secs(105));
+        assert_eq!(timer.process_timers(), 1);
+
+        if late {
+            assert_eq!(
+                timeout.poll_with_time(&mut cx, Time::from_secs(6)),
+                Poll::Ready(Err(Elapsed::new(deadline)))
+            );
+            assert_eq!(timeout.inner().count, 1, "late work must not be polled");
+        } else {
+            assert_eq!(
+                timeout.poll_with_time(&mut cx, deadline),
+                Poll::Ready(Ok("done"))
+            );
+            assert_eq!(timeout.inner().count, 2);
+        }
+        assert_eq!(timer.pending_count(), 0, "completion disarms before drop");
+        drop(timeout);
+        assert_eq!(timer.pending_count(), 0);
+    }
+}
+
+#[test]
+fn manual_clock_timeout_rechecks_a_wake_armed_by_ordinary_poll() {
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let owner = Cx::new_with_drivers(
+        RegionId::new_for_test(0, 125),
+        TaskId::new_for_test(0, 125),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+        Some(timer.clone()),
+        None,
+    );
+    let _current = Cx::set_current(Some(owner));
+    let deadline = Time::from_secs(5);
+    let mut timeout = TimeoutFuture::new(pending::<()>(), deadline);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(Pin::new(&mut timeout).poll(&mut cx).is_pending());
+    clock.set(deadline);
+    assert_eq!(timer.process_timers(), 1);
+
+    assert!(timeout.poll_with_time(&mut cx, Time::ZERO).is_pending());
+    assert_eq!(timer.next_deadline(), Some(Time::from_secs(10)));
+    assert_eq!(
+        timeout.poll_with_time(&mut cx, deadline),
+        Poll::Ready(Err(Elapsed::new(deadline)))
+    );
+    assert_eq!(timer.pending_count(), 0);
+}
+
+#[test]
+fn manual_clock_timeout_without_driver_ignores_its_configured_getter() {
+    let _current = Cx::set_current(None);
+    set_current_time(Time::from_secs(10_000).as_nanos());
+    let deadline = Time::from_secs(5);
+    let mut timeout = TimeoutFuture::with_time_getter(pending::<()>(), deadline, test_now);
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(timeout.poll_with_time(&mut cx, Time::ZERO).is_pending());
+    assert!(
+        timeout
+            .poll_with_time(&mut cx, Time::from_secs(4))
+            .is_pending()
+    );
+    assert_eq!(
+        timeout.poll_with_time(&mut cx, deadline),
+        Poll::Ready(Err(Elapsed::new(deadline)))
+    );
+}
+
+#[test]
 fn poll_with_time_elapsed_deadline_clears_registered_timer() {
     let clock = Arc::new(crate::time::VirtualClock::new());
     let timer_driver = crate::time::TimerDriverHandle::with_virtual_clock(clock);
