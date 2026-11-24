@@ -323,7 +323,9 @@ impl<C> IdleConnection<C> {
 
 struct PoolInner<C> {
     idle: VecDeque<IdleConnection<C>>,
-    /// Total connections (idle + checked out).
+    /// Connections reserved by calls to the synchronous pool's warm_up.
+    warming: usize,
+    /// Total slots (idle, checked out or being created).
     total: usize,
     closed: bool,
     /// Async acquisition waiters ordered by arrival. The synchronous pool
@@ -674,14 +676,21 @@ impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
 
 struct CreationGuard<'a, M: ConnectionManager> {
     pool: &'a DbPool<M>,
+    warming: bool,
     disarmed: bool,
     client_id: Option<String>,
 }
 
 impl<M: ConnectionManager> Drop for CreationGuard<'_, M> {
     fn drop(&mut self) {
+        if self.disarmed && !self.warming {
+            return;
+        }
+        let mut inner = self.pool.inner.lock();
+        if self.warming {
+            inner.warming -= 1;
+        }
         if !self.disarmed {
-            let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
             DbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
         }
@@ -697,6 +706,7 @@ impl<M: ConnectionManager> DbPool<M> {
             config,
             inner: Mutex::new(PoolInner {
                 idle: VecDeque::new(),
+                warming: 0,
                 total: 0,
                 closed: false,
                 waiters: VecDeque::new(),
@@ -906,6 +916,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
             let mut creation_guard = CreationGuard {
                 pool: self,
+                warming: false,
                 disarmed: false,
                 client_id: None,
             };
@@ -1132,6 +1143,7 @@ impl<M: ConnectionManager> DbPool<M> {
             // Create new connection
             let mut creation_guard = CreationGuard {
                 pool: self,
+                warming: false,
                 disarmed: false,
                 client_id: Some(client_id_owned.clone()),
             };
@@ -1632,19 +1644,30 @@ impl<M: ConnectionManager> DbPool<M> {
         let mut created = 0;
         for _ in 0..self.config.min_idle {
             let mut inner = self.inner.lock();
-            if inner.total >= self.effective_max_size() || inner.closed {
+            if inner.closed
+                || inner.total >= self.effective_max_size()
+                || inner.idle.len() + inner.warming >= self.config.min_idle
+            {
                 break;
             }
             inner.total += 1;
+            inner.warming += 1;
+            let mut reservation = CreationGuard {
+                pool: self,
+                warming: true,
+                disarmed: false,
+                client_id: None,
+            };
             drop(inner);
 
             if let Ok(conn) = self.manager.connect() {
+                // return_connection takes ownership of the physical slot even
+                // if a release callback unwinds. Keep the warm-up reservation
+                // until it finishes publishing (or discarding) the connection.
+                reservation.disarmed = true;
                 self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                self.return_connection(conn, crate::time::wall_now(), None); // br-asupersync-gb3rck: clean connection
+                self.return_connection(conn, crate::time::wall_now(), None);
                 created += 1;
-            } else {
-                let mut inner = self.inner.lock();
-                inner.total = inner.total.saturating_sub(1);
             }
         }
         created
@@ -2080,6 +2103,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             config,
             inner: Mutex::new(PoolInner {
                 idle: VecDeque::new(),
+                warming: 0,
                 total: 0,
                 closed: false,
                 waiters: VecDeque::new(),

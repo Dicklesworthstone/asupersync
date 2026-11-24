@@ -3466,6 +3466,56 @@ fn warm_up_creates_connections() {
 }
 
 #[test]
+fn concurrent_warm_up_fills_only_the_missing_idle_slots() {
+    use std::sync::Barrier;
+
+    struct PausingConnect {
+        first: AtomicBool,
+        entered: Barrier,
+        resume: Barrier,
+    }
+
+    impl ConnectionManager for PausingConnect {
+        type Connection = ();
+        type Error = TestError;
+
+        fn connect(&self) -> Result<(), TestError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.entered.wait();
+                self.resume.wait();
+            }
+            Ok(())
+        }
+
+        fn is_valid(&self, _conn: &()) -> bool {
+            true
+        }
+    }
+
+    let pool = DbPool::new(
+        PausingConnect {
+            first: AtomicBool::new(true),
+            entered: Barrier::new(2),
+            resume: Barrier::new(2),
+        },
+        DbPoolConfig::with_max_size(4).min_idle(2),
+    );
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| pool.warm_up());
+        pool.manager.entered.wait();
+        let second = pool.warm_up();
+        pool.manager.resume.wait();
+        assert_eq!(first.join().unwrap(), 1);
+        assert_eq!(second, 1);
+    });
+    assert_eq!(pool.stats().idle, 2);
+    assert_eq!(pool.warm_up(), 0);
+    let _checked_out = pool.get().unwrap();
+    assert_eq!(pool.warm_up(), 1);
+    assert_eq!(pool.stats().idle, 2);
+}
+
+#[test]
 fn warm_up_respects_max_size() {
     init_test("warm_up_respects_max_size");
     let pool = DbPool::new(
@@ -4479,6 +4529,20 @@ mod callback_ownership_regressions {
             panic!("{expected:?} callback must retain its outward panic");
         };
         assert_eq!(payload.downcast_ref::<Hook>(), Some(&expected));
+    }
+
+    #[test]
+    fn warm_up_releases_its_reservations_on_manager_panic() {
+        for hook in [Hook::Connect, Hook::Authentication] {
+            let pool = DbPool::new(CallbackManager::new(), config(1).min_idle(1));
+            pool.manager.arm(hook);
+            assert_hook_panic(catch_unwind(AssertUnwindSafe(|| pool.warm_up())), hook);
+            assert_eq!(pool.stats().total, 0);
+            assert_eq!(pool.manager.live.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.warm_up(), 1);
+            let recovered = pool.get().expect("capacity recovered");
+            assert_eq!(recovered.id, if hook == Hook::Connect { 1 } else { 2 });
+        }
     }
 
     #[test]
