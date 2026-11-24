@@ -2624,33 +2624,36 @@ fn incomplete_cancellation_report_retains_failure_without_enforcing_panic() {
 
 #[test]
 fn ordinary_cancel_ack_can_park_for_masked_cleanup_then_complete() {
-    use crate::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use crate::sync::atomic::{AtomicU32, Ordering};
+    use std::future::{Future, poll_fn};
 
-    let mut runtime = LabRuntime::new(LabConfig::new(0x0c_a113));
+    let mut runtime = LabRuntime::new(LabConfig::new(0x0c_a113).max_steps(32));
     let root = runtime.state.create_root_region(Budget::INFINITE);
-    let release = Arc::new(AtomicBool::new(false));
-    let cleanup_release = Arc::clone(&release);
+    let (release, mut cleanup) = crate::channel::oneshot::channel::<()>();
     let polls = Arc::new(AtomicU32::new(0));
     let observed_polls = Arc::clone(&polls);
     let (task, handle) = runtime
         .state
         .create_task(root, Budget::INFINITE, async move {
-            std::future::poll_fn(move |_| {
+            let cx = crate::Cx::current().unwrap();
+            poll_fn(|_| {
                 observed_polls.fetch_add(1, Ordering::SeqCst);
-                let cx = crate::Cx::current().unwrap();
                 if cx.checkpoint().is_ok() {
-                    return Poll::Pending;
-                }
-                // Snapshot sampling must not move this mask before the
-                // acknowledgement or invent an acknowledgement under it.
-                cx.masked(|| {});
-                if cleanup_release.load(Ordering::SeqCst) {
-                    Poll::Ready(())
-                } else {
                     Poll::Pending
+                } else {
+                    Poll::Ready(())
                 }
             })
             .await;
+            let mut cleanup = std::pin::pin!(cleanup.recv(&cx));
+            poll_fn(|task_cx| {
+                observed_polls.fetch_add(1, Ordering::SeqCst);
+                // The acknowledgement precedes cleanup, whose actual wait
+                // remains masked across every poll until external release.
+                cx.masked(|| cleanup.as_mut().poll(task_cx))
+            })
+            .await
+            .unwrap();
         })
         .unwrap();
     runtime.scheduler.lock().schedule(task, 0);
@@ -2659,6 +2662,11 @@ fn ordinary_cancel_ack_can_park_for_masked_cleanup_then_complete() {
     handle.abort_with_reason(CancelReason::timeout());
     runtime.run_until_idle();
     assert!(runtime.state.task(task).is_some(), "cleanup is still live");
+    assert!(
+        polls.load(Ordering::SeqCst) < 16,
+        "unchanged masked cleanup must park instead of exhausting the step budget"
+    );
+    assert!(runtime.scheduler.lock().is_empty());
     assert!(
         runtime
             .oracles
@@ -2670,8 +2678,7 @@ fn ordinary_cancel_ack_can_park_for_masked_cleanup_then_complete() {
         Some(0)
     );
 
-    release.store(true, Ordering::SeqCst);
-    runtime.scheduler.lock().schedule(task, 0);
+    release.send_blocking(()).unwrap();
     runtime.run_until_idle();
     assert!(runtime.state.task(task).is_none(), "cleanup completed");
     let report = runtime.report();

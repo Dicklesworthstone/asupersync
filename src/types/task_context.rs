@@ -36,6 +36,9 @@ use std::task::Waker;
 #[doc(hidden)]
 pub struct CancelWaker {
     waker: Waker,
+    /// One redelivery when cancellation becomes observable after masking.
+    /// Only a new target or an actual cancellation publication rearms it.
+    unmask_wake_pending: crate::sync::atomic::AtomicBool,
 }
 
 impl CancelWaker {
@@ -43,7 +46,10 @@ impl CancelWaker {
     #[inline]
     #[doc(hidden)]
     pub fn new(waker: Waker) -> Self {
-        Self { waker }
+        Self {
+            waker,
+            unmask_wake_pending: crate::sync::atomic::AtomicBool::new(true),
+        }
     }
 
     /// Returns whether this target wakes the same task as `other`.
@@ -62,7 +68,20 @@ impl CancelWaker {
     /// returned Waker must be dropped without a `CxInner` guard.
     #[inline]
     pub(crate) fn replace_waker(&mut self, waker: Waker) -> Waker {
+        self.rearm_unmask_wake();
         std::mem::replace(&mut self.waker, waker)
+    }
+
+    #[inline]
+    fn rearm_unmask_wake(&self) {
+        self.unmask_wake_pending
+            .store(true, crate::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn take_unmask_wake(&self) -> bool {
+        self.unmask_wake_pending
+            .swap(false, crate::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1162,11 +1181,13 @@ impl CxInner {
             .store(value, crate::sync::atomic::Ordering::Release);
     }
 
-    /// Snapshot every distinct cancellation wake target using only safe `Arc`
-    /// reference-count operations. Actual wake callbacks must run after unlock.
+    /// Publish a cancellation to every distinct wake target using only safe
+    /// `Arc` reference-count operations. Rearm one unmask redelivery in case
+    /// the original wake is consumed while masked. Callbacks run after unlock.
     pub(crate) fn cancel_waker_snapshot(&self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
         let mut snapshot = smallvec::SmallVec::new();
         let mut push_unique = |candidate: &Arc<CancelWaker>| {
+            candidate.rearm_unmask_wake();
             if !snapshot
                 .iter()
                 .any(|existing: &Arc<CancelWaker>| existing.will_wake(&candidate.waker))
@@ -1183,6 +1204,42 @@ impl CxInner {
         }
         for registration in &self.cancel_waker_registrations {
             push_unique(&registration.target);
+        }
+        snapshot
+    }
+
+    /// Consume owed unmask redeliveries without publishing a new cancellation.
+    /// Registration, publication, and consumption share the owning context's
+    /// lock; the target's atomic bit only protects its interior mutability.
+    /// Actual wake callbacks must run after unlocking.
+    pub(crate) fn take_cancel_unmask_wakers(
+        &mut self,
+    ) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
+        let rearm = std::mem::take(&mut self.cancel_wakers_pending);
+        let mut snapshot = smallvec::SmallVec::new();
+        let mut push_pending = |candidate: &Arc<CancelWaker>| {
+            if rearm {
+                candidate.rearm_unmask_wake();
+            }
+            // Consume every registration's debt before deduplicating targets.
+            // Equivalent subscribers must not take turns waking on later exits.
+            if candidate.take_unmask_wake()
+                && !snapshot
+                    .iter()
+                    .any(|existing: &Arc<CancelWaker>| existing.will_wake(&candidate.waker))
+            {
+                snapshot.push(Arc::clone(candidate));
+            }
+        };
+
+        if let Some(primary) = &self.cancel_waker {
+            push_pending(primary);
+        }
+        if let Some(untracked) = &self.untracked_cancel_waker {
+            push_pending(untracked);
+        }
+        for registration in &self.cancel_waker_registrations {
+            push_pending(&registration.target);
         }
         snapshot
     }

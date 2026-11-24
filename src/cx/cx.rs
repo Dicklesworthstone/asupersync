@@ -797,11 +797,9 @@ impl Drop for MaskGuard<'_> {
             let outermost = inner.mask_depth == 1;
             inner.mask_depth = inner.mask_depth.saturating_sub(1);
             if outermost && self.wake_on_exit && inner.is_cancel_requested() {
-                // A waiter may have consumed the original cancellation wake
-                // while it was masked. Making cancellation observable again
-                // must wake the current subscribers after releasing the lock.
-                let wakers = inner.cancel_waker_snapshot();
-                inner.cancel_wakers_pending = false;
+                // Redeliver a cancellation wake consumed while masked once.
+                // Repeated cleanup polls must not rearm their own wake debt.
+                let wakers = inner.take_cancel_unmask_wakers();
                 crate::types::task_context::CancelWakeEffects::new(wakers)
             } else {
                 crate::types::task_context::CancelWakeEffects::empty()
@@ -842,8 +840,7 @@ impl Drop for MaskedPollWakeGuard<'_> {
         let effects = {
             let mut inner = self.inner.write();
             if inner.mask_depth == 0 && inner.is_cancel_requested() {
-                let wakers = inner.cancel_waker_snapshot();
-                inner.cancel_wakers_pending = false;
+                let wakers = inner.take_cancel_unmask_wakers();
                 crate::types::task_context::CancelWakeEffects::new(wakers)
             } else {
                 crate::types::task_context::CancelWakeEffects::empty()

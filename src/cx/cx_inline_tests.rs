@@ -1803,6 +1803,290 @@ fn set_cancel_requested_wakes_registered_cancel_waker() {
 }
 
 #[test]
+fn mask_exit_redelivers_each_cancellation_publication_only_once() {
+    use std::task::{Poll, Wake, Waker};
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let cx = test_cx();
+    let counted = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&counted));
+    let primary = Arc::new(CancelWaker::new(waker.clone()));
+    cx.inner.write().cancel_waker = Some(primary);
+    let first = cx.refresh_cancel_waker(None, &waker);
+    let second = cx.refresh_cancel_waker(None, &waker);
+
+    cx.masked(|| {
+        cx.masked(|| {
+            cx.cancel_fast(CancelKind::User);
+            assert_eq!(counted.0.load(Ordering::SeqCst), 1);
+            assert!(cx.checkpoint().is_ok());
+        });
+        assert_eq!(counted.0.load(Ordering::SeqCst), 1);
+    });
+    assert_eq!(counted.0.load(Ordering::SeqCst), 2);
+    assert!(cx.checkpoint().is_err());
+
+    for _ in 0..3 {
+        cx.masked(|| {
+            assert_eq!(cx.refresh_cancel_waker(Some(first), &waker), first);
+            assert_eq!(cx.refresh_cancel_waker(Some(second), &waker), second);
+            assert!(cx.checkpoint().is_ok());
+        });
+        assert_eq!(
+            counted.0.load(Ordering::SeqCst),
+            2,
+            "stable subscribers must not create a cancellation wake loop",
+        );
+    }
+
+    cx.masked(|| {
+        cx.masked(|| {
+            cx.cancel_with_reason(CancelReason::shutdown());
+            assert_eq!(counted.0.load(Ordering::SeqCst), 3);
+            assert!(cx.checkpoint().is_ok());
+        });
+        assert_eq!(counted.0.load(Ordering::SeqCst), 3);
+    });
+    assert_eq!(counted.0.load(Ordering::SeqCst), 4);
+    assert!(cx.cancelled_by(CancelKind::Shutdown));
+    assert!(cx.checkpoint().is_err());
+
+    cx.masked(|| {
+        cx.set_cancel_internal(true);
+        assert_eq!(counted.0.load(Ordering::SeqCst), 4);
+    });
+    assert_eq!(counted.0.load(Ordering::SeqCst), 5);
+
+    // A parked masked-poll combinator retains the same delivery obligation
+    // until it is dropped; retiring it must not manufacture a new signal.
+    for publish in [true, false] {
+        let before = counted.0.load(Ordering::SeqCst);
+        let mut guard = cx.masked_poll_guard();
+        let (result, suppressed) = cx.masked_poll(true, || {
+            if publish {
+                cx.set_cancel_internal(true);
+            }
+            Poll::<()>::Pending
+        });
+        assert!(result.is_pending());
+        assert!(suppressed);
+        guard.set_suppressed(suppressed);
+        assert_eq!(counted.0.load(Ordering::SeqCst), before);
+        drop(guard);
+        assert_eq!(
+            counted.0.load(Ordering::SeqCst),
+            before + if publish { 1 } else { 0 },
+        );
+    }
+    cx.clear_cancel_waker(first);
+    cx.clear_cancel_waker(second);
+}
+
+#[test]
+fn newly_registered_and_replaced_cancel_targets_receive_their_unmask_wake() {
+    use std::task::{Wake, Waker};
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let cx = test_cx();
+    let first_wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let next_wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+    let first_waker = Waker::from(Arc::clone(&first_wakes));
+    let next_waker = Waker::from(Arc::clone(&next_wakes));
+    let first = cx.refresh_cancel_waker(None, &first_waker);
+    cx.cancel_fast(CancelKind::User);
+    cx.masked(|| {});
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 2);
+
+    // An independent operation needs its own first unmask delivery even if
+    // another operation has already observed this cancellation on this task.
+    let second = cx.masked(|| cx.refresh_cancel_waker(None, &first_waker));
+    assert_ne!(first, second);
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 3);
+    cx.masked(|| {});
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 3);
+
+    assert_eq!(
+        cx.masked(|| cx.refresh_cancel_waker(Some(first), &next_waker)),
+        first,
+    );
+    assert_eq!(next_wakes.0.load(Ordering::SeqCst), 1);
+    cx.masked(|| {
+        assert_eq!(cx.refresh_cancel_waker(Some(first), &next_waker), first);
+    });
+    assert_eq!(next_wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 3);
+
+    cx.clear_cancel_waker(first);
+    cx.clear_cancel_waker(second);
+    let recycled = cx.masked(|| cx.refresh_cancel_waker(None, &next_waker));
+    assert_ne!(recycled, first);
+    assert_ne!(recycled, second);
+    assert_eq!(next_wakes.0.load(Ordering::SeqCst), 2);
+    cx.masked(|| {});
+    assert_eq!(next_wakes.0.load(Ordering::SeqCst), 2);
+    cx.clear_cancel_waker(recycled);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_masked_cleanup_repolls_do_not_republish_cancel_wakes() {
+    use crate::channel::{mpsc, oneshot};
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+    use std::future::{Future, poll_fn};
+    use std::task::{Context, Wake, Waker};
+    use std::time::Duration;
+
+    struct ForwardWake {
+        target: Waker,
+        calls: AtomicUsize,
+    }
+    impl Wake for ForwardWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.target.wake_by_ref();
+        }
+    }
+    struct Finalized(Arc<AtomicUsize>);
+    impl Drop for Finalized {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    async fn witness_pending<F: Future>(future: F, ready: oneshot::Sender<()>) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut ready = Some(ready);
+        poll_fn(|task| {
+            let result = future.as_mut().poll(task);
+            if result.is_pending()
+                && let Some(ready) = ready.take()
+            {
+                ready.send_blocking(()).expect("Pending witness accepted");
+            }
+            result
+        })
+        .await
+    }
+
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .unwrap();
+        let finalized = Arc::new(AtomicUsize::new(0));
+        runtime.block_on(async {
+            let owner = Cx::current().expect("native root context");
+            crate::time::timeout(owner.now(), Duration::from_secs(10), async {
+                let region = owner
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                region
+                    .retain_until_finalized(Finalized(Arc::clone(&finalized)))
+                    .await
+                    .unwrap();
+                let (entered, mut operation_parked) = oneshot::channel();
+                let (parked, mut cleanup_parked) = oneshot::channel();
+                let (release, mut cleanup) = oneshot::channel::<u32>();
+                let mut task = region
+                    .cx()
+                    .spawn(move |child| async move {
+                        let (keep_sender, mut operation) = mpsc::channel::<()>(1);
+                        assert_eq!(
+                            witness_pending(operation.recv(&child), entered).await,
+                            Err(mpsc::RecvError::Cancelled),
+                        );
+                        let mut cleanup = std::pin::pin!(cleanup.recv(&child));
+                        let mut parked = Some(parked);
+                        let mut forwarding: Option<Arc<ForwardWake>> = None;
+                        let value = poll_fn(|task| {
+                            let forwarding = forwarding.get_or_insert_with(|| {
+                                Arc::new(ForwardWake {
+                                    target: task.waker().clone(),
+                                    calls: AtomicUsize::new(0),
+                                })
+                            });
+                            let waker = Waker::from(Arc::clone(forwarding));
+                            let mut watched = Context::from_waker(&waker);
+                            let result = child.masked(|| cleanup.as_mut().poll(&mut watched));
+                            if result.is_pending() && parked.is_some() {
+                                let delivered = forwarding.calls.load(Ordering::SeqCst);
+                                assert!(
+                                    delivered > 0,
+                                    "a new masked subscriber must receive its unmask wake",
+                                );
+                                // The owner cannot release cleanup until this witness is sent.
+                                // Repoll the same operation to isolate unmask wake production
+                                // from scheduler timing and from any actual channel event.
+                                for _ in 0..3 {
+                                    assert!(
+                                        child.masked(|| cleanup.as_mut().poll(&mut watched)).is_pending(),
+                                    );
+                                    assert_eq!(
+                                        forwarding.calls.load(Ordering::SeqCst),
+                                        delivered,
+                                        "an unchanged cleanup subscription must not wake on every mask exit",
+                                    );
+                                }
+                                parked.take().unwrap().send_blocking(()).unwrap();
+                            }
+                            result
+                        })
+                        .await
+                        .unwrap();
+                        drop(keep_sender);
+                        value
+                    })
+                    .unwrap();
+                operation_parked.recv(&owner).await.unwrap();
+                task.abort();
+                cleanup_parked.recv(&owner).await.unwrap();
+                assert!(
+                    !task.is_finished(),
+                    "cleanup remains parked until its external release",
+                );
+                assert_eq!(finalized.load(Ordering::SeqCst), 0);
+                release.send_blocking(37).unwrap();
+                assert_eq!(task.join(&owner).await.unwrap(), 37);
+                region.close().await.unwrap();
+            })
+            .await
+            .expect("native masked cleanup and region retirement must complete");
+        });
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        assert!(runtime.is_quiescent());
+    }
+}
+
+#[test]
 fn tracked_cancel_wakers_have_exact_independent_ownership() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
