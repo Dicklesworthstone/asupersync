@@ -90,6 +90,317 @@ fn dropping_unrecorded_permit_guard_releases_half_open_probe() {
     drop(guard2); // also released as ignored -> no leak either way
 }
 
+// Admission and classification both run user code while a probe is owned.
+// These entrypoints must transfer that ownership without gaps (5vzqse, pchkaf).
+#[derive(Clone, Copy, Debug)]
+enum PanicPermitEntryPoint {
+    Raw,
+    Guarded,
+    Call,
+}
+
+#[test]
+fn half_open_callback_panic_releases_unpublished_probe() {
+    for entrypoint in [
+        PanicPermitEntryPoint::Raw,
+        PanicPermitEntryPoint::Guarded,
+        PanicPermitEntryPoint::Call,
+    ] {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            open_duration: Duration::ZERO,
+            half_open_max_probes: 1,
+            on_state_change: Some(Arc::new(|_, to, _| {
+                if matches!(to, State::HalfOpen { .. }) {
+                    panic!("admission callback panic");
+                }
+            })),
+            ..Default::default()
+        });
+        let now = Time::ZERO;
+        let initial = cb.should_allow(now).expect("closed admission");
+        cb.record_failure(initial, "open", now);
+
+        let mut operation_started = false;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entrypoint {
+            PanicPermitEntryPoint::Raw => {
+                let permit = cb.should_allow(now).expect("first probe");
+                cb.record_ignored(permit);
+            }
+            PanicPermitEntryPoint::Guarded => {
+                drop(cb.acquire_guarded(now).expect("first guarded probe"));
+            }
+            PanicPermitEntryPoint::Call => {
+                cb.call::<(), &str, _>(now, || {
+                    operation_started = true;
+                    Ok(())
+                })
+                .expect("first call");
+            }
+        }))
+        .expect_err("admission callback panic must propagate");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"admission callback panic"),
+            "{entrypoint:?}"
+        );
+        assert!(!operation_started, "{entrypoint:?}");
+        let State::HalfOpen {
+            epoch,
+            probes_active: 0,
+            successes: 0,
+        } = cb.state()
+        else {
+            panic!("unpublished probe must be released: {entrypoint:?}");
+        };
+        let metrics = cb.metrics();
+        assert_eq!(metrics.total_failure, 1, "{entrypoint:?}");
+        assert_eq!(metrics.total_success, 0, "{entrypoint:?}");
+        assert_eq!(metrics.total_ignored_errors, 1, "{entrypoint:?}");
+        assert_eq!(metrics.times_opened, 1, "{entrypoint:?}");
+
+        let recovered = cb.acquire_guarded(now).expect("released probe is reusable");
+        assert_eq!(
+            cb.state(),
+            State::HalfOpen {
+                epoch,
+                probes_active: 1,
+                successes: 0,
+            },
+            "{entrypoint:?}"
+        );
+        assert!(
+            matches!(cb.should_allow(now), Err(CircuitBreakerError::HalfOpenFull)),
+            "recovery must still enforce the probe limit: {entrypoint:?}"
+        );
+        drop(recovered);
+        assert_eq!(cb.metrics().total_ignored_errors, 2, "{entrypoint:?}");
+    }
+}
+
+#[test]
+fn failure_predicate_panic_releases_probe_once_without_callbacks() {
+    fn classify(error: &str) -> bool {
+        if error == "panic" {
+            panic!("failure predicate panic");
+        }
+        true
+    }
+
+    for failure_predicate in [
+        FailurePredicate::ByType(classify),
+        FailurePredicate::Custom(Arc::new(classify)),
+    ] {
+        for entrypoint in [
+            PanicPermitEntryPoint::Raw,
+            PanicPermitEntryPoint::Guarded,
+            PanicPermitEntryPoint::Call,
+        ] {
+            let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unwind_callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_callbacks = Arc::clone(&callbacks);
+            let observed_unwind_callbacks = Arc::clone(&unwind_callbacks);
+            let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+                failure_threshold: 1,
+                open_duration: Duration::ZERO,
+                half_open_max_probes: 1,
+                failure_predicate: failure_predicate.clone(),
+                on_state_change: Some(Arc::new(move |_, _, _| {
+                    observed_callbacks.fetch_add(1, Ordering::SeqCst);
+                    if std::thread::panicking() {
+                        observed_unwind_callbacks.fetch_add(1, Ordering::SeqCst);
+                    }
+                })),
+                ..Default::default()
+            });
+            let now = Time::ZERO;
+            let initial = cb.should_allow(now).expect("closed admission");
+            cb.record_failure(initial, "open", now);
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entrypoint {
+                PanicPermitEntryPoint::Raw => {
+                    let permit = cb.should_allow(now).expect("raw probe");
+                    cb.record_failure(permit, "panic", now);
+                }
+                PanicPermitEntryPoint::Guarded => {
+                    cb.acquire_guarded(now)
+                        .expect("guarded probe")
+                        .record_failure("panic", now);
+                }
+                PanicPermitEntryPoint::Call => {
+                    let _ = cb.call::<(), &str, _>(now, || Err("panic"));
+                }
+            }))
+            .expect_err("classification panic must propagate");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"failure predicate panic"),
+                "{entrypoint:?}"
+            );
+            assert!(
+                matches!(
+                    cb.state(),
+                    State::HalfOpen {
+                        probes_active: 0,
+                        successes: 0,
+                        ..
+                    }
+                ),
+                "unclassified probe must remain neutral: {entrypoint:?}"
+            );
+            let metrics = cb.metrics();
+            assert_eq!(metrics.total_failure, 1, "{entrypoint:?}");
+            assert_eq!(metrics.total_success, 0, "{entrypoint:?}");
+            assert_eq!(metrics.total_ignored_errors, 1, "{entrypoint:?}");
+            assert_eq!(metrics.times_opened, 1, "{entrypoint:?}");
+            assert_eq!(callbacks.load(Ordering::SeqCst), 2, "{entrypoint:?}");
+            assert_eq!(unwind_callbacks.load(Ordering::SeqCst), 0, "{entrypoint:?}");
+
+            let recovered = cb.acquire_guarded(now).expect("released probe is reusable");
+            assert!(
+                matches!(cb.should_allow(now), Err(CircuitBreakerError::HalfOpenFull)),
+                "the probe must be released exactly once: {entrypoint:?}"
+            );
+            drop(recovered);
+            assert_eq!(cb.metrics().total_ignored_errors, 2, "{entrypoint:?}");
+        }
+    }
+}
+
+#[test]
+fn recorded_failure_callback_panic_does_not_also_record_ignored() {
+    for entrypoint in [
+        PanicPermitEntryPoint::Raw,
+        PanicPermitEntryPoint::Guarded,
+        PanicPermitEntryPoint::Call,
+    ] {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            open_duration: Duration::ZERO,
+            half_open_max_probes: 1,
+            failure_predicate: FailurePredicate::ByType(|_| true),
+            on_state_change: Some(Arc::new(|from, to, _| {
+                if matches!(from, State::HalfOpen { .. }) && matches!(to, State::Open { .. }) {
+                    panic!("recorded failure callback panic");
+                }
+            })),
+            ..Default::default()
+        });
+        let now = Time::ZERO;
+        let initial = cb.should_allow(now).expect("closed admission");
+        cb.record_failure(initial, "open", now);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entrypoint {
+            PanicPermitEntryPoint::Raw => {
+                let permit = cb.should_allow(now).expect("raw probe");
+                cb.record_failure(permit, "failed probe", now);
+            }
+            PanicPermitEntryPoint::Guarded => {
+                cb.acquire_guarded(now)
+                    .expect("guarded probe")
+                    .record_failure("failed probe", now);
+            }
+            PanicPermitEntryPoint::Call => {
+                let _ = cb.call::<(), &str, _>(now, || Err("failed probe"));
+            }
+        }))
+        .expect_err("outcome callback panic must propagate");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"recorded failure callback panic"),
+            "{entrypoint:?}"
+        );
+        assert!(matches!(cb.state(), State::Open { .. }), "{entrypoint:?}");
+        let metrics = cb.metrics();
+        assert_eq!(metrics.total_failure, 2, "{entrypoint:?}");
+        assert_eq!(metrics.total_success, 0, "{entrypoint:?}");
+        assert_eq!(metrics.total_ignored_errors, 0, "{entrypoint:?}");
+        assert_eq!(metrics.times_opened, 2, "{entrypoint:?}");
+        drop(cb.acquire_guarded(now).expect("new recovery probe"));
+    }
+}
+
+#[test]
+fn reentrant_callback_panic_cannot_release_a_new_epoch_probe() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Mutex, OnceLock, Weak};
+
+    let breaker_slot = Arc::new(OnceLock::<Weak<CircuitBreaker>>::new());
+    let replacement_slot = Arc::new(Mutex::new(None::<Permit>));
+    let reentered = Arc::new(AtomicBool::new(false));
+    let callback_breaker = Arc::clone(&breaker_slot);
+    let callback_replacement = Arc::clone(&replacement_slot);
+    let callback_reentered = Arc::clone(&reentered);
+    let cb = Arc::new(CircuitBreaker::new(CircuitBreakerPolicy {
+        failure_threshold: 1,
+        open_duration: Duration::ZERO,
+        half_open_max_probes: 1,
+        on_state_change: Some(Arc::new(move |_, to, _| {
+            let State::HalfOpen { epoch, .. } = to else {
+                return;
+            };
+            if callback_reentered.swap(true, Ordering::SeqCst) {
+                return;
+            }
+
+            let cb = callback_breaker
+                .get()
+                .and_then(Weak::upgrade)
+                .expect("callback breaker");
+            cb.reset();
+            let initial = cb.should_allow(Time::ZERO).expect("reset closed admission");
+            cb.record_failure(initial, "replacement open", Time::ZERO);
+            let replacement = cb
+                .should_allow(Time::ZERO)
+                .expect("replacement recovery probe");
+            assert_ne!(replacement, Permit::Probe { epoch });
+            *callback_replacement.lock().expect("replacement slot") = Some(replacement);
+            panic!("reentrant admission callback panic");
+        })),
+        ..Default::default()
+    }));
+    assert!(breaker_slot.set(Arc::downgrade(&cb)).is_ok());
+    let initial = cb.should_allow(Time::ZERO).expect("closed admission");
+    cb.record_failure(initial, "initial open", Time::ZERO);
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = cb.should_allow(Time::ZERO);
+    }))
+    .expect_err("reentrant callback panic must propagate");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"reentrant admission callback panic")
+    );
+    let replacement = replacement_slot
+        .lock()
+        .expect("replacement slot")
+        .take()
+        .expect("replacement probe retained by callback");
+    let Permit::Probe { epoch } = replacement else {
+        panic!("replacement admission must be a probe");
+    };
+    assert_eq!(
+        cb.state(),
+        State::HalfOpen {
+            epoch,
+            probes_active: 1,
+            successes: 0,
+        },
+        "old callback unwind must not refund a replacement epoch's probe"
+    );
+    assert!(matches!(
+        cb.should_allow(Time::ZERO),
+        Err(CircuitBreakerError::HalfOpenFull)
+    ));
+    assert_eq!(cb.metrics().total_ignored_errors, 1);
+    assert_eq!(cb.metrics().total_failure, 2);
+    cb.record_ignored(replacement);
+    drop(
+        cb.acquire_guarded(Time::ZERO)
+            .expect("replacement probe releases its own slot"),
+    );
+}
+
 #[test]
 fn closed_allows_calls() {
     let cb = CircuitBreaker::new(CircuitBreakerPolicy::default());
