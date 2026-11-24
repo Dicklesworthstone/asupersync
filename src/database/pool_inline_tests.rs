@@ -1320,6 +1320,71 @@ fn async_client_dropped_acquire_releases_only_its_own_quota() {
 }
 
 #[test]
+fn sync_close_during_manager_callback_refuses_checkout_and_retires_reservations() {
+    #[derive(Default)]
+    struct ClosingManager {
+        pool: std::sync::OnceLock<std::sync::Weak<DbPool<Self>>>,
+        disconnects: AtomicUsize,
+    }
+
+    impl ClosingManager {
+        fn close_if_armed(&self) {
+            if let Some(pool) = self.pool.get() {
+                pool.upgrade().expect("pool is live").close();
+            }
+        }
+    }
+
+    impl ConnectionManager for ClosingManager {
+        type Connection = ();
+        type Error = TestError;
+
+        fn connect(&self) -> Result<(), TestError> {
+            self.close_if_armed();
+            Ok(())
+        }
+
+        fn is_valid(&self, _conn: &()) -> bool {
+            self.close_if_armed();
+            true
+        }
+
+        fn disconnect(&self, _conn: ()) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for client_checkout in [false, true] {
+        for reuse in [false, true] {
+            let pool = Arc::new(DbPool::new(
+                ClosingManager::default(),
+                DbPoolConfig::with_max_size(1)
+                    .max_connections_per_client(Some(1))
+                    .enforce_client_quotas(true)
+                    .validate_on_checkout(true),
+            ));
+            if reuse {
+                pool.get().expect("seed the idle connection").return_to_pool();
+            }
+            assert!(pool.manager.pool.set(Arc::downgrade(&pool)).is_ok());
+            let result = if client_checkout {
+                pool.get_for_client("client")
+            } else {
+                pool.get()
+            };
+            assert!(matches!(result, Err(DbPoolError::Closed)));
+            let stats = pool.stats();
+            assert_eq!((stats.active, stats.idle, stats.total), (0, 0, 0));
+            assert_eq!(stats.total_creates, 1);
+            assert_eq!(stats.total_acquisitions, u64::from(reuse));
+            assert_eq!(stats.total_discards, 1);
+            assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+            assert!(pool.inner.lock().client_connections.is_empty());
+        }
+    }
+}
+
+#[test]
 fn async_client_close_during_acquire_prevents_checkout_and_releases_quota() {
     use std::future::Future;
 

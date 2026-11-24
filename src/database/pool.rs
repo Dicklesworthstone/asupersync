@@ -607,7 +607,28 @@ struct ValidationGuard<'a, M: ConnectionManager> {
     client_id: Option<String>,
 }
 
-impl<M: ConnectionManager> ValidationGuard<'_, M> {
+impl<'a, M: ConnectionManager> ValidationGuard<'a, M> {
+    fn finish_checkout(
+        mut self,
+        created_at: Time,
+    ) -> Result<PooledConnection<'a, M>, DbPoolError<M::Error>> {
+        // The manager may have spent an arbitrary time outside the lock.
+        // Order the handoff against close after all manager callbacks return.
+        if self.pool.is_closed() {
+            return Err(DbPoolError::Closed);
+        }
+        self.pool
+            .stats
+            .total_acquisitions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(PooledConnection {
+            conn: self.conn.take(),
+            pool: self.pool,
+            created_at,
+            client_id: self.client_id.take(),
+        })
+    }
+
     /// Explicit authentication refusal historically propagates a disconnect
     /// panic. Retire ownership first, while preserving that callback policy.
     fn disconnect(mut self) {
@@ -867,45 +888,20 @@ impl<M: ConnectionManager> DbPool<M> {
                     continue;
                 }
 
-                // Validate if configured.
-                if self.config.validate_on_checkout {
-                    let mut guard = ValidationGuard {
-                        pool: self,
-                        conn: Some(conn),
-                        client_id: None,
-                    };
-
-                    let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
-
-                    if !valid {
-                        self.stats
-                            .total_validation_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                        // Guard will drop here and safely decrement total & disconnect
-                        continue;
-                    }
-
-                    let valid_conn = guard.conn.take().unwrap();
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Ok(PooledConnection {
-                        conn: Some(valid_conn),
-                        pool: self,
-                        created_at,
-                        client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
-                    });
-                }
-
-                self.stats
-                    .total_acquisitions
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(PooledConnection {
-                    conn: Some(conn),
+                let guard = ValidationGuard {
                     pool: self,
-                    created_at,
-                    client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
-                });
+                    conn: Some(conn),
+                    client_id: None,
+                };
+                if self.config.validate_on_checkout
+                    && !self.manager.is_valid(guard.conn.as_ref().unwrap())
+                {
+                    self.stats
+                        .total_validation_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                return guard.finish_checkout(created_at);
             }
 
             let mut creation_guard = CreationGuard {
@@ -918,16 +914,12 @@ impl<M: ConnectionManager> DbPool<M> {
                 Ok(conn) => {
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Ok(PooledConnection {
-                        conn: Some(conn),
+                    return ValidationGuard {
                         pool: self,
-                        // br-asupersync-w3g9kb: sync path → wall_now().
-                        created_at: crate::time::wall_now(),
-                        client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
-                    });
+                        conn: Some(conn),
+                        client_id: creation_guard.client_id.take(),
+                    }
+                    .finish_checkout(crate::time::wall_now());
                 }
                 Err(e) => {
                     // Drop guard rolls back total count on failure (or panic).
@@ -1074,14 +1066,12 @@ impl<M: ConnectionManager> DbPool<M> {
                     continue;
                 }
 
-                // Validate if configured
+                let mut guard = ValidationGuard {
+                    pool: self,
+                    conn: Some(conn),
+                    client_id: Some(client_id_owned.clone()),
+                };
                 if self.config.validate_on_checkout {
-                    let mut guard = ValidationGuard {
-                        pool: self,
-                        conn: Some(conn),
-                        client_id: Some(client_id_owned.clone()),
-                    };
-
                     let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
 
                     if !valid {
@@ -1135,27 +1125,8 @@ impl<M: ConnectionManager> DbPool<M> {
                             }
                         }
                     }
-
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Ok(PooledConnection {
-                        conn: guard.conn.take(),
-                        pool: self,
-                        created_at,
-                        client_id: guard.client_id.take(),
-                    });
                 }
-
-                self.stats
-                    .total_acquisitions
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(PooledConnection {
-                    conn: Some(conn),
-                    pool: self,
-                    created_at,
-                    client_id: Some(client_id_owned.clone()),
-                });
+                return guard.finish_checkout(created_at);
             }
 
             // Create new connection
@@ -1169,15 +1140,12 @@ impl<M: ConnectionManager> DbPool<M> {
                 Ok(conn) => {
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Ok(PooledConnection {
-                        conn: Some(conn),
+                    return ValidationGuard {
                         pool: self,
-                        created_at: crate::time::wall_now(),
+                        conn: Some(conn),
                         client_id: creation_guard.client_id.take(),
-                    });
+                    }
+                    .finish_checkout(crate::time::wall_now());
                 }
                 Err(e) => {
                     // The guard retires capacity and client quota on either
