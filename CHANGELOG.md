@@ -211,6 +211,15 @@ artifacts.
   cleanup retires the connection before queued caller SQL can run. An
   acknowledged commit resolves its transaction obligation before awaiting
   session-isolation restoration, preserving its commit proof on hard drop.
+- **SQLite row streams retain cancellation across statement admission.**
+  An interrupt issued before SQLite starts a statement no longer permits a
+  cancelled or abandoned stream to execute its query later. A persistent
+  operation-local request is checked before preparation and each step,
+  including short `INSERT ... RETURNING` statements, and by a progress callback
+  during VM execution. Callback retirement remains under the connection mutex
+  on success, error, and unwind; cancellation and manual interruption retain
+  their distinction from statement timeouts. Already executed effects are not
+  promised to be undone by a later cancellation.
 - **SQLite asynchronous close keeps final cleanup off runtime workers.**
   Final connection-lock acquisition, orphan rollback, cache flushing, and
   engine destruction use the connection's blocking pool, including after

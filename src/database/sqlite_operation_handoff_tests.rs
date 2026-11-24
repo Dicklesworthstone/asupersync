@@ -186,9 +186,9 @@ fn poll_pending<F: Future>(future: Pin<&mut F>) {
     );
 }
 
-/// A host deadline, independent of the executor under test, bounds the close
-/// tail regressions. Teardown always precedes timeout or task-panic propagation.
-fn native_close<F, Fut>(workers: usize, scenario: F)
+/// A host deadline, independent of the executor under test, bounds native
+/// worker regressions. Teardown precedes timeout or task-panic propagation.
+fn native_workers<F, Fut>(workers: usize, scenario: F)
 where
     F: FnOnce(Cx) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
@@ -204,19 +204,22 @@ where
     let runtime = RuntimeBuilder::multi_thread()
         .worker_threads(workers)
         .build()
-        .expect("native close runtime");
+        .expect("native SQLite runtime");
     let request_cx = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
     let timeout_cx = request_cx.clone();
     let (completed_tx, completed_rx) = std_mpsc::channel();
     let completion = CompletionSignal(completed_tx);
     let task = runtime.handle().spawn(async move {
         let _completion = completion;
-        assert!(Cx::current().is_some(), "close must run on a native worker");
+        assert!(
+            Cx::current().is_some(),
+            "scenario must run on a native worker"
+        );
         scenario(request_cx).await;
     });
     let completed = completed_rx.recv_timeout(WAIT_LIMIT);
     if completed.is_err() {
-        timeout_cx.cancel_with_reason(CancelReason::user("SQLite close test deadline"));
+        timeout_cx.cancel_with_reason(CancelReason::user("SQLite native test deadline"));
     }
     drop(timeout_cx);
     let drain = runtime.shutdown_drained(WAIT_LIMIT);
@@ -227,7 +230,7 @@ where
     }));
     assert!(
         completed.is_ok(),
-        "{workers} workers: close timed out: {completed:?}; drain: {drain:?}"
+        "{workers} workers: scenario timed out: {completed:?}; drain: {drain:?}"
     );
     assert_eq!(drain.outcome, RootDrainOutcome::Quiescent, "{drain:?}");
     assert_eq!(drain.live_tasks, 0, "{drain:?}");
@@ -236,10 +239,10 @@ where
     assert_eq!(drain.pending_obligations, 0, "{drain:?}");
     assert_eq!(drain.queued_finalizers, 0, "{drain:?}");
     assert!(!drain.has_pending_obligation_posts, "{drain:?}");
-    assert!(stopped, "native close workers must retire");
+    assert!(stopped, "native SQLite workers must retire");
     match result {
         Ok(std::task::Poll::Ready(())) => {}
-        Ok(std::task::Poll::Pending) => panic!("close task must be terminal after teardown"),
+        Ok(std::task::Poll::Pending) => panic!("SQLite task must be terminal after teardown"),
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }
@@ -388,7 +391,10 @@ async fn run_close_case(cx: Cx, diagnosed: bool, disposition: CloseDisposition) 
             gate.open();
             if matches!(disposition, CloseDisposition::CancelAfterCompletion) {
                 fixture.fence();
-                assert!(!fixture.connection.is_open(), "worker already closed the engine");
+                assert!(
+                    !fixture.connection.is_open(),
+                    "worker already closed the engine"
+                );
                 cx.cancel_with_reason(CancelReason::user("cancel after final close completed"));
             }
             let outcome = closing.await;
@@ -411,13 +417,22 @@ async fn run_close_case(cx: Cx, diagnosed: bool, disposition: CloseDisposition) 
         disposition,
         CloseDisposition::DropQueued | CloseDisposition::CancelQueued
     ) {
-        assert!(fixture.connection.is_open(), "queued abandonment cannot close later");
+        assert!(
+            fixture.connection.is_open(),
+            "queued abandonment cannot close later"
+        );
         fixture.assert_handler_retired();
         fixture.finish(&active_cx).await;
     } else {
-        assert!(!fixture.connection.is_open(), "successful close removes the engine");
+        assert!(
+            !fixture.connection.is_open(),
+            "successful close removes the engine"
+        );
         assert!(matches!(
-            fixture.connection.query(&active_cx, "SELECT 1 AS one", &[]).await,
+            fixture
+                .connection
+                .query(&active_cx, "SELECT 1 AS one", &[])
+                .await,
             Outcome::Err(SqliteError::ConnectionClosed)
         ));
         fixture.fence();
@@ -432,7 +447,9 @@ fn close_matrix(dispositions: &[CloseDisposition]) {
     for workers in [1, 2] {
         for diagnosed in [false, true] {
             for &disposition in dispositions {
-                native_close(workers, move |cx| run_close_case(cx, diagnosed, disposition));
+                native_workers(workers, move |cx| {
+                    run_close_case(cx, diagnosed, disposition)
+                });
             }
         }
     }
@@ -616,6 +633,257 @@ fn sqlite_dropped_running_transaction_keeps_its_finite_insert_and_open_transacti
         }
         fixture.finish(&cx).await;
     });
+}
+
+/// Holds the real transaction-state mutex on a fixture thread. Once a stream
+/// publishes Running, its worker owns the connection but cannot pass validation
+/// to prepare or step any SQL until this gate is released. Keeping the guard
+/// on this thread also keeps the native scenario's future Send.
+struct StreamStateGate {
+    release: Option<Release>,
+    thread: Option<std::thread::JoinHandle<Result<(), std_mpsc::RecvTimeoutError>>>,
+}
+
+impl StreamStateGate {
+    fn new(state: Arc<Mutex<TransactionState>>) -> Self {
+        let (locked, observed) = std_mpsc::channel();
+        let (release, received) = std_mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("sqlite-stream-state-gate".to_string())
+            .spawn(move || {
+                let _state = state.lock();
+                if locked.send(()).is_err() {
+                    return Ok(());
+                }
+                received.recv_timeout(WAIT_LIMIT)
+            })
+            .expect("spawn stream state gate");
+        let gate = Self {
+            release: Some(Release(Some(release))),
+            thread: Some(thread),
+        };
+        observed
+            .recv_timeout(WAIT_LIMIT)
+            .expect("fixture must own the transaction-state mutex");
+        gate
+    }
+
+    fn open(mut self) {
+        self.release.take().unwrap().open();
+        self.thread
+            .take()
+            .unwrap()
+            .join()
+            .expect("stream state gate must not panic")
+            .expect("state gate release must precede its independent deadline");
+    }
+}
+
+impl Drop for StreamStateGate {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn observe_stream_before_first_instruction(phase: &Mutex<SqliteConnectionOpPhase>) {
+    let deadline = std::time::Instant::now() + WAIT_LIMIT;
+    loop {
+        let observed = *phase.lock();
+        if observed == SqliteConnectionOpPhase::Running {
+            return;
+        }
+        assert_eq!(observed, SqliteConnectionOpPhase::Queued);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stream worker must acquire the connection and reach its state-mutex gate"
+        );
+        std::thread::yield_now();
+    }
+}
+
+async fn run_stream_admission_case(cx: Cx, hard_drop: bool, timed: bool, sql: &'static str) {
+    let active_cx = Cx::current().expect("native stream worker context");
+    let mut fixture = Fixture::new();
+    match fixture
+        .connection
+        .execute_batch(&active_cx, "CREATE TABLE stream_effects(value INTEGER)")
+        .await
+    {
+        Outcome::Ok(()) => {}
+        other => panic!("create stream-effects fixture: {other:?}"),
+    }
+    if timed {
+        fixture
+            .connection
+            .set_statement_timeout_override(Some(Duration::from_secs(60)));
+    }
+    let transaction_state = Arc::clone(&fixture.connection.transaction_state);
+    let worker_gate = CloseGate::new(&fixture, false);
+    let mut stream = match fixture
+        .connection
+        .query_stream_unchecked(&cx, sql, &[])
+        .await
+    {
+        Outcome::Ok(stream) => stream,
+        other => panic!("open public row stream: {other:?}"),
+    };
+    let phase = Arc::clone(&stream.phase);
+    let counters = Arc::clone(&stream.counters);
+    let state_gate = StreamStateGate::new(transaction_state);
+    worker_gate.open();
+    observe_stream_before_first_instruction(&phase);
+    assert_eq!(counters.snapshot().rows_stepped, 0);
+
+    if hard_drop {
+        drop(stream);
+        assert_eq!(*phase.lock(), SqliteConnectionOpPhase::CancelRequested);
+        state_gate.open();
+    } else {
+        let reason = CancelReason::user("stream cancelled before SQLite admission");
+        cx.cancel_with_reason(reason.clone());
+        let mut next = Box::pin(stream.next(&cx));
+        std::future::poll_fn(|task_cx| {
+            assert!(
+                next.as_mut().poll(task_cx).is_pending(),
+                "cancelled next must await the actual parked worker's retirement"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(*phase.lock(), SqliteConnectionOpPhase::CancelRequested);
+        state_gate.open();
+        match next.await {
+            Outcome::Cancelled(observed) => assert_eq!(observed, reason),
+            other => panic!("public next must preserve the caller's cancellation: {other:?}"),
+        }
+        drop(stream);
+    }
+
+    fixture.fence();
+    assert_eq!(*phase.lock(), SqliteConnectionOpPhase::Completed);
+    let stats = counters.snapshot();
+    assert_eq!(
+        stats.rows_stepped, 0,
+        "hard_drop={hard_drop}, timed={timed}, sql={sql}: cancelled admission ran SQL"
+    );
+    assert_eq!(stats.rows_yielded, 0);
+    // A fresh wrapper operation would replace a leaked progress callback, so
+    // first prove the raw engine is reusable without installing another hook.
+    fixture.assert_handler_retired();
+    match fixture
+        .connection
+        .query(
+            &active_cx,
+            "SELECT count(*) AS count FROM stream_effects",
+            &[],
+        )
+        .await
+    {
+        Outcome::Ok(rows) => assert_eq!(rows[0].get_i64("count").unwrap(), 0),
+        other => panic!("cancelled INSERT RETURNING must leave the table untouched: {other:?}"),
+    }
+    fixture.finish(&active_cx).await;
+}
+
+fn stream_admission_matrix(hard_drop: bool) {
+    for workers in [1, 2] {
+        for timed in [false, true] {
+            for sql in [
+                FINITE_QUERY,
+                "INSERT INTO stream_effects(value) VALUES (7) RETURNING value",
+            ] {
+                native_workers(workers, move |cx| {
+                    run_stream_admission_case(cx, hard_drop, timed, sql)
+                });
+            }
+        }
+    }
+}
+
+/// br-asupersync-1cjrtx / sqlite-pool-audit-r10-dj4uhx: an idle interrupt at
+/// the worker/VM boundary must not let a finite query or short write run later.
+#[test]
+fn sqlite_row_stream_drop_before_first_instruction_suppresses_query_and_write() {
+    stream_admission_matrix(true);
+}
+
+#[test]
+fn sqlite_row_stream_cancel_before_first_instruction_drains_and_preserves_reason() {
+    stream_admission_matrix(false);
+}
+
+async fn run_started_stream_case(cx: Cx, hard_drop: bool, timed: bool) {
+    let active_cx = Cx::current().expect("native stream worker context");
+    let mut fixture = Fixture::new();
+    if timed {
+        fixture
+            .connection
+            .set_statement_timeout_override(Some(Duration::from_secs(60)));
+    }
+    let mut stream = match fixture
+        .connection
+        .query_stream_unchecked(
+            &cx,
+            "WITH RECURSIVE c(x) AS \
+             (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 4096) SELECT x FROM c",
+            &[],
+        )
+        .await
+    {
+        Outcome::Ok(stream) => stream,
+        other => panic!("open started row stream: {other:?}"),
+    };
+    let deadline = std::time::Instant::now() + WAIT_LIMIT;
+    while stream.stats().rows_stepped < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stream must reach real VM execution and capacity-one backpressure"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(stream.stats().rows_yielded, 0);
+    let phase = Arc::clone(&stream.phase);
+    let counters = Arc::clone(&stream.counters);
+    let control = Arc::clone(&stream.control);
+    assert_eq!(*phase.lock(), SqliteConnectionOpPhase::Running);
+    assert!(control.progress_active.load(Ordering::Acquire));
+    if !hard_drop {
+        let reason = CancelReason::user("cancel started SQLite stream");
+        cx.cancel_with_reason(reason.clone());
+        match stream.next(&cx).await {
+            Outcome::Cancelled(observed) => assert_eq!(observed, reason),
+            other => panic!("started stream must preserve its cancellation reason: {other:?}"),
+        }
+    }
+    drop(stream);
+    fixture.fence();
+    assert_eq!(*phase.lock(), SqliteConnectionOpPhase::Completed);
+    let stats = counters.snapshot();
+    assert_eq!(stats.rows_stepped, 2);
+    assert_eq!(stats.rows_yielded, 0);
+    assert!(!control.progress_active.load(Ordering::Acquire));
+    // The callback was installed in every case; cooperative cancellation also
+    // set its cancellation flag. Hard drop may let the worker finish as soon
+    // as its receiver closes, but must still retire the callback. An ordinary
+    // follow-up operation would overwrite the hook and conceal a leak.
+    fixture.assert_handler_retired();
+    fixture.finish(&active_cx).await;
+}
+
+#[test]
+fn sqlite_row_stream_cancellation_after_vm_entry_retires_its_progress_handler() {
+    for workers in [1, 2] {
+        for hard_drop in [false, true] {
+            for timed in [false, true] {
+                native_workers(workers, move |cx| {
+                    run_started_stream_case(cx, hard_drop, timed)
+                });
+            }
+        }
+    }
 }
 
 #[test]
