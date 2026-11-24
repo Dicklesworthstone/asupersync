@@ -1,4 +1,4 @@
-//! Borrowing decoders for PostgreSQL's `pgoutput` protocol versions 1 and 2.
+//! Borrowing decoders for PostgreSQL's `pgoutput` protocol versions 1 through 3.
 //!
 //! Decode the `data` portion of a replication `XLogData` event, after its WAL
 //! envelope has been removed. Names and tuple payloads borrow that buffer;
@@ -7,13 +7,13 @@
 //! bytes, keeping NULL, an unchanged TOAST value, and empty text distinct.
 //!
 //! The stateless helpers retain their version-1 contract. [`PgOutputDecoder`]
-//! additionally decodes version-2 streamed transactions, retaining the active
+//! additionally decodes streamed and prepared transactions, retaining the active
 //! segment across WAL envelopes so transaction IDs cannot be mistaken for
 //! relation IDs. Streamed changes are provisional until Stream Commit; a
 //! Stream Abort can discard a whole transaction or one of its subtransactions.
 //! The consumer owns relation metadata, transaction assembly, and the decision
-//! to acknowledge a durably committed LSN. Versions 3 and 4, including two-phase
-//! commit and parallel apply, remain unsupported.
+//! to acknowledge WAL progress. Version 3 exposes prepared transactions and
+//! their later commit or rollback. Version 4 parallel apply remains unsupported.
 //!
 //! Wire reference: <https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html>.
 
@@ -277,9 +277,26 @@ pub enum PgOutputProtocolVersion {
     V1,
     /// Supports streamed in-progress transactions (PostgreSQL 14 or later).
     V2,
+    /// Supports two-phase transaction decoding (PostgreSQL 15 or later).
+    V3,
 }
 
-/// A decoded message with version-2 transaction ownership preserved.
+/// WAL coordinates and transaction identity carried by a pgoutput prepare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgPrepare<'a> {
+    /// Position of the PREPARE record.
+    pub prepare_lsn: PgLsn,
+    /// End of the prepare record.
+    pub end_lsn: PgLsn,
+    /// Prepare timestamp in microseconds since the PostgreSQL epoch.
+    pub prepare_time_micros: i64,
+    /// Publisher transaction ID.
+    pub xid: u32,
+    /// Global transaction identifier borrowed from the WAL payload.
+    pub gid: &'a str,
+}
+
+/// A decoded message with transaction ownership and commit state preserved.
 ///
 /// Changes in a stream segment may belong to a subtransaction. `stream_xid`
 /// identifies the enclosing top-level transaction; `xid` is the actual wire
@@ -295,6 +312,40 @@ pub enum PgOutputEvent<'a> {
         xid: Option<u32>,
         /// The existing borrowing representation of the message payload.
         message: PgOutputMessage<'a>,
+    },
+    /// Opens a sequence of changes that will end with Prepare.
+    BeginPrepare(PgPrepare<'a>),
+    /// The transaction was prepared and still awaits its final outcome.
+    Prepare(PgPrepare<'a>),
+    /// A previously streamed transaction has reached the prepared state.
+    StreamPrepare(PgPrepare<'a>),
+    /// The publisher committed the named prepared transaction.
+    CommitPrepared {
+        /// Position of the COMMIT PREPARED record.
+        commit_lsn: PgLsn,
+        /// End of the commit record.
+        end_lsn: PgLsn,
+        /// Commit timestamp in microseconds since the PostgreSQL epoch.
+        commit_time_micros: i64,
+        /// Publisher transaction ID.
+        xid: u32,
+        /// Global transaction identifier.
+        gid: &'a str,
+    },
+    /// The publisher rolled back the named prepared transaction.
+    RollbackPrepared {
+        /// End of the original prepare record.
+        prepare_end_lsn: PgLsn,
+        /// End of the rollback record.
+        rollback_end_lsn: PgLsn,
+        /// Timestamp of the original prepare.
+        prepare_time_micros: i64,
+        /// Rollback timestamp in microseconds since the PostgreSQL epoch.
+        rollback_time_micros: i64,
+        /// Publisher transaction ID.
+        xid: u32,
+        /// Global transaction identifier.
+        gid: &'a str,
     },
     /// Start or continuation of one transaction's streamed segment.
     StreamStart {
@@ -343,6 +394,7 @@ pub enum PgOutputEvent<'a> {
 #[derive(Debug, Default, Clone)]
 pub struct PgOutputDecoder {
     version: PgOutputProtocolVersion,
+    streaming: bool,
     stream_xid: Option<u32>,
 }
 
@@ -350,8 +402,13 @@ impl PgOutputDecoder {
     /// Create a decoder matching the protocol negotiated with the publisher.
     #[must_use]
     pub const fn new(version: PgOutputProtocolVersion) -> Self {
+        Self::with_streaming(version, !matches!(version, PgOutputProtocolVersion::V1))
+    }
+
+    pub(super) const fn with_streaming(version: PgOutputProtocolVersion, streaming: bool) -> Self {
         Self {
             version,
+            streaming,
             stream_xid: None,
         }
     }
@@ -402,7 +459,53 @@ impl PgOutputDecoder {
         let mut next_stream_xid = self.stream_xid;
         let boundary_error = |reason| PgOutputError::Invalid { offset: 0, reason };
         let event = match tag {
-            b'S' | b'E' | b'c' | b'A' if self.version == PgOutputProtocolVersion::V1 => {
+            b'b' | b'P' | b'p' | b'K' | b'r' => {
+                if self.version != PgOutputProtocolVersion::V3 {
+                    return Err(PgOutputError::UnsupportedMessage { offset: 0, tag });
+                }
+                if tag == b'p' && !self.streaming {
+                    return Err(PgOutputError::UnsupportedMessage { offset: 0, tag });
+                }
+                if self.stream_xid.is_some() {
+                    return Err(boundary_error("prepared transaction boundary inside a stream segment"));
+                }
+                // Begin Prepare is the only two-phase message without a flag byte.
+                if tag != b'b' {
+                    input.flags(0)?;
+                }
+                match tag {
+                    b'K' => PgOutputEvent::CommitPrepared {
+                        commit_lsn: input.lsn()?,
+                        end_lsn: input.lsn()?,
+                        commit_time_micros: input.i64()?,
+                        xid: input.u32()?,
+                        gid: input.string()?,
+                    },
+                    b'r' => PgOutputEvent::RollbackPrepared {
+                        prepare_end_lsn: input.lsn()?,
+                        rollback_end_lsn: input.lsn()?,
+                        prepare_time_micros: input.i64()?,
+                        rollback_time_micros: input.i64()?,
+                        xid: input.u32()?,
+                        gid: input.string()?,
+                    },
+                    _ => {
+                        let prepare = PgPrepare {
+                            prepare_lsn: input.lsn()?,
+                            end_lsn: input.lsn()?,
+                            prepare_time_micros: input.i64()?,
+                            xid: input.u32()?,
+                            gid: input.string()?,
+                        };
+                        match tag {
+                            b'b' => PgOutputEvent::BeginPrepare(prepare),
+                            b'P' => PgOutputEvent::Prepare(prepare),
+                            _ => PgOutputEvent::StreamPrepare(prepare),
+                        }
+                    }
+                }
+            }
+            b'S' | b'E' | b'c' | b'A' if !self.streaming => {
                 return Err(PgOutputError::UnsupportedMessage { offset: 0, tag });
             }
             b'S' => {
@@ -1317,5 +1420,71 @@ mod tests {
                 remaining: 16
             })
         ));
+    }
+
+    #[test]
+    fn pgoutput_v3_preserves_each_prepared_transaction_boundary() {
+        // Independently assembled PostgreSQL wire fields, including negative
+        // timestamps, a high-bit LSN and a GID distinct from the numeric XID.
+        let common = b"\x80\0\0\0\0\0\0\x10\x80\0\0\0\0\0\0\x18\xff\xff\xff\xff\xff\xff\xff\xfe";
+        let identity = b"\0\0\0\x2aorders-7\0";
+        let prepare = PgPrepare {
+            prepare_lsn: PgLsn::new(0x8000_0000_0000_0010),
+            end_lsn: PgLsn::new(0x8000_0000_0000_0018),
+            prepare_time_micros: -2,
+            xid: 42,
+            gid: "orders-7",
+        };
+        let mut decoder = PgOutputDecoder::new(PgOutputProtocolVersion::V3);
+        for (tag, expected) in [
+            (b'b', PgOutputEvent::BeginPrepare(prepare)),
+            (b'P', PgOutputEvent::Prepare(prepare)),
+            (b'p', PgOutputEvent::StreamPrepare(prepare)),
+            (b'K', PgOutputEvent::CommitPrepared {
+                commit_lsn: prepare.prepare_lsn,
+                end_lsn: prepare.end_lsn,
+                commit_time_micros: -2,
+                xid: 42,
+                gid: "orders-7",
+            }),
+            (b'r', PgOutputEvent::RollbackPrepared {
+                prepare_end_lsn: prepare.prepare_lsn,
+                rollback_end_lsn: prepare.end_lsn,
+                prepare_time_micros: -2,
+                rollback_time_micros: 9,
+                xid: 42,
+                gid: "orders-7",
+            }),
+        ] {
+            let mut frame = vec![tag];
+            if tag != b'b' {
+                frame.push(0);
+            }
+            frame.extend_from_slice(common);
+            if tag == b'r' {
+                frame.extend_from_slice(&9i64.to_be_bytes());
+            }
+            frame.extend_from_slice(identity);
+            assert_eq!(decoder.decode(&frame).unwrap(), expected);
+            for end in 0..frame.len() {
+                assert!(decoder.decode(&frame[..end]).is_err());
+            }
+            for version in [PgOutputProtocolVersion::V1, PgOutputProtocolVersion::V2] {
+                assert!(matches!(PgOutputDecoder::new(version).decode(&frame),
+                    Err(PgOutputError::UnsupportedMessage { .. })));
+            }
+            decoder.decode(b"S\0\0\0\x2a\x01").unwrap();
+            assert!(matches!(decoder.decode(&frame), Err(PgOutputError::Invalid { .. })));
+            assert_eq!(decoder.active_stream_xid(), Some(42));
+            decoder.decode(b"E").unwrap();
+            let size = frame.len();
+            frame.push(b'E');
+            assert!(matches!(decoder.decode(&frame), Err(PgOutputError::TrailingBytes { .. })));
+            assert_eq!(decoder.decode_prefix(&frame).unwrap(), (expected, size));
+            if tag != b'b' {
+                frame[1] = 1;
+                assert!(matches!(decoder.decode_prefix(&frame), Err(PgOutputError::Invalid { .. })));
+            }
+        }
     }
 }
