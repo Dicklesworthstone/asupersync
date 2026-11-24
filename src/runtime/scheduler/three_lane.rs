@@ -8111,6 +8111,12 @@ impl ThreeLaneWorker {
                 command,
             ));
         }
+        if drain_now.is_some() {
+            // Close/cancel can make cleanup ready after the last body retired.
+            // Admit it before selecting more work: an unrelated runnable task
+            // must not keep a close waiter dependent on global idleness.
+            self.schedule_ready_finalizers();
+        }
         count
     }
 
@@ -11277,3 +11283,7 @@ mod completion_retention_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "three_lane_queued_close_tests.rs"]
 mod queued_close_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "three_lane_finalizer_fairness_tests.rs"]
+mod finalizer_fairness_tests;
