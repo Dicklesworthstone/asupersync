@@ -66,6 +66,8 @@ impl GenerationName {
     ) -> Result<(), RegistrationFailure> {
         Self::check_cancel(cx)?;
         let deadline = cx.budget().deadline.unwrap_or(Time::from_nanos(u64::MAX));
+        // A caller-supplied clock can inspect this same registry.
+        let registered_at = cx.now();
         let displaced = {
             let mut ownership = self.ownership.lock();
             ownership.identity = Some(identity);
@@ -79,7 +81,7 @@ impl GenerationName {
                 self.name.clone(),
                 identity.task,
                 identity.region,
-                cx.now(),
+                registered_at,
                 policy,
             );
             match result.map_err(RegistrationFailure::Name)? {
@@ -116,6 +118,7 @@ impl GenerationName {
         }
         loop {
             Self::check_cancel(cx)?;
+            let now = cx.now();
             {
                 let mut ownership = self.ownership.lock();
                 if let Some(lease) = &ownership.lease {
@@ -127,7 +130,6 @@ impl GenerationName {
                         }))
                     };
                 }
-                let now = cx.now();
                 if now >= deadline {
                     return Err(RegistrationFailure::Name(
                         NameLeaseError::WaitBudgetExceeded {
@@ -178,12 +180,19 @@ impl GenerationName {
     /// can start. A task/generation identity mismatch means an external
     /// replacement already won; settle our token without removing its entry.
     pub(super) fn release(&self) {
+        let cx = {
+            let ownership = self.ownership.lock();
+            if ownership.resolved {
+                return;
+            }
+            ownership.cx.clone()
+        };
+        let now = cx.as_ref().map_or(Time::ZERO, Cx::now);
         let mut ownership = self.ownership.lock();
         if ownership.resolved {
             return;
         }
         ownership.resolved = true;
-        let now = ownership.cx.as_ref().map_or(Time::ZERO, Cx::now);
         let mut registry = self.registry.lock();
         if let Some(mut lease) = ownership.lease.take() {
             if registry.unregister_owned_and_grant(&lease, now).is_ok() {
@@ -210,3 +219,7 @@ impl Drop for GenerationName {
         self.release();
     }
 }
+
+#[cfg(test)]
+#[path = "managed_names_inline_tests.rs"]
+mod tests;
