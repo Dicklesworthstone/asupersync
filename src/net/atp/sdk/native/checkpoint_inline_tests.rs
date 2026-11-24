@@ -149,6 +149,66 @@ fn acknowledged_journal_retains_the_actual_receipt_and_rejects_inconsistent_fact
     }
 }
 
+#[test]
+fn reduced_checkpoint_receipt_requires_the_verified_whole_source_identity() {
+    let mut record = journal();
+    let bytes = b"payload";
+    let content = ContentId::from_bytes(bytes);
+    record.source_sha256 = Sha256::digest(bytes).into();
+    let root = flat_merkle_root_from_digests(&[EntryDigest {
+        rel_path: record.file_name.clone(),
+        size: record.source_bytes,
+        content_id: ObjectId::content(content.clone()),
+        content_sha256: record.source_sha256,
+    }]);
+    record.state = NativeCheckpointState::Acknowledged;
+    record.version = REUSED_JOURNAL_VERSION;
+    record.attempt = 1;
+    record.receipt = Some(StoredReceipt {
+        verified_content_id: Some(content),
+        transfer_id: "retained-transfer".into(),
+        merkle_root_hex: root,
+        bytes_sent: 3,
+        files: 1,
+        symbols_sent: 0,
+        feedback_rounds: 0,
+        peer: record.remote,
+        receipt: ReceiveReceipt {
+            committed: true,
+            bytes_received: 3,
+            files: 1,
+            sha_ok: true,
+            merkle_ok: true,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
+            decode_count: 0,
+            decode_micros: 0,
+            reason: None,
+            committed_paths: vec!["/dest/data.bin".into()],
+        },
+    });
+    record.validate().unwrap();
+    assert!(read_version_one(&serde_json::to_vec(&record).unwrap()).is_err());
+    for kind in 0..8 {
+        let mut wrong = record.clone();
+        let stored = wrong.receipt.as_mut().unwrap();
+        match kind {
+            0 => stored.verified_content_id = None,
+            1 => stored.verified_content_id = Some(ContentId::from_bytes(b"changed")),
+            2 => wrong.source_sha256[0] ^= 1,
+            3 => wrong.file_name = "other.bin".into(),
+            4 => stored.merkle_root_hex = "00".repeat(32),
+            5 => stored.receipt.bytes_received += 1,
+            6 => wrong.version = JOURNAL_VERSION,
+            _ => {
+                stored.bytes_sent = wrong.source_bytes + 1;
+                stored.receipt.bytes_received = stored.bytes_sent;
+            }
+        }
+        assert!(wrong.validate().is_err(), "kind={kind}");
+    }
+}
+
 // The pre-cancellation decoder's exact field inventory and version check.
 // It must retain compatibility for live v1 journals and refuse a terminal
 // v2 rather than silently treating retained payload bytes as sendable.
