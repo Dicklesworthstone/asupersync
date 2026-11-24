@@ -10,15 +10,16 @@
 
 use asupersync::Cx;
 use asupersync::actor::Actor;
+use asupersync::channel::oneshot;
 use asupersync::cx::ChildRegionSpec;
 use asupersync::gen_server::{CallError, GenServer, GenServerHandle, Reply, SystemMsg};
 use asupersync::monitor::{DownNotification, DownReason, WatchError};
 use asupersync::observability::Diagnostics;
 use asupersync::runtime::{JoinError, Runtime, RuntimeBuilder, yield_now};
 use asupersync::types::{CancelKind, RegionId, TaskId};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::{Future, poll_fn};
+use std::pin::{Pin, pin};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -716,5 +717,337 @@ fn a_native_supervised_actor_restarts_after_a_crash() {
             final_state.total, 5,
             "{flavor}: the restarted instance handled the later message"
         );
+    }
+}
+
+// br-asupersync-pk44qd: caught panic payloads are user-owned objects. None of
+// their destructors may run during restart, terminal publication, or cleanup.
+#[derive(Debug)]
+struct OpaqueActorPanic {
+    drops: Arc<AtomicUsize>,
+    panic_on_drop: bool,
+}
+
+impl Drop for OpaqueActorPanic {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.panic_on_drop,
+            "opaque actor panic payload was dropped"
+        );
+    }
+}
+
+async fn witness_actor_pending<F: Future>(future: F, parked: oneshot::Sender<()>) -> F::Output {
+    let mut future = pin!(future);
+    let mut parked = Some(parked);
+    poll_fn(|task| {
+        let result = future.as_mut().poll(task);
+        if result.is_pending()
+            && let Some(parked) = parked.take()
+        {
+            parked.send_blocking(()).expect("publish Pending witness");
+        }
+        result
+    })
+    .await
+}
+
+#[derive(Debug)]
+enum PayloadNote {
+    Crash {
+        parked: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
+    Followup(oneshot::Sender<usize>),
+}
+
+#[derive(Debug)]
+struct PayloadActor {
+    generation: usize,
+    payload_drops: Arc<AtomicUsize>,
+    stopped: bool,
+}
+
+impl Actor for PayloadActor {
+    type Message = PayloadNote;
+
+    fn handle(
+        &mut self,
+        cx: &Cx,
+        msg: PayloadNote,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        Box::pin(async move {
+            match msg {
+                PayloadNote::Crash {
+                    parked,
+                    mut release,
+                } => {
+                    witness_actor_pending(release.recv(&cx), parked)
+                        .await
+                        .expect("release the witnessed crash");
+                    std::panic::panic_any(OpaqueActorPanic {
+                        drops: Arc::clone(&self.payload_drops),
+                        panic_on_drop: true,
+                    });
+                }
+                PayloadNote::Followup(receipt) => {
+                    receipt
+                        .send_blocking(self.generation)
+                        .expect("deliver followup");
+                }
+            }
+        })
+    }
+
+    fn on_stop(&mut self, _: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.stopped = true;
+        Box::pin(async {})
+    }
+}
+
+#[test]
+fn native_supervised_restart_forgets_opaque_panic_before_starting_successor() {
+    use asupersync::supervision::{BackoffStrategy, RestartConfig, SupervisionStrategy};
+
+    for (flavor, rt) in runtimes() {
+        in_child_region(&rt, |cx| async move {
+            asupersync::time::timeout(cx.now(), WAIT, async {
+                let instances = Arc::new(AtomicUsize::new(0));
+                let payload_drops = Arc::new(AtomicUsize::new(0));
+                let built = Arc::clone(&instances);
+                let dropped = Arc::clone(&payload_drops);
+                let mut actor = cx
+                    .spawn_supervised_actor(
+                        move || PayloadActor {
+                            generation: built.fetch_add(1, Ordering::SeqCst) + 1,
+                            payload_drops: Arc::clone(&dropped),
+                            stopped: false,
+                        },
+                        SupervisionStrategy::Restart(
+                            RestartConfig::new(1, Duration::from_secs(60))
+                                .with_backoff(BackoffStrategy::None),
+                        ),
+                        4,
+                    )
+                    .expect("spawn supervised actor");
+                let (parked, mut waiting) = oneshot::channel();
+                let (release, gate) = oneshot::channel();
+                actor
+                    .try_send(PayloadNote::Crash {
+                        parked,
+                        release: gate,
+                    })
+                    .expect("queue crash gate");
+                waiting.recv(&cx).await.expect("handler actually parked");
+                assert_eq!(instances.load(Ordering::SeqCst), 1);
+                let (receipt, mut delivered) = oneshot::channel();
+                actor
+                    .try_send(PayloadNote::Followup(receipt))
+                    .expect("queue successor work before the crash");
+                release.send_blocking(()).expect("trigger witnessed crash");
+                assert_eq!(
+                    delivered
+                        .recv(&cx)
+                        .await
+                        .expect("successor handled buffered work"),
+                    2,
+                );
+                actor.stop();
+                let final_state = actor.join(&cx).await.expect("join successor");
+                assert_eq!(final_state.generation, 2);
+                assert!(final_state.stopped);
+                assert_eq!(instances.load(Ordering::SeqCst), 2);
+                assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+                assert!(!actor.sender().is_alive());
+            })
+            .await
+            .expect("supervised payload restart must finish");
+        });
+        assert!(rt.is_quiescent(), "{flavor}: actor region drained");
+        eprintln!(
+            "ACTOR_PAYLOAD scenario=restart backend={flavor} parked=true generations=2 delivered=2 payload_drops=0 quiescent=true"
+        );
+    }
+}
+
+#[test]
+fn native_supervised_stop_preserves_original_opaque_panic_attribution() {
+    use asupersync::supervision::SupervisionStrategy;
+
+    for (flavor, rt) in runtimes() {
+        in_child_region(&rt, |cx| async move {
+            asupersync::time::timeout(cx.now(), WAIT, async {
+                let instances = Arc::new(AtomicUsize::new(0));
+                let payload_drops = Arc::new(AtomicUsize::new(0));
+                let built = Arc::clone(&instances);
+                let dropped = Arc::clone(&payload_drops);
+                let mut actor = cx
+                    .spawn_supervised_actor(
+                        move || PayloadActor {
+                            generation: built.fetch_add(1, Ordering::SeqCst) + 1,
+                            payload_drops: Arc::clone(&dropped),
+                            stopped: false,
+                        },
+                        SupervisionStrategy::Stop,
+                        4,
+                    )
+                    .expect("spawn supervised actor");
+                let (parked, mut waiting) = oneshot::channel();
+                let (release, gate) = oneshot::channel();
+                actor
+                    .try_send(PayloadNote::Crash {
+                        parked,
+                        release: gate,
+                    })
+                    .expect("queue crash gate");
+                waiting.recv(&cx).await.expect("handler actually parked");
+                let monitor = cx
+                    .monitor(actor.task_id())
+                    .await
+                    .expect("monitor admitted actor");
+                release.send_blocking(()).expect("trigger witnessed crash");
+                match actor.join(&cx).await {
+                    Err(JoinError::Panicked(payload)) => {
+                        assert_eq!(payload.message(), "unknown panic")
+                    }
+                    other => panic!("original actor crash must reach join: {other:?}"),
+                }
+                let down = monitor.down(&cx).await.expect("observe actor retirement");
+                match down.reason {
+                    DownReason::Panicked(payload) => assert_eq!(payload.message(), "unknown panic"),
+                    other => panic!("monitor must retain actor crash: {other:?}"),
+                }
+                assert_eq!(instances.load(Ordering::SeqCst), 1);
+                assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+                assert!(!actor.sender().is_alive());
+            })
+            .await
+            .expect("supervised payload stop must finish");
+        });
+        assert!(rt.is_quiescent(), "{flavor}: actor region drained");
+        eprintln!(
+            "ACTOR_PAYLOAD scenario=stop backend={flavor} parked=true generations=1 original_panic=true payload_drops=0 quiescent=true"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct DrainPayloadActor {
+    parked: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<()>>,
+    events: Arc<Mutex<Vec<&'static str>>>,
+    payload_drops: Arc<AtomicUsize>,
+    opaque_first: bool,
+}
+
+impl Actor for DrainPayloadActor {
+    type Message = u8;
+
+    fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        let parked = self.parked.take().expect("one startup witness");
+        let mut release = self.release.take().expect("one startup gate");
+        self.events.lock().unwrap().push("start");
+        Box::pin(async move {
+            witness_actor_pending(release.recv(&cx), parked)
+                .await
+                .expect("release startup after stop");
+        })
+    }
+
+    fn handle(&mut self, _: &Cx, msg: u8) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        match msg {
+            0 => {
+                self.events.lock().unwrap().push("first");
+                if self.opaque_first {
+                    std::panic::panic_any(OpaqueActorPanic {
+                        drops: Arc::clone(&self.payload_drops),
+                        panic_on_drop: false,
+                    });
+                }
+                panic!("original graceful drain failure");
+            }
+            1 => {
+                self.events.lock().unwrap().push("second");
+                std::panic::panic_any(OpaqueActorPanic {
+                    drops: Arc::clone(&self.payload_drops),
+                    // Keep the old-code control non-aborting while detecting
+                    // the same forbidden payload destructor invocation.
+                    panic_on_drop: false,
+                });
+            }
+            2 => self.events.lock().unwrap().push("tail"),
+            _ => unreachable!("fixture message"),
+        }
+        Box::pin(async {})
+    }
+
+    fn on_stop(&mut self, _: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.events.lock().unwrap().push("on_stop");
+        std::panic::panic_any(OpaqueActorPanic {
+            drops: Arc::clone(&self.payload_drops),
+            panic_on_drop: false,
+        });
+    }
+}
+
+#[test]
+fn native_actor_graceful_drain_retires_secondary_panic_payloads_before_cleanup() {
+    for opaque_first in [false, true] {
+        for (flavor, rt) in runtimes() {
+            in_child_region(&rt, move |cx| async move {
+                asupersync::time::timeout(cx.now(), WAIT, async {
+                    let events = Arc::new(Mutex::new(Vec::new()));
+                    let payload_drops = Arc::new(AtomicUsize::new(0));
+                    let (parked, mut waiting) = oneshot::channel();
+                    let (release, gate) = oneshot::channel();
+                    let mut actor = cx
+                        .spawn_actor(
+                            DrainPayloadActor {
+                                parked: Some(parked),
+                                release: Some(gate),
+                                events: Arc::clone(&events),
+                                payload_drops: Arc::clone(&payload_drops),
+                                opaque_first,
+                            },
+                            4,
+                        )
+                        .expect("spawn drain actor");
+                    waiting.recv(&cx).await.expect("startup actually parked");
+                    for msg in 0..=2 {
+                        actor.try_send(msg).expect("queue graceful-drain tail");
+                    }
+                    actor.stop();
+                    release.send_blocking(()).expect("enter graceful drain");
+                    match actor.join(&cx).await {
+                        Err(JoinError::Panicked(payload)) => {
+                            assert_eq!(
+                                payload.message(),
+                                if opaque_first {
+                                    "unknown panic"
+                                } else {
+                                    "original graceful drain failure"
+                                }
+                            );
+                        }
+                        other => panic!("first drain failure must survive cleanup: {other:?}"),
+                    }
+                    assert_eq!(
+                        *events.lock().unwrap(),
+                        ["start", "first", "second", "tail", "on_stop"]
+                    );
+                    assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+                    assert!(!actor.sender().is_alive());
+                })
+                .await
+                .expect("graceful drain with secondary panics must finish");
+            });
+            assert!(rt.is_quiescent(), "{flavor}: actor region drained");
+            eprintln!(
+                "ACTOR_PAYLOAD scenario=graceful_drain backend={flavor} opaque_first={opaque_first} parked=true tail_handled=true on_stop=true first_panic_preserved=true payload_drops=0 quiescent=true"
+            );
+        }
     }
 }

@@ -984,7 +984,7 @@ async fn catch_graceful_drain_handler<A: Actor>(
     actor: &mut A,
     cx: &Cx,
     msg: A::Message,
-) -> std::thread::Result<()> {
+) -> Result<(), crate::types::PanicPayload> {
     use crate::cx::scope::CatchUnwind;
 
     // The async wrapper is intentional: `Actor::handle` may panic either while
@@ -993,6 +993,7 @@ async fn catch_graceful_drain_handler<A: Actor>(
         inner: async { actor.handle(cx, msg).await },
     }
     .await
+    .map_err(actor_panic_payload)
 }
 
 /// Internal: runs the actor message loop.
@@ -1189,12 +1190,13 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         let cleanup = CatchUnwind {
             inner: async { actor.on_stop(&cx).await },
         }
-        .await;
+        .await
+        .map_err(actor_panic_payload);
         drop(mask_guard);
         if cleanup.is_err() {
             cx.trace("actor::on_stop_panicked_after_drain_panic");
         }
-        std::panic::resume_unwind(drain_panic);
+        std::panic::resume_unwind(Box::new(drain_panic.message().to_owned()));
     } else {
         actor.on_stop(&cx).await;
         drop(mask_guard);
@@ -1379,9 +1381,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                     Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let msg = crate::cx::scope::payload_to_string(&payload);
-                    std::mem::forget(payload);
-                    let panic_payload = crate::types::PanicPayload::new(msg);
+                    let panic_payload = actor_panic_payload(payload);
                     let _ =
                         result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     Outcome::Panicked(panic_payload)
@@ -1513,13 +1513,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             .await
             {
                 Ok(result) => result,
-                Err(payload) => {
-                    let message = crate::cx::scope::payload_to_string(&payload);
-                    std::mem::forget(payload);
-                    Err(JoinError::Panicked(crate::types::PanicPayload::new(
-                        message,
-                    )))
-                }
+                Err(payload) => Err(panicked_join_error(payload)),
             };
             state_for_task.store(ActorState::Stopped);
             let outcome = join_result_to_task_outcome(&result).map_err(|_| ());
@@ -1689,12 +1683,17 @@ impl Cx {
     }
 }
 
-/// The join error for an actor whose run panicked. The payload is forgotten
-/// rather than dropped, as in the scope spawns: its destructor could panic.
-fn panicked_join_error(payload: Box<dyn std::any::Any + Send>) -> JoinError {
+/// Retain only the closed diagnostic before any callback, await, or policy
+/// decision. An opaque panic payload can panic again when it is dropped.
+fn actor_panic_payload(payload: Box<dyn std::any::Any + Send>) -> crate::types::PanicPayload {
     let message = crate::cx::scope::payload_to_string(&payload);
     std::mem::forget(payload);
-    JoinError::Panicked(crate::types::PanicPayload::new(message))
+    crate::types::PanicPayload::new(message)
+}
+
+/// The join error for an actor whose run panicked.
+fn panicked_join_error(payload: Box<dyn std::any::Any + Send>) -> JoinError {
+    JoinError::Panicked(actor_panic_payload(payload))
 }
 
 /// Outcome of a supervised actor run.
@@ -1747,8 +1746,7 @@ where
                 return Ok(actor_final);
             }
             Err(payload) => {
-                let msg = crate::cx::scope::payload_to_string(&payload);
-                let panic_payload = crate::types::PanicPayload::new(msg);
+                let panic_payload = actor_panic_payload(payload);
                 cx.trace("supervised_actor::failure");
 
                 // Explicit shutdown wins over restart policy. If the owner has
@@ -1822,17 +1820,29 @@ where
     }
 }
 
-/// Logs a panic contained while dropping a buffered message, then leaks its
-/// payload, because dropping the payload can panic too. An unresolved
-/// obligation left in an aborted actor's mailbox panics this way (ASUP-E101);
+/// Retires an opaque message-drop panic before attempting its diagnostic.
+/// The diagnostic's own callback panic must not interrupt mailbox disposal.
+/// An unresolved obligation left in an aborted actor's mailbox panics this way (ASUP-E101);
 /// without this the leak would show only as an abort-path trace event
 /// (br-asupersync-pk44qd S3).
 fn forget_contained_drop_panic(payload: Box<dyn std::any::Any + Send>) {
-    crate::tracing_compat::error!(
-        panic = %crate::cx::scope::payload_to_string(&payload),
-        "a buffered actor message panicked while being dropped; the panic was contained"
-    );
-    std::mem::forget(payload);
+    let panic_payload = actor_panic_payload(payload);
+    #[cfg(not(feature = "tracing-integration"))]
+    let _ = panic_payload;
+    #[cfg(feature = "tracing-integration")]
+    {
+        let diagnostic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::tracing_compat::error!(
+                panic = %panic_payload.message(),
+                "a buffered actor message panicked while being dropped; the panic was contained"
+            );
+        }));
+        if let Err(payload) = diagnostic {
+            // A subscriber may itself panic with an opaque, panicking destructor.
+            // Preserve per-message disposal rather than recursively logging it.
+            std::mem::forget(payload);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1911,6 +1911,234 @@ fn a_contained_buffered_message_drop_panic_is_logged() {
     );
 }
 
+#[cfg(feature = "tracing-integration")]
+#[test]
+fn buffered_message_disposal_contains_diagnostic_panics_and_retires_the_tail() {
+    use std::sync::atomic::AtomicUsize;
+    use tracing_subscriber::prelude::*;
+
+    struct CountedPayload(Arc<AtomicUsize>);
+    impl Drop for CountedPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Message {
+        panics: bool,
+        drops: Arc<AtomicUsize>,
+        payload_drops: Arc<AtomicUsize>,
+        unwinding_drops: Arc<AtomicUsize>,
+    }
+    impl Drop for Message {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if std::thread::panicking() {
+                // Keep the old-code control non-aborting: an escaped logger
+                // panic still fails the exact isolation and disposal checks.
+                self.unwinding_drops.fetch_add(1, Ordering::SeqCst);
+            } else if self.panics {
+                std::panic::panic_any(CountedPayload(Arc::clone(&self.payload_drops)));
+            }
+        }
+    }
+    struct PanickingDiagnostic {
+        calls: Arc<AtomicUsize>,
+        payload_drops: Arc<AtomicUsize>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanickingDiagnostic {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR
+                && event.metadata().fields().field("panic").is_some()
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                std::panic::panic_any(CountedPayload(Arc::clone(&self.payload_drops)));
+            }
+        }
+    }
+
+    let message_drops = Arc::new(AtomicUsize::new(0));
+    let message_payload_drops = Arc::new(AtomicUsize::new(0));
+    let unwinding_drops = Arc::new(AtomicUsize::new(0));
+    let diagnostic_calls = Arc::new(AtomicUsize::new(0));
+    let diagnostic_payload_drops = Arc::new(AtomicUsize::new(0));
+    let (sender, mailbox) = mpsc::channel(3);
+    for panics in [true, true, false] {
+        assert!(
+            sender
+                .try_send(Message {
+                    panics,
+                    drops: Arc::clone(&message_drops),
+                    payload_drops: Arc::clone(&message_payload_drops),
+                    unwinding_drops: Arc::clone(&unwinding_drops),
+                })
+                .is_ok()
+        );
+    }
+    let cell = ActorCell {
+        mailbox,
+        state: Arc::new(ActorStateCell::new(ActorState::Stopping)),
+    };
+    let subscriber = tracing_subscriber::registry().with(PanickingDiagnostic {
+        calls: Arc::clone(&diagnostic_calls),
+        payload_drops: Arc::clone(&diagnostic_payload_drops),
+    });
+    let disposal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tracing::subscriber::with_default(subscriber, || drop(cell));
+    }));
+    let escaped = match disposal {
+        Ok(()) => false,
+        Err(payload) => {
+            std::mem::forget(payload);
+            true
+        }
+    };
+    assert!(
+        !escaped,
+        "the diagnostic callback must not escape ActorCell::drop"
+    );
+    assert_eq!(diagnostic_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(message_drops.load(Ordering::SeqCst), 3);
+    assert_eq!(message_payload_drops.load(Ordering::SeqCst), 0);
+    assert_eq!(diagnostic_payload_drops.load(Ordering::SeqCst), 0);
+    assert_eq!(unwinding_drops.load(Ordering::SeqCst), 0);
+    assert!(sender.is_closed());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_supervised_backoff_forgets_panic_payload_before_pending_cleanup() {
+    use crate::channel::oneshot;
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::RuntimeBuilder;
+    use crate::supervision::{BackoffStrategy, RestartConfig, SupervisionStrategy, Supervisor};
+    use std::future::poll_fn;
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountedPayload(Arc<AtomicUsize>);
+    impl Drop for CountedPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    #[derive(Debug)]
+    struct CrashOnStart(Arc<AtomicUsize>);
+    impl Actor for CrashOnStart {
+        type Message = ();
+
+        fn on_start(&mut self, _: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            std::panic::panic_any(CountedPayload(Arc::clone(&self.0)));
+        }
+
+        fn handle(&mut self, _: &Cx, (): ()) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            unreachable!("the fixture crashes before receiving a message")
+        }
+    }
+    struct Finalized(Arc<AtomicUsize>);
+    impl Drop for Finalized {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        }
+        .build()
+        .unwrap();
+        let finalized = Arc::new(AtomicUsize::new(0));
+        runtime.block_on(async {
+            let owner = Cx::current().expect("native root context");
+            crate::time::timeout(owner.now(), Duration::from_secs(10), async {
+                let region = owner
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                region
+                    .retain_until_finalized(Finalized(Arc::clone(&finalized)))
+                    .await
+                    .unwrap();
+                let payload_drops = Arc::new(AtomicUsize::new(0));
+                let factories = Arc::new(AtomicUsize::new(0));
+                let dropped = Arc::clone(&payload_drops);
+                let built = Arc::clone(&factories);
+                let (parked, mut pending) = oneshot::channel();
+                let mut task = region
+                    .cx()
+                    .spawn(move |cx| async move {
+                        let (_sender, mailbox) = mpsc::channel(1);
+                        let state = Arc::new(ActorStateCell::new(ActorState::Created));
+                        let mut cell = ActorCell {
+                            mailbox,
+                            state: Arc::clone(&state),
+                        };
+                        let mut factory = || {
+                            built.fetch_add(1, Ordering::SeqCst);
+                            CrashOnStart(Arc::clone(&dropped))
+                        };
+                        let initial = factory();
+                        let mut running = Box::pin(run_supervised_loop(
+                            initial,
+                            &mut factory,
+                            cx.clone(),
+                            &mut cell,
+                            Supervisor::new(SupervisionStrategy::Restart(
+                                RestartConfig::new(1, Duration::from_secs(120))
+                                    .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(60))),
+                            )),
+                            cx.task_id(),
+                            cx.region_id(),
+                        ));
+                        let mut parked = Some(parked);
+                        poll_fn(|poll_cx| {
+                            let result = running.as_mut().poll(poll_cx);
+                            if result.is_pending()
+                                && state.stop_waker.lock().is_some()
+                                && let Some(parked) = parked.take()
+                            {
+                                parked.send_blocking(()).unwrap();
+                            }
+                            result
+                        })
+                        .await
+                    })
+                    .unwrap();
+                pending
+                    .recv(&owner)
+                    .await
+                    .expect("actual backoff Pending witness");
+                assert_eq!(factories.load(Ordering::SeqCst), 1);
+                assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+                assert!(!task.is_finished());
+                task.abort();
+                match task.join(&owner).await {
+                    Ok(Err(JoinError::Cancelled(reason))) => {
+                        assert_eq!(reason.kind, crate::types::CancelKind::User);
+                        assert_eq!(reason.message.as_deref(), Some("abort"));
+                    }
+                    other => panic!("backoff cancellation must retain its typed result: {other:?}"),
+                }
+                assert_eq!(factories.load(Ordering::SeqCst), 1);
+                assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+                region.close().await.unwrap();
+            })
+            .await
+            .expect("backoff cancellation must finish");
+        });
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+        assert!(runtime.is_quiescent());
+        eprintln!(
+            "ACTOR_PAYLOAD scenario=backoff_cancel workers={workers} parked=true generations=1 payload_drops=0 finalized=1 quiescent=true"
+        );
+    }
+}
+
 #[test]
 fn supervised_restart_factory_panic_reaches_join_and_marks_stopped() {
     use crate::sync::atomic::AtomicU32;
