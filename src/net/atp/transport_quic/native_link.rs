@@ -10747,6 +10747,38 @@ async fn commit_staged_entries(
     config: &QuicConfig,
     options: &QuicReceiveOptions,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
+    let result =
+        publish_staged_entries(cx, link, control, dest_dir, manifest, staged, config, options).await;
+    if matches!(
+        &result,
+        Err(QuicTransportError::Io(_) | QuicTransportError::Source(_))
+    ) {
+        // Full-object senders are already waiting for their terminal Proof.
+        // Keep detailed filesystem errors (including paths) local. A failed
+        // directory sync can happen after a rename, so report only that
+        // completion could not be confirmed.
+        refuse_transfer_in_band(
+            cx,
+            link,
+            control,
+            "receiver could not confirm destination publication".to_string(),
+            None,
+        )
+        .await;
+    }
+    result
+}
+
+async fn publish_staged_entries(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    config: &QuicConfig,
+    options: &QuicReceiveOptions,
+) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut read_buf = vec![0_u8; config.chunk_size.max(1)];
     let mut sha_ok = true;
     let mut digests = Vec::with_capacity(manifest.entries.len());

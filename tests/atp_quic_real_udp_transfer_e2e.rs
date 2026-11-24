@@ -984,6 +984,37 @@ fn authenticated_delta_refusal_preserves_full_and_noop_transfer_paths() {
     assert_no_staging_residue(&destination);
 }
 
+/// A local publication error after data admission must reach the full-object
+/// sender. A nonempty directory cannot be atomically replaced by a file.
+#[test]
+fn full_transfer_reports_destination_publication_failure_to_sender() {
+    let source_root = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let destination_path = destination.path().canonicalize().unwrap();
+    let source = source_root.path().canonicalize().unwrap().join("payload.bin");
+    std::fs::write(&source, vec![42; 4096]).unwrap();
+    let conflict = destination_path.join("payload.bin");
+    std::fs::create_dir(&conflict).unwrap();
+    let retained = conflict.join("retain-me");
+    std::fs::write(&retained, b"original").unwrap();
+
+    let mut configs = transport_authenticated_configs();
+    configs.send.enable_delta = false;
+    configs.recv.enable_delta = false;
+    let (sent, received) = run_transfer(configs.send, configs.recv, &source, &destination_path);
+    assert!(matches!(
+        received,
+        Err(QuicTransportError::Io(_) | QuicTransportError::Source(_))
+    ));
+    assert!(
+        matches!(sent, Err(QuicTransportError::Integrity(ref reason))
+            if reason == "receiver could not confirm destination publication"),
+        "sender received {sent:?}"
+    );
+    assert_eq!(std::fs::read(retained).unwrap(), b"original");
+    assert_no_staging_residue(&destination_path);
+}
+
 /// A failure to inspect the receiver's destination happens before ObjectRequest
 /// and must carry a bound refusal, with no receiver filesystem paths disclosed.
 #[cfg(unix)]
