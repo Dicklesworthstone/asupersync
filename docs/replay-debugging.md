@@ -1240,6 +1240,23 @@ trace into deterministic replay proof. For v3, only `Complete` authenticates
 the whole event stream; partial and limit-reached receipts are decoded prefixes,
 not checksum admission.
 
+The CLI exposes this recovery path with a required event-count bound:
+
+```text
+asupersync --format json trace recover crashed.trace --max-events 10000 --output recovered-prefix.json
+```
+
+The command preserves the source and creates the JSON destination only if it
+does not already exist. The report includes the recovered events, metadata,
+counts, and exact stopping status. It writes one report to stdout; diagnostics
+go to stderr. `Partial` and `LimitReached` exit with code **5**, including an
+unfinished writer whose available frames all decode. `Complete` exits with code
+**0**, but legacy v1/v2 recovery still reports `event_stream_verified: false`.
+Every report has `replay_executed: false`: recovery extracts evidence and does
+not execute or certify a deterministic replay. The event-count bound and the
+existing per-frame/chunk limits apply; there is no cumulative decoded-byte
+budget. `--max-events 0` inspects the header without recovering any events.
+
 ### ReplayEvent Variants
 
 ```rust

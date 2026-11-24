@@ -113,6 +113,8 @@ mod atp_local_recover;
 mod atp_local_sync;
 #[path = "asupersync/atp_local_watch.rs"]
 mod atp_local_watch;
+#[path = "asupersync/trace_recover.rs"]
+mod trace_recover;
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -2983,6 +2985,9 @@ enum TraceCommand {
 
     /// Rewrite a legacy v1/v2 trace into the checksummed current container
     Migrate(TraceMigrateArgs),
+
+    /// Recover a bounded event prefix without modifying the source trace
+    Recover(trace_recover::RecoverArgs),
 
     /// Export trace events to JSON
     Export(TraceExportArgs),
@@ -6770,6 +6775,7 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
                 .map_err(output_write_error("migration results"))?;
             Ok(())
         }
+        TraceCommand::Recover(args) => trace_recover::run(&args, output),
         TraceCommand::Export(args) => {
             export_trace(&args.file, args.format)?;
             Ok(())
