@@ -279,3 +279,197 @@ fn checkpoint_writer_cancellation_and_drop_drain_without_publishing_prefixes() {
         assert_clean(&inspect);
     }
 }
+
+
+#[test]
+fn checkpoint_writer_empty_input_is_durable_and_can_be_revoked_before_delivery() {
+    let _exclusive = exclusive();
+    run(async move {
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let witness = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let remote = witness.local_addr().unwrap();
+        let root = fixture();
+        let sending = sender();
+        let mut options = NativeUploadOptions::new(&root, "empty.bin");
+        options.max_bytes = Some(0);
+        let mut writer = sending
+            .open_checkpoint_writer(&cx, &scope, remote, options)
+            .unwrap();
+        writer.shutdown().await.unwrap();
+        assert_eq!(writer.accepted_bytes(), 0);
+        assert_eq!(writer.spooled_bytes(), 0);
+        let terminal = writer.finish().await;
+        assert!(terminal.join.is_ok());
+        let prepared = terminal.outcome.as_ref().unwrap().as_ref().unwrap();
+        let digest: [u8; 32] = Sha256::digest(b"").into();
+        assert_eq!(prepared.checkpoint.source_sha256, digest);
+        assert_eq!(prepared.checkpoint.source_bytes, 0);
+        assert!(prepared.cleanup_error.is_none());
+        let checkpoint = prepared.checkpoint.clone();
+        assert!(std::fs::read(checkpoint.directory.join("payload/empty.bin"))
+            .unwrap()
+            .is_empty());
+        let cancelling = sender();
+        let status = cancelling
+            .cancel_checkpoint(&cx, &checkpoint)
+            .await
+            .unwrap();
+        assert!(status.cancelled);
+        assert!(!status.delivery_uncertain());
+        assert_eq!(status.checkpoint.attempt, 0);
+        let restarted = sender();
+        assert!(matches!(
+            restarted
+                .send_checkpoint(
+                    &cx,
+                    &checkpoint.directory,
+                    remote,
+                    NativeCheckpointRetry::Never,
+                )
+                .await,
+            Err(NativeCheckpointError::Cancelled {
+                attempt: 0,
+                delivery_uncertain: false,
+            })
+        ));
+        assert_eq!(sending.active_transfers(), 0);
+        assert_eq!(restarted.active_transfers(), 0);
+        no_packet(&witness);
+    });
+}
+
+#[test]
+fn checkpoint_writer_oversize_never_publishes_a_successful_prefix() {
+    let _exclusive = exclusive();
+    for configured_limit in [true, false] {
+        let root = fixture();
+        let inspect = root.clone();
+        run(async move {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let witness = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut cfg = config("localhost", false);
+            let mut options = NativeUploadOptions::new(&root, "too-large.bin");
+            if configured_limit {
+                cfg.max_transfer_bytes = 31;
+            } else {
+                options.max_bytes = Some(31);
+            }
+            let sending = client("checkpoint-writer-limit", cfg, 1);
+            let mut writer = sending
+                .open_checkpoint_writer(&cx, &scope, witness.local_addr().unwrap(), options)
+                .unwrap();
+            writer.write_all(&[7; 32]).await.unwrap();
+            assert_eq!(
+                writer.shutdown().await.unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            let terminal = writer.finish().await;
+            assert!(terminal.join.is_ok());
+            assert!(matches!(
+                terminal.outcome.as_ref(),
+                Some(Err(NativeCheckpointError::Upload(NativeUploadError::TooLarge {
+                    limit: 31,
+                })))
+            ));
+            assert_eq!(sending.active_transfers(), 0);
+            no_packet(&witness);
+        });
+        assert_clean(&inspect);
+    }
+}
+
+#[test]
+fn checkpoint_writer_storage_failure_wakes_a_blocked_producer() {
+    let _exclusive = exclusive();
+    let root = fixture();
+    let inspect = root.clone();
+    run(async move {
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let witness = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut cfg = config("localhost", false);
+        cfg.chunk_size = 1;
+        let sending = client("checkpoint-writer-storage", cfg, 1);
+        let mut writer = sending
+            .open_checkpoint_writer(
+                &cx,
+                &scope,
+                witness.local_addr().unwrap(),
+                NativeUploadOptions::new(root.join("missing-parent"), "data.bin"),
+            )
+            .unwrap();
+        {
+            let mut ctx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut writer).poll_write(&mut ctx, b"x"),
+                Poll::Ready(Ok(1))
+            ));
+        }
+        let error = asupersync::time::timeout(
+            cx.now(),
+            Duration::from_secs(60),
+            writer.write_all(b"blocked"),
+        )
+        .await
+        .expect("failure before the first source read must wake the producer")
+        .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe
+        ));
+        let terminal = writer.finish().await;
+        assert!(terminal.join.is_ok());
+        assert!(matches!(
+            terminal.outcome.as_ref(),
+            Some(Err(NativeCheckpointError::Io(error))) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(writer.spooled_bytes(), 0);
+        assert_eq!(sending.active_transfers(), 0);
+        no_packet(&witness);
+    });
+    assert_clean(&inspect);
+}
+
+#[test]
+fn checkpoint_writer_idle_deadline_retires_unclosed_input_without_publication() {
+    let _exclusive = exclusive();
+    let root = fixture();
+    let inspect = root.clone();
+    run(async move {
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let witness = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sending = sender();
+        let mut options = NativeUploadOptions::new(&root, "unfinished.bin");
+        options.source_idle_timeout = Duration::from_millis(100);
+        let mut writer = sending
+            .open_checkpoint_writer(&cx, &scope, witness.local_addr().unwrap(), options)
+            .unwrap();
+        writer.write_all(b"still waiting for the rest").await.unwrap();
+        writer.flush().await.unwrap();
+        // Leave input open. The source deadline must retire the parked worker
+        // itself; finish/cancellation must not be what wakes the source.
+        asupersync::time::timeout(cx.now(), Duration::from_secs(60), async {
+            while writer.terminal().is_none() {
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .await
+        .expect("source idle timeout must retire the unfinished worker");
+        assert_eq!(
+            writer.flush().await.unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        let terminal = writer.finish().await;
+        assert!(terminal.join.is_ok());
+        assert!(matches!(
+            terminal.outcome.as_ref(),
+            Some(Err(NativeCheckpointError::Upload(NativeUploadError::SourceTimeout)))
+        ));
+        assert_eq!(sending.active_transfers(), 0);
+        no_packet(&witness);
+    });
+    assert_clean(&inspect);
+}
