@@ -664,11 +664,11 @@ impl ChannelBuilder {
     /// Before reuse, whatever the server sent while the connection was idle
     /// is processed: a connection the server closed or sent GOAWAY on, or one
     /// idle for over 30 seconds, is dropped instead. If a reused connection
-    /// turns out to be gone before the server could act on the call (the
-    /// request could not be written, the stream was refused, or GOAWAY
-    /// excludes it), the call is retried once on a fresh connection. A close
-    /// after the request was sent is reported as `UNAVAILABLE`, as it is
-    /// without reuse. Streaming calls are unaffected.
+    /// provably did not process the call (a local stream refusal, REFUSED_STREAM,
+    /// or GOAWAY excluding its stream), the call is retried once on a fresh
+    /// connection. Request write or flush failures leave delivery ambiguous and
+    /// are reported to the caller without automatic replay. Streaming calls are
+    /// unaffected.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn reuse_connections(mut self, max_idle: usize) -> Self {
@@ -2349,9 +2349,15 @@ enum NativeChannelDial {
     ),
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+trait NativeH2TestIo: AsyncRead + AsyncWrite + Unpin + Send + Sync + fmt::Debug {}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 enum NativeH2Io {
+    // Fault injection at the real pooled-unary dispatch boundary.
+    #[cfg(test)]
+    Injected(Box<dyn NativeH2TestIo>),
     Plain(TcpStream),
     #[cfg(unix)]
     Unix(crate::net::unix::UnixStream),
@@ -2382,6 +2388,8 @@ impl AsyncRead for NativeH2Io {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match &mut *self {
+            #[cfg(test)]
+            Self::Injected(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -2402,6 +2410,8 @@ impl AsyncWrite for NativeH2Io {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
+            #[cfg(test)]
+            Self::Injected(stream) => Pin::new(stream.as_mut()).poll_write(cx, data),
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, data),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_write(cx, data),
@@ -2415,6 +2425,8 @@ impl AsyncWrite for NativeH2Io {
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
+            #[cfg(test)]
+            Self::Injected(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
@@ -2428,6 +2440,8 @@ impl AsyncWrite for NativeH2Io {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
+            #[cfg(test)]
+            Self::Injected(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
             Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
@@ -2785,11 +2799,15 @@ impl NativeH2Conn {
                     "queue HTTP/2 request body: {error}"
                 )))
             })?;
-        // A unary handler runs only on the complete request, so a write that
-        // fails cannot have reached one.
+        // A transport failure does not prove that the peer did not process
+        // this RPC. In particular, write_all can accept the complete request
+        // before flush reports a reactor or TLS error. Replaying that ambiguous
+        // delivery can duplicate non-idempotent application effects. Only a
+        // local stream refusal above, REFUSED_STREAM, or GOAWAY excluding this
+        // stream below establishes that a fresh-connection retry is safe.
         flush_native_h2_frames(&mut self.connection, &mut self.io)
             .await
-            .map_err(UnaryFailure::unprocessed)?;
+            .map_err(UnaryFailure::processed)?;
 
         let mut accumulator = NativeUnaryAccumulator::new(max_recv_message_size);
         let mut chunk = [0_u8; 16 * 1024];

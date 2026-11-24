@@ -1174,3 +1174,302 @@ fn returned_stream_keeps_the_deadline_captured_before_its_codec_factory() {
     peer.join().unwrap();
     assert!(runtime.shutdown_timeout(WATCHDOG));
 }
+
+// A pooled attempt can deliver a complete non-idempotent RPC before the
+// transport reports a flush error. Exercise the public clients and their
+// actual retry loop with a fault at that boundary, not a stand-alone status
+// classifier. Explicit HTTP/2 non-processing signals must still permit retry.
+mod pooled_replay {
+    use super::*;
+    use crate::codec::Decoder as _;
+    use crate::grpc::client::{NativeH2Conn, NativeH2Io, NativeH2TestIo, lock_unpoisoned};
+    use crate::http::h2::ErrorCode;
+    use crate::http::h2::frame::{Frame, GoAwayFrame, RstStreamFrame, Setting, SettingsFrame};
+    use crate::io::{AsyncRead, AsyncWrite};
+    use std::sync::Mutex;
+
+    const FLUSH_ERROR: &str = "complete unary request accepted before flush failure";
+    const PAYLOAD: &[u8] = b"apply non-idempotent operation once";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Attempt {
+        FlushFailure,
+        LocalRefusal,
+        RefusedStream,
+        GoAwayBeforeStream,
+        GoAwayIncludingStream,
+    }
+
+    #[derive(Debug, Default)]
+    struct Evidence {
+        wire: Vec<u8>,
+        flush_failures: usize,
+        drops: usize,
+    }
+
+    #[derive(Debug)]
+    struct AttemptIo {
+        attempt: Attempt,
+        reply: BytesMut,
+        evidence: Arc<Mutex<Evidence>>,
+    }
+
+    impl NativeH2TestIo for AttemptIo {}
+
+    impl AsyncRead for AttemptIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+            buffer: &mut crate::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            // refresh() must see an idle connection; the scripted signal is
+            // observable only after this RPC's request was actually accepted.
+            if self.reply.is_empty() || lock_unpoisoned(&self.evidence).wire.is_empty() {
+                return Poll::Pending;
+            }
+            let length = buffer.remaining().min(self.reply.len());
+            buffer.put_slice(&self.reply.split_to(length));
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for AttemptIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            lock_unpoisoned(&self.evidence).wire.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.attempt == Attempt::FlushFailure {
+                let mut evidence = lock_unpoisoned(&self.evidence);
+                // Prove the complete RPC reached the transport before its
+                // failure: HEADERS, the full framed message, and END_STREAM.
+                let requests = decode_requests(&evidence.wire);
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].payload(), PAYLOAD);
+                evidence.flush_failures += 1;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    FLUSH_ERROR,
+                )));
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _task: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Drop for AttemptIo {
+        fn drop(&mut self) {
+            lock_unpoisoned(&self.evidence).drops += 1;
+        }
+    }
+
+    fn decode_requests(wire: &[u8]) -> Vec<Observation> {
+        let mut connection = Connection::server(Settings::server());
+        // The injected connection is already established and pooled.
+        connection
+            .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        let mut decoder = FrameCodec::new();
+        let mut input = BytesMut::from(wire);
+        let mut requests = Vec::new();
+        let mut headers = Vec::new();
+        let mut body = BytesMut::new();
+        while let Some(frame) = decoder.decode(&mut input).unwrap() {
+            let (stream, ended) = match connection.process_frame(frame).unwrap() {
+                Some(ReceivedFrame::Headers {
+                    stream_id,
+                    headers: received,
+                    end_stream,
+                }) => {
+                    headers.extend(received);
+                    (stream_id, end_stream)
+                }
+                Some(ReceivedFrame::Data {
+                    stream_id,
+                    data,
+                    end_stream,
+                }) => {
+                    body.extend_from_slice(&data);
+                    (stream_id, end_stream)
+                }
+                _ => continue,
+            };
+            if ended {
+                requests.push(Observation {
+                    stream,
+                    headers: std::mem::take(&mut headers),
+                    body: std::mem::take(&mut body).freeze(),
+                });
+            }
+        }
+        assert!(input.is_empty(), "no partial frame may count as delivery");
+        assert!(body.is_empty(), "no partial message may count as delivery");
+        assert!(headers.is_empty(), "no partial request may count as delivery");
+        requests
+    }
+
+    fn seed(channel: &Channel, attempt: Attempt) -> Arc<Mutex<Evidence>> {
+        let mut connection = Connection::client(crate::http::h2::SettingsBuilder::client().build());
+        let settings = if attempt == Attempt::LocalRefusal {
+            vec![Setting::MaxConcurrentStreams(0)]
+        } else {
+            Vec::new()
+        };
+        connection
+            .process_frame(Frame::Settings(SettingsFrame::new(settings)))
+            .unwrap();
+        while connection.next_frame().is_some() {}
+        let mut reply = BytesMut::new();
+        let frame = match attempt {
+            Attempt::RefusedStream => Some(Frame::RstStream(RstStreamFrame::new(
+                1,
+                ErrorCode::RefusedStream,
+            ))),
+            Attempt::GoAwayBeforeStream => {
+                Some(Frame::GoAway(GoAwayFrame::new(0, ErrorCode::NoError)))
+            }
+            Attempt::GoAwayIncludingStream => {
+                Some(Frame::GoAway(GoAwayFrame::new(1, ErrorCode::InternalError)))
+            }
+            Attempt::FlushFailure | Attempt::LocalRefusal => None,
+        };
+        if let Some(frame) = frame {
+            frame.encode(&mut reply).unwrap();
+        }
+        let evidence = Arc::new(Mutex::new(Evidence::default()));
+        channel.unary_pool.as_ref().unwrap().put(
+            NativeH2Conn {
+                io: NativeH2Io::Injected(Box::new(AttemptIo {
+                    attempt,
+                    reply,
+                    evidence: Arc::clone(&evidence),
+                })),
+                connection,
+                codec: FrameCodec::new(),
+                inbound: BytesMut::new(),
+                idle_since: crate::grpc::client::native_now(),
+            },
+            crate::grpc::client::native_now(),
+        );
+        evidence
+    }
+
+    #[test]
+    fn native_unary_never_replays_ambiguous_dispatch() {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            runtime.block_on(Box::pin(async {
+                for balanced in [false, true] {
+                    for attempt in [Attempt::FlushFailure, Attempt::GoAwayIncludingStream] {
+                        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                        let channel = channel(&listener, 1, None).await;
+                        let evidence = seed(&channel, attempt);
+                        let cx = Cx::current().unwrap();
+                        let result = if balanced {
+                            let client = BalancedGrpcClient::new(
+                                BalancedChannel::new(vec![channel.clone()]).unwrap(),
+                            );
+                            immediately(client.unary(
+                                &cx,
+                                PATH,
+                                Request::new(Bytes::from_static(PAYLOAD)),
+                            ))
+                            .await
+                        } else {
+                            let mut client = GrpcClient::new(channel.clone());
+                            immediately(client.unary::<Bytes, Bytes>(
+                                PATH,
+                                Request::new(Bytes::from_static(PAYLOAD)),
+                            ))
+                            .await
+                        };
+                        let status = result.expect_err("ambiguous delivery must not be replayed");
+                        assert_eq!(status.code(), Code::Unavailable);
+                        if attempt == Attempt::FlushFailure {
+                            assert!(status.message().contains(FLUSH_ERROR), "{status}");
+                        }
+                        let evidence = lock_unpoisoned(&evidence);
+                        let requests = decode_requests(&evidence.wire);
+                        assert_eq!(requests.len(), 1);
+                        assert_eq!(requests[0].payload(), PAYLOAD);
+                        assert_eq!(
+                            evidence.flush_failures,
+                            usize::from(attempt == Attempt::FlushFailure),
+                        );
+                        assert_eq!(evidence.drops, 1, "the failed transport was retired");
+                        assert!(
+                            lock_unpoisoned(&channel.unary_pool.as_ref().unwrap().idle).is_empty()
+                        );
+                        assert_no_connection(&listener);
+                    }
+                }
+            }));
+            assert!(runtime.shutdown_timeout(WATCHDOG));
+        }
+    }
+
+    #[test]
+    fn native_unary_retries_only_explicitly_unprocessed_attempts() {
+        for attempt in [
+            Attempt::LocalRefusal,
+            Attempt::RefusedStream,
+            Attempt::GoAwayBeforeStream,
+        ] {
+            let runtime = runtime(2);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let (mut steps, mut closed, peer_task) = peer(&listener, 1);
+            runtime.block_on(Box::pin(async {
+                let cx = Cx::current().unwrap();
+                let channel = channel(&listener, 1, None).await;
+                let evidence = seed(&channel, attempt);
+                steps[0].reply.send(Reply::Echo).unwrap();
+                let mut client = GrpcClient::new(channel.clone());
+                let response = within(
+                    &cx,
+                    client.unary::<Bytes, Bytes>(
+                        PATH,
+                        Request::new(Bytes::from_static(PAYLOAD)),
+                    ),
+                )
+                .await
+                .expect("a proven unprocessed call may retry on one fresh connection");
+                assert_eq!(response.get_ref().as_ref(), PAYLOAD);
+                let request = within(&cx, steps[0].observed.recv(&cx)).await.unwrap();
+                assert_eq!(request.payload(), PAYLOAD);
+                assert_eq!(request.stream, 1, "the retry used a fresh connection");
+                {
+                    let evidence = lock_unpoisoned(&evidence);
+                    let requests = decode_requests(&evidence.wire);
+                    assert_eq!(
+                        requests.len(),
+                        usize::from(attempt != Attempt::LocalRefusal),
+                    );
+                    if attempt == Attempt::LocalRefusal {
+                        assert!(evidence.wire.is_empty(), "local refusal must not dispatch bytes");
+                    } else {
+                        assert_eq!(requests[0].payload(), PAYLOAD);
+                    }
+                    assert_eq!(evidence.flush_failures, 0);
+                    assert_eq!(evidence.drops, 1);
+                }
+                drop(client);
+                drop(channel);
+                within(&cx, closed.recv(&cx)).await.unwrap();
+                assert_no_connection(&listener);
+            }));
+            peer_task.join().unwrap();
+            assert!(runtime.shutdown_timeout(WATCHDOG));
+        }
+    }
+}
