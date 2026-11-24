@@ -6894,7 +6894,7 @@ function recordClosedAsyncScopeBrackets(ownerKeys: Set<string>): void {
 }
 
 interface BrowserOperationOwner {
-  scopeKey: string;
+  ancestry: Set<string>;
   stop(kind: string, released?: boolean): Promise<BrowserOutcome<void>>;
 }
 
@@ -6919,6 +6919,9 @@ function startBrowserOperation<T>(
   const signal = controller.signal;
   const abort = controller.abort.bind(controller);
   if (unavailable()) return OutcomeFactory.err("capability_denied", "transient", "Operation owner is closing or unavailable.");
+  // A synchronous ABI close can remove the child's live lineage before its
+  // JavaScript callback finishes. Ancestors must still be able to join it.
+  const ancestry = browserOwnerAncestry(scopeKey);
   const spawned = taskSpawn({ scope, label: label ?? "browser-operation", cancel_kind: "operation_cancel" }, version);
   if (spawned.outcome !== "ok") return spawned;
   const task = snapshotTaskHandle(spawned.value);
@@ -6992,7 +6995,7 @@ function startBrowserOperation<T>(
   }
 
   const owner: BrowserOperationOwner = {
-    scopeKey,
+    ancestry,
     stop(kind, ownerReleased = false) {
       released ||= ownerReleased;
       if (!bodyDone) {
@@ -7021,7 +7024,10 @@ async function stopBrowserOperations(
   owners: Set<string>, kind: string, released = false,
 ): Promise<BrowserOutcome<void>> {
   const receipts = await Promise.all([...BROWSER_OPERATIONS]
-    .filter(operation => owners.has(operation.scopeKey))
+    .filter(operation => {
+      for (const key of operation.ancestry) if (owners.has(key)) return true;
+      return false;
+    })
     .map(operation => operation.stop(kind, released)));
   return receipts.find(receipt => receipt.outcome !== "ok") ?? OutcomeFactory.ok(undefined);
 }
