@@ -839,6 +839,143 @@ fn release_after_reset_does_not_exceed_max_concurrent() {
     }
 }
 
+// br-asupersync-r0x5ho: a reset must fence both old issued permits and
+// queued grants from the capacity owned by the next generation.
+#[test]
+fn pre_reset_permits_cannot_refund_capacity_owned_by_new_permits() {
+    let now = Time::ZERO;
+    let bh = Bulkhead::new(BulkheadPolicy {
+        max_concurrent: 6,
+        ..Default::default()
+    });
+    let old_small = bh.try_acquire(2, now).unwrap();
+    let old_large = bh.try_acquire(4, now).unwrap();
+
+    bh.reset();
+    let current = bh.try_acquire(6, now).unwrap();
+    old_small.release();
+    assert_eq!(bh.available(), 0);
+    assert!(bh.try_acquire(1, now).is_none());
+
+    old_large.release();
+    assert_eq!(bh.available(), 0);
+    assert_eq!(bh.metrics().active_permits, 6);
+    assert!(bh.try_acquire(1, now).is_none());
+
+    current.release();
+    assert_eq!(bh.available(), 6);
+    let replacement = bh.try_acquire(6, now).unwrap();
+    replacement.release();
+    assert_eq!(bh.available(), 6);
+}
+
+#[test]
+fn pre_reset_queued_permit_cannot_refund_new_generation() {
+    let now = Time::ZERO;
+    let bh = Bulkhead::new(BulkheadPolicy {
+        max_concurrent: 3,
+        ..Default::default()
+    });
+    let held = bh.try_acquire(3, now).unwrap();
+    let mut queued = bh.acquire_queued(3, now).unwrap();
+    held.release();
+    let old = queued.poll_claim(now).unwrap().unwrap();
+    assert_eq!(bh.available(), 0);
+
+    bh.reset();
+    let current = bh.try_acquire(3, now).unwrap();
+    old.release();
+    drop(queued);
+    assert_eq!(bh.available(), 0);
+    assert!(bh.try_acquire(1, now).is_none());
+
+    current.release();
+    assert_eq!(bh.available(), 3);
+}
+
+#[test]
+fn reset_invalidates_a_granted_unclaimed_queue_guard() {
+    let now = Time::ZERO;
+    let bh = Bulkhead::new(BulkheadPolicy {
+        max_concurrent: 4,
+        ..Default::default()
+    });
+    let held = bh.try_acquire(4, now).unwrap();
+    let queued = bh.acquire_queued(4, now).unwrap();
+    held.release();
+    assert_eq!(bh.process_queue(now), Some(queued.entry_id()));
+    assert_eq!(bh.available(), 0);
+    assert_eq!(bh.metrics().queue_depth, 0);
+
+    bh.reset();
+    let current = bh.try_acquire(4, now).unwrap();
+    drop(queued);
+    assert_eq!(bh.available(), 0);
+    assert!(bh.try_acquire(1, now).is_none());
+
+    current.release();
+    assert_eq!(bh.available(), 4);
+}
+
+#[test]
+fn granted_queue_cancellation_racing_reset_cannot_refund_a_new_owner() {
+    let now = Time::ZERO;
+    let bh = Bulkhead::new(BulkheadPolicy {
+        max_concurrent: 1,
+        ..Default::default()
+    });
+
+    for _ in 0..256 {
+        let entry_id = bh.enqueue(1, now).unwrap();
+        assert_eq!(bh.process_queue(now), Some(entry_id));
+        assert_eq!(bh.available(), 0);
+        let ready = std::sync::Barrier::new(2);
+        let current = std::thread::scope(|scope| {
+            let cancellation = scope.spawn(|| {
+                ready.wait();
+                bh.cancel_entry(entry_id, now);
+            });
+            ready.wait();
+            bh.reset();
+            let current = bh.try_acquire(1, now).unwrap();
+            cancellation.join().unwrap();
+            current
+        });
+        assert_eq!(
+            bh.available(),
+            0,
+            "an old queue refund must not replenish the current permit"
+        );
+        assert!(bh.try_acquire(1, now).is_none());
+        current.release();
+        assert_eq!(bh.available(), 1);
+    }
+}
+
+#[test]
+fn reset_generation_exhaustion_preserves_live_permits_and_queue() {
+    let now = Time::ZERO;
+    let bh = Bulkhead::new(BulkheadPolicy {
+        max_concurrent: 1,
+        ..Default::default()
+    });
+    bh.reset_generation.store(u64::MAX, Ordering::Relaxed);
+    let held = bh.try_acquire(1, now).unwrap();
+    let mut queued = bh.acquire_queued(1, now).unwrap();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bh.reset()));
+    assert!(result.is_err(), "reset epochs must never wrap");
+    assert_eq!(bh.available(), 0);
+    assert_eq!(bh.metrics().queue_depth, 1);
+    assert!(queued.poll_claim(now).unwrap().is_none());
+
+    held.release();
+    let permit = queued.poll_claim(now).unwrap().unwrap();
+    assert_eq!(bh.available(), 0);
+    permit.release();
+    assert_eq!(bh.available(), 1);
+}
+
 #[test]
 fn reset_racing_cancel_never_wraps_the_pending_count() {
     // br-asupersync-r0x5ho: cancel_entry decremented the pending count after

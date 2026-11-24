@@ -181,6 +181,9 @@ pub struct Bulkhead {
     /// Available permits.
     available_permits: AtomicU32,
 
+    /// Reset epoch, read and advanced while holding the queue lock.
+    reset_generation: AtomicU64,
+
     /// Queue of waiting operations.
     queue: RwLock<VecDeque<QueueEntry>>,
 
@@ -225,6 +228,7 @@ impl Bulkhead {
         Self {
             policy,
             available_permits: AtomicU32::new(available),
+            reset_generation: AtomicU64::new(0),
             queue: RwLock::new(VecDeque::with_capacity(max_queue)),
             pending_queue_count: AtomicU32::new(0),
             changed: Notify::new(),
@@ -352,6 +356,7 @@ impl Bulkhead {
                     return Some(BulkheadPermit {
                         bulkhead: self,
                         weight,
+                        generation: self.reset_generation.load(Ordering::Relaxed),
                     });
                 }
                 Err(actual) => available = actual,
@@ -577,6 +582,7 @@ impl Bulkhead {
                     Ok(Some(BulkheadPermit {
                         bulkhead: self,
                         weight: entry.weight,
+                        generation: self.reset_generation.load(Ordering::Relaxed),
                     }))
                 }
                 Some(Err(RejectionReason::Timeout)) => {
@@ -610,12 +616,15 @@ impl Bulkhead {
             // decrement wrapped it to u32::MAX, closing the fast path for good.
             if previous_result.is_none() {
                 self.pending_queue_count.fetch_sub(1, Ordering::Release);
+            } else if matches!(previous_result, Some(Ok(()))) {
+                // A queued grant belongs to this locked generation. Refund it
+                // before unlock, so reset cannot reopen capacity and admit a
+                // new owner between removal and this old grant's refund.
+                self.refund_permit(entry.weight);
             }
             drop(queue);
 
             if matches!(previous_result, Some(Ok(()))) {
-                // Permit was granted but not claimed. Release it.
-                self.release_permit(entry.weight);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
@@ -635,17 +644,30 @@ impl Bulkhead {
         }
     }
 
-    /// Release permit (internal use - prefer RAII via permit).
-    ///
-    /// Uses a CAS loop to cap `available_permits` at `max_concurrent`,
-    /// preventing overflow if permits are released after a `reset()`.
-    fn release_permit(&self, weight: u32) {
+    /// Release an issued permit only into the reset epoch that admitted it.
+    fn release_permit(&self, weight: u32, generation: u64) {
+        // Keep the epoch check and refund in one critical section with reset.
+        // A stale permit must not replenish capacity owned by a new permit.
+        let queue = self.queue.read();
+        if self.reset_generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let changed = self.refund_permit(weight);
+        drop(queue);
+        if changed {
+            self.notify_admission_change();
+        }
+    }
+
+    /// Refund current-epoch capacity while the caller holds the queue lock.
+    /// This helper never invokes a wake callback under that lock.
+    fn refund_permit(&self, weight: u32) -> bool {
         let max = self.policy.max_concurrent;
         let mut current = self.available_permits.load(Ordering::Acquire);
-        let changed = loop {
+        loop {
             let new = current.saturating_add(weight).min(max);
             if new == current {
-                break false;
+                return false;
             }
             match self.available_permits.compare_exchange_weak(
                 current,
@@ -653,12 +675,9 @@ impl Bulkhead {
                 Ordering::Release,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break true,
+                Ok(_) => return true,
                 Err(actual) => current = actual,
             }
-        };
-        if changed {
-            self.notify_admission_change();
         }
     }
 
@@ -695,13 +714,25 @@ impl Bulkhead {
     }
 
     /// Manually reset the bulkhead to full capacity.
+    ///
+    /// Outstanding permits remain usable, but releasing them cannot refund
+    /// capacity into the new reset epoch. Pending queue entries are cancelled.
+    ///
+    /// # Panics
+    ///
+    /// Panics without changing state if the reset epoch would overflow `u64`.
     pub fn reset(&self) {
-        // Restore the permits under the queue lock: restored first, a grant
-        // could take permits for an entry this then clears, and that entry's
-        // weight never came back.
+        // Restore the permits and advance the epoch under the queue lock.
+        // Claims and refunds cannot cross this reset boundary.
         let mut queue = self.queue.write();
+        let generation = self
+            .reset_generation
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+            .expect("bulkhead reset generation exhausted");
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Release);
+        self.reset_generation.store(generation, Ordering::Relaxed);
         self.available_permits
             .store(self.policy.max_concurrent, Ordering::Release);
         drop(queue);
@@ -731,6 +762,7 @@ impl fmt::Debug for Bulkhead {
 pub struct BulkheadPermit<'a> {
     bulkhead: &'a Bulkhead,
     weight: u32,
+    generation: u64,
 }
 
 impl BulkheadPermit<'_> {
@@ -752,7 +784,7 @@ impl BulkheadPermit<'_> {
 
 impl Drop for BulkheadPermit<'_> {
     fn drop(&mut self) {
-        self.bulkhead.release_permit(self.weight);
+        self.bulkhead.release_permit(self.weight, self.generation);
     }
 }
 
