@@ -75,9 +75,9 @@ impl LabInjectionConfig {
 
     /// Enables all oracles for verification.
     ///
-    /// After each injection run, the runner runs the lab runtime until it is
-    /// idle, then checks both the suite passed to the test and the runtime's
-    /// own oracles, hydrated from the state the test left behind.
+    /// After recording and each injection run, the runner runs the lab runtime
+    /// until it is idle, then checks both the suite passed to the test and the
+    /// runtime's own oracles, hydrated from the state the test left behind.
     #[must_use]
     pub const fn with_all_oracles(mut self) -> Self {
         self.use_all_oracles = true;
@@ -489,6 +489,14 @@ impl LabInjectionRunner {
     /// - A `&mut LabRuntime` for runtime access
     /// - A `&mut OracleSuite` for oracle registration
     ///
+    /// The recording run is checked before injection. Its failures use point
+    /// zero, including oracle failures when no injection points are selected.
+    /// Oracle-only baseline failures remain in the report while injection
+    /// continues, unless `stop_on_failure` is enabled. A baseline panic or
+    /// timeout stops exploration. A successful recording is not counted as an
+    /// injection result. Factory, polling and result-drop panics become failed
+    /// results, and the runner returns to recording mode after the run.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -508,108 +516,53 @@ impl LabInjectionRunner {
         Fut: Future<Output = T>,
         T: std::fmt::Debug,
     {
-        // Phase 1: Recording run
         self.current_mode = InjectionMode::Recording;
-        let mut lab_config = LabConfig::new(self.config.seed);
-        if let Some(max) = self.config.max_steps_per_run {
-            lab_config = lab_config.max_steps(max);
-        }
-        let mut runtime = LabRuntime::new(lab_config);
-        let mut oracles = OracleSuite::new();
         let recording_injector = CancellationInjector::recording();
+        let recording = self.run_unowned_once(&test_fn, Arc::clone(&recording_injector), None);
+        let recorded_points = recording_injector.recorded_points();
+        let strategy_name = format!("{:?}", self.config.strategy);
 
-        let instrumented = test_fn(recording_injector.clone(), &mut runtime, &mut oracles);
-        if Self::poll_to_completion(instrumented, self.config.max_steps_per_run).is_err() {
-            let strategy_name = format!("{:?}", self.config.strategy);
-            let recorded_points = recording_injector.recorded_points();
+        // A failed recording is evidence, even when the strategy selects no
+        // injection points. Do not explore a baseline that could not finish.
+        // Oracle-only failures may still collect the requested injection runs.
+        if !recording.injection.is_success()
+            || (self.config.stop_on_failure && !recording.is_success())
+        {
             return LabInjectionReport::from_results(
-                vec![LabInjectionResult {
-                    injection: InjectionResult {
-                        injection_point: 0,
-                        outcome: InjectionOutcome::Timeout,
-                        await_points_before: recorded_points.len(),
-                    },
-                    oracle_violations: Vec::new(),
-                }],
+                vec![recording],
                 recorded_points.len(),
                 &strategy_name,
                 self.config.seed,
             );
         }
 
-        let recorded_points = recording_injector.recorded_points();
-        let total_await_points = recorded_points.len();
-
-        // Phase 2: Select injection points based on strategy
-        let injection_points = self
+        let points = self
             .config
             .strategy
             .select_points(&recorded_points, self.config.seed);
+        let mut results = Vec::with_capacity(points.len());
+        if !recording.is_success() {
+            results.push(recording);
+        }
 
-        // Phase 3: Injection runs with oracle verification
-        let mut results = Vec::with_capacity(injection_points.len());
-
-        for point in injection_points {
+        for point in points {
             self.current_mode = InjectionMode::Injecting { target: point };
-
-            // Fresh runtime and oracles for each run
-            let mut lab_config = LabConfig::new(self.config.seed);
-            if let Some(max) = self.config.max_steps_per_run {
-                lab_config = lab_config.max_steps(max);
-            }
-            let mut runtime = LabRuntime::new(lab_config);
-            let mut oracles = OracleSuite::new();
-            let injector = CancellationInjector::inject_at(point);
-
-            // Run the test
-            let instrumented = test_fn(injector.clone(), &mut runtime, &mut oracles);
-            let (mut outcome, poll_result) =
-                Self::run_with_panic_catch(instrumented, self.config.max_steps_per_run);
-
-            // A successful run must actually inject cancellation at the target point.
-            // If the future completed normally, the target point was not reached.
-            if matches!(outcome, InjectionOutcome::Success)
-                && matches!(poll_result, Some(InstrumentedPollResult::Inner(_)))
-            {
-                outcome = InjectionOutcome::AssertionFailed(format!(
-                    "Injection target {point} was not reached; future completed without cancellation injection"
-                ));
-            }
-
-            let await_points_before = injector.recorded_points().len().saturating_sub(1);
-
-            // Check oracles
-            let oracle_violations = if self.config.use_all_oracles {
-                Self::check_oracles(&mut runtime, &mut oracles)
-            } else {
-                Vec::new()
-            };
-
-            let lab_result = LabInjectionResult {
-                injection: InjectionResult {
-                    injection_point: point,
-                    outcome,
-                    await_points_before,
-                },
-                oracle_violations,
-            };
-
-            let should_stop = self.config.stop_on_failure && !lab_result.is_success();
-            results.push(lab_result);
-
-            if should_stop {
+            let result = self.run_unowned_once(
+                &test_fn,
+                CancellationInjector::inject_at(point),
+                Some(point),
+            );
+            let stop = self.config.stop_on_failure && !result.is_success();
+            results.push(result);
+            if stop {
                 break;
             }
         }
 
-        // Reset mode so callers can inspect it between runs.
         self.current_mode = InjectionMode::Recording;
-
-        // Phase 4: Generate report
-        let strategy_name = format!("{:?}", self.config.strategy);
         LabInjectionReport::from_results(
             results,
-            total_await_points,
+            recorded_points.len(),
             &strategy_name,
             self.config.seed,
         )
@@ -900,36 +853,72 @@ impl LabInjectionRunner {
         violations
     }
 
-    /// Polls an instrumented future to completion with panic catching.
-    fn run_with_panic_catch<F, T>(
-        future: InstrumentedFuture<F>,
-        max_polls: Option<u64>,
-    ) -> (InjectionOutcome, Option<InstrumentedPollResult<T>>)
+    /// Runs the recording and injection cases through the same failure boundary.
+    /// No task admission is imposed on borrowed or non-`Send` futures.
+    fn run_unowned_once<F, Fut, T>(
+        &self,
+        test_fn: &F,
+        injector: Arc<CancellationInjector>,
+        target: Option<u64>,
+    ) -> LabInjectionResult
     where
-        F: Future<Output = T>,
+        F: Fn(
+            Arc<CancellationInjector>,
+            &mut LabRuntime,
+            &mut OracleSuite,
+        ) -> InstrumentedFuture<Fut>,
+        Fut: Future<Output = T>,
         T: std::fmt::Debug,
     {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::poll_to_completion(future, max_polls)
-        }));
+        let mut lab_config = LabConfig::new(self.config.seed);
+        if let Some(max) = self.config.max_steps_per_run {
+            lab_config = lab_config.max_steps(max);
+        }
+        let mut runtime = LabRuntime::new(lab_config);
+        let mut oracles = OracleSuite::new();
+        let terminal = Self::catch_owned_panic(|| {
+            let future = test_fn(Arc::clone(&injector), &mut runtime, &mut oracles);
+            Self::poll_to_completion(future, self.config.max_steps_per_run).map(|output| {
+                // Drop the output inside the catch as well: its destructor is
+                // user code, just like the factory, Future::poll and cleanup.
+                matches!(output, InstrumentedPollResult::CancellationInjected(_))
+            })
+        })
+        .and_then(std::convert::identity);
 
-        match result {
-            Ok(Ok(poll_result)) => {
-                let outcome = match &poll_result {
-                    InstrumentedPollResult::Inner(_)
-                    | InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
-                };
-                (outcome, Some(poll_result))
+        let mut outcome = match terminal {
+            Ok(false) if target.is_some() => InjectionOutcome::AssertionFailed(format!(
+                "Injection target {} was not reached; future completed without cancellation injection",
+                target.unwrap_or(0)
+            )),
+            Ok(_) => InjectionOutcome::Success,
+            Err(outcome) => outcome,
+        };
+        let oracle_violations = if self.config.use_all_oracles {
+            match Self::catch_owned_panic(|| Self::check_oracles(&mut runtime, &mut oracles)) {
+                Ok(violations) => violations,
+                Err(failure) => {
+                    if matches!(outcome, InjectionOutcome::Success) {
+                        outcome = failure;
+                    }
+                    Vec::new()
+                }
             }
-            Ok(Err(outcome)) => (outcome, None),
-            Err(e) => {
-                let message = e
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .or_else(|| e.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "Unknown panic".to_string());
-                (InjectionOutcome::Panic(message), None)
-            }
+        } else {
+            Vec::new()
+        };
+        let observed = injector.recorded_points().len();
+        LabInjectionResult {
+            injection: InjectionResult {
+                injection_point: target.unwrap_or(0),
+                outcome,
+                await_points_before: if target.is_some() {
+                    observed.saturating_sub(1)
+                } else {
+                    observed
+                },
+            },
+            oracle_violations,
         }
     }
 

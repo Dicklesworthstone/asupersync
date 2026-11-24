@@ -154,7 +154,16 @@ fn lab_injection_with_all_oracles_checks_the_runtime_state() {
             .with_all_oracles(),
     );
     let report = checked.run_with_lab(close_a_region_around_a_live_task);
-    assert_eq!(report.tests_run, 3);
+    // Keep the broken recording as well as every requested injection result.
+    assert_eq!(report.tests_run, 4);
+    assert_eq!(
+        report
+            .results
+            .iter()
+            .map(|result| result.injection.injection_point)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
     for result in &report.results {
         assert!(result.injection.is_success(), "{result:?}");
         assert!(
@@ -203,7 +212,9 @@ fn lab_injection_oracles_check_the_runtime_state() {
         InstrumentedFuture::new(YieldingFuture::new(3, 42), injector)
     });
 
-    assert_eq!(report.tests_run, 1);
+    assert_eq!(report.tests_run, 2);
+    assert_eq!(report.results[0].injection.injection_point, 0);
+    assert_eq!(report.results[1].injection.injection_point, 1);
     let reports_the_child = |violation: &OracleViolation| {
         matches!(
             violation,
@@ -939,5 +950,320 @@ fn owned_injection_rejects_an_unreached_target_and_restores_runner_mode() {
         &report.results[1].injection.outcome,
         InjectionOutcome::AssertionFailed(message) if message.contains("target 2 was not reached")
     ));
+    assert_eq!(runner.current_mode(), InjectionMode::Recording);
+}
+
+
+/// A successful recording must still check the selected oracles when the
+/// strategy has no injection runs. Exercise the caller and runtime suites
+/// independently so one cannot accidentally stand in for the other.
+#[test]
+fn lab_injection_recording_checks_both_oracle_suites_without_selected_points() {
+    use std::cell::Cell;
+
+    for strategy in [InjectionStrategy::Never, InjectionStrategy::FirstN(0)] {
+        for runtime_violation in [false, true] {
+            let invocations = Cell::new(0);
+            let expected = Cell::new(None);
+            let mut runner = LabInjectionRunner::new(
+                LabInjectionConfig::new(0xCACE)
+                    .with_strategy(strategy.clone())
+                    .with_all_oracles()
+                    .max_steps_per_run(16),
+            );
+            let report = runner.run_with_lab(|injector, runtime, oracles| {
+                invocations.set(invocations.get() + 1);
+                let (region, task) = if runtime_violation {
+                    let region = runtime.state.create_root_region(Budget::INFINITE);
+                    let (task, _join) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, std::future::pending::<()>())
+                        .expect("admit a live task before the illegal close");
+                    runtime
+                        .state
+                        .region(region)
+                        .expect("live task owns this region")
+                        .set_state(crate::record::region::RegionState::Closed);
+                    (region, task)
+                } else {
+                    let region = RegionId::from_arena(ArenaIndex::new(999, 1));
+                    let task = crate::types::TaskId::from_arena(ArenaIndex::new(998, 1));
+                    oracles.task_leak.on_spawn(task, region, Time::ZERO);
+                    oracles.task_leak.on_region_close(region, Time::ZERO);
+                    (region, task)
+                };
+                expected.set(Some((region, task)));
+                InstrumentedFuture::new(YieldingFuture::new(1, 42), injector)
+            });
+
+            assert_eq!(invocations.get(), 1, "only the recording was requested");
+            assert_eq!(report.total_await_points, 2);
+            assert_eq!(report.tests_run, 1);
+            assert_eq!(report.successes, 0);
+            assert_eq!(report.failures, 1);
+            assert!(!report.all_passed());
+            assert_eq!(runner.current_mode(), InjectionMode::Recording);
+            let result = &report.results[0];
+            assert_eq!(result.injection.injection_point, 0);
+            assert_eq!(result.injection.await_points_before, 2);
+            assert!(result.injection.is_success());
+            let (region, task) = expected.get().expect("recording reached the corrupt state");
+            let found = result.oracle_violations.iter().any(|violation| {
+                if runtime_violation {
+                    matches!(
+                        violation,
+                        OracleViolation::Quiescence(violation)
+                            if violation.region == region && violation.live_tasks.contains(&task)
+                    )
+                } else {
+                    matches!(
+                        violation,
+                        OracleViolation::TaskLeak(violation)
+                            if violation.region == region && violation.leaked_tasks.contains(&task)
+                    )
+                }
+            });
+            assert!(found, "the selected baseline oracle must fail: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn lab_injection_retains_a_failed_baseline_while_exploring_clean_injections() {
+    use std::cell::Cell;
+
+    for stop_on_failure in [false, true] {
+        let invocations = Cell::new(0);
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::AllPoints)
+                .with_all_oracles()
+                .stop_on_failure(stop_on_failure)
+                .max_steps_per_run(16),
+        );
+        let report = runner.run_with_lab(|injector, _runtime, oracles| {
+            let recording = invocations.get() == 0;
+            invocations.set(invocations.get() + 1);
+            if recording {
+                let region = RegionId::from_arena(ArenaIndex::new(999, 1));
+                let task = crate::types::TaskId::from_arena(ArenaIndex::new(998, 1));
+                oracles.task_leak.on_spawn(task, region, Time::ZERO);
+                oracles.task_leak.on_region_close(region, Time::ZERO);
+            }
+            InstrumentedFuture::new(YieldingFuture::new(2, 42), injector)
+        });
+
+        let injections = if stop_on_failure { 0 } else { 3 };
+        assert_eq!(invocations.get(), injections + 1);
+        assert_eq!(report.total_await_points, 3);
+        assert_eq!(report.tests_run, injections + 1);
+        assert_eq!(report.successes, injections);
+        assert_eq!(report.failures, 1);
+        assert!(!report.all_passed(), "clean injections cannot erase the baseline");
+        assert_eq!(report.results[0].injection.injection_point, 0);
+        assert!(report.results[0].injection.is_success());
+        assert!(
+            report.results[0]
+                .oracle_violations
+                .iter()
+                .any(|violation| matches!(violation, OracleViolation::TaskLeak(_)))
+        );
+        for (index, result) in report.results.iter().skip(1).enumerate() {
+            assert!(result.is_success(), "fresh injection oracle suite: {result:?}");
+            assert_eq!(result.injection.injection_point, index as u64 + 1);
+        }
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+    }
+}
+
+#[test]
+fn lab_injection_factory_panics_are_reported_in_recording_and_injection() {
+    use std::cell::Cell;
+
+    for panic_on_invocation in [0, 1] {
+        let invocations = Cell::new(0);
+        let mut runner = LabInjectionRunner::new(
+            LabInjectionConfig::new(0xCACE)
+                .with_strategy(InjectionStrategy::AllPoints)
+                .stop_on_failure(true)
+                .max_steps_per_run(16),
+        );
+        let report = runner.run_simple(|injector| {
+            let invocation = invocations.get();
+            invocations.set(invocation + 1);
+            assert_ne!(invocation, panic_on_invocation, "injection factory failed");
+            InstrumentedFuture::new(YieldingFuture::new(2, 42), injector)
+        });
+
+        assert_eq!(invocations.get(), panic_on_invocation + 1);
+        assert_eq!(report.tests_run, 1);
+        assert_eq!(report.failures, 1);
+        assert_eq!(
+            report.total_await_points,
+            if panic_on_invocation == 0 { 0 } else { 3 }
+        );
+        assert_eq!(
+            report.results[0].injection.injection_point,
+            panic_on_invocation as u64
+        );
+        assert_eq!(report.results[0].injection.await_points_before, 0);
+        assert!(matches!(
+            &report.results[0].injection.outcome,
+            InjectionOutcome::Panic(message) if message.contains("injection factory failed")
+        ));
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
+    }
+}
+
+#[test]
+fn lab_injection_recording_poll_panic_is_a_failed_result() {
+    let mut runner = LabInjectionRunner::new(
+        LabInjectionConfig::new(0xCACE)
+            .with_strategy(InjectionStrategy::Never)
+            .with_all_oracles()
+            .max_steps_per_run(16),
+    );
+    let report = runner.run_simple(|injector| {
+        InstrumentedFuture::new(
+            std::future::poll_fn(|_| -> std::task::Poll<()> {
+                panic!("recording poll failed");
+            }),
+            injector,
+        )
+    });
+
+    assert_eq!(report.total_await_points, 1);
+    assert_eq!(report.tests_run, 1);
+    assert_eq!(report.failures, 1);
+    assert_eq!(report.results[0].injection.injection_point, 0);
+    assert_eq!(report.results[0].injection.await_points_before, 1);
+    assert!(matches!(
+        &report.results[0].injection.outcome,
+        InjectionOutcome::Panic(message) if message == "recording poll failed"
+    ));
+    assert_eq!(runner.current_mode(), InjectionMode::Recording);
+}
+
+#[test]
+fn lab_injection_recording_output_drop_panic_is_a_failed_result() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Debug)]
+    struct OutputDropBomb(Rc<Cell<usize>>);
+
+    impl Drop for OutputDropBomb {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+            panic!("recording output dropped");
+        }
+    }
+
+    let drops = Rc::new(Cell::new(0));
+    let invocations = Cell::new(0);
+    let mut runner = LabInjectionRunner::new(
+        LabInjectionConfig::new(0xCACE)
+            .with_strategy(InjectionStrategy::AllPoints)
+            .max_steps_per_run(16),
+    );
+    let report = runner.run_simple(|injector| {
+        invocations.set(invocations.get() + 1);
+        InstrumentedFuture::new(
+            std::future::ready(OutputDropBomb(Rc::clone(&drops))),
+            injector,
+        )
+    });
+
+    assert_eq!(invocations.get(), 1, "a failed recording stops exploration");
+    assert_eq!(drops.get(), 1, "the accepted output was retired exactly once");
+    assert_eq!(report.total_await_points, 1);
+    assert_eq!(report.tests_run, 1);
+    assert_eq!(report.failures, 1);
+    assert_eq!(report.results[0].injection.injection_point, 0);
+    assert!(matches!(
+        &report.results[0].injection.outcome,
+        InjectionOutcome::Panic(message) if message == "recording output dropped"
+    ));
+    assert_eq!(runner.current_mode(), InjectionMode::Recording);
+}
+
+#[test]
+fn lab_injection_does_not_drop_an_opaque_panic_payload_while_reporting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OpaquePanic(Arc<AtomicUsize>);
+
+    impl Drop for OpaquePanic {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("opaque panic payload must not be dropped");
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut runner = LabInjectionRunner::new(
+        LabInjectionConfig::new(0xCACE)
+            .with_strategy(InjectionStrategy::Never)
+            .max_steps_per_run(16),
+    );
+    let report = runner.run_simple(|injector| {
+        let drops = Arc::clone(&drops);
+        InstrumentedFuture::new(
+            std::future::poll_fn(move |_| -> std::task::Poll<()> {
+                std::panic::panic_any(OpaquePanic(Arc::clone(&drops)));
+            }),
+            injector,
+        )
+    });
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert_eq!(report.total_await_points, 1);
+    assert_eq!(report.tests_run, 1);
+    assert_eq!(report.failures, 1);
+    assert_eq!(report.results[0].injection.injection_point, 0);
+    assert!(matches!(
+        &report.results[0].injection.outcome,
+        InjectionOutcome::Panic(message) if message == "Unknown panic"
+    ));
+    assert_eq!(runner.current_mode(), InjectionMode::Recording);
+}
+
+#[test]
+fn lab_injection_preserves_borrowed_non_send_futures_and_borrowed_outputs() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let value = String::from("borrowed output");
+    let borrowed = value.as_str();
+    let completions = Rc::new(Cell::new(0));
+    let invocations = Cell::new(0);
+    let mut runner = LabInjectionRunner::new(
+        LabInjectionConfig::new(0xCACE)
+            .with_strategy(InjectionStrategy::AllPoints)
+            .with_all_oracles()
+            .max_steps_per_run(16),
+    );
+    let report = runner.run_simple(|injector| {
+        invocations.set(invocations.get() + 1);
+        let completions = Rc::clone(&completions);
+        InstrumentedFuture::new(
+            async move {
+                crate::runtime::yield_now().await;
+                // The Rc and the borrowed output both survive Pending.
+                completions.set(completions.get() + 1);
+                borrowed
+            },
+            injector,
+        )
+    });
+
+    assert_eq!(invocations.get(), 3);
+    assert_eq!(completions.get(), 1, "only the recording completes normally");
+    assert_eq!(report.total_await_points, 2);
+    assert_eq!(report.tests_run, 2, "a passing recording remains uncounted");
+    assert_eq!(report.successes, 2);
+    assert_eq!(report.failures, 0);
+    assert!(report.all_passed());
+    assert_eq!(value, "borrowed output");
     assert_eq!(runner.current_mode(), InjectionMode::Recording);
 }
