@@ -3726,6 +3726,1029 @@ mod tests {
         peer.set_nonblocking(false).expect("restore blocking peer");
     }
 
+
+    // br-asupersync-2oh2u.6.5: library-owned transaction state changes need
+    // their own wire acknowledgement, exercised on the real native reactor.
+    #[derive(Clone, Copy, Debug)]
+    enum ManagedControlCase {
+        Begin,
+        IsolatedBegin,
+        Commit,
+        Rollback,
+    }
+
+    impl ManagedControlCase {
+        fn sql(self) -> &'static str {
+            match self {
+                Self::Begin => "BEGIN",
+                Self::IsolatedBegin => "BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE",
+                Self::Commit => "COMMIT",
+                Self::Rollback => "ROLLBACK",
+            }
+        }
+
+        fn tag(self) -> &'static str {
+            match self {
+                Self::Begin | Self::IsolatedBegin => "BEGIN",
+                Self::Commit => "COMMIT",
+                Self::Rollback => "ROLLBACK",
+            }
+        }
+
+        fn status(self) -> u8 {
+            match self {
+                Self::Begin | Self::IsolatedBegin => b'T',
+                Self::Commit | Self::Rollback => b'I',
+            }
+        }
+
+        fn has_initial_begin(self) -> bool {
+            matches!(self, Self::Commit | Self::Rollback)
+        }
+
+        fn request_frames(self) -> Vec<u8> {
+            let mut frames = Vec::new();
+            if self.has_initial_begin() {
+                frames.extend(backend_message(b'Q', b"BEGIN\0"));
+            }
+            frames.extend(backend_message(b'Q', format!("{}\0", self.sql()).as_bytes()));
+            frames
+        }
+
+        fn response_prefix(self) -> Vec<u8> {
+            if self.has_initial_begin() {
+                [command_complete_message("BEGIN"), ready_for_query(b'T')].concat()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    async fn invoke_managed_control(
+        conn: &mut PgConnection,
+        cx: &Cx,
+        operation: ManagedControlCase,
+    ) -> Outcome<(), PgError> {
+        match operation {
+            ManagedControlCase::Begin => conn.begin(cx).await.map(drop),
+            ManagedControlCase::IsolatedBegin => conn
+                .begin_with_isolation(cx, IsolationLevel::Serializable, false)
+                .await
+                .map(drop),
+            ManagedControlCase::Commit | ManagedControlCase::Rollback => {
+                let transaction = match conn.begin(cx).await {
+                    Outcome::Ok(transaction) => transaction,
+                    Outcome::Err(error) => return Outcome::Err(error),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                };
+                match operation {
+                    ManagedControlCase::Commit => transaction.commit(cx).await,
+                    ManagedControlCase::Rollback => transaction.rollback(cx).await,
+                    _ => unreachable!("only terminators require an initial BEGIN"),
+                }
+            }
+        }
+    }
+
+    fn isolation_level_reply(level: &str) -> Vec<u8> {
+        let mut description = Vec::new();
+        description.extend_from_slice(&1i16.to_be_bytes());
+        description.extend_from_slice(b"transaction_isolation\0");
+        description.extend_from_slice(&0i32.to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        description.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+        description.extend_from_slice(&(-1i16).to_be_bytes());
+        description.extend_from_slice(&(-1i32).to_be_bytes());
+        description.extend_from_slice(&0i16.to_be_bytes());
+        let mut row = Vec::new();
+        row.extend_from_slice(&1i16.to_be_bytes());
+        row.extend_from_slice(
+            &i32::try_from(level.len())
+                .expect("fixture isolation length")
+                .to_be_bytes(),
+        );
+        row.extend_from_slice(level.as_bytes());
+        [
+            backend_message(b'T', &description),
+            backend_message(b'D', &row),
+            command_complete_message("SHOW"),
+            ready_for_query(b'T'),
+        ]
+        .concat()
+    }
+
+    async fn witness_managed_control_pending<F: std::future::Future>(
+        mut operation: Pin<&mut F>,
+        peer: &mut std::net::TcpStream,
+        expected: &[u8],
+    ) {
+        use std::io::Read;
+
+        peer.set_nonblocking(true).expect("nonblocking control witness");
+        let mut received = Vec::new();
+        std::future::poll_fn(|task_cx| {
+            assert!(
+                operation.as_mut().poll(task_cx).is_pending(),
+                "managed operation must wait for the withheld acknowledgement"
+            );
+            let mut bytes = [0u8; 128];
+            loop {
+                match peer.read(&mut bytes) {
+                    Ok(0) => panic!("control socket closed before its Pending witness"),
+                    Ok(count) => {
+                        received.extend_from_slice(&bytes[..count]);
+                        assert!(
+                            received.len() <= expected.len(),
+                            "caller SQL escaped before transaction acknowledgement"
+                        );
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("read managed control request: {error}"),
+                }
+            }
+            if received.len() == expected.len() {
+                assert_eq!(received.as_slice(), expected, "exact public transaction request");
+                Poll::Ready(())
+            } else {
+                task_cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        peer.set_nonblocking(false).expect("restore blocking control peer");
+    }
+
+    fn assert_managed_control_requests(
+        peer: &mut std::net::TcpStream,
+        operation: ManagedControlCase,
+    ) {
+        if operation.has_initial_begin() {
+            assert_eq!(read_frontend_frame(peer), (b'Q', b"BEGIN\0".to_vec()));
+        }
+        assert_eq!(
+            read_frontend_frame(peer),
+            (b'Q', format!("{}\0", operation.sql()).into_bytes())
+        );
+    }
+
+    #[test]
+    fn managed_transactions_reject_incomplete_mismatched_and_ambiguous_acknowledgements() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for operation in [
+                    ManagedControlCase::Begin,
+                    ManagedControlCase::IsolatedBegin,
+                    ManagedControlCase::Commit,
+                    ManagedControlCase::Rollback,
+                ] {
+                    let complete = command_complete_message(operation.tag());
+                    let ready = ready_for_query(operation.status());
+                    let wrong_tag = if operation.tag() == "BEGIN" { "COMMIT" } else { "BEGIN" };
+                    let cases = [
+                        ("ready without completion", ready.clone()),
+                        (
+                            "wrong command tag",
+                            [command_complete_message(wrong_tag), ready.clone()].concat(),
+                        ),
+                        (
+                            "unterminated command tag",
+                            [
+                                backend_message(b'C', operation.tag().as_bytes()),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "trailing command tag bytes",
+                            [
+                                backend_message(
+                                    b'C',
+                                    format!("{}\0junk", operation.tag()).as_bytes(),
+                                ),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "duplicate command completion",
+                            [complete.clone(), complete.clone(), ready.clone()].concat(),
+                        ),
+                        (
+                            "wrong transaction state",
+                            [
+                                complete.clone(),
+                                ready_for_query(if operation.status() == b'I' {
+                                    b'T'
+                                } else {
+                                    b'I'
+                                }),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "failed transaction state",
+                            [complete.clone(), ready_for_query(b'E')].concat(),
+                        ),
+                        (
+                            "trailing ready bytes",
+                            [complete.clone(), backend_message(b'Z', b"II")].concat(),
+                        ),
+                        (
+                            "empty ready body",
+                            [complete.clone(), backend_message(b'Z', b"")].concat(),
+                        ),
+                        (
+                            "unknown ready state",
+                            [complete.clone(), ready_for_query(b'X')].concat(),
+                        ),
+                        (
+                            "error after completion cannot be retried",
+                            [
+                                complete.clone(),
+                                error_response_message("40001", "ambiguous completion"),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "completion after error cannot be retried",
+                            [
+                                error_response_message("40001", "ambiguous completion"),
+                                complete.clone(),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "duplicate error response",
+                            [
+                                error_response_message("40001", "first error"),
+                                error_response_message("40001", "second error"),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "malformed async metadata",
+                            [
+                                backend_message(b'S', b"application_name\0x\0junk"),
+                                complete.clone(),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                        (
+                            "unexpected row description",
+                            [
+                                backend_message(b'T', &[0, 0]),
+                                complete.clone(),
+                                ready.clone(),
+                            ]
+                            .concat(),
+                        ),
+                    ];
+                    for (case, response) in cases {
+                        for dirty in [false, true] {
+                            let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                            conn.inner.needs_discard = dirty;
+                            let mut reply = operation.response_prefix();
+                            reply.extend_from_slice(&response);
+                            // Let the old permissive isolated-BEGIN path finish
+                            // its SHOW, so accepting the bad ACK fails directly.
+                            if matches!(operation, ManagedControlCase::IsolatedBegin) {
+                                reply.extend(isolation_level_reply("serializable"));
+                            }
+                            reply.extend(command_complete_message("UPDATE 1"));
+                            reply.extend(ready_for_query(b'I'));
+                            std::io::Write::write_all(&mut peer, &reply)
+                                .expect("write invalid managed control fixture");
+
+                            let outcome = invoke_managed_control(&mut conn, &cx, operation).await;
+                            assert!(
+                                matches!(&outcome, Outcome::Err(PgError::Protocol(_))),
+                                "{operation:?}/{case}: reject uncertain success: {outcome:?}"
+                            );
+                            assert_orphan_recovery_debt(&conn, dirty, case);
+                            assert!(matches!(
+                                conn.execute_unchecked(&cx, "UPDATE must_not_run SET v = 1")
+                                    .await,
+                                Outcome::Err(PgError::ConnectionClosed)
+                            ));
+                            assert_managed_control_requests(&mut peer, operation);
+                            assert_orphan_peer_closed(&mut peer, case);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn isolated_begin_compensation_requires_a_complete_idle_rollback() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for (case, acknowledgement, recovered) in [
+                    ("missing completion", ready_for_query(b'I'), false),
+                    (
+                        "wrong completion",
+                        [command_complete_message("COMMIT"), ready_for_query(b'I')].concat(),
+                        false,
+                    ),
+                    (
+                        "still in transaction",
+                        [command_complete_message("ROLLBACK"), ready_for_query(b'T')].concat(),
+                        false,
+                    ),
+                    (
+                        "acknowledged rollback",
+                        [command_complete_message("ROLLBACK"), ready_for_query(b'I')].concat(),
+                        true,
+                    ),
+                ] {
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    let reply = [
+                        command_complete_message("BEGIN"),
+                        ready_for_query(b'T'),
+                        isolation_level_reply("read committed"),
+                        acknowledgement,
+                        command_complete_message("UPDATE 1"),
+                        ready_for_query(b'I'),
+                    ]
+                    .concat();
+                    std::io::Write::write_all(&mut peer, &reply)
+                        .expect("write isolation verification and cleanup fixture");
+                    let outcome = conn
+                        .begin_with_isolation(&cx, IsolationLevel::Serializable, false)
+                        .await
+                        .map(drop);
+                    assert!(
+                        matches!(
+                            &outcome,
+                            Outcome::Err(PgError::IsolationLevelMismatch {
+                                requested: IsolationLevel::Serializable,
+                                observed,
+                            }) if observed == "read committed"
+                        ),
+                        "{case}: preserve the verification failure: {outcome:?}"
+                    );
+                    for sql in [
+                        "BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE",
+                        "SHOW transaction_isolation",
+                        "ROLLBACK",
+                    ] {
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (b'Q', format!("{sql}\0").into_bytes())
+                        );
+                    }
+                    if recovered {
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        assert!(!conn.needs_discard());
+                        assert!(matches!(
+                            conn.execute_unchecked(&cx, "UPDATE recovered SET v = 1").await,
+                            Outcome::Ok(1)
+                        ));
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (b'Q', b"UPDATE recovered SET v = 1\0".to_vec())
+                        );
+                        conn.close().await.expect("close compensated transaction");
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                    } else {
+                        assert_orphan_recovery_debt(&conn, false, case);
+                        assert!(matches!(
+                            conn.execute_unchecked(&cx, "UPDATE must_not_run SET v = 1")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                    }
+                    assert_orphan_peer_closed(&mut peer, case);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn dropping_a_pending_managed_control_keeps_debt_and_blocks_reconnect() {
+        for workers in [1, 2] {
+            for operation in [
+                ManagedControlCase::Begin,
+                ManagedControlCase::IsolatedBegin,
+                ManagedControlCase::Commit,
+                ManagedControlCase::Rollback,
+            ] {
+                run_native_orphan_recovery_test(workers, move |cx| async move {
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    let mut reply = operation.response_prefix();
+                    reply.extend(command_complete_message(operation.tag()));
+                    std::io::Write::write_all(&mut peer, &reply)
+                        .expect("write completion without ReadyForQuery");
+                    let mut pending = Box::pin(invoke_managed_control(&mut conn, &cx, operation));
+                    witness_managed_control_pending(
+                        pending.as_mut(),
+                        &mut peer,
+                        &operation.request_frames(),
+                    )
+                    .await;
+                    drop(pending);
+                    assert_orphan_recovery_debt(&conn, false, "dropped managed control");
+                    assert!(matches!(
+                        conn.execute_unchecked(&cx, "UPDATE must_not_run SET v = 1").await,
+                        Outcome::Err(PgError::ConnectionClosed)
+                    ));
+                    // Hard drop leaves no future to perform asynchronous
+                    // cleanup; disposal must close the quarantined transport.
+                    drop(conn);
+                    assert_orphan_peer_closed(&mut peer, "dropped managed control");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_pending_begin_or_commit_preserves_reason_and_retires_transport() {
+        for workers in [1, 2] {
+            for operation in [
+                ManagedControlCase::Begin,
+                ManagedControlCase::IsolatedBegin,
+                ManagedControlCase::Commit,
+            ] {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native control worker");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    let mut reply = operation.response_prefix();
+                    reply.extend(command_complete_message(operation.tag()));
+                    std::io::Write::write_all(&mut peer, &reply)
+                        .expect("write pending cancellable control response");
+                    let mut pending =
+                        Box::pin(invoke_managed_control(&mut conn, &request_cx, operation));
+                    witness_managed_control_pending(
+                        pending.as_mut(),
+                        &mut peer,
+                        &operation.request_frames(),
+                    )
+                    .await;
+                    let reason = CancelReason::user("cancel unacknowledged transaction control");
+                    request_cx.cancel_with_reason(reason.clone());
+                    assert!(matches!(
+                        pending.await,
+                        Outcome::Cancelled(observed) if observed == reason
+                    ));
+                    assert_orphan_recovery_debt(&conn, false, "cancelled managed control");
+                    assert!(matches!(
+                        conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1")
+                            .await,
+                        Outcome::Err(PgError::ConnectionClosed)
+                    ));
+                    assert!(!active_cx.is_cancel_requested());
+                    // The zero-key fixture cannot issue a real CancelRequest;
+                    // this asserts the real data socket close fallback instead.
+                    assert_orphan_peer_closed(&mut peer, "cancelled managed control");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_pending_rollback_still_requires_its_masked_idle_acknowledgement() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |request_cx| async move {
+                let active_cx = Cx::current().expect("native rollback worker");
+                let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                let reply = [
+                    command_complete_message("BEGIN"),
+                    ready_for_query(b'T'),
+                    command_complete_message("ROLLBACK"),
+                ]
+                .concat();
+                std::io::Write::write_all(&mut peer, &reply)
+                    .expect("write pending masked rollback fixture");
+                let mut pending = Box::pin(invoke_managed_control(
+                    &mut conn,
+                    &request_cx,
+                    ManagedControlCase::Rollback,
+                ));
+                witness_managed_control_pending(
+                    pending.as_mut(),
+                    &mut peer,
+                    &ManagedControlCase::Rollback.request_frames(),
+                )
+                .await;
+                request_cx.cancel_with_reason(CancelReason::user("cancel during rollback cleanup"));
+                // Cleanup is deliberately masked. Supply the actual proof of
+                // rollback before awaiting; cancellation alone is not that proof.
+                std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                    .expect("release the masked rollback acknowledgement");
+                assert!(matches!(pending.await, Outcome::Ok(())));
+                assert!(!conn.inner.closed);
+                assert!(!conn.inner.needs_rollback);
+                assert!(!conn.in_transaction());
+                assert!(!conn.needs_discard());
+                reply_complete(&mut peer, "UPDATE 1", b'I');
+                assert!(matches!(
+                    conn.execute_unchecked(&active_cx, "UPDATE after_rollback SET v = 1")
+                        .await,
+                    Outcome::Ok(1)
+                ));
+                assert_eq!(
+                    read_frontend_frame(&mut peer),
+                    (b'Q', b"UPDATE after_rollback SET v = 1\0".to_vec())
+                );
+                conn.close().await.expect("close acknowledged rollback");
+                assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                assert_orphan_peer_closed(&mut peer, "acknowledged masked rollback");
+            });
+        }
+    }
+
+    #[test]
+    fn managed_server_errors_resynchronize_without_claiming_transaction_success() {
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for operation in [
+                    ManagedControlCase::Begin,
+                    ManagedControlCase::IsolatedBegin,
+                    ManagedControlCase::Commit,
+                    ManagedControlCase::Rollback,
+                ] {
+                    for status in [b'I', b'T', b'E'] {
+                        for dirty in [false, true] {
+                            let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                            conn.inner.needs_discard = dirty;
+                            let mut reply = operation.response_prefix();
+                            reply.extend(error_response_message("40001", "serialization failure"));
+                            reply.extend(parameter_status_message(
+                                "application_name",
+                                "after_error",
+                            ));
+                            reply.extend(ready_for_query(status));
+                            if status != b'I' {
+                                reply.extend(command_complete_message("ROLLBACK"));
+                                reply.extend(ready_for_query(b'I'));
+                            }
+                            reply.extend(command_complete_message("UPDATE 1"));
+                            reply.extend(ready_for_query(b'I'));
+                            std::io::Write::write_all(&mut peer, &reply)
+                                .expect("write synchronized server-error fixture");
+
+                            let outcome = invoke_managed_control(&mut conn, &cx, operation).await;
+                            assert!(
+                                matches!(
+                                    &outcome,
+                                    Outcome::Err(error) if error.is_serialization_failure()
+                                ),
+                                "{operation:?}/{status}: preserve SQLSTATE 40001: {outcome:?}"
+                            );
+                            assert!(!conn.inner.closed);
+                            assert_eq!(conn.inner.transaction_status, status);
+                            assert_eq!(conn.inner.needs_rollback, status != b'I');
+                            assert_eq!(conn.inner.needs_discard, dirty);
+                            assert_eq!(conn.parameter("application_name"), Some("after_error"));
+                            assert_managed_control_requests(&mut peer, operation);
+                            assert!(matches!(
+                                conn.execute_unchecked(&cx, "UPDATE after_error SET v = 1").await,
+                                Outcome::Ok(1)
+                            ));
+                            if status != b'I' {
+                                assert_eq!(
+                                    read_frontend_frame(&mut peer),
+                                    (b'Q', b"ROLLBACK\0".to_vec())
+                                );
+                            }
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"UPDATE after_error SET v = 1\0".to_vec())
+                            );
+                            assert!(!conn.inner.needs_rollback);
+                            assert_eq!(conn.needs_discard(), dirty);
+                            conn.close().await.expect("close synchronized connection");
+                            assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                            assert_orphan_peer_closed(&mut peer, "synchronized server error");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn acknowledged_managed_controls_preserve_async_metadata_and_session_dirtiness() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for isolated in [false, true] {
+                    for commit in [false, true] {
+                        for dirty in [false, true] {
+                            let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                            conn.inner.needs_discard = dirty;
+                            let tag = if commit { "COMMIT" } else { "ROLLBACK" };
+                            let mut reply = [
+                                backend_message(b'N', b"SNOTICE\0C00000\0Mbegin notice\0\0"),
+                                parameter_status_message("application_name", "during_begin"),
+                                command_complete_message("BEGIN"),
+                                notification_response_message(7, "control", "begin"),
+                                ready_for_query(b'T'),
+                            ]
+                            .concat();
+                            if isolated {
+                                reply.extend(isolation_level_reply("serializable"));
+                            }
+                            reply.extend(
+                                [
+                                    backend_message(b'N', b"SNOTICE\0C00000\0Mend notice\0\0"),
+                                    command_complete_message(tag),
+                                    parameter_status_message("application_name", "after_control"),
+                                    notification_response_message(7, "control", "end"),
+                                    ready_for_query(b'I'),
+                                ]
+                                .concat(),
+                            );
+                            std::io::Write::write_all(&mut peer, &reply)
+                                .expect("write acknowledged controls with metadata");
+                            let transaction = if isolated {
+                                conn.begin_with_isolation(&cx, IsolationLevel::Serializable, false)
+                                    .await
+                                    .unwrap()
+                            } else {
+                                conn.begin(&cx).await.unwrap()
+                            };
+                            assert_eq!(
+                                transaction.conn.parameter("application_name"),
+                                Some("during_begin")
+                            );
+                            assert!(!transaction.conn.inner.needs_rollback);
+                            assert_eq!(transaction.conn.inner.transaction_status, b'T');
+                            let outcome = if commit {
+                                transaction.commit(&cx).await
+                            } else {
+                                transaction.rollback(&cx).await
+                            };
+                            assert!(matches!(outcome, Outcome::Ok(())));
+                            let begin_sql = if isolated {
+                                "BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE"
+                            } else {
+                                "BEGIN"
+                            };
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', format!("{begin_sql}\0").into_bytes())
+                            );
+                            if isolated {
+                                assert_eq!(
+                                    read_frontend_frame(&mut peer),
+                                    (b'Q', b"SHOW transaction_isolation\0".to_vec())
+                                );
+                            }
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', format!("{tag}\0").into_bytes())
+                            );
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(!conn.in_transaction());
+                            assert_eq!(conn.inner.needs_discard, dirty);
+                            assert_eq!(conn.needs_discard(), dirty);
+                            assert_eq!(conn.parameter("application_name"), Some("after_control"));
+                            assert_eq!(conn.inner.notifications.queue.len(), 2);
+                            let manager = PgConnectionManager::new(
+                                PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+                            );
+                            assert_eq!(manager.release_check(&mut conn), !dirty);
+                            assert_eq!(manager.is_valid(&cx, &mut conn).await, !dirty);
+                            conn.close().await.expect("close acknowledged transaction");
+                            assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                            assert_orphan_peer_closed(&mut peer, "acknowledged transaction");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn interrupted_isolation_compensation_keeps_its_rollback_obligation() {
+        for workers in [1, 2] {
+            for cancel in [false, true] {
+                run_native_orphan_recovery_test(workers, move |request_cx| async move {
+                    let active_cx = Cx::current().expect("native compensation worker");
+                    let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                    let reply = [
+                        command_complete_message("BEGIN"),
+                        ready_for_query(b'T'),
+                        isolation_level_reply("read committed"),
+                        command_complete_message("ROLLBACK"),
+                    ]
+                    .concat();
+                    std::io::Write::write_all(&mut peer, &reply)
+                        .expect("write pending compensation fixture");
+                    let mut pending = Box::pin(conn.begin_with_isolation(
+                        &request_cx,
+                        IsolationLevel::Serializable,
+                        false,
+                    ));
+                    let requests = [
+                        backend_message(
+                            b'Q',
+                            b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE\0",
+                        ),
+                        backend_message(b'Q', b"SHOW transaction_isolation\0"),
+                        backend_message(b'Q', b"ROLLBACK\0"),
+                    ]
+                    .concat();
+                    witness_managed_control_pending(pending.as_mut(), &mut peer, &requests).await;
+                    if cancel {
+                        request_cx.cancel_with_reason(CancelReason::user("cancel compensation"));
+                        std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                            .expect("release masked compensation");
+                        let outcome = pending.await.map(drop);
+                        assert!(
+                            matches!(
+                                &outcome,
+                                Outcome::Err(PgError::IsolationLevelMismatch { .. })
+                            ),
+                            "preserve the error that required cleanup: {outcome:?}"
+                        );
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        reply_complete(&mut peer, "UPDATE 1", b'I');
+                        assert!(matches!(
+                            conn.execute_unchecked(&active_cx, "UPDATE after_cleanup SET v = 1")
+                                .await,
+                            Outcome::Ok(1)
+                        ));
+                        assert_eq!(
+                            read_frontend_frame(&mut peer),
+                            (b'Q', b"UPDATE after_cleanup SET v = 1\0".to_vec())
+                        );
+                        conn.close().await.expect("close compensated connection");
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                    } else {
+                        drop(pending);
+                        assert_orphan_recovery_debt(&conn, false, "dropped compensation");
+                        assert!(matches!(
+                            conn.execute_unchecked(&active_cx, "UPDATE must_not_run SET v = 1")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                        drop(conn);
+                    }
+                    assert_orphan_peer_closed(&mut peer, "interrupted compensation");
+                });
+            }
+        }
+    }
+
+    struct BorrowedControlState<'env> {
+        result: &'env str,
+        calls: usize,
+        fail_body: bool,
+        // This state is Send but not Sync and does not implement Clone.
+        marker: std::cell::Cell<usize>,
+    }
+
+    async fn borrowed_control_body<'env>(
+        _transaction: &mut PgTransaction<'_>,
+        _cx: &Cx,
+        state: &mut BorrowedControlState<'env>,
+    ) -> Outcome<&'env str, PgError> {
+        state.calls += 1;
+        state.marker.set(state.calls);
+        if state.fail_body {
+            Outcome::Err(PgError::Protocol("original body failure".to_string()))
+        } else {
+            Outcome::Ok(state.result)
+        }
+    }
+
+    #[test]
+    fn borrowed_helpers_gate_body_and_return_value_on_managed_acknowledgements() {
+        use crate::database::transaction::{
+            RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+            with_pg_transaction_retry_with_state, with_pg_transaction_with_state,
+        };
+
+        for workers in [1, 2] {
+            for retry in [false, true] {
+                run_native_orphan_recovery_test(workers, move |cx| async move {
+                    for (case, fail_begin, fail_body, ambiguous_commit) in [
+                        ("begin", true, false, false),
+                        ("commit", false, false, false),
+                        ("ambiguous commit", false, false, true),
+                        ("rollback", false, true, false),
+                    ] {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        if !fail_begin {
+                            reply_complete(&mut peer, "BEGIN", b'T');
+                        }
+                        let result = String::from("caller-owned result without cloning");
+                        let mut state = BorrowedControlState {
+                            result: result.as_str(),
+                            calls: 0,
+                            fail_body,
+                            marker: std::cell::Cell::new(0),
+                        };
+                        let policy = RetryPolicy {
+                            max_retries: 1,
+                            base_delay: Duration::ZERO,
+                            max_delay: Duration::ZERO,
+                        };
+                        let mut pending = Box::pin(async {
+                            if retry {
+                                with_pg_transaction_retry_with_state(
+                                    &mut conn,
+                                    &cx,
+                                    &policy,
+                                    TransactionReplaySafety::ReplaySafe,
+                                    &mut state,
+                                    |tx, cx, state| {
+                                        ScopedTransactionFuture::new(borrowed_control_body(
+                                            tx, cx, state,
+                                        ))
+                                    },
+                                )
+                                .await
+                            } else {
+                                with_pg_transaction_with_state(
+                                    &mut conn,
+                                    &cx,
+                                    &mut state,
+                                    |tx, cx, state| {
+                                        ScopedTransactionFuture::new(borrowed_control_body(
+                                            tx, cx, state,
+                                        ))
+                                    },
+                                )
+                                .await
+                            }
+                        });
+                        let operation = if fail_begin {
+                            ManagedControlCase::Begin
+                        } else if fail_body {
+                            ManagedControlCase::Rollback
+                        } else {
+                            ManagedControlCase::Commit
+                        };
+                        witness_managed_control_pending(
+                            pending.as_mut(),
+                            &mut peer,
+                            &operation.request_frames(),
+                        )
+                        .await;
+                        let acknowledgement = if ambiguous_commit {
+                            [
+                                command_complete_message("COMMIT"),
+                                error_response_message("40001", "ambiguous commit must not replay"),
+                                ready_for_query(b'I'),
+                            ]
+                            .concat()
+                        } else {
+                            // Ready alone must not prove any managed command.
+                            ready_for_query(operation.status())
+                        };
+                        std::io::Write::write_all(&mut peer, &acknowledgement)
+                            .expect("release invalid helper acknowledgement");
+                        let outcome = pending.await;
+                        assert!(
+                            matches!(&outcome, Outcome::Err(PgError::Protocol(_))),
+                            "{case}: no successful value before complete commit proof: {outcome:?}"
+                        );
+                        if fail_body {
+                            assert!(matches!(
+                                &outcome,
+                                Outcome::Err(PgError::Protocol(message))
+                                    if message == "original body failure"
+                            ));
+                        }
+                        assert_eq!(state.calls, usize::from(!fail_begin), "{case}");
+                        assert_eq!(state.marker.get(), state.calls);
+                        assert_orphan_recovery_debt(&conn, false, case);
+                        assert!(matches!(
+                            conn.execute_unchecked(&cx, "UPDATE must_not_run SET v = 1")
+                                .await,
+                            Outcome::Err(PgError::ConnectionClosed)
+                        ));
+                        assert_orphan_peer_closed(&mut peer, case);
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_retry_helpers_preserve_replay_rules_after_synchronized_server_error() {
+        use crate::database::transaction::{
+            RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+            with_pg_transaction_retry_with_state,
+        };
+
+        for workers in [1, 2] {
+            run_native_orphan_recovery_test(workers, |cx| async move {
+                for fail_begin in [false, true] {
+                    for replay_safe in [false, true] {
+                        let (mut conn, mut peer) = make_orphan_recovery_connection_with_peer();
+                        if !fail_begin {
+                            reply_complete(&mut peer, "BEGIN", b'T');
+                        }
+                        let result = String::from("borrowed value from the acknowledged attempt");
+                        let mut state = BorrowedControlState {
+                            result: result.as_str(),
+                            calls: 0,
+                            fail_body: false,
+                            marker: std::cell::Cell::new(0),
+                        };
+                        let policy = RetryPolicy {
+                            max_retries: 1,
+                            base_delay: Duration::ZERO,
+                            max_delay: Duration::ZERO,
+                        };
+                        let replay = if replay_safe {
+                            TransactionReplaySafety::ReplaySafe
+                        } else {
+                            TransactionReplaySafety::ReplayUnsafe
+                        };
+                        let mut pending = Box::pin(with_pg_transaction_retry_with_state(
+                            &mut conn,
+                            &cx,
+                            &policy,
+                            replay,
+                            &mut state,
+                            |tx, cx, state| {
+                                ScopedTransactionFuture::new(borrowed_control_body(tx, cx, state))
+                            },
+                        ));
+                        let first = if fail_begin {
+                            ManagedControlCase::Begin
+                        } else {
+                            ManagedControlCase::Commit
+                        };
+                        witness_managed_control_pending(
+                            pending.as_mut(),
+                            &mut peer,
+                            &first.request_frames(),
+                        )
+                        .await;
+                        let should_retry = fail_begin || replay_safe;
+                        let mut reply = [
+                            error_response_message("40001", "safe synchronized retry boundary"),
+                            ready_for_query(b'I'),
+                        ]
+                        .concat();
+                        if should_retry {
+                            reply.extend(command_complete_message("BEGIN"));
+                            reply.extend(ready_for_query(b'T'));
+                            reply.extend(command_complete_message("COMMIT"));
+                            reply.extend(ready_for_query(b'I'));
+                        }
+                        std::io::Write::write_all(&mut peer, &reply)
+                            .expect("release synchronized retry response");
+                        let outcome = pending.await;
+                        if should_retry {
+                            assert!(
+                                matches!(&outcome, Outcome::Ok(value) if *value == result.as_str()),
+                                "only acknowledged commit returns the borrowed value: {outcome:?}"
+                            );
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"BEGIN\0".to_vec())
+                            );
+                            assert_eq!(
+                                read_frontend_frame(&mut peer),
+                                (b'Q', b"COMMIT\0".to_vec())
+                            );
+                        } else {
+                            assert!(
+                                matches!(
+                                    &outcome,
+                                    Outcome::Err(error) if error.is_serialization_failure()
+                                ),
+                                "ReplayUnsafe must preserve the commit error: {outcome:?}"
+                            );
+                        }
+                        assert_eq!(
+                            state.calls,
+                            if fail_begin || !replay_safe { 1 } else { 2 },
+                            "begin errors may retry before the body; commit retries require consent"
+                        );
+                        assert_eq!(state.marker.get(), state.calls);
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        assert!(!conn.needs_discard());
+                        conn.close().await.expect("close retry fixture");
+                        assert_eq!(read_frontend_frame(&mut peer), (b'X', Vec::new()));
+                        assert_orphan_peer_closed(&mut peer, "synchronized retry");
+                    }
+                }
+            });
+        }
+    }
+
     #[test]
     fn interrupted_orphan_rollback_preserves_debt_and_refuses_queued_sql() {
         for workers in [1, 2] {

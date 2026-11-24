@@ -160,8 +160,9 @@ pub enum PgError {
     /// br-asupersync-dvgvcu — `begin_with_isolation` issued a
     /// `BEGIN ISOLATION LEVEL X` but the server-reported value of
     /// `SHOW transaction_isolation` did not match the requested
-    /// level. The transaction has been rolled back before this
-    /// error is returned.
+    /// level. Rollback cleanup is attempted before this error is returned.
+    /// If cleanup cannot be acknowledged, rollback debt remains and pool
+    /// reuse is refused. Protocol uncertainty also closes the connection.
     IsolationLevelMismatch {
         /// The level the caller requested.
         requested: IsolationLevel,
@@ -328,7 +329,7 @@ impl fmt::Display for PgError {
             } => write!(
                 f,
                 "PostgreSQL isolation level mismatch: requested {requested}, server reported \
-                 {observed:?} — silent downgrade detected, transaction rolled back \
+                 {observed:?} — silent downgrade detected, rollback cleanup attempted \
                  (br-asupersync-dvgvcu)"
             ),
         }
@@ -4291,6 +4292,39 @@ enum PgOpenState {
     Reconnected,
 }
 
+/// The acknowledgement required before a managed transaction changes state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgTransactionControl {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+impl PgTransactionControl {
+    const fn command_tag(self) -> &'static str {
+        match self {
+            Self::Begin => "BEGIN",
+            Self::Commit => "COMMIT",
+            Self::Rollback => "ROLLBACK",
+        }
+    }
+
+    const fn ready_status(self) -> u8 {
+        match self {
+            Self::Begin => b'T',
+            Self::Commit | Self::Rollback => b'I',
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PgTransactionErrorPolicy {
+    /// A synchronized server error remains usable for transaction retry.
+    Resynchronize,
+    /// Orphan cleanup cannot admit caller SQL after a refused rollback.
+    Close,
+}
+
 /// Server metadata returned when a PostgreSQL `COPY ... FROM STDIN` command
 /// enters COPY IN mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7414,7 +7448,10 @@ impl PgConnection {
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<PgTransaction<'_>, PgError> {
         trace_database_transaction(cx, "postgres", "begin", "start");
-        match self.execute_unchecked(cx, "BEGIN").await {
+        match self
+            .execute_transaction_control(cx, "BEGIN", PgTransactionControl::Begin)
+            .await
+        {
             // Reserve the obligation ONLY after BEGIN succeeds: an
             // ObligationToken is a drop bomb, so reserving it before a fallible
             // BEGIN would panic on the error/cancel paths (token dropped
@@ -7465,7 +7502,10 @@ impl PgConnection {
         trace_database_transaction(cx, "postgres", "begin_with_isolation", "start");
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let sql = format!("BEGIN ISOLATION LEVEL {level} {access_mode}");
-        match self.execute_unchecked(cx, &sql).await {
+        match self
+            .execute_transaction_control(cx, &sql, PgTransactionControl::Begin)
+            .await
+        {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => {
                 trace_database_transaction(cx, "postgres", "begin_with_isolation", "err");
@@ -7562,7 +7602,7 @@ impl PgConnection {
         match crate::combinator::commit_section(
             cx,
             MASKED_ROLLBACK_POLLS,
-            self.execute_unchecked(cx, "ROLLBACK"),
+            self.execute_transaction_control(cx, "ROLLBACK", PgTransactionControl::Rollback),
         )
         .await
         {
@@ -8773,6 +8813,78 @@ impl PgConnection {
     // Internal helpers
     // ========================================================================
 
+    /// Execute one library-owned transaction command (br-asupersync-2oh2u.6.5).
+    /// Ordinary SQL keeps its general command semantics; transaction ownership
+    /// changes only after the expected command tag and transaction status agree.
+    async fn execute_transaction_control(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        control: PgTransactionControl,
+    ) -> Outcome<(), PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        let mut buffer = MessageBuffer::new();
+        buffer.write_cstring(sql);
+        let message = match buffer.build_message(FrontendMessage::Query as u8) {
+            Ok(message) => message,
+            Err(error) => return Outcome::Err(error),
+        };
+
+        // BEGIN has no transaction guard yet. Mark uncertainty before its
+        // first write too, so cancellation or dropping an incomplete response
+        // cannot turn an unacknowledged transaction into an idle reconnect.
+        self.inner.closed = true;
+        self.inner.needs_rollback = true;
+        let response = match self.write_all(cx, &message).await {
+            Ok(()) => {
+                self.read_transaction_control_response(
+                    cx,
+                    control,
+                    PgTransactionErrorPolicy::Resynchronize,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match response {
+            Ok(()) => {
+                self.inner.needs_rollback = false;
+                self.inner.closed = false;
+                Outcome::Ok(())
+            }
+            Err(error) if matches!(&error, PgError::Server { .. }) && !self.inner.closed => {
+                // A valid ErrorResponse followed by ReadyForQuery proves
+                // synchronization, not successful COMMIT. In particular,
+                // serialization failure + idle must remain retryable without
+                // poisoning a connection whose transaction already ended.
+                self.inner.needs_rollback = self.inner.transaction_status != b'I';
+                outcome_from_error(error)
+            }
+            Err(error) => self.fail_in_flight(error),
+        }
+    }
+
     /// Clear an orphaned transaction left by a dropped `PgTransaction`.
     ///
     /// If `needs_rollback` is set, require a successful ROLLBACK completion
@@ -8797,7 +8909,14 @@ impl PgConnection {
             return Err(e);
         }
 
-        if let Err(e) = self.read_orphaned_rollback_response(cx).await {
+        if let Err(e) = self
+            .read_transaction_control_response(
+                cx,
+                PgTransactionControl::Rollback,
+                PgTransactionErrorPolicy::Close,
+            )
+            .await
+        {
             // Never send queued caller SQL after a refused or unproven
             // rollback, even if the peer sent a ReadyForQuery marker.
             self.abort_in_flight_exchange();
@@ -8813,54 +8932,88 @@ impl PgConnection {
         Ok(())
     }
 
-    /// Validate the response to the single fixed ROLLBACK recovery command.
-    /// Keep the connection closed until both command success and transaction
-    /// termination have been established; generic error draining cannot do this.
-    async fn read_orphaned_rollback_response(&mut self, cx: &Cx) -> Result<(), PgError> {
+    /// Validate one managed transaction-control exchange. Both CommandComplete
+    /// and ReadyForQuery are required; neither proves success independently.
+    /// Server-error resynchronization is separate from success, and is disabled
+    /// for orphan cleanup, where a refusal must never admit queued caller SQL.
+    async fn read_transaction_control_response(
+        &mut self,
+        cx: &Cx,
+        control: PgTransactionControl,
+        error_policy: PgTransactionErrorPolicy,
+    ) -> Result<(), PgError> {
         let mut completed = false;
+        let mut server_error: Option<PgError> = None;
+        let expected_tag = control.command_tag();
         loop {
             if cx.checkpoint().is_err() {
                 return self.finish_io_result(cx, Err(cancelled_error(cx))).await;
             }
-            let (msg_type, data) = self.read_message(cx).await?;
+            let (msg_type, data) = match self.read_message(cx).await {
+                Ok(message) => message,
+                Err(error) => {
+                    return Err(match (server_error.take(), error) {
+                        (_, PgError::Cancelled(reason)) => PgError::Cancelled(reason),
+                        (Some(original), drain_error) => PgError::Protocol(format!(
+                            "{original}; additionally failed to drain to ReadyForQuery: {drain_error}"
+                        )),
+                        (None, error) => error,
+                    });
+                }
+            };
             match msg_type {
                 b'C' => {
-                    if completed {
-                        return Err(PgError::Protocol(
-                            "orphaned ROLLBACK received duplicate CommandComplete".to_string(),
-                        ));
+                    if completed || server_error.is_some() {
+                        return Err(PgError::Protocol(format!(
+                            "{expected_tag} received CommandComplete after a terminal response"
+                        )));
                     }
                     let mut reader = MessageReader::new(&data);
                     let tag = reader.read_cstring()?;
-                    reader.ensure_consumed("orphaned ROLLBACK CommandComplete")?;
-                    if tag != "ROLLBACK" {
+                    reader.ensure_consumed("transaction-control CommandComplete")?;
+                    if tag != expected_tag {
                         return Err(PgError::Protocol(format!(
-                            "orphaned ROLLBACK received unexpected command tag: {tag:?}"
+                            "{expected_tag} received unexpected command tag: {tag:?}"
                         )));
                     }
                     completed = true;
                 }
                 b'Z' => {
                     let status = Self::parse_ready_for_query_transaction_status(&data)?;
-                    if !completed {
-                        return Err(PgError::Protocol(
-                            "orphaned ROLLBACK reached ReadyForQuery without CommandComplete"
-                                .to_string(),
-                        ));
+                    if let Some(error) = server_error.take() {
+                        self.handle_ready_for_query(&data)?;
+                        self.inner.closed = false;
+                        return Err(error);
                     }
-                    if status != b'I' {
+                    if !completed {
                         return Err(PgError::Protocol(format!(
-                            "orphaned ROLLBACK did not end the transaction: ReadyForQuery {status:#04X}"
+                            "{expected_tag} reached ReadyForQuery without CommandComplete"
+                        )));
+                    }
+                    if status != control.ready_status() {
+                        return Err(PgError::Protocol(format!(
+                            "{expected_tag} received unexpected ReadyForQuery state: {status:#04X}"
                         )));
                     }
                     self.handle_ready_for_query(&data)?;
                     return Ok(());
                 }
-                b'E' => return Err(self.parse_error_response(&data).unwrap_or_else(|err| err)),
+                b'E' => {
+                    let error = self.parse_error_response(&data)?;
+                    if matches!(error_policy, PgTransactionErrorPolicy::Close) {
+                        return Err(error);
+                    }
+                    if completed || server_error.is_some() {
+                        return Err(PgError::Protocol(format!(
+                            "{expected_tag} received ErrorResponse after a terminal response: {error}"
+                        )));
+                    }
+                    server_error = Some(error);
+                }
                 _ => {
                     if !self.handle_async_backend_message(msg_type, &data)? {
                         return Err(unexpected_backend_message(
-                            "orphaned ROLLBACK response",
+                            "transaction-control response",
                             msg_type,
                         ));
                     }
@@ -10693,7 +10846,11 @@ impl PgTransaction<'_> {
                 "transaction must roll back before commit".to_string(),
             ));
         }
-        match self.conn.execute_unchecked(cx, "COMMIT").await {
+        match self
+            .conn
+            .execute_transaction_control(cx, "COMMIT", PgTransactionControl::Commit)
+            .await
+        {
             Outcome::Ok(_) => {
                 self.finished = true;
                 // The transaction truly committed: discharge the obligation
@@ -10736,7 +10893,8 @@ impl PgTransaction<'_> {
         match crate::combinator::commit_section(
             cx,
             MASKED_ROLLBACK_POLLS,
-            self.conn.execute_unchecked(cx, "ROLLBACK"),
+            self.conn
+                .execute_transaction_control(cx, "ROLLBACK", PgTransactionControl::Rollback),
         )
         .await
         {
