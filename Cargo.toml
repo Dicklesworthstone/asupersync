@@ -1473,6 +1473,11 @@ path = "tests/transaction_borrowing_native.rs"
 required-features = ["postgres", "mysql"]
 
 [[test]]
+name = "sqlite_transaction_borrowing_native"
+path = "tests/sqlite_transaction_borrowing_native.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "quic_application_data_udp_loopback"
 path = "tests/quic_application_data_udp_loopback.rs"
 required-features = ["test-internals"]

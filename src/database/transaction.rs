@@ -16,6 +16,8 @@
 //!   Borrow the transaction and context across awaits
 //! - [`with_pg_transaction_with_state`] / [`with_mysql_transaction_with_state`]:
 //!   Lend caller-owned SQL, parameters, and mutable state across awaits
+//! - [`with_sqlite_transaction_with_state`] / [`with_sqlite_transaction_immediate_with_state`]:
+//!   Lend caller-owned state to a deferred or immediate SQLite transaction
 //! - [`with_pg_transaction_retry`]: PostgreSQL retry on serialization failure (40001)
 //! - [`with_mysql_transaction_retry`]: MySQL retry on deadlock (1213/1205)
 //! - [`with_pg_transaction_retry_borrowed`] / [`with_mysql_transaction_retry_borrowed`]:
@@ -23,13 +25,39 @@
 //! - [`with_pg_transaction_retry_with_state`] / [`with_mysql_transaction_retry_with_state`]:
 //!   Retry callbacks while lending caller-owned state to each attempt
 //! - [`with_sqlite_transaction_retry`]: SQLite retry on SQLITE_BUSY/SQLITE_LOCKED
+//! - [`with_sqlite_transaction_retry_with_state`]: Retry while lending SQLite caller state
 //! - [`PgSavepoint`] / [`SqliteSavepoint`] / [`MySqlSavepoint`]: Nested savepoints
 //! - [`RetryPolicy`]: Configurable retry with exponential backoff
 //! - [`TransactionReplaySafety`]: Explicit opt-in for replaying user closures
+//! - [`ScopedTransactionFuture`]: A `Send` callback future with one borrow lifetime
 //!
 //! All helpers integrate with [`Cx`] for cancellation. On `Outcome::Err` or
 //! `Outcome::Cancelled`, the transaction is rolled back. On `Outcome::Ok`,
 //! it is committed.
+//!
+//! # Borrowing and cleanup
+//!
+//! Prefer the `with_state` helpers when an async body needs caller-owned
+//! references. Pass a struct, tuple, slice, or the value itself as `&mut S`;
+//! each invocation borrows the state, transaction, and context together.
+//! Neither the state nor its contents need to be cloned or `'static`.
+//! Mutable state only needs `Send`, not `Sync`. A result may contain an
+//! existing reference stored in the state, but cannot retain the callback's
+//! temporary borrow of the state or transaction.
+//!
+//! Retrying reborrows the same state. Database rollback does not undo changes
+//! to caller memory or external effects, including changes from a failed
+//! commit. Replay therefore requires [`TransactionReplaySafety::ReplaySafe`]
+//! after the body starts; begin-time failures may retry without that opt-in.
+//!
+//! Await the helper to completion to let it finalize the transaction. An
+//! `Outcome::Panicked` value follows the rollback path, while an unwinding
+//! Rust panic or a dropped helper runs the backend's transaction `Drop`
+//! recovery instead. Drop cannot await rollback. Explicit rollback is also
+//! best effort under bounded cancellation masking: a failed rollback or
+//! commit leaves recovery/discard to the backend's connection lifecycle.
+//! These helpers do not promise successful physical rollback after transport
+//! failure, or resolve an uncertain server commit after a lost response.
 //!
 //! # Example
 //!
@@ -39,12 +67,12 @@
 //! #     conn: &mut asupersync::database::PgConnection,
 //! #     cx: &asupersync::Cx,
 //! # ) -> asupersync::Outcome<u64, asupersync::database::PgError> {
-//! use asupersync::database::transaction::{TransactionFuture, with_pg_transaction_with_state};
+//! use asupersync::database::transaction::{ScopedTransactionFuture, with_pg_transaction_with_state};
 //!
 //! let sql = String::from("UPDATE accounts SET balance = balance + 100 WHERE id = 2");
 //! let mut state = sql.as_str();
 //! with_pg_transaction_with_state(conn, cx, &mut state, |tx, cx, sql| {
-//!     TransactionFuture::new(async move {
+//!     ScopedTransactionFuture::new(async move {
 //!         // The transaction and caller-owned SQL are borrowed across await.
 //!         tx.execute_unchecked(cx, *sql).await
 //!     })
@@ -67,7 +95,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-/// A transaction callback future that can borrow caller-owned data.
+/// A boxed transaction callback future, retaining its original lifetime parameters.
 ///
 /// Construct this with [`TransactionFuture::new`] around an `async move`
 /// block. `'borrow` is the current transaction borrow; `'env` records an
@@ -76,8 +104,11 @@ use std::time::Duration;
 /// At a higher-ranked callback boundary, an independently captured reference
 /// is not tied to the callback's transaction borrow. Use the `with_state`
 /// helpers to lend non-`'static` SQL, parameters, or mutable state explicitly.
-/// Those helpers use `TransactionFuture<'borrow, 'borrow, T, E>` and borrow
-/// the state for the same lifetime as the transaction and context.
+/// Prefer [`ScopedTransactionFuture`] for those helpers: it names the same
+/// type with a single invocation lifetime. This two-lifetime spelling remains
+/// available for existing callbacks and type annotations; the environment
+/// marker does not make independently captured references work under a
+/// higher-ranked callback bound.
 #[must_use = "transaction callback futures do nothing unless polled"]
 pub struct TransactionFuture<'env, 'borrow, T, E> {
     future: Pin<Box<dyn Future<Output = Outcome<T, E>> + Send + 'borrow>>,
@@ -113,6 +144,32 @@ impl<T, E> Future for TransactionFuture<'_, '_, T, E> {
         self.get_mut().future.as_mut().poll(cx)
     }
 }
+
+/// A `Send` transaction callback future borrowing one invocation's inputs.
+///
+/// Use `ScopedTransactionFuture::new(async move { ... })` with any
+/// `with_state` helper. The transaction, context, and caller state all share
+/// `'borrow`, so borrowed SQL, parameters, and mutable state can cross awaits
+/// without cloning. `T` may contain references with a lifetime independent of
+/// this temporary borrow, such as an existing `&str` stored in the state.
+///
+/// This alias is exactly [`TransactionFuture`] with both lifetime parameters
+/// equal. Existing `TransactionFuture::new` callbacks remain interchangeable;
+/// there is no extra allocation, conversion, or new runtime dependency.
+///
+/// A future that retains non-`Send` data across an await is rejected, even
+/// if the closure constructing it is itself `Send`:
+///
+/// ```compile_fail
+/// use asupersync::Outcome;
+/// use asupersync::database::transaction::ScopedTransactionFuture;
+/// let _ = ScopedTransactionFuture::new(async {
+///     let local = std::rc::Rc::new(1);
+///     std::future::pending::<()>().await;
+///     Outcome::<_, ()>::Ok(*local)
+/// });
+/// ```
+pub type ScopedTransactionFuture<'borrow, T, E> = TransactionFuture<'borrow, 'borrow, T, E>;
 
 // ─── RetryPolicy ─────────────────────────────────────────────────────────────
 
@@ -279,7 +336,7 @@ pub(super) async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), Can
 /// Apply the same replay gate and backoff to both callback forms. Taking the
 /// error classification rather than an outcome avoids retaining a shared
 /// reference to the caller's result across the delay.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 async fn retry_after_error(
     cx: &Cx,
     policy: &RetryPolicy,
@@ -341,8 +398,8 @@ where
 #[cfg(feature = "postgres")]
 mod pg {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionFuture, TransactionReplaySafety,
-        retry_after_error, validate_savepoint_name,
+        Cx, Future, Outcome, RetryPolicy, ScopedTransactionFuture, TransactionFuture,
+        TransactionReplaySafety, retry_after_error, validate_savepoint_name,
     };
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::{
@@ -483,12 +540,61 @@ mod pg {
     /// `state` may contain non-`'static` references to SQL, parameters, or
     /// mutable caller data. The callback receives the state, transaction,
     /// and context under one borrow and can use all three across awaits.
-    /// Return [`TransactionFuture::new`] around the callback's async block;
-    /// both lifetime parameters describe this same invocation borrow.
+    /// Return [`ScopedTransactionFuture::new`] around the callback's async
+    /// block. `S` needs neither `Clone`, `Sync`, nor `'static` and may be
+    /// unsized, for example a borrowed parameter slice.
     ///
     /// Commit, cancellation, rollback, and `Outcome::Panicked` handling are
     /// identical to [`with_pg_transaction`]. The callback runs only after
     /// `BEGIN` succeeds. Both callback and future are `Send`.
+    ///
+    /// An existing reference stored in the state can be returned without a copy:
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, Outcome};
+    /// use asupersync::database::{PgConnection, PgError};
+    /// use asupersync::database::transaction::{ScopedTransactionFuture, with_pg_transaction_with_state};
+    /// async fn update<'env>(conn: &mut PgConnection, cx: &Cx, sql: &'env str)
+    ///     -> Outcome<&'env str, PgError>
+    /// {
+    ///     let mut state = (sql, 0usize);
+    ///     with_pg_transaction_with_state(conn, cx, &mut state, |tx, cx, state| {
+    ///         ScopedTransactionFuture::new(async move {
+    ///             let result = tx.execute_unchecked(cx, state.0).await;
+    ///             state.1 += 1;
+    ///             result.map(|_| state.0)
+    ///         })
+    ///     }).await
+    /// }
+    /// ```
+    ///
+    /// The temporary transaction borrow cannot escape finalization:
+    ///
+    /// ```compile_fail
+    /// use asupersync::{Cx, Outcome};
+    /// use asupersync::database::PgConnection;
+    /// use asupersync::database::transaction::{ScopedTransactionFuture, with_pg_transaction_with_state};
+    /// async fn escape(conn: &mut PgConnection, cx: &Cx) {
+    ///     let mut state = ();
+    ///     let _ = with_pg_transaction_with_state(conn, cx, &mut state, |tx, _, _| {
+    ///         ScopedTransactionFuture::new(async move { Outcome::Ok(tx) })
+    ///     }).await;
+    /// }
+    /// ```
+    ///
+    /// Nor can the invocation's mutable state borrow be returned:
+    ///
+    /// ```compile_fail
+    /// use asupersync::{Cx, Outcome};
+    /// use asupersync::database::PgConnection;
+    /// use asupersync::database::transaction::{ScopedTransactionFuture, with_pg_transaction_with_state};
+    /// async fn escape(conn: &mut PgConnection, cx: &Cx) {
+    ///     let mut state = String::from("caller-owned");
+    ///     let _ = with_pg_transaction_with_state(conn, cx, &mut state, |_, _, state| {
+    ///         ScopedTransactionFuture::new(async move { Outcome::Ok(state.as_str()) })
+    ///     }).await;
+    /// }
+    /// ```
     pub async fn with_pg_transaction_with_state<T, S, F>(
         conn: &mut PgConnection,
         cx: &Cx,
@@ -497,12 +603,12 @@ mod pg {
     ) -> Outcome<T, PgError>
     where
         T: Send,
-        S: Send,
+        S: Send + ?Sized,
         F: for<'a, 'tx> FnOnce(
                 &'a mut PgTransaction<'tx>,
                 &'a Cx,
                 &'a mut S,
-            ) -> TransactionFuture<'a, 'a, T, PgError>
+            ) -> ScopedTransactionFuture<'a, T, PgError>
             + Send,
     {
         let mut tx = match conn.begin(cx).await {
@@ -656,12 +762,12 @@ mod pg {
     ) -> Outcome<T, PgError>
     where
         T: Send,
-        S: Send,
+        S: Send + ?Sized,
         F: for<'a, 'tx> FnMut(
                 &'a mut PgTransaction<'tx>,
                 &'a Cx,
                 &'a mut S,
-            ) -> TransactionFuture<'a, 'a, T, PgError>
+            ) -> ScopedTransactionFuture<'a, T, PgError>
             + Send,
     {
         let mut attempt = 0u32;
@@ -818,8 +924,8 @@ pub use pg::{
 #[cfg(feature = "sqlite")]
 mod sqlite {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, validate_savepoint_name,
-        wait_retry_delay,
+        Cx, Future, Outcome, RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+        retry_after_error, validate_savepoint_name,
     };
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
     use std::{
@@ -851,26 +957,12 @@ mod sqlite {
                 .await;
     }
 
-    /// Run a closure inside a SQLite transaction.
-    ///
-    /// See [`with_pg_transaction`](super::with_pg_transaction) for semantics.
-    pub async fn with_sqlite_transaction<T, F>(
-        conn: &SqliteConnection,
+    /// Every callback and BEGIN mode shares the same finalization path.
+    async fn finish_transaction<T>(
+        tx: SqliteTransaction<'_>,
         cx: &Cx,
-        f: F,
-    ) -> Outcome<T, SqliteError>
-    where
-        F: for<'a> FnOnce(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
-    {
-        let tx = match conn.begin(cx).await {
-            Outcome::Ok(tx) => tx,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
-
-        let result = f(&tx, cx).await;
-
+        result: Outcome<T, SqliteError>,
+    ) -> Outcome<T, SqliteError> {
         match result {
             Outcome::Ok(value) => {
                 if tx.requires_rollback_before_commit() {
@@ -909,6 +1001,30 @@ mod sqlite {
         }
     }
 
+    /// Run a closure inside a SQLite transaction.
+    ///
+    /// See [`with_pg_transaction`](super::with_pg_transaction) for semantics.
+    /// Use [`with_sqlite_transaction_with_state`] to borrow caller-owned
+    /// SQL, parameters, or mutable state across awaits.
+    pub async fn with_sqlite_transaction<T, F>(
+        conn: &SqliteConnection,
+        cx: &Cx,
+        f: F,
+    ) -> Outcome<T, SqliteError>
+    where
+        F: for<'a> FnOnce(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
+    {
+        let tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
+
     /// Run a closure inside a SQLite IMMEDIATE transaction.
     ///
     /// Acquires the write lock immediately, avoiding SQLITE_BUSY in the
@@ -929,43 +1045,97 @@ mod sqlite {
         };
 
         let result = f(&tx, cx).await;
+        finish_transaction(tx, cx, result).await
+    }
 
-        match result {
-            Outcome::Ok(value) => {
-                if tx.requires_rollback_before_commit() {
-                    rollback_before_propagating(tx, cx).await;
-                    return Outcome::Err(rollback_required_error());
-                }
-                // A Cx cancelled while the body finished refuses the commit,
-                // and dropping the transaction would only schedule its
-                // rollback: finish that rollback before returning.
-                if cx.checkpoint().is_err() {
-                    rollback_before_propagating(tx, cx).await;
-                    return Outcome::Cancelled(
-                        cx.cancel_reason()
-                            .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
-                    );
-                }
-                match tx.commit(cx).await {
-                    Outcome::Ok(()) => Outcome::Ok(value),
-                    Outcome::Err(e) => Outcome::Err(e),
-                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                    Outcome::Panicked(p) => Outcome::Panicked(p),
-                }
-            }
-            Outcome::Err(e) => {
-                rollback_before_propagating(tx, cx).await;
-                Outcome::Err(e)
-            }
-            Outcome::Cancelled(r) => {
-                rollback_before_propagating(tx, cx).await;
-                Outcome::Cancelled(r)
-            }
-            Outcome::Panicked(p) => {
-                rollback_before_propagating(tx, cx).await;
-                Outcome::Panicked(p)
-            }
-        }
+    /// Run a deferred SQLite transaction while lending caller-owned state.
+    ///
+    /// The callback borrows the transaction, context, and `state` for the
+    /// same invocation lifetime. SQL and parameters may refer to local data;
+    /// neither `S` nor its contents need `Clone`, `Sync`, or `'static`.
+    /// `S` can also be unsized, such as a parameter slice.
+    ///
+    /// The callback runs only after `BEGIN` succeeds. Commit, precommit
+    /// cancellation checks, and rollback are identical to
+    /// [`with_sqlite_transaction`]. SQLite transactions use shared references
+    /// because their operations serialize access through the connection.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, Outcome};
+    /// use asupersync::database::{SqliteConnection, SqliteError, SqliteValue};
+    /// use asupersync::database::transaction::{ScopedTransactionFuture, with_sqlite_transaction_with_state};
+    /// async fn update(conn: &SqliteConnection, cx: &Cx) -> Outcome<u64, SqliteError> {
+    ///     let sql = String::from("UPDATE accounts SET balance = balance + ?1");
+    ///     let parameters = [SqliteValue::Integer(100)];
+    ///     let mut calls = 0;
+    ///     let mut state = (sql.as_str(), parameters.as_slice(), &mut calls);
+    ///     with_sqlite_transaction_with_state(conn, cx, &mut state, |tx, cx, state| {
+    ///         ScopedTransactionFuture::new(async move {
+    ///             let result = tx.execute(cx, state.0, state.1).await;
+    ///             *state.2 += 1;
+    ///             result
+    ///         })
+    ///     }).await
+    /// }
+    /// ```
+    pub async fn with_sqlite_transaction_with_state<T, S, F>(
+        conn: &SqliteConnection,
+        cx: &Cx,
+        state: &mut S,
+        f: F,
+    ) -> Outcome<T, SqliteError>
+    where
+        T: Send,
+        S: Send + ?Sized,
+        F: for<'a, 'tx> FnOnce(
+                &'a SqliteTransaction<'tx>,
+                &'a Cx,
+                &'a mut S,
+            ) -> ScopedTransactionFuture<'a, T, SqliteError>
+            + Send,
+    {
+        let tx = match conn.begin(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&tx, cx, state).await;
+        finish_transaction(tx, cx, result).await
+    }
+
+    /// Lend caller-owned state to a SQLite IMMEDIATE transaction.
+    ///
+    /// This has the borrowing and cleanup semantics of
+    /// [`with_sqlite_transaction_with_state`], but acquires the write lock
+    /// before invoking the callback, as [`with_sqlite_transaction_immediate`]
+    /// does. A refused `BEGIN IMMEDIATE` leaves caller state untouched.
+    pub async fn with_sqlite_transaction_immediate_with_state<T, S, F>(
+        conn: &SqliteConnection,
+        cx: &Cx,
+        state: &mut S,
+        f: F,
+    ) -> Outcome<T, SqliteError>
+    where
+        T: Send,
+        S: Send + ?Sized,
+        F: for<'a, 'tx> FnOnce(
+                &'a SqliteTransaction<'tx>,
+                &'a Cx,
+                &'a mut S,
+            ) -> ScopedTransactionFuture<'a, T, SqliteError>
+            + Send,
+    {
+        let tx = match conn.begin_immediate(cx).await {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let result = f(&tx, cx, state).await;
+        finish_transaction(tx, cx, result).await
     }
 
     /// Run a closure inside a SQLite transaction with retry on busy/locked.
@@ -999,20 +1169,75 @@ mod sqlite {
             })
             .await;
 
-            match &result {
-                Outcome::Err(err)
-                    if (err.is_busy() || err.is_locked())
-                        && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.load(Ordering::Relaxed))
-                        && attempt < policy.max_retries =>
-                {
-                    let delay = policy.delay_for(attempt);
-                    attempt += 1;
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
-                }
-                _ => return result,
+            let is_retryable =
+                matches!(&result, Outcome::Err(err) if err.is_busy() || err.is_locked());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started.load(Ordering::Relaxed),
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
+            }
+        }
+    }
+
+    /// Retry deferred SQLite transactions while lending state to each attempt.
+    ///
+    /// Retries `SQLITE_BUSY` / `SQLITE_LOCKED` under the same policy as
+    /// [`with_sqlite_transaction_retry`]. Each attempt reborrows the same
+    /// state after the previous attempt's finalization; the callback never
+    /// runs when `BEGIN` fails. Caller-memory changes are not rolled back.
+    /// `ReplayUnsafe` permits begin-time retries only. `ReplaySafe` also
+    /// permits replay after the body starts, including a retryable commit
+    /// error. Backoff observes cancellation through the supplied context.
+    pub async fn with_sqlite_transaction_retry_with_state<T, S, F>(
+        conn: &SqliteConnection,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
+        state: &mut S,
+        mut f: F,
+    ) -> Outcome<T, SqliteError>
+    where
+        T: Send,
+        S: Send + ?Sized,
+        F: for<'a, 'tx> FnMut(
+                &'a SqliteTransaction<'tx>,
+                &'a Cx,
+                &'a mut S,
+            ) -> ScopedTransactionFuture<'a, T, SqliteError>
+            + Send,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let mut body_started = false;
+            let result = with_sqlite_transaction_with_state(conn, cx, state, |tx, tx_cx, state| {
+                body_started = true;
+                f(tx, tx_cx, state)
+            })
+            .await;
+            let is_retryable =
+                matches!(&result, Outcome::Err(err) if err.is_busy() || err.is_locked());
+            match retry_after_error(
+                cx,
+                policy,
+                replay_safety,
+                body_started,
+                is_retryable,
+                &mut attempt,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return result,
+                Err(reason) => return Outcome::Cancelled(reason),
             }
         }
     }
@@ -1123,7 +1348,8 @@ mod sqlite {
 #[cfg(feature = "sqlite")]
 pub use sqlite::{
     SqliteSavepoint, with_sqlite_transaction, with_sqlite_transaction_immediate,
-    with_sqlite_transaction_retry,
+    with_sqlite_transaction_immediate_with_state, with_sqlite_transaction_retry,
+    with_sqlite_transaction_retry_with_state, with_sqlite_transaction_with_state,
 };
 
 // ─── MySQL helpers ───────────────────────────────────────────────────────────
@@ -1131,8 +1357,8 @@ pub use sqlite::{
 #[cfg(feature = "mysql")]
 mod mysql {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionFuture, TransactionReplaySafety,
-        retry_after_error, validate_savepoint_name,
+        Cx, Future, Outcome, RetryPolicy, ScopedTransactionFuture, TransactionFuture,
+        TransactionReplaySafety, retry_after_error, validate_savepoint_name,
     };
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::{
@@ -1256,7 +1482,10 @@ mod mysql {
     /// `state` may contain non-`'static` references to SQL, parameters, or
     /// mutable caller data. The callback borrows it for the same invocation
     /// as the transaction and context, and may use all three across awaits.
-    /// Return [`TransactionFuture::new`] around the callback's async block.
+    /// Return [`ScopedTransactionFuture::new`] around the callback's async
+    /// block. `S` needs neither `Clone`, `Sync`, nor `'static` and may be
+    /// unsized. Results may contain existing references stored in the state,
+    /// but cannot retain the invocation's temporary state or transaction borrow.
     ///
     /// This uses the commit, cancellation, rollback, and panic-outcome
     /// handling of [`with_mysql_transaction`]. The callback runs only after
@@ -1269,12 +1498,12 @@ mod mysql {
     ) -> Outcome<T, MySqlError>
     where
         T: Send,
-        S: Send,
+        S: Send + ?Sized,
         F: for<'a, 'tx> FnOnce(
                 &'a mut MySqlTransaction<'tx>,
                 &'a Cx,
                 &'a mut S,
-            ) -> TransactionFuture<'a, 'a, T, MySqlError>
+            ) -> ScopedTransactionFuture<'a, T, MySqlError>
             + Send,
     {
         let mut tx = match conn.begin(cx).await {
@@ -1423,12 +1652,12 @@ mod mysql {
     ) -> Outcome<T, MySqlError>
     where
         T: Send,
-        S: Send,
+        S: Send + ?Sized,
         F: for<'a, 'tx> FnMut(
                 &'a mut MySqlTransaction<'tx>,
                 &'a Cx,
                 &'a mut S,
-            ) -> TransactionFuture<'a, 'a, T, MySqlError>
+            ) -> ScopedTransactionFuture<'a, T, MySqlError>
             + Send,
     {
         let mut attempt = 0u32;
