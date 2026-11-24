@@ -138,6 +138,21 @@ artifacts.
   `Outcome::Panicked` follows awaited cleanup; a Rust panic unwind or hard
   future drop uses the transaction's drop/recovery path.
 
+### Fixed
+
+- **PostgreSQL transaction helpers permit healthy session changes.**
+  A transaction using `SET LOCAL` can commit while its connection remains
+  excluded from pool reuse. The helpers and direct transaction commit now
+  share the rollback-required predicate; abandoned savepoints and failed
+  transaction blocks still cannot commit.
+- **PostgreSQL orphan recovery requires acknowledged rollback.**
+  Recovery requires a valid `ROLLBACK` command completion and idle
+  `ReadyForQuery` before queued caller SQL may proceed. Refused, incomplete,
+  malformed, or non-idle recovery closes the connection and retains its
+  rollback debt. Successful recovery clears that debt without erasing
+  independent session dirtiness, so a prior session change cannot silently
+  become eligible for pool reuse.
+
 ## [v0.7.0] - 2026-11-21
 
 Over 415 commits since `v0.6.2`, spanning native gRPC/HTTP/3/ATP protocol
