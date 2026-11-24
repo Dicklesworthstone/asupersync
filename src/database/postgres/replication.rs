@@ -5,7 +5,9 @@
 //! uses an existing pgoutput slot and publication names; this API never creates
 //! or drops a slot. Protocol 1 remains the default; explicitly enabling
 //! [`PgReplicationConfig::streaming`] negotiates version 2 and delivers changes
-//! from large in-progress transactions before commit. [`PgReplicationStream`]
+//! from large in-progress transactions before commit. [`PgReplicationConfig::two_phase`]
+//! opts into version 3 to follow prepared transactions through commit or rollback.
+//! [`PgReplicationStream`]
 //! owns its socket and retains the
 //! starting context's authority, cancellation, and deadline across calls.
 //!
@@ -95,6 +97,7 @@ pub struct PgReplicationConfig {
     binary: bool,
     messages: bool,
     streaming: bool,
+    two_phase: bool,
 }
 
 impl PgReplicationConfig {
@@ -147,6 +150,7 @@ impl PgReplicationConfig {
             binary: false,
             messages: false,
             streaming: false,
+            two_phase: false,
         };
         config.start_command()?;
         Ok(config)
@@ -180,7 +184,7 @@ impl PgReplicationConfig {
         self
     }
 
-    /// Stream large in-progress transactions using pgoutput protocol version 2.
+    /// Stream large in-progress transactions using pgoutput protocol version 2 or later.
     ///
     /// This opt-in requires PostgreSQL 14 or later. There is no silent fallback
     /// if the server refuses the option. Changes inside Stream Start/Stop
@@ -197,18 +201,36 @@ impl PgReplicationConfig {
         self
     }
 
+    /// Request pgoutput two-phase decoding (PostgreSQL 15 and later).
+    ///
+    /// Use a logical slot configured for two-phase decoding. A prepared
+    /// transaction can still roll back. Keep its changes associated with the
+    /// global transaction ID until the publisher reports its final outcome.
+    /// Feedback remains explicit. This option composes with [`Self::streaming`].
+    #[must_use]
+    pub fn two_phase(mut self, enabled: bool) -> Self {
+        self.two_phase = enabled;
+        self
+    }
+
+    const fn protocol_version(&self) -> super::pgoutput::PgOutputProtocolVersion {
+        use super::pgoutput::PgOutputProtocolVersion;
+        if self.two_phase {
+            PgOutputProtocolVersion::V3
+        } else if self.streaming {
+            PgOutputProtocolVersion::V2
+        } else {
+            PgOutputProtocolVersion::V1
+        }
+    }
+
     /// Create a fresh decoder matching this configuration's wire version.
     ///
     /// Retain it across events from the start of the replication stream. Do
     /// not recreate it for each event or attach it midway through a segment.
     #[must_use]
     pub const fn pgoutput_decoder(&self) -> super::pgoutput::PgOutputDecoder {
-        let version = if self.streaming {
-            super::pgoutput::PgOutputProtocolVersion::V2
-        } else {
-            super::pgoutput::PgOutputProtocolVersion::V1
-        };
-        super::pgoutput::PgOutputDecoder::new(version)
+        super::pgoutput::PgOutputDecoder::with_streaming(self.protocol_version(), self.streaming)
     }
 
     fn start_command(&self) -> Result<String, PgError> {
@@ -224,10 +246,14 @@ impl PgReplicationConfig {
             "START_REPLICATION SLOT {} LOGICAL {} (proto_version '{}', publication_names '{}')",
             quote_postgres_identifier(&self.slot),
             self.start_lsn,
-            if self.streaming { 2 } else { 1 },
+            match self.protocol_version() {
+                super::pgoutput::PgOutputProtocolVersion::V1 => 1,
+                super::pgoutput::PgOutputProtocolVersion::V2 => 2,
+                super::pgoutput::PgOutputProtocolVersion::V3 => 3,
+            },
             names.replace('\'', "''"),
         );
-        if self.binary || self.messages || self.streaming {
+        if self.binary || self.messages || self.streaming || self.two_phase {
             command.pop();
             if self.binary {
                 command.push_str(", binary 'true'");
@@ -237,6 +263,9 @@ impl PgReplicationConfig {
             }
             if self.streaming {
                 command.push_str(", streaming 'on'");
+            }
+            if self.two_phase {
+                command.push_str(", two_phase 'on'");
             }
             command.push(')');
         }
