@@ -371,6 +371,104 @@ fn checkpoint_survives_process_exit_and_reuses_the_durable_peer_receipt() {
 }
 
 #[test]
+fn checkpoint_reuses_complete_and_partial_destinations_and_replays_their_receipts() {
+    use asupersync::atp::object::MetadataPolicy;
+    use asupersync::net::atp::transport_quic::QuicSendOptions;
+    use asupersync::security::SecurityContext;
+
+    let _exclusive = exclusive();
+    run(async move {
+        let cx = Cx::current().unwrap();
+        let delta_config = |server| {
+            let mut cfg = config("localhost", server)
+                .with_delta_control_auth(SecurityContext::for_testing(0xCE00));
+            cfg.enable_delta = true;
+            cfg.metadata_policy = MetadataPolicy::portable();
+            cfg
+        };
+        let producer = AtpSdk::new_in_process(SessionConfig {
+            local_peer: PeerId::from_label("checkpoint-sender"),
+            max_concurrent_transfers: 1,
+            ..SessionConfig::default()
+        })
+        .native_transfers_with_send_options(
+            delta_config(false),
+            QuicSendOptions::default().with_delta_chunks(true),
+        )
+        .unwrap();
+        let receiver_client = client("checkpoint-receiver", delta_config(true), 1);
+        const CHUNK: usize = 4096;
+        let mut bytes = vec![1; CHUNK * 3];
+        bytes[CHUNK..CHUNK * 2].fill(2);
+        bytes[CHUNK * 2..].fill(3);
+        for expected in [0, CHUNK as u64] {
+            let root = fixture();
+            let dest = root.join("received");
+            std::fs::create_dir(&dest).unwrap();
+            let path = dest.join("data.bin");
+            let mut baseline = bytes.clone();
+            if expected != 0 {
+                baseline[CHUNK..CHUNK * 2].fill(4);
+            }
+            std::fs::write(&path, baseline).unwrap();
+            // Retained checkpoint payloads have mode 0400; a no-op negotiation
+            // compares permitted metadata as well as content.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            let receiver = receiver_client
+                .bind_receiver(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    &dest,
+                    QuicReceiveOptions::default().with_delta_chunks(true),
+                )
+                .await
+                .unwrap();
+            let remote = receiver.local_addr();
+            let prepared = producer
+                .prepare_buffer(
+                    &cx,
+                    remote,
+                    NativeUploadOptions::new(&root, "data.bin"),
+                    &bytes,
+                )
+                .await
+                .unwrap();
+            let dir = &prepared.checkpoint.directory;
+            let (sent, received) = zip(
+                producer.send_checkpoint(&cx, dir, remote, NativeCheckpointRetry::Never),
+                receiver.receive(&cx),
+            )
+            .await;
+            let sent = sent.unwrap();
+            let report = sent.outcome.unwrap();
+            let received = received.unwrap();
+            assert_eq!(sent.checkpoint.state, NativeCheckpointState::Acknowledged);
+            assert!(sent.persistence_error.is_none());
+            assert!(!sent.cached_receipt);
+            assert_eq!(report.bytes_sent, expected);
+            assert_eq!(report.receipt.bytes_received, expected);
+            assert_eq!(received.bytes_received, expected);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+            // A fresh client and no receiving peer. Recover the exact receipt,
+            // including its wire-byte count, without starting a second attempt.
+            let socket = UdpSocket::bind(remote).unwrap();
+            let recovered = sender()
+                .send_checkpoint(&cx, dir, remote, NativeCheckpointRetry::Never)
+                .await
+                .unwrap();
+            assert!(recovered.cached_receipt);
+            assert_eq!(recovered.checkpoint.attempt, 1);
+            let cached = recovered.outcome.unwrap();
+            assert_eq!(cached.transfer_id, report.transfer_id);
+            assert_eq!(cached.receipt, report.receipt);
+            assert_eq!(cached.bytes_sent, expected);
+            no_packet(&socket);
+        }
+    });
+}
+
+#[test]
 fn checkpoint_crashed_sender_requires_exact_acknowledgement_before_retry() {
     let _exclusive = exclusive();
     if let Some((root, remote)) = child_context("crash-send") {
