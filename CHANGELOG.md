@@ -188,6 +188,13 @@ artifacts.
   plain begin inherits the acknowledged session access mode. Malformed or
   interrupted starts retain cleanup debt and refuse reuse, while valid server
   refusals retain pre-body retry behavior.
+- **MySQL failed isolated begins finish cancellation cleanup or retire the session.**
+  Compensating rollback and restoration of the previous session isolation now
+  share the bounded cleanup driver. A cancelled operation cannot wait forever
+  on either acknowledgement, while healthy cleanup retains its normal waiting
+  behavior. The original isolation-verification error survives cleanup and the
+  native task-result boundary; an unanswered or invalid cleanup reply retires
+  the connection instead of making an uncertain session reusable.
 - **MySQL managed transactions end independently of `completion_type`.**
   Commit, rollback, and abandoned-transaction recovery explicitly suppress
   chaining and session release. Cleanup requires a single idle OK response.

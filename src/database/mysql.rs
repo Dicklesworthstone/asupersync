@@ -99,10 +99,11 @@ pub enum MySqlError {
     /// session value did NOT match the requested level. This signals
     /// a silent downgrade (e.g., a server-side override, a permission
     /// limit, or a replication-mode constraint stripping the
-    /// requested level back to the connection default). The
-    /// transaction has been rolled back before this error is
-    /// returned, so the caller can safely retry against a different
-    /// connection.
+    /// requested level back to the connection default). Rollback and session
+    /// restoration are attempted before this error is returned. Failed or
+    /// interrupted cleanup makes the connection unusable; this error alone
+    /// does not prove that physical rollback completed. The caller can retry
+    /// against a different connection.
     IsolationLevelMismatch {
         /// The level the caller requested via `begin_with_isolation`.
         requested: IsolationLevel,
@@ -5931,6 +5932,12 @@ impl MySqlConnection {
     ///
     /// On failure of the `SET SESSION` half, no transaction is started and
     /// the connection state is unchanged.
+    ///
+    /// A verification failure drives rollback and session restoration before
+    /// returning the original error. After cancellation, that cleanup has at
+    /// most 500ms (or the configured connect timeout, when smaller) and a
+    /// 32-poll masking budget. Unresponsive or invalid cleanup replies retire
+    /// the connection. Healthy, uncancelled cleanup has no additional timeout.
     pub async fn begin_with_isolation(
         &mut self,
         cx: &Cx,
@@ -6112,38 +6119,67 @@ impl MySqlConnection {
         }
     }
 
-    async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
-        const MASKED_ROLLBACK_POLLS: u32 = 32;
+    fn transaction_cleanup_grace(&self) -> std::time::Duration {
+        const CANCEL_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+        self.options
+            .as_ref()
+            .and_then(|options| options.connect_timeout)
+            .map_or(CANCEL_CLEANUP_GRACE, |bound| {
+                bound.min(CANCEL_CLEANUP_GRACE)
+            })
+    }
 
-        match crate::combinator::commit_section(
-            cx,
-            MASKED_ROLLBACK_POLLS,
-            self.execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE"),
-        )
-        .await
-        {
-            Outcome::Ok(_) => {
-                self.restore_session_isolation(cx).await;
-            }
-            Outcome::Err(err) => {
+    async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
+        let cleanup_grace = self.transaction_cleanup_grace();
+        let result =
+            crate::database::transaction::run_transaction_cleanup(cx, cleanup_grace, async {
+                let result = self
+                    .execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE")
+                    .await;
+                if result.is_ok() {
+                    // Both acknowledgements belong to this cleanup. Restoring
+                    // outside the mask would discard a healthy session merely
+                    // because its owning begin was cancelled during rollback.
+                    self.restore_session_isolation(cx).await;
+                }
+                result
+            })
+            .await;
+        match result {
+            Some(Outcome::Ok(_)) => {}
+            Some(Outcome::Err(err)) => {
                 self.mark_unusable_after_cleanup_failure();
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback failed; marking connection for orphan cleanup: {:?}",
                     err
                 ));
             }
-            Outcome::Cancelled(reason) => {
+            Some(Outcome::Cancelled(reason)) => {
                 self.mark_unusable_after_cleanup_failure();
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback was cancelled; marking connection for orphan cleanup: {reason}"
                 ));
             }
-            Outcome::Panicked(_) => {
+            Some(Outcome::Panicked(_)) => {
                 self.mark_unusable_after_cleanup_failure();
                 cx.trace(
                     "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
                 );
             }
+            None => {
+                // The unanswered exchange has been dropped before retiring
+                // the retained socket. Its rollback debt cannot be forgiven.
+                self.mark_unusable_after_cleanup_failure();
+                self.inner
+                    .query_in_flight
+                    .store(false, std::sync::atomic::Ordering::Release);
+                cx.trace("begin_with_isolation cleanup grace expired; retiring connection");
+            }
+        }
+        // Publish the original verification outcome through ordinary
+        // Cx::spawn even when cancellation arrived during masked cleanup.
+        if cx.is_cancel_requested() {
+            let _ = cx.checkpoint();
         }
     }
 
@@ -8534,13 +8570,7 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
         trace_database_transaction(cx, "mysql", "rollback", "start");
-        const CANCEL_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
-        let cleanup_grace = self
-            .conn
-            .options
-            .as_ref()
-            .and_then(|options| options.connect_timeout)
-            .map_or(CANCEL_CLEANUP_GRACE, |bound| bound.min(CANCEL_CLEANUP_GRACE));
+        let cleanup_grace = self.conn.transaction_cleanup_grace();
         let result = crate::database::transaction::run_transaction_cleanup(
             cx,
             cleanup_grace,

@@ -10822,6 +10822,384 @@ mod tests {
             }
         }
 
+        const FAILED_ISOLATED_BEGIN_COMMANDS: [&str; 5] = [
+            "SELECT @@SESSION.transaction_isolation AS isolation",
+            "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            "START TRANSACTION READ WRITE",
+            "SELECT @@SESSION.transaction_isolation AS isolation",
+            ROLLBACK_SQL,
+        ];
+
+        fn write_failed_isolated_begin(peer: &mut std::net::TcpStream, server_error: bool) {
+            write_isolation(peer, "REPEATABLE-READ", IDLE);
+            write_response_packet(peer, 1, ok_packet_payload(0, IDLE));
+            write_response_packet(peer, 1, ok_packet_payload(0, ACTIVE));
+            if server_error {
+                write_response_packet(
+                    peer,
+                    1,
+                    error_packet_payload(1105, "HY000", "verification refused"),
+                );
+            } else {
+                write_isolation(peer, "READ-COMMITTED", ACTIVE);
+            }
+        }
+
+        fn assert_isolation_verification_failure(
+            outcome: &Outcome<(), MySqlError>,
+            server_error: bool,
+        ) {
+            if server_error {
+                assert!(matches!(
+                    outcome,
+                    Outcome::Err(MySqlError::Server {
+                        code: 1105,
+                        sql_state,
+                        message,
+                    }) if sql_state == "HY000" && message == "verification refused"
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    Outcome::Err(MySqlError::IsolationLevelMismatch {
+                        requested: IsolationLevel::Serializable,
+                        observed,
+                    }) if observed == "READ-COMMITTED"
+                ));
+            }
+        }
+
+        // br-asupersync-9g47af / asupersync-2oh2u.6.5: a rejected isolated
+        // begin owns both rollback and restoration, including after cancellation.
+        #[test]
+        fn cancelled_isolated_begin_restores_the_session_before_returning_its_original_error() {
+            for workers in [1, 2] {
+                for server_error in [false, true] {
+                    for cancel_during_restore in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native isolated begin worker");
+                            let (mut conn, mut peer) = connection();
+                            write_failed_isolated_begin(&mut peer, server_error);
+                            let mut operation = Box::pin(conn.begin_with_isolation(
+                                &request_cx,
+                                IsolationLevel::Serializable,
+                                false,
+                            ));
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &FAILED_ISOLATED_BEGIN_COMMANDS,
+                            )
+                            .await;
+                            let reason = CancelReason::user("cancel isolated begin compensation");
+                            if !cancel_during_restore {
+                                request_cx.cancel_with_reason(reason.clone());
+                            }
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL).await;
+                            if cancel_during_restore {
+                                request_cx.cancel_with_reason(reason.clone());
+                            }
+                            std::future::poll_fn(|task_cx| {
+                                assert!(
+                                    operation.as_mut().poll(task_cx).is_pending(),
+                                    "cancellation must not replace the restoration acknowledgement"
+                                );
+                                Poll::Ready(())
+                            })
+                            .await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            let outcome = operation.await.map(|_| ());
+                            assert_isolation_verification_failure(&outcome, server_error);
+                            assert_eq!(request_cx.cancel_reason(), Some(reason));
+                            assert!(!active_cx.is_cancel_requested());
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(!conn.in_transaction());
+                            assert_eq!(conn.inner.status_flags, IDLE);
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            assert!(
+                                !conn
+                                    .inner
+                                    .query_in_flight
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                            );
+                            write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                            assert!(matches!(
+                                conn.execute_trusted_sql(&active_cx, CALLER_SQL).await,
+                                Outcome::Ok(1)
+                            ));
+                            assert_eq!(command_sql(&read_client_command(&mut peer)), CALLER_SQL);
+                            drop(conn);
+                            peer_closed(&mut peer);
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn silent_isolated_begin_compensation_retires_after_cancellation_without_forced_polls() {
+            for workers in [1, 2] {
+                for server_error in [false, true] {
+                    for restore_boundary in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native isolated begin worker");
+                            let (mut conn, mut peer) = connection();
+                            let mut options =
+                                MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
+                            options.connect_timeout = Some(Duration::from_millis(50));
+                            conn.options = Some(options);
+                            write_failed_isolated_begin(&mut peer, server_error);
+                            let mut operation = Box::pin(conn.begin_with_isolation(
+                                &request_cx,
+                                IsolationLevel::Serializable,
+                                false,
+                            ));
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &FAILED_ISOLATED_BEGIN_COMMANDS,
+                            )
+                            .await;
+                            if restore_boundary {
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL)
+                                    .await;
+                            }
+                            let reason = CancelReason::user("silent isolated begin cleanup peer");
+                            request_cx.cancel_with_reason(reason.clone());
+                            // Keep the peer and connection alive. Only cancellation
+                            // wakeup plus the cleanup grace can finish this await.
+                            let outcome = operation.await.map(|_| ());
+                            assert_isolation_verification_failure(&outcome, server_error);
+                            assert_eq!(request_cx.cancel_reason(), Some(reason));
+                            assert!(
+                                !conn
+                                    .inner
+                                    .query_in_flight
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                            );
+                            assert_eq!(conn.in_transaction(), !restore_boundary);
+                            retired(
+                                &mut conn,
+                                &active_cx,
+                                (!restore_boundary).then_some(IsolationLevel::RepeatableRead),
+                            )
+                            .await;
+                            peer_closed(&mut peer);
+                            assert!(!active_cx.is_cancel_requested());
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn cancelled_isolated_begin_rejects_invalid_rollback_and_restore_acknowledgements() {
+            for workers in [1, 2] {
+                for restore_boundary in [false, true] {
+                    for failure in 0..3 {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native isolated begin worker");
+                            let (mut conn, mut peer) = connection();
+                            write_failed_isolated_begin(&mut peer, false);
+                            let mut operation = Box::pin(conn.begin_with_isolation(
+                                &request_cx,
+                                IsolationLevel::Serializable,
+                                false,
+                            ));
+                            commands_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                &FAILED_ISOLATED_BEGIN_COMMANDS,
+                            )
+                            .await;
+                            if restore_boundary {
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL)
+                                    .await;
+                            }
+                            request_cx.cancel_with_reason(CancelReason::user(
+                                "refused isolated begin cleanup",
+                            ));
+                            let reply = match failure {
+                                0 => ok_packet_payload(0, ACTIVE),
+                                1 => vec![0, 0, 0, 2],
+                                _ => error_packet_payload(1105, "HY000", "cleanup refused"),
+                            };
+                            write_response_packet(&mut peer, 1, reply);
+                            let outcome = operation.await.map(|_| ());
+                            assert_isolation_verification_failure(&outcome, false);
+                            assert!(
+                                !conn
+                                    .inner
+                                    .query_in_flight
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                            );
+                            retired(
+                                &mut conn,
+                                &active_cx,
+                                (!restore_boundary).then_some(IsolationLevel::RepeatableRead),
+                            )
+                            .await;
+                            peer_closed(&mut peer);
+                            assert!(!active_cx.is_cancel_requested());
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn healthy_isolated_begin_compensation_waits_beyond_the_cancellation_grace() {
+            for workers in [1, 2] {
+                for restore_boundary in [false, true] {
+                    native_journey(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native isolated begin worker");
+                        let (mut conn, mut peer) = connection();
+                        let mut options =
+                            MySqlConnectOptions::parse("mysql://localhost/test").unwrap();
+                        options.connect_timeout = Some(Duration::from_millis(20));
+                        conn.options = Some(options);
+                        write_failed_isolated_begin(&mut peer, false);
+                        let mut operation = Box::pin(conn.begin_with_isolation(
+                            &request_cx,
+                            IsolationLevel::Serializable,
+                            false,
+                        ));
+                        commands_while_pending(
+                            operation.as_mut(),
+                            &mut peer,
+                            &FAILED_ISOLATED_BEGIN_COMMANDS,
+                        )
+                        .await;
+                        if restore_boundary {
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                            command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL).await;
+                        }
+                        crate::time::sleep_cx(&active_cx, Duration::from_millis(100))
+                            .await
+                            .expect("native delay beyond the configured cleanup grace");
+                        std::future::poll_fn(|task_cx| {
+                            assert!(
+                                operation.as_mut().poll(task_cx).is_pending(),
+                                "healthy compensation must await its actual acknowledgement"
+                            );
+                            Poll::Ready(())
+                        })
+                        .await;
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        if !restore_boundary {
+                            command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL).await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        }
+                        let outcome = operation.await.map(|_| ());
+                        assert_isolation_verification_failure(&outcome, false);
+                        assert!(!request_cx.is_cancel_requested());
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        assert!(!conn.in_transaction());
+                        assert!(conn.inner.session_isolation_restore.is_none());
+                        write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                        assert!(matches!(
+                            conn.execute_trusted_sql(&active_cx, CALLER_SQL).await,
+                            Outcome::Ok(1)
+                        ));
+                        assert_eq!(command_sql(&read_client_command(&mut peer)), CALLER_SQL);
+                        drop(conn);
+                        peer_closed(&mut peer);
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn isolated_begin_original_error_survives_its_own_task_cancellation() {
+            for workers in [1, 2] {
+                for server_error in [false, true] {
+                    for silent_peer in [false, true] {
+                        native_journey(workers, move |_| async move {
+                            let parent_cx = Cx::current().expect("native isolated begin parent");
+                            let mut child = parent_cx
+                                .spawn(move |child_cx| async move {
+                                    let (mut conn, mut peer) = connection();
+                                    let mut options =
+                                        MySqlConnectOptions::parse("mysql://localhost/test")
+                                            .unwrap();
+                                    options.connect_timeout = Some(Duration::from_millis(50));
+                                    conn.options = Some(options);
+                                    write_failed_isolated_begin(&mut peer, server_error);
+                                    let mut operation = Box::pin(conn.begin_with_isolation(
+                                        &child_cx,
+                                        IsolationLevel::Serializable,
+                                        false,
+                                    ));
+                                    commands_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        &FAILED_ISOLATED_BEGIN_COMMANDS,
+                                    )
+                                    .await;
+                                    child_cx.cancel_with_reason(CancelReason::user(
+                                        "cancel isolated begin owner",
+                                    ));
+                                    if !silent_peer {
+                                        write_response_packet(
+                                            &mut peer,
+                                            1,
+                                            ok_packet_payload(0, IDLE),
+                                        );
+                                        command_while_pending(
+                                            operation.as_mut(),
+                                            &mut peer,
+                                            RESTORE_SQL,
+                                        )
+                                        .await;
+                                        write_response_packet(
+                                            &mut peer,
+                                            1,
+                                            ok_packet_payload(0, IDLE),
+                                        );
+                                    }
+                                    let outcome = operation.await.map(|_| ());
+                                    assert_isolation_verification_failure(&outcome, server_error);
+                                    assert_eq!(conn.inner.closed, silent_peer);
+                                    assert_eq!(conn.inner.needs_rollback, silent_peer);
+                                    assert_eq!(conn.in_transaction(), silent_peer);
+                                    assert_eq!(
+                                        conn.inner.session_isolation_restore,
+                                        silent_peer.then_some(IsolationLevel::RepeatableRead)
+                                    );
+                                    assert!(
+                                        !conn
+                                            .inner
+                                            .query_in_flight
+                                            .load(std::sync::atomic::Ordering::Acquire)
+                                    );
+                                    if silent_peer {
+                                        peer_closed(&mut peer);
+                                    }
+                                    drop(conn);
+                                    if !silent_peer {
+                                        peer_closed(&mut peer);
+                                    }
+                                    // No additional checkpoint may conceal a missing
+                                    // acknowledgement in the public begin method.
+                                    outcome
+                                })
+                                .expect("spawn isolated begin owner");
+                            let Ok(outcome) = child.join(&parent_cx).await else {
+                                panic!("TaskHandle replaced the isolated begin result");
+                            };
+                            assert_isolation_verification_failure(&outcome, server_error);
+                            assert!(!parent_cx.is_cancel_requested());
+                        });
+                    }
+                }
+            }
+        }
+
         #[test]
         fn acknowledged_commit_stays_committed_when_session_restoration_is_interrupted() {
             for workers in [1, 2] {
