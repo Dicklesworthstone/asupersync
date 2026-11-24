@@ -222,6 +222,12 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
     /// Polls the timeout future with an explicit time value.
     ///
     /// This is useful when you want to control the time source manually.
+    /// The supplied `now` is authoritative even when an ambient timer driver or
+    /// the configured time getter uses a different clock. A runtime timer can
+    /// wake the caller after the remaining duration, but that wake alone does
+    /// not expire the timeout. Callers advancing a manual clock independently
+    /// must arrange another poll. Without a bound or ambient timer driver,
+    /// manual polling registers no timer and starts no fallback thread.
     ///
     /// # Arguments
     ///
@@ -244,7 +250,11 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
         let deadline = self.sleep.deadline();
-        if now > deadline && self.sleep.poll_ready_with_time(now).is_ready() {
+        if now > deadline
+            && Pin::new(&mut self.sleep)
+                .poll_deadline_with_time(cx, Some(now))
+                .is_ready()
+        {
             self.completed = true;
             self.timed_out = true;
             return Poll::Ready(Err(Elapsed::new(deadline)));
@@ -264,28 +274,17 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             Poll::Pending => {}
         }
 
-        if self.sleep.poll_ready_with_time(now).is_ready() {
-            self.completed = true;
-            self.timed_out = true;
-            return Poll::Ready(Err(Elapsed::new(deadline)));
-        }
-
-        // Preserve wake registration only when the underlying sleep can use
-        // the same time domain as the explicit `now`. Falling back to a
-        // wall-clock sleep here makes manual/virtual-time polls observe an
-        // unrelated clock and can spuriously expire after long test suites.
-        if self.sleep.has_custom_time_getter() || self.sleep.has_timer_driver_for_poll() {
-            match Pin::new(&mut self.sleep).poll_deadline(cx) {
-                Poll::Ready(()) => {
-                    self.completed = true;
-                    self.timed_out = true;
-                    return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
-                }
-                Poll::Pending => {}
+        // Timer availability does not establish clock identity. Use the
+        // explicit sample for readiness and rebase only the wakeup duration.
+        // Without a driver, this also retires any earlier automatic wait.
+        match Pin::new(&mut self.sleep).poll_deadline_with_time(cx, Some(now)) {
+            Poll::Ready(()) => {
+                self.completed = true;
+                self.timed_out = true;
+                Poll::Ready(Err(Elapsed::new(deadline)))
             }
+            Poll::Pending => Poll::Pending,
         }
-
-        Poll::Pending
     }
 }
 
