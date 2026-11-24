@@ -8664,6 +8664,7 @@ async fn send_native_source_stream_entries_pumped(
     config: &QuicConfig,
     chunk_codec: Option<&CodecAccept>,
     options: super::QuicSendOptions,
+    mut on_progress: super::QuicSendProgressObserver<'_>,
 ) -> Result<u64, QuicTransportError> {
     let max_chunk = link
         .max_app_payload
@@ -8681,6 +8682,7 @@ async fn send_native_source_stream_entries_pumped(
     let mut buf = vec![0_u8; read_len];
     // Logical (raw) bytes: what the manifest totals, compressed or not.
     let mut streamed = 0u64;
+    super::observe_send_progress(cx, &mut on_progress, streamed, prepared.manifest.total_bytes)?;
     let mut queued_since_flush = 0u64;
     // Framed chunks compress on the blocking pool, up to
     // `compression_parallelism` at once, and go out in order; consecutive
@@ -8737,6 +8739,13 @@ async fn send_native_source_stream_entries_pumped(
                         None,
                     )
                     .await?;
+                    streamed = streamed.saturating_add(n_u64);
+                    super::observe_send_progress(
+                        cx,
+                        &mut on_progress,
+                        streamed,
+                        prepared.manifest.total_bytes,
+                    )?;
                 }
                 #[cfg(feature = "zstd")]
                 Some(_) => {
@@ -8753,7 +8762,7 @@ async fn send_native_source_stream_entries_pumped(
                             else {
                                 break;
                             };
-                            let frame = pipelined_chunk_frame(chunk)?;
+                            let (frame, raw_len) = pipelined_chunk_frame(chunk)?;
                             queue_source_stream_frame(
                                 cx,
                                 link,
@@ -8767,6 +8776,13 @@ async fn send_native_source_stream_entries_pumped(
                                 None,
                             )
                             .await?;
+                            streamed = streamed.saturating_add(raw_len);
+                            super::observe_send_progress(
+                                cx,
+                                &mut on_progress,
+                                streamed,
+                                prepared.manifest.total_bytes,
+                            )?;
                         }
                     }
                 }
@@ -8792,9 +8808,15 @@ async fn send_native_source_stream_entries_pumped(
                         None,
                     )
                     .await?;
+                    streamed = streamed.saturating_add(n_u64);
+                    super::observe_send_progress(
+                        cx,
+                        &mut on_progress,
+                        streamed,
+                        prepared.manifest.total_bytes,
+                    )?;
                 }
             }
-            streamed = streamed.saturating_add(n_u64);
         }
         if read != entry.size {
             return Err(QuicTransportError::Source(format!(
@@ -8818,7 +8840,7 @@ async fn send_native_source_stream_entries_pumped(
     if let Some(pipeline) = pipeline.as_mut() {
         let mut finished = EntryCompression::new(options.compression(), "");
         while let Some(chunk) = pipeline.next(u32::MAX, &mut finished).await {
-            let frame = pipelined_chunk_frame(chunk)?;
+            let (frame, raw_len) = pipelined_chunk_frame(chunk)?;
             queue_source_stream_frame(
                 cx,
                 link,
@@ -8832,6 +8854,13 @@ async fn send_native_source_stream_entries_pumped(
                 None,
             )
             .await?;
+            streamed = streamed.saturating_add(raw_len);
+            super::observe_send_progress(
+                cx,
+                &mut on_progress,
+                streamed,
+                prepared.manifest.total_bytes,
+            )?;
         }
     }
 
@@ -8947,17 +8976,19 @@ fn source_stream_compressed_frame(
 #[cfg(feature = "zstd")]
 fn pipelined_chunk_frame(
     chunk: Result<codec::PipelinedChunk, crate::runtime::JoinError>,
-) -> Result<Frame, QuicTransportError> {
+) -> Result<(Frame, u64), QuicTransportError> {
     let chunk = chunk.map_err(|error| match error {
         crate::runtime::JoinError::Cancelled(_) => QuicTransportError::Cancelled,
         other => QuicTransportError::Source(format!("compressing a chunk failed: {other}")),
     })?;
-    match &chunk.compressed {
+    let raw_len = u64::try_from(chunk.raw.len()).unwrap_or(u64::MAX);
+    let frame = match &chunk.compressed {
         Some((record, payload)) => {
             source_stream_compressed_frame(chunk.index, chunk.offset, *record, payload)
         }
         None => source_stream_data_frame(chunk.index, chunk.offset, &chunk.raw),
-    }
+    }?;
+    Ok((frame, raw_len))
 }
 
 /// Queues `frame` on the source stream in write-sized pieces, so each write
@@ -9115,6 +9146,7 @@ fn source_stream_repair_tail_requests(
 /// Drive a full ATP-over-QUIC send over an established link: Hello, manifest,
 /// initial symbol spray, then the fountain feedback loop until Proof or the
 /// feedback-round budget is exhausted.
+#[allow(clippy::too_many_arguments)]
 async fn run_sender_session(
     cx: &Cx,
     link: &mut QuicLink,
@@ -9123,6 +9155,7 @@ async fn run_sender_session(
     config: &QuicConfig,
     peer_id: &str,
     options: super::QuicSendOptions,
+    mut on_progress: super::QuicSendProgressObserver<'_>,
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
     let config = &config;
@@ -9357,6 +9390,7 @@ async fn run_sender_session(
             super::DeltaWireMode::FullObject => accepted_delta_full_request = Some(request),
             super::DeltaWireMode::AlreadyInSync => {
                 super::validate_quic_prepared_delta_source_unchanged(cx, prepared, config).await?;
+                super::observe_send_progress(cx, &mut on_progress, 0, 0)?;
                 send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, 0)?;
                 link.flush(cx).await?;
                 let completion_frames = link.last_flushed_stream_frames();
@@ -9412,6 +9446,7 @@ async fn run_sender_session(
                     config,
                     session,
                     &request.request,
+                    on_progress,
                 ))
                 .await;
             }
@@ -9447,6 +9482,7 @@ async fn run_sender_session(
                 config,
                 chunk_codec.as_ref(),
                 options,
+                on_progress,
             ))
             .await?;
             if bytes_streamed != manifest.total_bytes {
@@ -12938,6 +12974,7 @@ pub(crate) async fn send_prepared_over_udp(
     config: &QuicConfig,
     peer_id: &str,
     options: super::QuicSendOptions,
+    on_progress: super::QuicSendProgressObserver<'_>,
 ) -> Result<(SendReport, QuicSendLimiterReport), QuicTransportError> {
     let config = prepared.effective_config(config);
     options.validate(&config)?;
@@ -12976,6 +13013,7 @@ pub(crate) async fn send_prepared_over_udp(
         &config,
         peer_id,
         options,
+        on_progress,
     ))
     .await?;
     let limiter = link.limiter_report();

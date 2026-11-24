@@ -12360,7 +12360,16 @@ pub async fn send_path_with_limiter_report(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
-    send_path_outcome(cx, addr, source, config, peer_id, QuicSendOptions::new()).await
+    send_path_outcome(
+        cx,
+        addr,
+        source,
+        config,
+        peer_id,
+        QuicSendOptions::new(),
+        None,
+    )
+    .await
 }
 
 /// [`send_path_with_limiter_report`] with sender-only options, as
@@ -12374,7 +12383,7 @@ pub async fn send_path_with_options_and_limiter_report(
     peer_id: &str,
     options: QuicSendOptions,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
-    send_path_outcome(cx, addr, source, config, peer_id, options).await
+    send_path_outcome(cx, addr, source, config, peer_id, options, None).await
 }
 
 /// [`send_path`] with sender-only options: with
@@ -12388,11 +12397,91 @@ pub async fn send_path_with_options(
     peer_id: &str,
     options: QuicSendOptions,
 ) -> Result<SendReport, QuicTransportError> {
-    send_path_outcome(cx, addr, source, config, peer_id, options)
+    send_path_outcome(cx, addr, source, config, peer_id, options, None)
         .await
         .map(|outcome| outcome.report)
 }
 
+/// A snapshot of raw source bytes admitted to a native reliable stream.
+///
+/// This is local progress, not a peer acknowledgement, integrity check, or
+/// commit receipt. Even when both counters match, the transfer can still fail;
+/// await the send result for the actual [`SendReport`]. Compression headers,
+/// compressed wire sizes, and QUIC retransmissions are excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuicSendProgress {
+    /// Raw bytes in complete source chunks successfully queued so far.
+    /// An error while queueing a chunk can leave additional partial bytes in
+    /// flight that have not been included in an observation.
+    pub raw_bytes_queued: u64,
+    /// Raw bytes this negotiated stream must queue. For a changed-chunk or
+    /// resumed transfer this excludes data the receiver already has.
+    pub total_raw_bytes: u64,
+}
+
+type QuicSendProgressObserver<'a> = Option<&'a mut (dyn FnMut(QuicSendProgress) + Send)>;
+
+#[cfg(feature = "tls")]
+fn observe_send_progress(
+    cx: &Cx,
+    observer: &mut QuicSendProgressObserver<'_>,
+    raw_bytes_queued: u64,
+    total_raw_bytes: u64,
+) -> Result<(), QuicTransportError> {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer(QuicSendProgress {
+            raw_bytes_queued,
+            total_raw_bytes,
+        });
+        // Observers may cancel synchronously, including at the final chunk
+        // or a zero-byte reuse observation. Preserve typed cancellation before
+        // another transport operation can publish FIN or wrap the error.
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    }
+    Ok(())
+}
+
+/// [`send_path_with_options`] with synchronous observations of native stream
+/// admission progress.
+///
+/// The observer receives an initial zero snapshot and monotonic raw-byte
+/// snapshots after complete source chunks enter the reliable stream. This
+/// includes compressed streams and negotiated changed-chunk/resume streams;
+/// an already-in-sync delta reports zero bytes to queue. The RaptorQ DATAGRAM
+/// fallback does not emit byte snapshots, because repair symbols are not
+/// equivalent to distinct source bytes. Silence therefore cannot establish
+/// either failure or completion. The unchanged returned report is authoritative.
+///
+/// The observer runs inline in the sending task, without an internal queue or
+/// observer task, and must return promptly. Retaining only its latest snapshot
+/// gives an application bounded progress storage. A panic propagates through
+/// the sending task's normal panic handling. Observations do not consume or
+/// replace the receiver's terminal receipt.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_path_with_options_and_progress(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicSendOptions,
+    mut on_progress: impl FnMut(QuicSendProgress) + Send,
+) -> Result<SendReport, QuicTransportError> {
+    send_path_outcome(
+        cx,
+        addr,
+        source,
+        config,
+        peer_id,
+        options,
+        Some(&mut on_progress),
+    )
+    .await
+    .map(|outcome| outcome.report)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_path_outcome(
     cx: &Cx,
     addr: SocketAddr,
@@ -12400,6 +12489,7 @@ async fn send_path_outcome(
     config: QuicConfig,
     peer_id: &str,
     options: QuicSendOptions,
+    on_progress: QuicSendProgressObserver<'_>,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
     let work = async {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -12414,14 +12504,21 @@ async fn send_path_outcome(
         trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
         #[cfg(feature = "tls")]
         {
-            let (report, limiter) =
-                native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id, options)
-                    .await?;
+            let (report, limiter) = native_link::send_prepared_over_udp(
+                cx,
+                addr,
+                &prepared,
+                &config,
+                peer_id,
+                options,
+                on_progress,
+            )
+            .await?;
             Ok(QuicSendOutcome { report, limiter })
         }
         #[cfg(not(feature = "tls"))]
         {
-            let _ = (addr, prepared, options);
+            let _ = (addr, prepared, options, on_progress);
             Err(QuicTransportError::Config(
                 "ATP-over-QUIC send requires the `tls` feature for the native QUIC/TLS-1.3 \
                  handshake; there is no insecure transport path"

@@ -25,10 +25,13 @@ pub(super) async fn send(
     config: &QuicConfig,
     session: QuicDeltaSessionContext,
     request: &DeltaObjectRequest,
+    mut on_progress: super::super::QuicSendProgressObserver<'_>,
 ) -> Result<SendReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     let manifest = &prepared.manifest;
     delta::validate_request(manifest, request)?;
+    let mut raw_bytes_queued = 0u64;
+    super::super::observe_send_progress(cx, &mut on_progress, 0, request.missing_bytes)?;
     let stream = control.stream;
     let limit = link.conn.stream_send_limit(stream).ok_or_else(|| {
         QuicTransportError::Control("changed-chunk control stream is missing".to_string())
@@ -117,6 +120,13 @@ pub(super) async fn send(
                         binding,
                     )
                     .await?;
+                    raw_bytes_queued = raw_bytes_queued.saturating_add(len as u64);
+                    super::super::observe_send_progress(
+                        cx,
+                        &mut on_progress,
+                        raw_bytes_queued,
+                        request.missing_bytes,
+                    )?;
                     check_source_stream_control(cx, link, control, &mut early, binding).await?;
                     offset += len as u64;
                 }
@@ -171,6 +181,13 @@ pub(super) async fn send(
                         binding,
                     )
                     .await?;
+                    raw_bytes_queued = raw_bytes_queued.saturating_add(bytes.len() as u64);
+                    super::super::observe_send_progress(
+                        cx,
+                        &mut on_progress,
+                        raw_bytes_queued,
+                        request.missing_bytes,
+                    )?;
                     check_source_stream_control(cx, link, control, &mut early, binding).await?;
                 }
             }

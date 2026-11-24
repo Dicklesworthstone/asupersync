@@ -11,6 +11,7 @@
 //! This is the ATP-specific wire protocol, not generic QUIC interoperability.
 
 pub mod upload;
+pub use crate::net::atp::transport_quic::QuicSendProgress as NativeSendProgress;
 pub use upload::{
     NativeUploadCleanupError, NativeUploadError, NativeUploadOptions, NativeUploadReport,
     NativeUploadTask,
@@ -321,6 +322,54 @@ impl NativeTransferClient {
         committed_send(report)
     }
 
+    /// Send with raw-byte progress while retaining the actual peer receipt.
+    ///
+    /// Observations describe complete chunks admitted to the native reliable
+    /// stream, including compressed and changed-chunk/resume sends. Reused
+    /// data is excluded from the total. The RaptorQ DATAGRAM fallback emits
+    /// no byte observations; see [`NativeSendProgress`] for counter semantics.
+    /// Neither a full counter nor absence of updates establishes completion.
+    /// Await this operation for its full verified [`SendReport`].
+    ///
+    /// The observer runs inline and must return promptly. There is no internal
+    /// progress queue or detached observer task: callers can replace a single
+    /// shared snapshot without consuming the terminal result. Observer panics
+    /// follow the sending task's normal panic handling.
+    ///
+    /// # Errors
+    /// Preserves the admission, cancellation and transport errors of
+    /// [`Self::send_path`], including failures after the last progress update.
+    pub async fn send_path_with_progress(
+        &self,
+        cx: &Cx,
+        remote: SocketAddr,
+        source: &Path,
+        on_progress: impl FnMut(NativeSendProgress) + Send,
+    ) -> Result<SendReport, NativeTransferError> {
+        let admission = self.admit_sender()?;
+        Self::send_admitted_with_progress(cx, remote, source, admission, on_progress).await
+    }
+
+    async fn send_admitted_with_progress(
+        cx: &Cx,
+        remote: SocketAddr,
+        source: &Path,
+        admission: NativeAdmission,
+        on_progress: impl FnMut(NativeSendProgress) + Send,
+    ) -> Result<SendReport, NativeTransferError> {
+        let report = transport_quic::send_path_with_options_and_progress(
+            cx,
+            remote,
+            source,
+            admission.shared.config.clone(),
+            &admission.shared.peer_label,
+            admission.shared.send_options,
+            on_progress,
+        )
+        .await?;
+        committed_send(report)
+    }
+
     /// Admit a sender as a real child of the supplied runtime scope.
     ///
     /// Native capacity is reserved *before* runtime enqueue, bounding queued
@@ -355,6 +404,46 @@ impl NativeTransferClient {
             > = Box::pin(
                 async move { Self::send_admitted(&child, remote, &source, admission).await },
             );
+            future
+        })
+        .map_err(NativeTransferError::Spawn)
+    }
+
+    /// [`Self::spawn_send_path`] with the progress observer of
+    /// [`Self::send_path_with_progress`].
+    ///
+    /// Admission is reserved before enqueueing the child. The observer runs in
+    /// that child and owns no additional task. The returned [`NativeSendTask`]
+    /// retains the full receipt or original error independently of every
+    /// progress observation. Cancel and join that handle to drain the worker;
+    /// progress reaching its total does not replace the canonical join.
+    ///
+    /// # Errors
+    /// As [`Self::spawn_send_path`]. The observer is not called if admission is
+    /// refused or cancellation retires the worker before transmission begins.
+    pub fn spawn_send_path_with_progress<P: Policy>(
+        &self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        remote: SocketAddr,
+        source: impl Into<PathBuf>,
+        on_progress: impl FnMut(NativeSendProgress) + Send + 'static,
+    ) -> Result<NativeSendTask, NativeTransferError> {
+        let admission = self.admit_sender()?;
+        let source = source.into();
+        cx.spawn_in(scope, move |child| {
+            let future: Pin<
+                Box<dyn Future<Output = Result<SendReport, NativeTransferError>> + Send>,
+            > = Box::pin(async move {
+                Self::send_admitted_with_progress(
+                    &child,
+                    remote,
+                    &source,
+                    admission,
+                    on_progress,
+                )
+                .await
+            });
             future
         })
         .map_err(NativeTransferError::Spawn)

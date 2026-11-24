@@ -283,7 +283,8 @@ impl AtpSdk {
 pub mod native;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use native::{
-    NativeReceiveTask, NativeReceiver, NativeSendTask, NativeTransferClient, NativeTransferError,
+    NativeReceiveTask, NativeReceiver, NativeSendProgress, NativeSendTask, NativeTransferClient,
+    NativeTransferError,
 };
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]

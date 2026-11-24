@@ -17,10 +17,12 @@
 
 use asupersync::Cx;
 use asupersync::net::atp::protocol::PeerId;
-use asupersync::net::atp::sdk::{AtpSdk, NativeTransferClient, NativeTransferError, SessionConfig};
+use asupersync::net::atp::sdk::{
+    AtpSdk, NativeSendProgress, NativeTransferClient, NativeTransferError, SessionConfig,
+};
 use asupersync::net::atp::transport_quic::native_link::{QuicClientTls, QuicServerTls};
 use asupersync::net::atp::transport_quic::{
-    QuicConfig, QuicReceiveOptions, ReceiveReport, SendReport,
+    QuicConfig, QuicReceiveOptions, QuicTransportError, ReceiveReport, SendReport,
 };
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::runtime::{JoinError, RuntimeBuilder};
@@ -31,6 +33,7 @@ use std::future::Future;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "zstd")]
@@ -38,7 +41,7 @@ use {
     asupersync::net::atp::sdk::native::NativeUploadOptions,
     asupersync::net::atp::transport_common::CompressionMode,
     asupersync::net::atp::transport_quic::QuicSendOptions,
-    std::sync::{Arc, atomic::AtomicBool},
+    std::sync::atomic::AtomicBool,
     std::thread::JoinHandle,
 };
 
@@ -182,6 +185,36 @@ fn run_native<T: Send + 'static>(
     result
 }
 
+/// Retain one snapshot while checking every observation. Observing progress
+/// must neither require an unbounded event queue nor consume a task's receipt.
+#[derive(Debug, Default)]
+struct ObservedProgress {
+    latest: Option<NativeSendProgress>,
+    saw_partial: bool,
+}
+
+impl ObservedProgress {
+    fn record(&mut self, progress: NativeSendProgress) {
+        assert!(progress.raw_bytes_queued <= progress.total_raw_bytes);
+        if let Some(previous) = self.latest {
+            assert_eq!(progress.total_raw_bytes, previous.total_raw_bytes);
+            assert!(progress.raw_bytes_queued > previous.raw_bytes_queued);
+        } else {
+            assert_eq!(progress.raw_bytes_queued, 0, "first snapshot must start at zero");
+        }
+        self.saw_partial |=
+            progress.raw_bytes_queued > 0 && progress.raw_bytes_queued < progress.total_raw_bytes;
+        self.latest = Some(progress);
+    }
+
+    fn assert_streamed(&self, raw_bytes: u64) {
+        let latest = self.latest.expect("native stream must publish progress");
+        assert_eq!(latest.raw_bytes_queued, raw_bytes);
+        assert_eq!(latest.total_raw_bytes, raw_bytes);
+        assert!(self.saw_partial, "the native stream skipped intermediate progress");
+    }
+}
+
 async fn transfer(
     source: PathBuf,
     destination: PathBuf,
@@ -203,11 +236,14 @@ async fn transfer(
     let address = receiver.local_addr();
     assert_ne!(address.port(), 0);
     assert_eq!(receiver_client.active_transfers(), 1);
+    let progress = Arc::new(Mutex::new(ObservedProgress::default()));
+    let observed = Arc::clone(&progress);
+    let observe = move |snapshot| observed.lock().unwrap().record(snapshot);
     let (sent, received) = if scoped_workers {
         let scope = cx.scope();
         let mut receive = receiver.spawn(&cx, &scope).expect("admit receiver child");
         let mut send = sender
-            .spawn_send_path(&cx, &scope, address, source)
+            .spawn_send_path_with_progress(&cx, &scope, address, source, observe)
             .expect("admit sender child");
         let (sent, received) = zip(send.join(&cx), receive.join(&cx)).await;
         (
@@ -216,7 +252,7 @@ async fn transfer(
         )
     } else {
         zip(
-            sender.send_path(&cx, address, &source),
+            sender.send_path_with_progress(&cx, address, &source, observe),
             receiver.receive(&cx),
         )
         .await
@@ -231,6 +267,9 @@ async fn transfer(
     assert_eq!(sent.transfer_id, received.transfer_id);
     assert_eq!(sent.receipt.bytes_received, received.bytes_received);
     assert_eq!(sent.receipt.files, received.files);
+    if sent.bytes_sent > 0 && sent.symbols_sent == 0 {
+        progress.lock().unwrap().assert_streamed(sent.bytes_sent);
+    }
     (sent, received)
 }
 
@@ -252,15 +291,15 @@ fn assert_content(report: &ReceiveReport, destination: &Path, relative: &str, by
 }
 
 #[test]
-fn native_sdk_scoped_file_transfer_has_real_receipts_on_both_backends() {
-    for workers in [1, 2] {
+fn native_sdk_file_progress_preserves_real_receipts_on_both_backends() {
+    for (workers, scoped) in [(1, false), (1, true), (2, true)] {
         let root = fixture("file");
         let source = root.join("payload.bin");
         let destination = root.join("received");
         let bytes: Vec<u8> = (0u8..=255).cycle().take(128 * 1024 + 17).collect();
         std::fs::write(&source, &bytes).unwrap();
         let receive_root = destination.clone();
-        let (sent, received) = run_native(workers, transfer(source, receive_root, true));
+        let (sent, received) = run_native(workers, transfer(source, receive_root, scoped));
         assert_eq!(sent.bytes_sent, u64::try_from(bytes.len()).unwrap());
         assert_eq!(received.bytes_received, u64::try_from(bytes.len()).unwrap());
         assert_content(&received, &destination, "payload.bin", &bytes);
@@ -301,6 +340,62 @@ fn native_sdk_direct_empty_file_still_requires_a_peer_commit() {
     assert_eq!(received.bytes_received, 0);
     assert_eq!(sent.receipt.files, 1);
     assert_content(&received, &destination, "empty.bin", &[]);
+}
+
+#[test]
+fn native_sdk_full_progress_does_not_replace_cancelled_sender_result() {
+    let root = fixture("progress-cancel");
+    let source = root.join("payload.bin");
+    std::fs::write(&source, vec![0x5a; 256 * 1024 + 17]).unwrap();
+    run_native(2, async move {
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let timeout = Duration::from_secs(5);
+        let sender = native_client("sender", sender_config("localhost", timeout), 1);
+        let receiver_client = native_client("receiver", receiver_config(timeout), 1);
+        let receiver = receiver_client
+            .bind_receiver(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                root.join("received"),
+                QuicReceiveOptions::default(),
+            )
+            .await
+            .unwrap();
+        let address = receiver.local_addr();
+        let mut receive = receiver.spawn(&cx, &scope).unwrap();
+        let progress = Arc::new(Mutex::new(ObservedProgress::default()));
+        let observed = Arc::clone(&progress);
+        let reason = CancelReason::user("cancel after final local byte observation");
+        let cancel_reason = reason.clone();
+        let mut send = sender
+            .spawn_send_path_with_progress(&cx, &scope, address, source, move |snapshot| {
+                observed.lock().unwrap().record(snapshot);
+                if snapshot.raw_bytes_queued > 0
+                    && snapshot.raw_bytes_queued == snapshot.total_raw_bytes
+                {
+                    // The callback runs in the actual sender, before source
+                    // exhaustion/FIN and the peer's final receipt exchange.
+                    Cx::current()
+                        .expect("observer runs in native sender child")
+                        .cancel_with_reason(cancel_reason.clone());
+                }
+            })
+            .unwrap();
+        let sent = send.join(&cx).await;
+        // Retire the peer as well, even if asserting the sender would fail.
+        // A local cancellation does not make a rollback claim about the peer.
+        receive.abort_with_reason(CancelReason::user("drain progress cancellation peer"));
+        let _received = receive.join(&cx).await;
+        match sent {
+            Ok(Err(NativeTransferError::Transport(QuicTransportError::Cancelled))) => {}
+            Err(JoinError::Cancelled(actual)) => assert_eq!(actual, reason),
+            other => panic!("full byte progress concealed sender cancellation: {other:?}"),
+        }
+        progress.lock().unwrap().assert_streamed(256 * 1024 + 17);
+        assert_eq!(sender.active_transfers(), 0);
+        assert_eq!(receiver_client.active_transfers(), 0);
+    });
 }
 
 #[test]
@@ -606,10 +701,13 @@ async fn counted_transfer(
         .await
         .expect("bind actual receiver before advertising its address");
     let proxy = CountingProxy::spawn(receiver.local_addr());
+    let progress = Arc::new(Mutex::new(ObservedProgress::default()));
+    let observed = Arc::clone(&progress);
+    let observe = move |snapshot| observed.lock().unwrap().record(snapshot);
     let (sent, received) = match route {
         Route::SendPath => {
             zip(
-                sender.send_path(&cx, proxy.addr, &source),
+                sender.send_path_with_progress(&cx, proxy.addr, &source, observe),
                 receiver.receive(&cx),
             )
             .await
@@ -618,7 +716,7 @@ async fn counted_transfer(
             let scope = cx.scope();
             let mut receive = receiver.spawn(&cx, &scope).expect("admit receiver child");
             let mut send = sender
-                .spawn_send_path(&cx, &scope, proxy.addr, source)
+                .spawn_send_path_with_progress(&cx, &scope, proxy.addr, source, observe)
                 .expect("admit sender child");
             let (sent, received) = zip(send.join(&cx), receive.join(&cx)).await;
             (
@@ -652,6 +750,9 @@ async fn counted_transfer(
     let received = received.expect("actual receiver must publish verified files");
     assert!(sent.receipt.committed && sent.receipt.sha_ok && sent.receipt.merkle_ok);
     assert!(received.committed);
+    if !matches!(route, Route::Upload) {
+        progress.lock().unwrap().assert_streamed(sent.bytes_sent);
+    }
     (sent, received, proxy.sent.load(Ordering::Relaxed))
 }
 
