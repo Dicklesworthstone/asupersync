@@ -1,7 +1,7 @@
 /**
  * Async scope brackets over the actual SDK, checked-in WASM ownership ledger,
- * and Node's native Web Streams. This is not browser-engine execution or a
- * Rust rebuild. Refusal cases inject only the scope-close ABI response.
+ * and Node's native Web Streams and AbortController. This is not browser-engine execution or a
+ * Rust rebuild. Refusal cases intercept a single named ABI operation.
  * node --unhandled-rejections=strict --experimental-vm-modules --test scripts/test_browser_scope_async.mjs
  */
 import assert from "node:assert/strict";
@@ -39,14 +39,14 @@ console.log(JSON.stringify({
   source_sha256: hashes,
 }));
 
-async function loadSdk(closeInterceptor) {
+async function loadSdk(closeInterceptor, joinInterceptor) {
   const context = createContext({
     console, AbortController, AbortSignal, ArrayBuffer, DataView, Uint8Array, URL,
     EventTarget, MessageEvent, WebSocket, TextEncoder, TextDecoder,
     ReadableStream, WritableStream, WebAssembly, Response, Request, structuredClone,
     queueMicrotask, setTimeout, clearTimeout,
     window: {}, document: {}, isSecureContext: true,
-    closeInterceptor,
+    closeInterceptor, joinInterceptor,
   });
   const modules = new Map();
   for (const [name, path, typescript] of files) {
@@ -56,17 +56,21 @@ async function loadSdk(closeInterceptor) {
       { context, identifier: fileURLToPath(new URL(`../${path}`, import.meta.url)) },
     ));
   }
-  // Every operation except an explicitly injected close refusal still reaches
+  // Every operation except an explicitly injected refusal still reaches
   // the packaged ABI. Successful closes are never fabricated by this harness.
   modules.set("@asupersync/browser-core", new SourceTextModule(`
     export * from "core-live";
     export { default } from "core-live";
-    import { scopeClose as realScopeClose } from "core-live";
+    import { scopeClose as realScopeClose, taskJoin as realTaskJoin } from "core-live";
+    export function taskJoin(handle, outcome, version) {
+      const refused = globalThis.joinInterceptor?.(handle, outcome, version);
+      return refused === undefined ? realTaskJoin(handle, outcome, version) : refused;
+    }
     export function scopeClose(handle, version) {
       const intercepted = globalThis.closeInterceptor?.(handle, version);
       return intercepted === undefined ? realScopeClose(handle, version) : intercepted;
     }
-  `, { context, identifier: "scope-close-refusal-boundary" }));
+  `, { context, identifier: "scope-and-task-refusal-boundary" }));
   modules.set("@asupersync/browser-core/webtransport-streams", modules.get("./webtransport-streams.js"));
   const entry = modules.get("sdk");
   await entry.link((specifier) => {
@@ -104,9 +108,9 @@ async function bounded(promise) {
   } finally { clearTimeout(timer); }
 }
 async function fixture(t, {
-  closeInterceptor, beforeCleanup = () => {}, runtimeAlreadyClosed = () => false,
+  closeInterceptor, joinInterceptor, beforeCleanup = () => {}, runtimeAlreadyClosed = () => false,
 } = {}) {
-  const loaded = await loadSdk(closeInterceptor);
+  const loaded = await loadSdk(closeInterceptor, joinInterceptor);
   const runtime = unwrap(await loaded.sdk.createBrowserRuntime({ eagerInit: false }));
   t.after(async () => {
     beforeCleanup();
@@ -479,3 +483,112 @@ for (const completionKind of ["success", "failure", "threw"]) {
     assert.equal(error.scope.close().outcome, "err", "retry released the retained real child");
   });
 }
+
+test("runTask admits once, preserves a realm-local value, and publishes thrown work", async t => {
+  const { runtime, snapshot } = await fixture(t);
+  const scope = unwrap(runtime.enterScope("application-operation"));
+  let executions = 0;
+  const value = Object.freeze({ marker: Symbol("cannot be serialized through the ABI") });
+  const handle = unwrap(scope.runTask(() => { executions++; return value; }, { label: "example" }));
+  assert.equal(executions, 0);
+  assert.equal(snapshot().tasks.total, 1);
+  const result = await bounded(handle.completed);
+  assert.strictEqual(unwrap(result), value);
+  assert.equal(executions, 1);
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await bounded(handle.cancel()));
+
+  let rendered = 0;
+  const thrown = Object.freeze({ toString() { rendered++; throw new Error("never stringify"); } });
+  for (const work of [() => { throw thrown; }, () => Promise.reject(thrown)]) {
+    const failed = unwrap(scope.runTask(work));
+    assert.equal((await bounded(failed.completed)).outcome, "panicked");
+    assert.equal(snapshot().tasks.total, 0);
+  }
+  assert.equal(rendered, 0);
+  unwrap(await scope.closeAsync());
+});
+
+test("runTask refuses incompatible admission and skips work cancelled before launch", async t => {
+  const { runtime, snapshot } = await fixture(t);
+  const scope = unwrap(runtime.enterScope("operation-admission"));
+  let executions = 0;
+  const run = () => ++executions;
+  assert.equal(scope.runTask(run, { consumerVersion: { major: 65535, minor: 0 } }).outcome, "err");
+  assert.equal(snapshot().tasks.total, 0);
+  const handle = unwrap(scope.runTask(run));
+  const first = handle.cancel(), second = handle.cancel();
+  unwrap(await bounded(first));
+  unwrap(await bounded(second));
+  const result = await bounded(handle.completed);
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.kind, "operation_cancel");
+  assert.equal(executions, 0);
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await scope.closeAsync());
+});
+
+for (const owner of ["scope", "runtime"]) {
+  test(`runTask waits for the callback's asynchronous cleanup on ${owner} close`, async t => {
+    const cleanup = deferred(), started = deferred(), sawAbort = deferred();
+    let closedRuntime = false;
+    const { runtime, snapshot } = await fixture(t, {
+      beforeCleanup: () => cleanup.resolve(), runtimeAlreadyClosed: () => closedRuntime,
+    });
+    const scope = unwrap(runtime.enterScope("operation-owner"));
+    const child = unwrap(scope.enterScope("operation-child"));
+    let delivered;
+    const handle = unwrap(child.runTask(async signal => {
+      started.resolve();
+      try {
+        await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+        return "late result";
+      } finally {
+        sawAbort.resolve(signal);
+        await cleanup.promise;
+        delivered = true;
+      }
+    }));
+    await bounded(started.promise);
+    let closed = false;
+    const closing = (owner === "runtime" ? runtime : scope).closeAsync()
+      .then(result => { closed = true; return result; });
+    assert.equal((await bounded(sawAbort.promise)).aborted, true);
+    await nextTurn();
+    assert.equal(closed, false);
+    assert.equal(snapshot().tasks.total, 1, "callback is still running its finally block");
+    assert.equal(child.runTask(() => assert.fail("close fence allowed launch")).outcome, "err");
+    cleanup.resolve();
+    const result = await bounded(handle.completed);
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.kind, owner === "scope" ? "scope_close" : "runtime_close");
+    unwrap(await bounded(closing));
+    closedRuntime = owner === "runtime";
+    assert.equal(delivered, true);
+    assert.equal(snapshot().tasks.total, 0);
+  });
+}
+
+test("runTask retains a refused publication and retries only its ledger release", async t => {
+  let attempts = 0, executions = 0;
+  const { runtime, snapshot } = await fixture(t, {
+    joinInterceptor() {
+      if (++attempts !== 1) return undefined;
+      return { outcome: "err", failure: {
+        code: "internal_failure", recoverability: "transient", message: "injected join refusal",
+      } };
+    },
+  });
+  const scope = unwrap(runtime.enterScope("retry-operation"));
+  const handle = unwrap(scope.runTask(() => ++executions));
+  const receipt = await bounded(handle.completed);
+  assert.equal(receipt.outcome, "err");
+  assert.equal(receipt.failure.message, "injected join refusal");
+  assert.equal(snapshot().tasks.total, 1);
+  unwrap(await bounded(handle.cancel()));
+  assert.strictEqual(await handle.completed, receipt, "original publication attempt remains observable");
+  assert.equal(attempts, 2);
+  assert.equal(executions, 1);
+  assert.equal(snapshot().tasks.total, 0);
+  unwrap(await scope.closeAsync());
+});
