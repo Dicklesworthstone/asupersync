@@ -19,6 +19,11 @@ use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod client;
+#[cfg(not(target_arch = "wasm32"))]
+pub use client::{EventSource, EventSourceError, EventSourceOptions, ReconnectPolicy};
+
 const POLL_BYTES: usize = 64 * 1024;
 const POLL_FRAMES: usize = 32;
 
