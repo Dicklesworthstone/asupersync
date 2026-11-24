@@ -4912,7 +4912,10 @@ impl Runtime {
         // inside a task poll, a concurrent call from another thread while the
         // worker is on loan, the worker thread itself, shutdown), in which
         // case the caller-polled path below admits its own ownership record.
-        let future = match self.inner.current_thread_driver.get() {
+        // Retain a driver owner through the whole loan, including root drop
+        // and unwind. The shutdown reaper waits for these owners before
+        // retiring shared task storage after the background worker exits.
+        let future = match self.inner.current_thread_driver.get().cloned() {
             Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
                 Ok(output) => return output,
                 Err(future) => future,
@@ -5119,12 +5122,13 @@ impl Runtime {
     /// as one from [`Runtime::handle`]: it is never released in time, so drop
     /// it first.
     ///
-    /// On a multi-thread runtime the reaper does not wait for those owners to
-    /// retire the tasks. Once the workers have exited, it drops the task
-    /// futures as ordinary drop would. So a `block_on` caller on a clone that
-    /// waits for a task sees that join end, and a task that holds a strong
-    /// `RuntimeHandle` releases it. A current-thread runtime's tasks are retired
-    /// by the final drop.
+    /// The reaper retires stopped `Send` tasks before waiting for those owners. Once
+    /// the workers have exited, it drops task futures as ordinary drop would,
+    /// so a task holding a strong `RuntimeHandle` releases it. On a multi-thread
+    /// runtime a `block_on` caller waiting for a task sees that join end. On a
+    /// current-thread or caller-driven runtime, the reaper first waits for any
+    /// active `block_on` or root drain to return its worker loan. A root still
+    /// waiting for a stopped child can therefore outlive the shutdown bound.
     ///
     /// [#60]: https://github.com/Dicklesworthstone/asupersync/issues/60
     #[must_use = "the return value reports whether teardown completed within the bound"]
@@ -5359,11 +5363,18 @@ impl Runtime {
         // while it waits, so cancelled tasks — including `!Send` tasks whose
         // future lives on this thread — make progress here; the observation
         // loop below is the fallback when the worker cannot be borrowed.
-        let driven = self.inner.current_thread_driver.get().and_then(|driver| {
-            driver.drain_until(&self.inner.scheduler, started, bound, &mut || {
-                self.work_is_drained()
-            })
-        });
+        // As in block_on, retain the driver until the loan has been returned;
+        // shutdown must not retire task storage while this drain uses it.
+        let driven = self
+            .inner
+            .current_thread_driver
+            .get()
+            .cloned()
+            .and_then(|driver| {
+                driver.drain_until(&self.inner.scheduler, started, bound, &mut || {
+                    self.work_is_drained()
+                })
+            });
         let drained_in_time = driven.unwrap_or_else(|| {
             loop {
                 if self.work_is_drained() {
@@ -6947,8 +6958,8 @@ impl RuntimeInner {
         }
     }
 
-    /// After [`Self::signal_shutdown`], retires a multi-thread runtime's
-    /// stopped tasks while other owners may still hold the runtime
+    /// After [`Self::signal_shutdown`], retires a native runtime's stopped
+    /// tasks while other owners may still hold the runtime
     /// (br-asupersync-1pi7ne H1).
     ///
     /// Tasks are otherwise dropped only by `RuntimeInner::drop`, which needs
@@ -6960,13 +6971,13 @@ impl RuntimeInner {
     /// Joins then hang, task-owned sockets and files stay open, and the
     /// reaper polls `Arc::try_unwrap` every millisecond forever.
     ///
-    /// Once the workers have exited, dropping the task tables is the same
-    /// abort-by-drop `RuntimeInner::drop` performs: joins observe
-    /// cancellation, and a dropped future releases what it held. A
-    /// current-thread runtime's worker is on loan to a `block_on` caller and
-    /// cannot be joined here, so its tasks wait for the final drop as before.
+    /// Once the workers have exited and any current-thread worker loan has
+    /// returned, dropping the task tables is the same abort-by-drop
+    /// `RuntimeInner::drop` performs: joins observe cancellation, and a
+    /// dropped future releases what it held. A caller still driving a loan
+    /// must finish before this retirement can proceed.
     fn retire_stopped_tasks_after_shutdown(&self) {
-        if self.current_thread_driver.get().is_some() || self.browser_pump.get().is_some() {
+        if self.browser_pump.get().is_some() {
             return;
         }
         let handles = {
@@ -6980,6 +6991,22 @@ impl RuntimeInner {
         };
         for handle in handles {
             let _ = handle.join();
+        }
+        if let Some(driver) = self.current_thread_driver.get() {
+            // shutdown permanently closed the loan slot before the joins.
+            // Every block_on/drain call retains a cloned driver Arc through
+            // worker return, including nested drives and unwind. The joined
+            // background thread has released its Arc too, so sole ownership
+            // here proves no caller can still dispatch or retire through the
+            // worker. New calls see Closed; re-entry requires an outer loan
+            // whose Arc keeps this count above one. Wait outside all runtime
+            // and driver locks, without touching another thread's !Send store.
+            while Arc::strong_count(driver) > 1 {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            // strong_count loads Relaxed; acquire the loan guards' release
+            // decrements before observing the state their workers left behind.
+            std::sync::atomic::fence(Ordering::Acquire);
         }
         let gateway_mailbox = {
             let state = self
