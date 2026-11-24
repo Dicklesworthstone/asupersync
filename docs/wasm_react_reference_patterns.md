@@ -205,3 +205,126 @@ This extends the lifecycle work tracked by `asupersync-umelq.10.1` and
 `asupersync-3qv04.17`. Those completed beads are historical context, not new
 closure claims. The behavior implements the browser plan's component
 unmount/cancel/drain boundary in section 12.2.
+
+
+## Application tasks with automatic cancellation and drain
+
+`useReactTask(work, dependencies, options?)` is the application-task hook from
+the browser plan's section 12.1. Each committed invocation gets a dedicated
+SDK child scope and a real `RegionHandle.runTask` ledger entry. The callback
+receives `(signal, scope)` and may return any JavaScript value or promise,
+including values that cannot be serialized through the WASM ABI.
+
+```tsx
+import {
+  ReactRuntimeProvider,
+  useReactTask,
+  type ReactCleanupReport,
+} from "@asupersync/react";
+
+function recordTaskCleanup(report: ReactCleanupReport): void {
+  if (report.outcome.outcome !== "ok") {
+    // Keep the report somewhere outside an unmounted component. After fixing
+    // the failure, await report.retry() and inspect the new report.
+    console.error("Task cleanup needs attention", report);
+  }
+}
+
+function DocumentPreview({ url }: { url: string }) {
+  const task = useReactTask(async (signal) => {
+    const response = await fetch(url, { signal });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.text();
+  }, [url], { label: "document-preview", onCleanup: recordTaskCleanup });
+
+  return (
+    <section>
+      <button
+        disabled={task.status !== "running"}
+        onClick={() => void task.cancel()}
+      >
+        Cancel
+      </button>
+      {task.status === "running" && <p>Loading…</p>}
+      {task.status === "cancelling" && <p>Finishing cancellation…</p>}
+      {task.outcome?.outcome === "cancelled" && <p>Cancelled.</p>}
+      {task.outcome?.outcome === "ok" && <pre>{task.outcome.value}</pre>}
+      {task.outcome?.outcome === "panicked" && <p>The operation failed.</p>}
+      {task.outcome?.outcome === "err" && <p>The runtime refused the operation.</p>}
+      {task.cleanup && task.cleanup.outcome.outcome !== "ok"
+        && <p>Resource cleanup needs attention.</p>}
+    </section>
+  );
+}
+
+<ReactRuntimeProvider>
+  <DocumentPreview url="/api/document" />
+</ReactRuntimeProvider>;
+```
+
+The example uses native fetch with its native authority and the task's abort
+signal. For the SDK's explicit fetch grants, bounded response reads, stream
+pipes or other owned integrations, use the callback's second argument:
+`scope.fetch(...)`, `scope.pipeTo(...)`, or another SDK scope operation.
+The dedicated task scope also owns descendants created through that scope.
+Its automatic close cancels and drains outstanding descendants before the
+hook publishes a terminal result.
+
+Dependencies follow `useEffect` semantics. Include every reactive value used
+by `work`; changing a dependency starts a new invocation after the old one
+retires. Changing only an inline callback or cleanup-observer identity does
+not restart work. Scope label, ABI version, provider runtime and `enabled`
+also participate in invocation identity. With `enabled: false`, the hook
+retires its previous invocation and returns to `idle`. Changing it back to
+`true` requests a new invocation.
+
+No callback runs during rendering. StrictMode effect replay retires obsolete
+generations before starting their replacements. Changed dependencies hide the
+old outcome during the render-to-effect gap. Late completion of an old or
+unmounted generation cannot publish into the current component. Cancellation
+of one task leaves sibling hooks running.
+
+`task.cancel()` requests cancellation of the hook's current invocation and
+returns a `Promise<ReactCleanupReport>`. While draining, status is
+`cancelling`; after the callback and its scope's cleanup attempt finish,
+status is `settled`. An idle hook with no admitted invocation has nothing to
+cancel. A rejected or thrown callback becomes a `panicked` outcome. A
+cancelled callback remains cancelled even if its abort handler returns a value.
+
+The callback outcome and cleanup report are separate. A successful body can
+coexist with a refused owner close; inspect `task.cleanup.outcome` and retain
+its report for retry. A refusal keeps the owner, blocks replacement work,
+and does not rerun the body. `report.retry()` targets only that report's
+original owners. It cannot cancel a later invocation, and it does not
+implicitly restart application work. Calling `task.cancel()` after settlement
+also retries outstanding cleanup without rerunning the callback.
+
+Return all asynchronous work that must be joined. A callback that ignores
+abort and never settles keeps retirement pending. Do not await
+`task.cancel()`, the supplied scope's `closeAsync()`, or an ancestor's
+`closeAsync()` from inside the callback: those boundaries must join that same
+callback promise. Request cancellation from an event handler or another
+external owner, and let the callback observe its signal.
+
+### Real React and packaged-WASM task harness
+
+The task integration harness uses React's actual renderer, the complete
+adapter and SDK sources, native Node AbortController and Web Streams, and
+the checked-in JavaScript/WASM ownership ledger. Its only ABI interception
+is the deliberately refused scope close in the refusal/retry case.
+
+```bash
+npm install --prefix /tmp/asupersync-react-tests --no-save react@19 react-test-renderer@19
+
+ASUPERSYNC_REACT_TEST_ROOT=/tmp/asupersync-react-tests \
+  node --unhandled-rejections=strict --experimental-vm-modules --test \
+  --test-concurrency=1 scripts/test_react_tasks_wasm.mjs
+```
+
+The eight scenarios cover StrictMode and exact values, dependency replacement
+and stale-result suppression, unmount with pending callback and child-stream
+cleanup, sibling cancellation isolation, disabled and pre-admission work,
+refused cleanup and generation-safe retry, successful callback results waiting
+for child cleanup, and hostile callback rejection. This is a Node integration
+harness, not browser-engine execution or a Rust rebuild. It supplements the
+existing deterministic hook-dispatcher harness above.

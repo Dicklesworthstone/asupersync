@@ -22,6 +22,7 @@ import {
 import {
   createContext,
   createElement,
+  type DependencyList,
   type ReactElement,
   type ReactNode,
   useCallback,
@@ -92,6 +93,21 @@ export interface ReactScopeLifecycleState extends ReactScopeState {
   closeAsync(): Promise<ReactCleanupReport>;
 }
 
+export interface ReactTaskOptions extends ReactScopeOptions {
+  /** False retires the current invocation and defers work until enabled. */
+  enabled?: boolean;
+}
+
+export interface ReactTaskState<T> {
+  status: "idle" | "running" | "cancelling" | "settled";
+  /** The callback outcome, published only after its scope's cleanup attempt. */
+  outcome: BrowserOutcome<T> | null;
+  /** Separate from the callback result: a refused close retains retryable owners. */
+  cleanup: ReactCleanupReport | null;
+  /** Cancel the current invocation and await its returned promise and owned cleanup. */
+  cancel(): Promise<ReactCleanupReport>;
+}
+
 export const REACT_UNSUPPORTED_RUNTIME_CODE = "ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME";
 
 export function detectReactRuntimeSupport(
@@ -157,6 +173,8 @@ interface ReactOwnerEntry {
 interface ReactOwnerGeneration<T> {
   entry: ReactOwnerEntry;
   ready: Promise<BrowserOutcome<T>>;
+  /** Retire this generation and its predecessors, never a later generation. */
+  retire(): Promise<ReactCleanupReport>;
 }
 
 interface ReactRuntimeContextInternal extends ReactRuntimeLifecycleContextValue {
@@ -332,7 +350,14 @@ class ReactOwnerLifecycle {
       initialized();
       resolve(outcome);
     })();
-    return { entry, ready };
+    return {
+      entry,
+      ready,
+      retire: () => {
+        if (this.active === entry) this.active = null;
+        return closeReactOwners([...previous, entry]);
+      },
+    };
   }
 
   retire(entry: ReactOwnerEntry): Promise<ReactCleanupReport> {
@@ -664,6 +689,180 @@ export function useReactScopeLifecycle(options: ReactScopeOptions = {}): ReactSc
     }),
     [visibleStatus, visibleScope, visibleError, close, closeAsync],
   );
+}
+
+
+interface ReactTaskOwner<T> extends ReactCleanupOwner {
+  completed: Promise<BrowserOutcome<T>>;
+}
+
+/**
+ * Run an application operation in a dedicated child scope after React commits.
+ *
+ * Dependencies follow useEffect semantics: include every reactive value read by
+ * work. Changed dependencies, disable, unmount and runtime replacement cancel
+ * and drain the old invocation before a replacement can start. No work starts
+ * during render. Inline work/observer identity alone does not restart a task.
+ *
+ * Return all asynchronous work that must be joined, and observe signal for
+ * cancellation. Do not await this hook's cancel(), or the supplied scope's
+ * closeAsync(), from inside work: they must join that same work promise.
+ */
+export function useReactTask<T>(
+  work: (signal: AbortSignal, scope: RegionHandle) => T | PromiseLike<T>,
+  dependencies: DependencyList,
+  options: ReactTaskOptions = {},
+): ReactTaskState<T> {
+  const reportCleanup = useReactCleanupObserver(options.onCleanup);
+  const context = useReactRuntimeContext() as ReactRuntimeContextInternal;
+  const { runtime, status: runtimeStatus, error: runtimeError, owner: parent } = context;
+  const invocation = useMemo(() => ({ work }), dependencies);
+  const enabled = options.enabled !== false;
+  const versionMajor = options.consumerVersion?.major ?? null;
+  const versionMinor = options.consumerVersion?.minor ?? null;
+  const requested = useMemo(() => ({
+    invocation, runtime, runtimeStatus, runtimeError, parent, enabled,
+    label: options.label,
+    consumerVersion: options.consumerVersion == null ? options.consumerVersion
+      : { major: versionMajor as number, minor: versionMinor as number },
+  }), [
+    invocation, runtime, runtimeStatus, runtimeError, parent, enabled,
+    options.label, versionMajor, versionMinor,
+  ]);
+  const lifecycleRef = useRef<ReactOwnerLifecycle | null>(null);
+  if (!lifecycleRef.current) lifecycleRef.current = new ReactOwnerLifecycle();
+  const lifecycle = lifecycleRef.current;
+  const controlRef = useRef<{ cancel(): Promise<ReactCleanupReport> } | null>(null);
+  const [state, setState] = useState<{
+    request: object | null;
+    status: ReactTaskState<T>["status"];
+    outcome: BrowserOutcome<T> | null;
+    cleanup: ReactCleanupReport | null;
+  }>({ request: null, status: "idle", outcome: null, cleanup: null });
+
+  const cancel = useCallback((): Promise<ReactCleanupReport> => {
+    if (controlRef.current) return controlRef.current.cancel();
+    const completion = lifecycle.close();
+    observeReactCleanup(completion, reportCleanup);
+    return completion;
+  }, [lifecycle, reportCleanup]);
+
+  useEffect(() => {
+    let disposed = false;
+    let settled = false;
+    let retirement: Promise<ReactCleanupReport> | null = null;
+    let retirementDone = false;
+    let retirementReport: ReactCleanupReport | null = null;
+    setState({
+      request: requested,
+      status: enabled && runtimeStatus === "ready" ? "running" : "idle",
+      outcome: null,
+      cleanup: null,
+    });
+    if (!enabled || runtimeStatus !== "ready" || !runtime || !parent) {
+      if (enabled && (runtimeError || runtimeStatus === "ready")) {
+        setState({
+          request: requested,
+          status: "settled",
+          outcome: reactLifecycleFailure(runtimeError
+            ?? new Error("Runtime status is ready but runtime owner is missing.")),
+          cleanup: null,
+        });
+      }
+      return;
+    }
+
+    const generation = lifecycle.start<ReactTaskOwner<T>>(() => {
+      const opened = runtime.enterScope(
+        requested.label,
+        requested.consumerVersion ?? runtime.consumerVersion,
+      );
+      if (opened.outcome !== "ok") return opened;
+      const scope = opened.value;
+      // Capture the method before application work can run.
+      const closeAsync = scope.closeAsync.bind(scope);
+      let completed: Promise<BrowserOutcome<T>>;
+      try {
+        const admitted = scope.runTask(
+          (signal) => requested.invocation.work(signal, scope),
+          { label: requested.label },
+        );
+        completed = admitted.outcome === "ok"
+          ? admitted.value.completed : Promise.resolve(admitted);
+      } catch (error) {
+        completed = Promise.resolve(reactLifecycleFailure(error));
+      }
+      return OutcomeFactory.ok({
+        consumerVersion: scope.consumerVersion,
+        closeAsync,
+        completed,
+      });
+    }, parent);
+
+    const isVisible = () => !disposed && controlRef.current === control
+      && !parent.closing && !parent.closed;
+    const retire = (retry = false): Promise<ReactCleanupReport> => {
+      if (retirement && (!retry || !retirementDone
+        || retirementReport?.outcome.outcome === "ok")) return retirement;
+      retirementDone = false;
+      const completion = generation.retire();
+      retirement = completion;
+      void completion.then((report) => {
+        if (retirement !== completion) return;
+        retirementDone = true;
+        retirementReport = report;
+        if (isVisible()) setState((current) => ({
+          ...current,
+          cleanup: report,
+        }));
+      });
+      observeReactCleanup(completion, reportCleanup);
+      return completion;
+    };
+    const control = {
+      cancel(): Promise<ReactCleanupReport> {
+        if (isVisible() && !settled) {
+          setState((current) => ({ ...current, status: "cancelling" }));
+        }
+        return retire(true);
+      },
+    };
+    controlRef.current = control;
+
+    void (async () => {
+      const initialized = await generation.ready;
+      let outcome: BrowserOutcome<T>;
+      try {
+        outcome = initialized.outcome === "ok"
+          ? await initialized.value.completed : initialized;
+      } catch (error) {
+        outcome = reactLifecycleFailure(error);
+      }
+      const cleanup = await retire();
+      settled = true;
+      if (isVisible()) {
+        setState({
+          request: requested,
+          status: "settled",
+          outcome,
+          cleanup: retirementReport ?? cleanup,
+        });
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      if (controlRef.current === control) controlRef.current = null;
+      void retire();
+    };
+  }, [requested]);
+
+  const requestMatches = state.request === requested && !parent?.closing && !parent?.closed;
+  const status = requestMatches ? state.status
+    : enabled && runtimeStatus === "ready" ? "running" : "idle";
+  const outcome = requestMatches ? state.outcome : null;
+  const cleanup = requestMatches ? state.cleanup : null;
+  return useMemo(() => ({ status, outcome, cleanup, cancel }), [status, outcome, cleanup, cancel]);
 }
 
 export { BROWSER_UNSUPPORTED_RUNTIME_CODE };
