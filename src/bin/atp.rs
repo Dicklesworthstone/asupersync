@@ -86,6 +86,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+#[path = "atp/checkpoint.rs"]
+mod checkpoint;
+
 const RQ_AUTH_ENV: &str = "ATP_RQ_AUTH_KEY_HEX";
 const SSH_STDIN_CONFIG_CANARY_PATH: &str = "/__atp_ssh_stdin_preflight_canary__";
 const DELTA_STATE_DIR: &str = ".asupersync-atp-delta-v1";
@@ -172,6 +175,8 @@ enum Command {
     Recv(RecvArgs),
     /// Alias for `recv` that listens persistently (daemon-style).
     Serve(RecvArgs),
+    /// Prepare, send, inspect, or revoke a durable local upload checkpoint.
+    Checkpoint(checkpoint::CheckpointArgs),
     /// Donate this host's byte-identical copy as one donor of a bonded
     /// multi-donor transfer (RQ symbols; run one instance per donor host).
     #[command(name = "bond-donate")]
@@ -15742,6 +15747,7 @@ fn main() -> ExitCode {
         Command::Send(args) => run_send(args),
         Command::Recv(args) => run_recv(args, false),
         Command::Serve(args) => run_recv(args, true),
+        Command::Checkpoint(args) => checkpoint::run(args),
         Command::BondDonate(args) => run_bond_donate(args),
         Command::BondRecv(args) => run_bond_recv(args),
         Command::BondPull(args) => run_bond_pull(args),

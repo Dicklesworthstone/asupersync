@@ -26,6 +26,182 @@ use sha2::{Digest, Sha256};
 
 const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
+#[cfg(unix)]
+mod checkpoint_cli {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Fixture {
+        root: PathBuf,
+        source: PathBuf,
+        spool: PathBuf,
+        ca: PathBuf,
+        payload: Vec<u8>,
+    }
+
+    fn fixture(label: &str) -> Fixture {
+        let root = unique_tmp(label);
+        let source = root.join("source/payload.bin");
+        let spool = root.join("private-spool");
+        let ca = root.join("tls/ca.pem");
+        let payload: Vec<_> = (0u8..=250).cycle().take(32 * 1024 + 19).collect();
+        write_file(&source, &payload);
+        write_file(&ca, CA_CERT_PEM.as_bytes());
+        std::fs::create_dir(&spool).unwrap();
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Fixture { root, source, spool, ca, payload }
+    }
+
+    fn command(operation: &str, path: &Path, remote: SocketAddr, ca: &Path, timeout: u64) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_atp"));
+        command.args(["checkpoint", operation]).arg(path).args([
+            "--remote", &remote.to_string(),
+            "--server-name", "localhost",
+            "--peer-id", "checkpoint-cli-test",
+            "--ca", ca.to_str().unwrap(),
+            "--max-bytes", "1048576",
+            "--timeout-secs", &timeout.to_string(),
+            "--workers", "1",
+        ]);
+        command.env_remove("ATP_RQ_AUTH_KEY_HEX");
+        command
+    }
+
+    fn invoke(mut command: Command, label: &str, success: bool) -> serde_json::Value {
+        let child = command.stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap_or_else(|error| panic!("spawn {label}: {error}"));
+        let output = wait_with_timeout(child, label);
+        let value = parse_cli_json(&output, label);
+        assert_eq!(output.status.success(), success, "{label}: {value}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr));
+        assert_eq!(value["ok"], success, "{label}: {value}");
+        assert_eq!(value["schema"], "asupersync.atp.checkpoint.v1");
+        value
+    }
+
+    fn prepare(fixture: &Fixture, remote: SocketAddr) -> PathBuf {
+        let mut command = command("prepare", &fixture.source, remote, &fixture.ca, 10);
+        command.arg("--spool-dir").arg(&fixture.spool);
+        let prepared = invoke(command, "prepare checkpoint in a separate process", true);
+        assert_eq!(prepared["checkpoint"]["state"], "prepared");
+        assert_eq!(prepared["checkpoint"]["attempt"], 0);
+        assert_eq!(prepared["checkpoint"]["source_bytes"], fixture.payload.len());
+        assert_eq!(prepared["delivery_uncertain"], false);
+        PathBuf::from(prepared["checkpoint"]["directory"].as_str().unwrap())
+    }
+
+    #[test]
+    fn durable_checkpoint_sends_retained_bytes_after_restart_and_reuses_receipt() {
+        let fixture = fixture("checkpoint_delivery");
+        let cert = fixture.root.join("tls/leaf.pem");
+        let key = fixture.root.join("tls/leaf.key");
+        let destination = fixture.root.join("destination");
+        write_file(&cert, LEAF_CERT_PEM.as_bytes());
+        write_file(&key, LEAF_KEY_PEM.as_bytes());
+        std::fs::create_dir(&destination).unwrap();
+        let mut receiver = ChildKillGuard::new(Command::new(env!("CARGO_BIN_EXE_atp"))
+            .arg("recv").arg(&destination).args([
+                "--listen", "127.0.0.1:0", "--transport", "quic", "--once",
+                "--server-cert", cert.to_str().unwrap(),
+                "--server-key", key.to_str().unwrap(),
+            ])
+            .env_remove("ATP_RQ_AUTH_KEY_HEX")
+            .stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().expect("real QUIC checkpoint receiver"));
+        let stderr = spawn_stderr_reader(receiver.child_mut());
+        let remote = wait_for_quic_listen_addr(&stderr);
+        let directory = prepare(&fixture, remote);
+        // The producer has exited and its original input changes. Delivery must
+        // use the durable prepared bytes, not reopen this source pathname.
+        std::fs::write(&fixture.source, b"producer changed after preparation").unwrap();
+        let status = invoke(command("status", &directory, remote, &fixture.ca, 10),
+            "inspect prepared checkpoint after process restart", true);
+        assert_eq!(status["checkpoint"]["state"], "prepared");
+        let sent = invoke(command("send", &directory, remote, &fixture.ca, 10),
+            "send prepared checkpoint", true);
+        assert_eq!(sent["checkpoint"]["state"], "acknowledged");
+        assert_eq!(sent["checkpoint"]["attempt"], 1);
+        assert_eq!(sent["cached_receipt"], false);
+        assert_eq!(sent["receipt"]["receipt"]["committed"], true);
+        assert_eq!(sent["receipt"]["receipt"]["sha_ok"], true);
+        assert_eq!(sent["receipt"]["receipt"]["merkle_ok"], true);
+        let received = wait_with_timeout(receiver.into_inner(), "checkpoint receiver");
+        assert!(received.status.success(), "receiver: {}", String::from_utf8_lossy(&received.stderr));
+        assert_eq!(std::fs::read(destination.join("payload.bin")).unwrap(), fixture.payload);
+        // The one-shot receiver is gone. A second send must return the saved
+        // receipt without another publication or even needing a listening peer.
+        let cached = invoke(command("send", &directory, remote, &fixture.ca, 2),
+            "reuse saved receipt without a receiver", true);
+        assert_eq!(cached["cached_receipt"], true);
+        assert_eq!(cached["receipt"], sent["receipt"]);
+        assert_eq!(cached["checkpoint"], sent["checkpoint"]);
+        let terminal = invoke(command("cancel", &directory, remote, &fixture.ca, 2),
+            "acknowledgement wins over later cancellation", true);
+        assert_eq!(terminal["cancelled"], false);
+        assert_eq!(terminal["receipt"], sent["receipt"]);
+        // Use the same destination and trust, but a different explicit local
+        // binding, by constructing this command independently.
+        let mut foreign = Command::new(env!("CARGO_BIN_EXE_atp"));
+        foreign.args(["checkpoint", "status"]).arg(&directory).args([
+            "--remote", &remote.to_string(), "--server-name", "localhost",
+            "--peer-id", "different-owner", "--ca", fixture.ca.to_str().unwrap(),
+        ]);
+        let refused = invoke(foreign, "refuse foreign checkpoint binding", false);
+        assert_eq!(refused["error"]["code"], "binding_mismatch");
+    }
+
+    #[test]
+    fn uncertain_checkpoint_requires_exact_retry_and_cancellation_survives_restart() {
+        let fixture = fixture("checkpoint_uncertain");
+        // A live but silent UDP peer makes the failed attempt actual network
+        // I/O, and keeps an ICMP refusal from substituting for the timeout.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let remote = silent.local_addr().unwrap();
+        let directory = prepare(&fixture, remote);
+        let first = invoke(command("send", &directory, remote, &fixture.ca, 1),
+            "retain uncertain attempt after a silent peer", false);
+        assert_eq!(first["checkpoint"]["state"], "sending");
+        assert_eq!(first["checkpoint"]["attempt"], 1);
+        assert_eq!(first["delivery_uncertain"], true);
+        silent.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut packet = [0; 2048];
+        let (length, caller) = silent.recv_from(&mut packet)
+            .expect("uncertain attempt actually reached the selected UDP peer");
+        assert!(length > 0);
+        assert!(caller.ip().is_loopback());
+        let refused = invoke(command("send", &directory, remote, &fixture.ca, 1),
+            "do not implicitly retry uncertain delivery", false);
+        assert_eq!(refused["error"]["code"], "uncertain_delivery");
+        assert_eq!(refused["error"]["details"]["attempt"], 1);
+        let mut stale = command("send", &directory, remote, &fixture.ca, 1);
+        stale.args(["--acknowledge-uncertain-attempt", "2"]);
+        let refused = invoke(stale, "reject stale retry decision", false);
+        assert_eq!(refused["error"]["code"], "stale_attempt");
+        let mut retry = command("send", &directory, remote, &fixture.ca, 1);
+        retry.args(["--acknowledge-uncertain-attempt", "1"]);
+        let retried = invoke(retry, "admit exactly the acknowledged retry", false);
+        assert_eq!(retried["checkpoint"]["attempt"], 2);
+        let cancelled = invoke(command("cancel", &directory, remote, &fixture.ca, 1),
+            "durably revoke the uncertain checkpoint", true);
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(cancelled["delivery_uncertain"], true);
+        assert_eq!(cancelled["checkpoint"]["attempt"], 2);
+        let again = invoke(command("cancel", &directory, remote, &fixture.ca, 1),
+            "repeat durable cancellation in a fresh process", true);
+        assert_eq!(again["checkpoint"], cancelled["checkpoint"]);
+        assert_eq!(again["cancelled"], true);
+        let mut resurrect = command("send", &directory, remote, &fixture.ca, 1);
+        resurrect.args(["--acknowledge-uncertain-attempt", "2"]);
+        let refused = invoke(resurrect, "cancellation forbids resurrection", false);
+        assert_eq!(refused["error"]["code"], "cancelled");
+        let status = invoke(command("status", &directory, remote, &fixture.ca, 1),
+            "inspect durable cancellation after restart", true);
+        assert_eq!(status["cancelled"], true);
+        assert_eq!(status["delivery_uncertain"], true);
+        assert!(directory.is_dir(), "durable evidence is retained");
+    }
+}
+
 // Canonical CA + leaf chain shared with the real UDP QUIC transport e2e. The
 // leaf has SAN DNS:localhost / IP:127.0.0.1, so the binary path exercises real
 // WebPKI verification with no insecure skip-verify branch.
