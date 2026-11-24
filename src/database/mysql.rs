@@ -3608,6 +3608,7 @@ impl MySqlConnection {
             killer
                 .raw_query_expect_ok(cx, &format!("KILL QUERY {thread_id}"), "KILL QUERY")
                 .await
+                .map(|_| ())
         };
         let mut exchange = std::pin::pin!(crate::time::timeout(cx.now(), bound, exchange));
         let mut cancel_wake = CancelWakerGuard::new(Some(cx.clone()));
@@ -3764,7 +3765,7 @@ impl MySqlConnection {
         // so "uncertain" must not read as the server default.
         self.inner.applied_max_execution_time_ms = None;
         self.inner.max_execution_time_uncertain = true;
-        match self.execute_unchecked_inner_impl(cx, &sql).await {
+        match self.execute_unchecked_inner_impl(cx, &sql, false).await {
             Outcome::Ok(_) => {
                 self.inner.applied_max_execution_time_ms = effective_ms;
                 self.inner.max_execution_time_uncertain = false;
@@ -5318,6 +5319,21 @@ impl MySqlConnection {
         })
     }
 
+    /// Fixed session-control commands must finish without a transaction,
+    /// an additional result, or a data-modification acknowledgement.
+    fn validate_idle_session_ok(ok: &OkPacket, what: &str) -> Result<(), MySqlError> {
+        const TRANSACTION_OR_MORE_RESULTS: u16 = 0x2009;
+        if ok.affected_rows != 0
+            || ok.last_insert_id != 0
+            || ok.status_flags & TRANSACTION_OR_MORE_RESULTS != 0
+        {
+            return Err(MySqlError::Protocol(format!(
+                "invalid OK response to {what}"
+            )));
+        }
+        Ok(())
+    }
+
     fn parse_eof_packet_status_flags(data: &[u8]) -> Result<u16, MySqlError> {
         if !Self::is_eof_packet(data) {
             return Err(MySqlError::Protocol("not an EOF packet".to_string()));
@@ -5569,6 +5585,28 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<MySqlExecResult, MySqlError> {
+        self.execute_sql_exchange_impl(cx, sql, false).await
+    }
+
+    /// Managed transaction completion must receive one idle OK response.
+    /// Ordinary caller-supplied SQL retains its result-set behavior. A valid
+    /// server error also retains the normal in-sync recovery/retry path.
+    async fn execute_idle_session_control(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<(), MySqlError> {
+        self.execute_sql_exchange_impl(cx, sql, true)
+            .await
+            .map(|_| ())
+    }
+
+    async fn execute_sql_exchange_impl(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        require_idle_ok: bool,
+    ) -> Outcome<MySqlExecResult, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
@@ -5592,7 +5630,10 @@ impl MySqlConnection {
             self.apply_statement_timeout(cx).await
         };
         let result = match apply_outcome {
-            Outcome::Ok(()) => self.execute_unchecked_inner_impl(cx, sql).await,
+            Outcome::Ok(()) => {
+                self.execute_unchecked_inner_impl(cx, sql, require_idle_ok)
+                    .await
+            }
             Outcome::Err(err) => Outcome::Err(err),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
@@ -5607,6 +5648,13 @@ impl MySqlConnection {
         {
             self.wire_cancel_in_drain(cx).await;
         }
+        if require_idle_ok && self.inner.closed {
+            // Retire an interrupted or malformed completion even if the
+            // caller keeps the connection. A checkpoint before any exchange
+            // and an ordinary server ERR leave `closed` false and preserve
+            // the existing rollback/retry behavior.
+            self.mark_unusable_after_cleanup_failure();
+        }
         self.inner
             .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
@@ -5617,6 +5665,7 @@ impl MySqlConnection {
         &mut self,
         cx: &Cx,
         sql: &str,
+        require_idle_ok: bool,
     ) -> Outcome<MySqlExecResult, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
@@ -5661,6 +5710,12 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::Protocol("empty execute response".to_string()));
         }
 
+        if require_idle_ok && !matches!(data[0], 0x00 | 0xFF) {
+            return Outcome::Err(MySqlError::Protocol(format!(
+                "unexpected response to {sql}: expected an idle OK packet"
+            )));
+        }
+
         let multi_result_session = self.inner.capabilities
             & (capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS)
             != 0;
@@ -5677,6 +5732,11 @@ impl MySqlConnection {
                 // OK packet
                 match Self::parse_ok_packet(&data) {
                     Ok(ok) => {
+                        if require_idle_ok
+                            && let Err(error) = Self::validate_idle_session_ok(&ok, sql)
+                        {
+                            return Outcome::Err(error);
+                        }
                         self.inner.status_flags = ok.status_flags;
                         if multi_result_session && ok.status_flags & 0x0008 != 0 {
                             return Outcome::Err(MySqlError::Protocol(
@@ -5693,7 +5753,7 @@ impl MySqlConnection {
                     Err(e) => {
                         // Preserve legacy behavior. The opt-in profile must
                         // prove the final status before clearing its poison.
-                        self.inner.closed = multi_result_session;
+                        self.inner.closed = multi_result_session || require_idle_ok;
                         Outcome::Err(e)
                     }
                 }
@@ -5953,7 +6013,7 @@ impl MySqlConnection {
             return;
         };
         let restore_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {previous}");
-        match self.execute_unchecked_internal(cx, &restore_sql).await {
+        match self.execute_idle_session_control(cx, &restore_sql).await {
             Outcome::Ok(_) => {}
             Outcome::Err(err) => {
                 self.mark_unusable_after_cleanup_failure();
@@ -5982,7 +6042,7 @@ impl MySqlConnection {
         match crate::combinator::commit_section(
             cx,
             MASKED_ROLLBACK_POLLS,
-            self.execute_unchecked_internal(cx, "ROLLBACK"),
+            self.execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE"),
         )
         .await
         {
@@ -6292,12 +6352,7 @@ impl MySqlConnection {
         match data.first() {
             Some(0x00) => {
                 let ok = Self::parse_ok_packet(&data)?;
-                if ok.affected_rows != 0 || ok.last_insert_id != 0 || ok.status_flags & 0x0009 != 0
-                {
-                    return Err(MySqlError::Protocol(format!(
-                        "invalid OK response to {what}"
-                    )));
-                }
+                Self::validate_idle_session_ok(&ok, what)?;
                 self.inner.status_flags = ok.status_flags;
                 Ok(())
             }
@@ -6999,18 +7054,41 @@ impl MySqlConnection {
         // will remain closed, preventing protocol desynchronization.
         self.inner.closed = true;
 
-        self.raw_query_expect_ok(cx, "ROLLBACK", "implicit ROLLBACK")
-            .await?;
-        self.inner.needs_rollback = false;
+        // A session's completion_type can make a bare ROLLBACK start another
+        // transaction or disconnect. Recovery owns the entire boundary and
+        // must leave this connection idle before admitting the caller's SQL.
+        self.raw_query_expect_idle_ok(
+            cx,
+            "ROLLBACK AND NO CHAIN NO RELEASE",
+            "implicit ROLLBACK",
+        )
+        .await?;
         // The abandoned transaction may have been opened by
         // `begin_with_isolation`; put the session level back before the
-        // connection is reused.
-        if let Some(previous) = self.inner.session_isolation_restore.take() {
+        // connection is reused. Keep both debts until all acknowledgements
+        // arrive, including if this future is dropped during restoration.
+        if let Some(previous) = self.inner.session_isolation_restore {
             let restore_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {previous}");
-            self.raw_query_expect_ok(cx, &restore_sql, "session isolation restore")
+            self.raw_query_expect_idle_ok(cx, &restore_sql, "session isolation restore")
                 .await?;
         }
+        self.inner.session_isolation_restore = None;
+        self.inner.needs_rollback = false;
         self.inner.closed = false;
+        Ok(())
+    }
+
+    async fn raw_query_expect_idle_ok(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        what: &str,
+    ) -> Result<(), MySqlError> {
+        let ok = self.raw_query_expect_ok(cx, sql, what).await?;
+        if let Err(error) = Self::validate_idle_session_ok(&ok, what) {
+            self.mark_unusable_after_cleanup_failure();
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -7023,7 +7101,8 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
         what: &str,
-    ) -> Result<(), MySqlError> {
+    ) -> Result<OkPacket, MySqlError> {
+        self.inner.closed = true;
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
@@ -7047,22 +7126,24 @@ impl MySqlConnection {
 
         match data.first() {
             Some(0x00) => {
-                self.inner.status_flags = Self::parse_ok_packet(&data)?.status_flags;
-                if self.inner.capabilities
-                    & (capability::CLIENT_MULTI_RESULTS | capability::CLIENT_PS_MULTI_RESULTS)
-                    != 0
-                    && self.inner.status_flags & 0x0008 != 0
-                {
+                let ok = match Self::parse_ok_packet(&data) {
+                    Ok(ok) => ok,
+                    Err(error) => {
+                        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                        return Err(error);
+                    }
+                };
+                if ok.status_flags & 0x0008 != 0 {
                     // Session-control commands are single-result exchanges,
-                    // even on the isolated multi-result connection. Never let
-                    // unread setup results become the next query's response.
-                    self.inner.closed = true;
+                    // regardless of negotiated capabilities. Never let unread
+                    // setup results become the next query's response.
                     let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
                     return Err(MySqlError::Protocol(format!(
                         "unexpected additional results for {what}"
                     )));
                 }
-                Ok(())
+                self.inner.status_flags = ok.status_flags;
+                Ok(ok)
             }
             Some(0xFF) => {
                 let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -8316,6 +8397,8 @@ impl MySqlTransaction<'_> {
     ///
     /// Fails without sending COMMIT when a savepoint was dropped without
     /// release or rollback; dropping the transaction then rolls it back.
+    /// Completion explicitly suppresses the session's `completion_type`
+    /// chaining/disconnection behavior and requires an idle acknowledgement.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
             trace_database_transaction(cx, "mysql", "commit", "already_finished");
@@ -8326,14 +8409,20 @@ impl MySqlTransaction<'_> {
             return Outcome::Err(error);
         }
         trace_database_transaction(cx, "mysql", "commit", "start");
-        match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
+        match self
+            .conn
+            .execute_idle_session_control(cx, "COMMIT AND NO CHAIN NO RELEASE")
+            .await
+        {
             Outcome::Ok(_) => {
                 self.finished = true;
-                self.conn.restore_session_isolation(cx).await;
-                // The transaction truly committed: discharge the obligation.
+                // COMMIT is already acknowledged. Resolve its obligation before
+                // any post-commit await: dropping a session-restore future must
+                // not record this committed transaction as aborted.
                 if let Some(token) = self.obligation.take() {
                     let _ = token.commit();
                 }
+                self.conn.restore_session_isolation(cx).await;
                 trace_database_transaction(cx, "mysql", "commit", "ok");
                 Outcome::Ok(())
             }
@@ -8352,14 +8441,19 @@ impl MySqlTransaction<'_> {
         }
     }
 
-    /// Rollback the transaction.
+    /// Rollback the transaction, requiring an idle acknowledgement without
+    /// chaining a new transaction or releasing the session.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
             trace_database_transaction(cx, "mysql", "rollback", "already_finished");
             return Outcome::Err(MySqlError::TransactionFinished);
         }
         trace_database_transaction(cx, "mysql", "rollback", "start");
-        match self.conn.execute_unchecked_internal(cx, "ROLLBACK").await {
+        match self
+            .conn
+            .execute_idle_session_control(cx, "ROLLBACK AND NO CHAIN NO RELEASE")
+            .await
+        {
             Outcome::Ok(_) => {
                 self.finished = true;
                 self.conn.restore_session_isolation(cx).await;

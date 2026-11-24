@@ -230,28 +230,32 @@ enum Backend {
 }
 
 fn script(backend: Backend, case: Case) -> Vec<(&'static str, bool)> {
-    let begin = match backend {
-        Backend::Postgres => "BEGIN",
-        Backend::MySql => "START TRANSACTION",
+    let (begin, commit, rollback) = match backend {
+        Backend::Postgres => ("BEGIN", "COMMIT", "ROLLBACK"),
+        Backend::MySql => (
+            "START TRANSACTION",
+            "COMMIT AND NO CHAIN NO RELEASE",
+            "ROLLBACK AND NO CHAIN NO RELEASE",
+        ),
     };
     let mut commands = match case {
         Case::BeginRetryUnsafe => vec![
             (begin, true),
             (begin, false),
             (SQL, false),
-            ("COMMIT", false),
+            (commit, false),
         ],
         Case::CommitRetrySafe | Case::CommitRetryUnsafe => {
-            let mut commands = vec![(begin, false), (SQL, false), ("COMMIT", true)];
+            let mut commands = vec![(begin, false), (SQL, false), (commit, true)];
             // PostgreSQL reports ReadyForQuery(I) after a commit-time
             // serialization failure. MySQL's ERR has no status flags, so
             // its consumed transaction is conservatively rolled back by
             // the next connection operation before any further command.
             if matches!(backend, Backend::MySql) {
-                commands.push(("ROLLBACK", false));
+                commands.push((rollback, false));
             }
             if case == Case::CommitRetrySafe {
-                commands.extend([(begin, false), (SQL, false), ("COMMIT", false)]);
+                commands.extend([(begin, false), (SQL, false), (commit, false)]);
             }
             commands
         }
@@ -263,16 +267,16 @@ fn script(backend: Backend, case: Case) -> Vec<(&'static str, bool)> {
             let mut commands = vec![(begin, false), (SQL, body_fails)];
             commands.push((
                 if case == Case::Commit {
-                    "COMMIT"
+                    commit
                 } else {
-                    "ROLLBACK"
+                    rollback
                 },
                 false,
             ));
             if case == Case::ReplaySafe {
-                commands.extend([(begin, false), (SQL, false), ("COMMIT", false)]);
+                commands.extend([(begin, false), (SQL, false), (commit, false)]);
             } else if case == Case::ReplayExhausted {
-                commands.extend([(begin, false), (SQL, true), ("ROLLBACK", false)]);
+                commands.extend([(begin, false), (SQL, true), (rollback, false)]);
             }
             commands
         }
@@ -463,7 +467,7 @@ fn peer_with_gate(
                     .recv_timeout(DEADLINE)
                     .expect("query must park before reply");
             }
-            if sql == "ROLLBACK"
+            if matches!(sql, "ROLLBACK" | "ROLLBACK AND NO CHAIN NO RELEASE")
                 && let Some((gate, parked)) = rollback_gate.take()
             {
                 // Wake the wrapper after the server has received ROLLBACK.
@@ -480,7 +484,10 @@ fn peer_with_gate(
             }
             match sql {
                 "BEGIN" | "START TRANSACTION" => in_transaction = true,
-                "COMMIT" | "ROLLBACK" => in_transaction = false,
+                "COMMIT"
+                | "ROLLBACK"
+                | "COMMIT AND NO CHAIN NO RELEASE"
+                | "ROLLBACK AND NO CHAIN NO RELEASE" => in_transaction = false,
                 _ => {}
             }
             match backend {

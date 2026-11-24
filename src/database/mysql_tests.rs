@@ -1339,7 +1339,7 @@ mod tests {
         let seen = server.join().expect("mysql server thread should finish");
         assert_eq!(
             seen,
-            ["ROLLBACK", "START TRANSACTION"],
+            ["ROLLBACK AND NO CHAIN NO RELEASE", "START TRANSACTION"],
             "the abandoned transaction is rolled back before the stream"
         );
         assert!(!conn.inner.needs_rollback);
@@ -1503,7 +1503,7 @@ mod tests {
             write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
 
             let commit_sql = command_sql(&read_client_command(&mut peer));
-            assert_eq!(commit_sql, "COMMIT");
+            assert_eq!(commit_sql, "COMMIT AND NO CHAIN NO RELEASE");
             write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
         });
 
@@ -1618,7 +1618,10 @@ mod tests {
                 "START TRANSACTION"
             );
             write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
-            assert_eq!(command_sql(&read_client_command(&mut peer)), "ROLLBACK");
+            assert_eq!(
+                command_sql(&read_client_command(&mut peer)),
+                "ROLLBACK AND NO CHAIN NO RELEASE"
+            );
             write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
         });
 
@@ -1683,7 +1686,7 @@ mod tests {
             unknown_variable(&mut peer);
             assert_eq!(read(&mut peer), OLD_NAME);
             isolation(&mut peer, "SERIALIZABLE", SERVER_STATUS_IN_TRANS);
-            assert_eq!(read(&mut peer), "COMMIT");
+            assert_eq!(read(&mut peer), "COMMIT AND NO CHAIN NO RELEASE");
             write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
             assert_eq!(
                 read(&mut peer),
@@ -9182,7 +9185,10 @@ mod tests {
                 "UPDATE t SET v = 2 WHERE id = 2"
             );
             write_response_packet(&mut stream, 1, ok_packet_payload(1, 0x0003));
-            assert_eq!(command_sql(&read_client_command(&mut stream)), "COMMIT");
+            assert_eq!(
+                command_sql(&read_client_command(&mut stream)),
+                "COMMIT AND NO CHAIN NO RELEASE"
+            );
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0x0002));
         });
 
@@ -9305,6 +9311,737 @@ mod tests {
         }
         server.join().expect("server thread");
         assert!(!conn.inner.closed, "the connection is in step and reusable");
+    }
+
+    // asupersync-2oh2u.6.5 / asupersync-mysql-client-audit-r10-4co10m:
+    // managed completion and orphan recovery must prove the idle boundary.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod transaction_completion {
+        use super::*;
+        use crate::database::pool::AsyncConnectionManager;
+
+        const IDLE: u16 = 0x0002;
+        const ACTIVE: u16 = 0x0003;
+        const COMMIT_SQL: &str = "COMMIT AND NO CHAIN NO RELEASE";
+        const ROLLBACK_SQL: &str = "ROLLBACK AND NO CHAIN NO RELEASE";
+        const RESTORE_SQL: &str = "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ";
+        const CALLER_SQL: &str = "UPDATE allowed_after_completion SET v = 1";
+        type Reply = Vec<(u8, Vec<u8>)>;
+
+        fn native_journey<F, Fut>(workers: usize, scenario: F)
+        where
+            F: FnOnce(Cx) -> Fut + Send + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            const DEADLINE: Duration = Duration::from_secs(15);
+
+            struct CompletionSignal(mpsc::Sender<()>);
+            impl Drop for CompletionSignal {
+                fn drop(&mut self) {
+                    let _ = self.0.send(());
+                }
+            }
+
+            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+                .build()
+                .expect("native MySQL completion runtime");
+            let request_cx = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+            let timeout_cx = request_cx.clone();
+            let (completed_tx, completed_rx) = mpsc::channel();
+            let completion = CompletionSignal(completed_tx);
+            let task = runtime.handle().spawn(async move {
+                let _completion = completion;
+                assert!(Cx::current().is_some(), "completion must run on a native worker");
+                scenario(request_cx).await;
+            });
+            let completed = completed_rx.recv_timeout(DEADLINE);
+            if completed.is_err() {
+                timeout_cx.cancel_with_reason(CancelReason::user("MySQL completion test deadline"));
+            }
+            let drain = runtime.shutdown_drained(DEADLINE);
+            let stopped = runtime.shutdown_timeout(DEADLINE);
+            let mut task = std::pin::pin!(task);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                task.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+            }));
+            assert!(
+                completed.is_ok(),
+                "{workers} workers: completion timed out: {completed:?}; drain: {drain:?}"
+            );
+            assert_eq!(drain.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+            assert_eq!(drain.live_tasks, 0);
+            assert_eq!(drain.pending_spawns, 0);
+            assert_eq!(drain.pending_obligations, 0);
+            assert_eq!(drain.queued_finalizers, 0);
+            assert!(stopped, "native workers must retire");
+            match result {
+                Ok(Poll::Ready(())) => {}
+                Ok(Poll::Pending) => panic!("completion task must be terminal after teardown"),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+
+        fn connection() -> (MySqlConnection, std::net::TcpStream) {
+            let (mut conn, peer) = make_test_connection_with_peer();
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bounded peer read");
+            peer.set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("bounded peer write");
+            conn.inner.capabilities = capability::CLIENT_PROTOCOL_41;
+            conn.inner.status_flags = IDLE;
+            conn.inner.connect_autocommit = true;
+            (conn, peer)
+        }
+
+        fn write_isolation(peer: &mut std::net::TcpStream, value: &str, status: u16) {
+            write_response_packet(peer, 1, vec![1]);
+            write_response_packet(peer, 2, column_definition_payload("isolation"));
+            write_response_packet(peer, 3, eof_packet_payload(status));
+            let mut row = vec![u8::try_from(value.len()).expect("short isolation value")];
+            row.extend_from_slice(value.as_bytes());
+            write_response_packet(peer, 4, row);
+            write_response_packet(peer, 5, eof_packet_payload(status));
+        }
+
+        async fn begin<'conn>(
+            conn: &'conn mut MySqlConnection,
+            peer: &mut std::net::TcpStream,
+            cx: &Cx,
+            isolated: bool,
+        ) -> MySqlTransaction<'conn> {
+            if isolated {
+                write_isolation(peer, "REPEATABLE-READ", IDLE);
+                write_response_packet(peer, 1, ok_packet_payload(0, IDLE));
+                write_response_packet(peer, 1, ok_packet_payload(0, ACTIVE));
+                write_isolation(peer, "SERIALIZABLE", ACTIVE);
+            } else {
+                write_response_packet(peer, 1, ok_packet_payload(0, ACTIVE));
+            }
+            let outcome = if isolated {
+                conn.begin_with_isolation(cx, IsolationLevel::Serializable, false)
+                    .await
+            } else {
+                conn.begin(cx).await
+            };
+            let Outcome::Ok(tx) = outcome else {
+                panic!("public transaction begin must succeed");
+            };
+            let expected = if isolated {
+                vec![
+                    "SELECT @@SESSION.transaction_isolation AS isolation",
+                    "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                    "START TRANSACTION READ WRITE",
+                    "SELECT @@SESSION.transaction_isolation AS isolation",
+                ]
+            } else {
+                vec!["START TRANSACTION"]
+            };
+            for sql in expected {
+                assert_eq!(command_sql(&read_client_command(peer)), sql);
+            }
+            tx
+        }
+
+        async fn command_while_pending<F: Future>(
+            operation: Pin<&mut F>,
+            peer: &mut std::net::TcpStream,
+            sql: &str,
+        ) {
+            commands_while_pending(operation, peer, &[sql]).await;
+        }
+
+        async fn commands_while_pending<F: Future>(
+            mut operation: Pin<&mut F>,
+            peer: &mut std::net::TcpStream,
+            statements: &[&str],
+        ) {
+            let mut expected = Vec::new();
+            for sql in statements {
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence(0);
+                packet.write_byte(command::COM_QUERY);
+                packet.write_bytes(sql.as_bytes());
+                expected.extend(packet.build_packet().bytes);
+            }
+            let mut received = Vec::new();
+            peer.set_nonblocking(true).expect("nonblocking command witness");
+            std::future::poll_fn(|task_cx| {
+                assert!(
+                    operation.as_mut().poll(task_cx).is_pending(),
+                    "the final response must still be withheld for {statements:?}"
+                );
+                let mut bytes = [0u8; 64];
+                loop {
+                    match peer.read(&mut bytes) {
+                        Ok(0) => panic!("connection closed before the Pending witness"),
+                        Ok(count) => {
+                            received.extend_from_slice(&bytes[..count]);
+                            assert!(
+                                received.len() <= expected.len(),
+                                "another command was sent before the final acknowledgement"
+                            );
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("read pending command: {error}"),
+                    }
+                }
+                if received.len() == expected.len() {
+                    assert_eq!(received, expected, "exact managed command");
+                    Poll::Ready(())
+                } else {
+                    task_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            peer.set_nonblocking(false).expect("restore blocking peer");
+        }
+
+        fn peer_closed(peer: &mut std::net::TcpStream) {
+            match peer.read(&mut [0u8; 1]) {
+                Ok(0) => {}
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                other => panic!("expected EOF without another caller command, got {other:?}"),
+            }
+        }
+
+        async fn retired(
+            conn: &mut MySqlConnection,
+            cx: &Cx,
+            restore: Option<IsolationLevel>,
+        ) {
+            assert!(conn.inner.closed, "failed completion must remain closed");
+            assert!(conn.inner.needs_rollback, "rollback debt must remain");
+            assert_eq!(conn.inner.session_isolation_restore, restore);
+            let manager = MySqlConnectionManager::new(
+                MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+            );
+            assert!(!manager.release_check(conn));
+            assert!(!manager.is_valid(cx, conn).await);
+            assert!(matches!(
+                conn.execute_trusted_sql(cx, CALLER_SQL).await,
+                Outcome::Err(MySqlError::ConnectionClosed)
+            ));
+        }
+
+        async fn cancel_or_drop<T, F>(operation: Pin<Box<F>>, cx: &Cx, cancel: bool)
+        where
+            T: Send,
+            F: Future<Output = Outcome<T, MySqlError>> + Send,
+        {
+            if cancel {
+                let reason = CancelReason::user("cancel MySQL transaction completion");
+                cx.cancel_with_reason(reason.clone());
+                assert!(matches!(
+                    operation.await,
+                    Outcome::Cancelled(observed) if observed == reason
+                ));
+            } else {
+                drop(operation);
+            }
+        }
+
+        fn rejected_replies() -> Vec<(&'static str, Reply, bool)> {
+            let mut replies = Vec::new();
+            for (name, payload) in [
+                ("still in transaction", ok_packet_payload(0, ACTIVE)),
+                ("read-only transaction flag", ok_packet_payload(0, IDLE | 0x2000)),
+                ("active read-only transaction", ok_packet_payload(0, ACTIVE | 0x2000)),
+                ("additional results", ok_packet_payload(0, IDLE | 0x0008)),
+                ("affected rows", ok_packet_payload(1, IDLE)),
+                ("insert id", vec![0, 0, 1, 2, 0, 0, 0]),
+                ("empty packet", vec![]),
+                ("short OK", vec![0, 0, 0, 2]),
+                ("invalid length encoding", vec![0, 0xff]),
+                ("LOCAL INFILE", vec![0xfb]),
+                ("EOF instead of OK", eof_packet_payload(IDLE)),
+            ] {
+                replies.push((name, vec![(1, payload)], false));
+            }
+            replies.push((
+                "result set instead of OK",
+                vec![
+                    (1, vec![1]),
+                    (2, column_definition_payload("value")),
+                    (3, eof_packet_payload(IDLE)),
+                    (4, vec![1, b'1']),
+                    (5, eof_packet_payload(IDLE)),
+                ],
+                false,
+            ));
+            replies.push((
+                "wrong packet sequence",
+                vec![(2, ok_packet_payload(0, IDLE))],
+                false,
+            ));
+            replies.push((
+                "server refused cleanup",
+                vec![(1, error_packet_payload(1105, "HY000", "cleanup refused"))],
+                true,
+            ));
+            replies
+        }
+
+        #[test]
+        fn orphan_rollback_and_restore_require_idle_acknowledgements() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for restore_reply in [false, true] {
+                        for extra_capabilities in [0, capability::CLIENT_MULTI_RESULTS] {
+                            for (case, reply, server_error) in rejected_replies() {
+                                let (mut conn, mut peer) = connection();
+                                conn.inner.capabilities |= extra_capabilities;
+                                drop(begin(&mut conn, &mut peer, &cx, true).await);
+                                assert!(conn.inner.needs_rollback);
+                                assert_eq!(
+                                    conn.inner.session_isolation_restore,
+                                    Some(IsolationLevel::RepeatableRead)
+                                );
+
+                                let mut operation =
+                                    Box::pin(conn.execute_trusted_sql(&cx, CALLER_SQL));
+                                command_while_pending(operation.as_mut(), &mut peer, ROLLBACK_SQL)
+                                    .await;
+                                if restore_reply {
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                    command_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        RESTORE_SQL,
+                                    )
+                                    .await;
+                                }
+                                for (sequence, payload) in reply {
+                                    write_response_packet(&mut peer, sequence, payload);
+                                }
+                                // Complete any forbidden continuation so a permissive
+                                // reader fails an outcome/wire assertion instead of hanging.
+                                if !restore_reply {
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                }
+                                write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                                let outcome = operation.await;
+                                if server_error {
+                                    assert!(
+                                        matches!(
+                                            &outcome,
+                                            Outcome::Err(MySqlError::Server { code: 1105, .. })
+                                        ),
+                                        "{case}: preserve the cleanup server error: {outcome:?}"
+                                    );
+                                } else {
+                                    assert!(
+                                        matches!(&outcome, Outcome::Err(MySqlError::Protocol(_))),
+                                        "{case}: reject the cleanup acknowledgement: {outcome:?}"
+                                    );
+                                }
+                                retired(
+                                    &mut conn,
+                                    &cx,
+                                    Some(IsolationLevel::RepeatableRead),
+                                )
+                                .await;
+                                assert!(!conn.inner.query_in_flight.load(
+                                    std::sync::atomic::Ordering::Acquire
+                                ));
+                                peer_closed(&mut peer);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn managed_commit_and_rollback_reject_invalid_acknowledgements() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for commit in [false, true] {
+                        for (case, reply, server_error) in rejected_replies() {
+                            if server_error {
+                                // Valid server errors retain the established retry path,
+                                // covered by the shared native commit-retry scenarios.
+                                continue;
+                            }
+                            let (mut conn, mut peer) = connection();
+                            let tx = begin(&mut conn, &mut peer, &cx, false).await;
+                            let mut operation = Box::pin(async {
+                                if commit {
+                                    tx.commit(&cx).await
+                                } else {
+                                    tx.rollback(&cx).await
+                                }
+                            });
+                            command_while_pending(
+                                operation.as_mut(),
+                                &mut peer,
+                                if commit { COMMIT_SQL } else { ROLLBACK_SQL },
+                            )
+                            .await;
+                            for (sequence, payload) in reply {
+                                write_response_packet(&mut peer, sequence, payload);
+                            }
+                            let outcome = operation.await;
+                            assert!(
+                                matches!(&outcome, Outcome::Err(MySqlError::Protocol(_))),
+                                "{case}, commit={commit}: invalid completion: {outcome:?}"
+                            );
+                            retired(&mut conn, &cx, None).await;
+                            assert!(!conn.inner.query_in_flight.load(
+                                std::sync::atomic::Ordering::Acquire
+                            ));
+                            peer_closed(&mut peer);
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn interrupted_managed_completion_or_recovery_refuses_connection_reuse() {
+            for workers in [1, 2] {
+                for boundary in 0..4 {
+                    for cancel in [false, true] {
+                        native_journey(workers, move |request_cx| async move {
+                            let active_cx = Cx::current().expect("native completion task");
+                            let (mut conn, mut peer) = connection();
+                            if boundary < 2 {
+                                let tx = begin(&mut conn, &mut peer, &request_cx, false).await;
+                                let mut operation = Box::pin(async {
+                                    if boundary == 0 {
+                                        tx.commit(&request_cx).await
+                                    } else {
+                                        tx.rollback(&request_cx).await
+                                    }
+                                });
+                                command_while_pending(
+                                    operation.as_mut(),
+                                    &mut peer,
+                                    if boundary == 0 { COMMIT_SQL } else { ROLLBACK_SQL },
+                                )
+                                .await;
+                                cancel_or_drop(operation, &request_cx, cancel).await;
+                            } else {
+                                drop(
+                                    begin(&mut conn, &mut peer, &request_cx, boundary == 3).await,
+                                );
+                                let mut operation =
+                                    Box::pin(conn.execute_trusted_sql(&request_cx, CALLER_SQL));
+                                command_while_pending(
+                                    operation.as_mut(),
+                                    &mut peer,
+                                    ROLLBACK_SQL,
+                                )
+                                .await;
+                                if boundary == 3 {
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                    command_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        RESTORE_SQL,
+                                    )
+                                    .await;
+                                }
+                                cancel_or_drop(operation, &request_cx, cancel).await;
+                            }
+                            retired(
+                                &mut conn,
+                                &active_cx,
+                                (boundary == 3).then_some(IsolationLevel::RepeatableRead),
+                            )
+                            .await;
+                            assert!(!active_cx.is_cancel_requested());
+                            if cancel {
+                                assert!(!conn.inner.query_in_flight.load(
+                                    std::sync::atomic::Ordering::Acquire
+                                ));
+                                peer_closed(&mut peer);
+                            }
+                            // Dropping a future leaves logical poison. Disposing
+                            // the connection retires its socket without async Drop.
+                            drop(conn);
+                            if !cancel {
+                                peer_closed(&mut peer);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn completion_type_defaults_cannot_chain_or_release_managed_transactions() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for completion_type in [1, 2] {
+                        for isolated in [false, true] {
+                            for finish in 0..3 {
+                                let (mut conn, mut peer) = connection();
+                                let setting =
+                                    format!("SET SESSION completion_type = {completion_type}");
+                                write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                assert!(matches!(
+                                    conn.execute_trusted_sql(&cx, &setting).await,
+                                    Outcome::Ok(0)
+                                ));
+                                assert_eq!(command_sql(&read_client_command(&mut peer)), setting);
+                                let tx = begin(&mut conn, &mut peer, &cx, isolated).await;
+
+                                if finish == 2 {
+                                    drop(tx);
+                                    let mut operation =
+                                        Box::pin(conn.execute_trusted_sql(&cx, CALLER_SQL));
+                                    command_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        ROLLBACK_SQL,
+                                    )
+                                    .await;
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                    if isolated {
+                                        command_while_pending(
+                                            operation.as_mut(),
+                                            &mut peer,
+                                            RESTORE_SQL,
+                                        )
+                                        .await;
+                                        write_response_packet(
+                                            &mut peer,
+                                            1,
+                                            ok_packet_payload(0, IDLE),
+                                        );
+                                    }
+                                    command_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        CALLER_SQL,
+                                    )
+                                    .await;
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                                    assert!(matches!(operation.await, Outcome::Ok(1)));
+                                } else {
+                                    let mut operation = Box::pin(async {
+                                        if finish == 0 {
+                                            tx.commit(&cx).await
+                                        } else {
+                                            tx.rollback(&cx).await
+                                        }
+                                    });
+                                    command_while_pending(
+                                        operation.as_mut(),
+                                        &mut peer,
+                                        if finish == 0 { COMMIT_SQL } else { ROLLBACK_SQL },
+                                    )
+                                    .await;
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                                    if isolated {
+                                        command_while_pending(
+                                            operation.as_mut(),
+                                            &mut peer,
+                                            RESTORE_SQL,
+                                        )
+                                        .await;
+                                        write_response_packet(
+                                            &mut peer,
+                                            1,
+                                            ok_packet_payload(0, IDLE),
+                                        );
+                                    }
+                                    assert!(matches!(operation.await, Outcome::Ok(())));
+                                    write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                                    assert!(matches!(
+                                        conn.execute_trusted_sql(&cx, CALLER_SQL).await,
+                                        Outcome::Ok(1)
+                                    ));
+                                    assert_eq!(
+                                        command_sql(&read_client_command(&mut peer)),
+                                        CALLER_SQL
+                                    );
+                                }
+                                assert!(!conn.inner.closed);
+                                assert!(!conn.inner.needs_rollback);
+                                assert!(conn.inner.session_isolation_restore.is_none());
+                                assert!(!conn.in_transaction());
+                                assert_eq!(conn.inner.status_flags, IDLE);
+                                let manager = MySqlConnectionManager::new(
+                                    MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+                                );
+                                assert!(manager.release_check(&mut conn));
+                                assert!(manager.is_valid(&cx, &mut conn).await);
+                                drop(conn);
+                                peer_closed(&mut peer);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn caller_sql_and_kill_replies_keep_their_existing_status_semantics() {
+            for workers in [1, 2] {
+                native_journey(workers, |cx| async move {
+                    for sql in ["COMMIT", "ROLLBACK"] {
+                        let (mut conn, mut peer) = connection();
+                        let mut operation = Box::pin(conn.execute_trusted_sql(&cx, sql));
+                        command_while_pending(operation.as_mut(), &mut peer, sql).await;
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, ACTIVE));
+                        assert!(matches!(operation.await, Outcome::Ok(0)));
+                        assert!(conn.in_transaction(), "raw SQL may intentionally chain");
+                        assert!(!conn.inner.closed);
+                        assert!(!conn.inner.needs_rollback);
+                        drop(conn);
+                        peer_closed(&mut peer);
+                    }
+
+                    let (mut conn, mut peer) = connection();
+                    let mut kill =
+                        Box::pin(conn.raw_query_expect_ok(&cx, "KILL QUERY 42", "KILL QUERY"));
+                    command_while_pending(kill.as_mut(), &mut peer, "KILL QUERY 42").await;
+                    write_response_packet(&mut peer, 1, ok_packet_payload(0, ACTIVE));
+                    let ok = kill.await.expect("KILL is not a transaction terminator");
+                    assert_eq!(ok.status_flags, ACTIVE);
+                    assert!(!conn.inner.needs_rollback);
+                    drop(conn);
+                    peer_closed(&mut peer);
+                });
+            }
+        }
+
+        #[test]
+        fn isolation_verification_cleanup_uses_a_terminating_idle_rollback() {
+            const READ_ISOLATION: &str = "SELECT @@SESSION.transaction_isolation AS isolation";
+
+            for workers in [1, 2] {
+                for refused in [false, true] {
+                    native_journey(workers, move |cx| async move {
+                        let (mut conn, mut peer) = connection();
+                        write_isolation(&mut peer, "REPEATABLE-READ", IDLE);
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, ACTIVE));
+                        write_isolation(&mut peer, "READ-COMMITTED", ACTIVE);
+                        let mut operation = Box::pin(conn.begin_with_isolation(
+                            &cx,
+                            IsolationLevel::Serializable,
+                            false,
+                        ));
+                        commands_while_pending(
+                            operation.as_mut(),
+                            &mut peer,
+                            &[
+                                READ_ISOLATION,
+                                "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                                "START TRANSACTION READ WRITE",
+                                READ_ISOLATION,
+                                ROLLBACK_SQL,
+                            ],
+                        )
+                        .await;
+                        write_response_packet(
+                            &mut peer,
+                            1,
+                            ok_packet_payload(0, if refused { ACTIVE } else { IDLE }),
+                        );
+                        if !refused {
+                            command_while_pending(operation.as_mut(), &mut peer, RESTORE_SQL).await;
+                            write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        }
+                        let Outcome::Err(error) = operation.await else {
+                            panic!("isolation mismatch must remain the primary failure");
+                        };
+                        assert!(matches!(
+                            error,
+                            MySqlError::IsolationLevelMismatch {
+                                requested: IsolationLevel::Serializable,
+                                observed,
+                            } if observed == "READ-COMMITTED"
+                        ));
+                        if refused {
+                            retired(&mut conn, &cx, Some(IsolationLevel::RepeatableRead)).await;
+                            peer_closed(&mut peer);
+                        } else {
+                            assert!(!conn.inner.closed);
+                            assert!(!conn.inner.needs_rollback);
+                            assert!(conn.inner.session_isolation_restore.is_none());
+                            assert!(!conn.in_transaction());
+                            write_response_packet(&mut peer, 1, ok_packet_payload(1, IDLE));
+                            assert!(matches!(
+                                conn.execute_trusted_sql(&cx, CALLER_SQL).await,
+                                Outcome::Ok(1)
+                            ));
+                            assert_eq!(command_sql(&read_client_command(&mut peer)), CALLER_SQL);
+                            drop(conn);
+                            peer_closed(&mut peer);
+                        }
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn acknowledged_commit_stays_committed_when_session_restoration_is_interrupted() {
+            for workers in [1, 2] {
+                for cancel in [false, true] {
+                    native_journey(workers, move |request_cx| async move {
+                        let active_cx = Cx::current().expect("native completion task");
+                        let (mut conn, mut peer) = connection();
+                        let mut tx = begin(&mut conn, &mut peer, &request_cx, true).await;
+                        write_response_packet(&mut peer, 1, ok_packet_payload(1, ACTIVE));
+                        assert!(matches!(
+                            tx.execute_trusted_sql(&request_cx, CALLER_SQL).await,
+                            Outcome::Ok(1)
+                        ));
+                        assert_eq!(command_sql(&read_client_command(&mut peer)), CALLER_SQL);
+
+                        let mut commit = Box::pin(tx.commit(&request_cx));
+                        command_while_pending(commit.as_mut(), &mut peer, COMMIT_SQL).await;
+                        write_response_packet(&mut peer, 1, ok_packet_payload(0, IDLE));
+                        // Reaching this second Pending boundary proves the COMMIT
+                        // acknowledgement was consumed, while restore is unfinished.
+                        command_while_pending(commit.as_mut(), &mut peer, RESTORE_SQL).await;
+                        if cancel {
+                            request_cx.cancel_with_reason(CancelReason::user("cancel session restore"));
+                            assert!(
+                                matches!(commit.await, Outcome::Ok(())),
+                                "acknowledged COMMIT cannot become a retryable failure"
+                            );
+                        } else {
+                            drop(commit);
+                        }
+                        assert!(conn.inner.closed);
+                        assert!(!conn.in_transaction(), "COMMIT was acknowledged idle");
+                        assert_eq!(
+                            conn.inner.needs_rollback, cancel,
+                            "observed restore failure is marked; hard drop retains closed poison"
+                        );
+                        assert!(conn.inner.session_isolation_restore.is_none());
+                        let manager = MySqlConnectionManager::new(
+                            MySqlConnectOptions::parse("mysql://localhost/test").unwrap(),
+                        );
+                        assert!(!manager.release_check(&mut conn));
+                        assert!(!manager.is_valid(&active_cx, &mut conn).await);
+                        assert!(matches!(
+                            conn.execute_trusted_sql(&active_cx, CALLER_SQL).await,
+                            Outcome::Err(MySqlError::ConnectionClosed)
+                        ));
+                        assert!(!active_cx.is_cancel_requested());
+                        if cancel {
+                            peer_closed(&mut peer);
+                        }
+                        drop(conn);
+                        if !cancel {
+                            peer_closed(&mut peer);
+                        }
+                        // The graded token has no resolution ledger. Its commit-before-
+                        // restore ordering is source-reviewed; these are wire/lifecycle
+                        // assertions, not fabricated commit/abort counter evidence.
+                    });
+                }
+            }
+        }
     }
 
     // asupersync-1dl7 / asupersync-1dl7s: additive stored-procedure workflow.
@@ -11469,7 +12206,10 @@ mod tests {
                 "START TRANSACTION"
             );
             write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
-            assert_eq!(command_sql(&read_client_command(&mut peer)), "ROLLBACK");
+            assert_eq!(
+                command_sql(&read_client_command(&mut peer)),
+                "ROLLBACK AND NO CHAIN NO RELEASE"
+            );
             write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
         });
 

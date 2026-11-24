@@ -152,6 +152,25 @@ artifacts.
   rollback debt. Successful recovery clears that debt without erasing
   independent session dirtiness, so a prior session change cannot silently
   become eligible for pool reuse.
+- **PostgreSQL managed transaction boundaries verify server completion.**
+  Begin, commit, rollback, and failed-begin cleanup require the expected
+  command completion and transaction state. Invalid acknowledgements cannot
+  run the callback or report a successful commit. Valid server errors are
+  still drained so retryable errors retain their existing recovery behavior.
+- **MySQL managed transactions end independently of `completion_type`.**
+  Commit, rollback, and abandoned-transaction recovery explicitly suppress
+  chaining and session release. Cleanup requires a single idle OK response.
+  Abandoned-transaction recovery retains rollback and isolation-restoration
+  debt until every required acknowledgement arrives. Interrupted or malformed
+  cleanup retires the connection before queued caller SQL can run. An
+  acknowledged commit resolves its transaction obligation before awaiting
+  session-isolation restoration, preserving its commit proof on hard drop.
+- **SQLite asynchronous close keeps final cleanup off runtime workers.**
+  Final connection-lock acquisition, orphan rollback, cache flushing, and
+  engine destruction use the connection's blocking pool, including after
+  asynchronous checkpointing. Queued cancellation and hard drop use the same
+  operation-admission guard as statements, and completed close retains its
+  result when cancellation arrives later.
 
 ## [v0.7.0] - 2026-11-21
 
