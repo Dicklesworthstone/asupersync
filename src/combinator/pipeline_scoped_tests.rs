@@ -1181,3 +1181,292 @@ fn scope_pipeline_stream_worker_failure_interrupts_a_pending_next_item() {
     });
     assert!(report.quiescent && report.invariant_violations.is_empty());
 }
+
+#[derive(Default)]
+struct ConcurrentPipelineProgress {
+    started: AtomicUsize,
+    completed: AtomicUsize,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    first_wave: AtomicBool,
+    first_pending: AtomicBool,
+    release_first: AtomicBool,
+    workers: crate::sync::pl::Mutex<std::collections::BTreeSet<TaskId>>,
+    changed: Notify,
+}
+
+struct ConcurrentTransformActive(Arc<ConcurrentPipelineProgress>);
+
+impl Drop for ConcurrentTransformActive {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        self.0.changed.notify_waiters();
+    }
+}
+
+async fn concurrent_pipeline_ordered_journey(cx: Cx) {
+    let seen = Arc::new(ConcurrentPipelineProgress::default());
+    let stage_seen = Arc::clone(&seen);
+    let sink_seen = Arc::new(Progress::default());
+    let sink_probe = Arc::clone(&sink_seen);
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let source_pulls = Arc::clone(&pulls);
+    let delivered = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+    let sink_values = Arc::clone(&delivered);
+    let (release_sink, sink_gate) = oneshot::channel();
+    let mut operation = cx
+        .spawn(move |owner| async move {
+            let owner_region = owner.region_id();
+            let source = (0..9_usize).inspect(move |_| {
+                source_pulls.fetch_add(1, Ordering::SeqCst);
+            });
+            let mut serial_next = 0;
+            let mut sink_gate = Some(sink_gate);
+            ScopedPipelineExecution::new(&owner, source, config(6))
+                .then_concurrent(capacity(1), capacity(3), move |stage, value| {
+                    let seen = Arc::clone(&stage_seen);
+                    async move {
+                        assert_eq!(Cx::current().unwrap().task_id(), stage.task_id());
+                        assert_ne!(stage.region_id(), owner_region);
+                        seen.workers.lock().insert(stage.task_id());
+                        let active = seen.active.fetch_add(1, Ordering::SeqCst) + 1;
+                        seen.peak.fetch_max(active, Ordering::SeqCst);
+                        let _active = ConcurrentTransformActive(Arc::clone(&seen));
+                        let started = seen.started.fetch_add(1, Ordering::SeqCst) + 1;
+                        if started == 3 {
+                            seen.first_wave.store(true, Ordering::Release);
+                        }
+                        seen.changed.notify_waiters();
+                        // A serial implementation cannot pass this barrier.
+                        if value < 3 {
+                            seen.changed
+                                .wait_until(|| seen.first_wave.load(Ordering::Acquire))
+                                .await;
+                        }
+                        if value == 0 {
+                            let mut waiting = std::pin::pin!(
+                                seen.changed.wait_until(|| seen.release_first.load(Ordering::Acquire))
+                            );
+                            poll_fn(|task| {
+                                let result = waiting.as_mut().poll(task);
+                                if result.is_pending()
+                                    && !seen.first_pending.swap(true, Ordering::AcqRel)
+                                {
+                                    seen.changed.notify_waiters();
+                                }
+                                result
+                            })
+                            .await;
+                        }
+                        seen.completed.fetch_add(1, Ordering::SeqCst);
+                        seen.changed.notify_waiters();
+                        Outcome::<_, &'static str>::Ok(value * 2)
+                    }
+                })
+                .then(capacity(1), move |_stage, value| {
+                    // The original serial FnMut contract remains usable
+                    // between two independently concurrent typed stages.
+                    assert_eq!(value, serial_next * 2);
+                    serial_next += 1;
+                    async move { Outcome::Ok(value + 1) }
+                })
+                .then_concurrent(capacity(1), capacity(2), |_stage, value| async move {
+                    Outcome::Ok(format!("item:{value}"))
+                })
+                .run(move |sink, value| {
+                    let mut gate = sink_gate.take();
+                    let seen = Arc::clone(&sink_probe);
+                    let delivered = Arc::clone(&sink_values);
+                    async move {
+                        if let Some(gate) = gate.as_mut() {
+                            let mut waiting = std::pin::pin!(gate.recv(&sink));
+                            poll_fn(|task| {
+                                let result = waiting.as_mut().poll(task);
+                                if result.is_pending() {
+                                    seen.note(&seen.parked);
+                                }
+                                result
+                            })
+                            .await
+                            .unwrap();
+                        }
+                        delivered.lock().push(value);
+                        Outcome::Ok(())
+                    }
+                })
+                .await
+                .unwrap()
+        })
+        .unwrap();
+
+    seen.changed
+        .wait_until(|| {
+            seen.first_pending.load(Ordering::Acquire)
+                && seen.completed.load(Ordering::SeqCst) == 5
+        })
+        .await;
+    // Input zero is genuinely pending while every later input in the work
+    // window completed. Their values must remain charged while being reordered.
+    assert_eq!(seen.started.load(Ordering::SeqCst), 6);
+    assert_eq!(pulls.load(Ordering::SeqCst), 6);
+    assert_eq!(seen.peak.load(Ordering::SeqCst), 3);
+    assert_eq!(seen.workers.lock().len(), 3);
+    assert!(delivered.lock().is_empty());
+    assert!(!operation.is_finished());
+
+    seen.release_first.store(true, Ordering::Release);
+    seen.changed.notify_waiters();
+    sink_seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+    // Reordering has completed, but the first asynchronous sink effect has not
+    // acknowledged. None of those six original credits may be released yet.
+    assert_eq!(pulls.load(Ordering::SeqCst), 6);
+    assert!(delivered.lock().is_empty());
+    release_sink.send_blocking(()).unwrap();
+    let report = operation.join(&cx).await.unwrap();
+    assert!(report.execution.outcome.is_ok(), "{report:?}");
+    assert_eq!(report.execution.summary.admitted, 9);
+    assert_eq!(report.execution.summary.consumed, 9);
+    assert_eq!(report.execution.summary.max_in_flight, 6);
+    assert_eq!(report.execution.summary.stages, 3);
+    assert_eq!(seen.completed.load(Ordering::SeqCst), 9);
+    assert_eq!(seen.active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *delivered.lock(),
+        (0..9).map(|value| format!("item:{}", value * 2 + 1)).collect::<Vec<_>>()
+    );
+    assert!(report.close.is_ok(), "{report:?}");
+}
+
+async fn concurrent_pipeline_failed_later_input_journey(cx: Cx, cleanup_panics: bool) {
+    let seen = Arc::new(Progress::default());
+    let stage_seen = Arc::clone(&seen);
+    let (release, cleanup) = oneshot::channel();
+    let cleanup = Arc::new(crate::sync::pl::Mutex::new(Some(cleanup)));
+    let (sender, receiver) = mpsc::channel(1);
+    let mut operation = cx
+        .spawn(move |owner| async move {
+            ScopedPipelineExecution::new(&owner, 0..2_usize, config(2))
+                .then_concurrent(capacity(1), capacity(2), move |stage, value| {
+                    let seen = Arc::clone(&stage_seen);
+                    let cleanup = Arc::clone(&cleanup);
+                    let sender = sender.clone();
+                    async move {
+                        if value == 0 {
+                            let cleanup = cleanup.lock().take().unwrap();
+                            held_descendant(stage, sender, seen, cleanup, cleanup_panics).await;
+                            Outcome::Ok(value)
+                        } else {
+                            seen.wait(|state| state.parked.load(Ordering::Acquire)).await;
+                            Outcome::Err("later concurrent input failed")
+                        }
+                    }
+                })
+                .run(|_sink, _value| async {
+                    panic!("a failed prefix must not reach the sink")
+                })
+                .await
+                .unwrap()
+        })
+        .unwrap();
+
+    seen.wait(|state| state.cleaning.load(Ordering::Acquire)).await;
+    // The later input's error must cancel a genuinely parked first transform.
+    // Its cleanup holds a checked send permit across another Pending, so a
+    // terminal report or region-close receipt at this point would be premature.
+    assert!(!operation.is_finished());
+    assert!(!seen.retired.load(Ordering::Acquire));
+    release.send_blocking(()).unwrap();
+    let report = operation.join(&cx).await.unwrap();
+    assert_eq!(report.execution.outcome.is_panicked(), cleanup_panics, "{report:?}");
+    assert_eq!(report.execution.outcome.is_cancelled(), !cleanup_panics, "{report:?}");
+    assert!(matches!(
+        report.execution.error(),
+        Some(PipelineExecutionError::Stage {
+            stage: 0,
+            input: 1,
+            error: "later concurrent input failed",
+        })
+    ), "{report:?}");
+    assert_eq!(report.execution.summary.admitted, 2);
+    assert_eq!(report.execution.summary.consumed, 0);
+    assert_eq!(report.execution.summary.stages, 1);
+    assert!(seen.finished.load(Ordering::Acquire));
+    assert!(seen.retired.load(Ordering::Acquire));
+    assert!(report.close.is_ok(), "{report:?}");
+    drop(receiver);
+}
+
+async fn concurrent_pipeline_small_inputs_journey(cx: Cx) {
+    for (count, window, concurrency) in [(0, 3, 3), (1, 3, 3), (5, 4, 1), (5, 1, 8)] {
+        let transformed = Arc::new(AtomicUsize::new(0));
+        let stage_count = Arc::clone(&transformed);
+        let output = Arc::new(crate::sync::pl::Mutex::new(Vec::new()));
+        let sink_values = Arc::clone(&output);
+        let report = cx
+            .scope()
+            .pipeline(&cx, config(window), 0..count)
+            .then_concurrent(capacity(1), capacity(concurrency), move |_stage, value| {
+                let called = Arc::clone(&stage_count);
+                async move {
+                    called.fetch_add(1, Ordering::SeqCst);
+                    Outcome::<_, ()>::Ok(value * 3)
+                }
+            })
+            .run(move |_sink, value| {
+                let values = Arc::clone(&sink_values);
+                async move {
+                    values.lock().push(value);
+                    Outcome::Ok(())
+                }
+            })
+            .await;
+        assert!(report.outcome.is_ok(), "{report:?}");
+        assert_eq!(report.summary.stages, 1);
+        assert_eq!(report.summary.admitted, count);
+        assert_eq!(report.summary.consumed, count);
+        assert!(report.summary.max_in_flight <= window);
+        assert_eq!(transformed.load(Ordering::SeqCst), count);
+        assert_eq!(*output.lock(), (0..count).map(|value| value * 3).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn concurrent_pipeline_preserves_order_and_charges_completed_values_until_sink_ack() {
+    let ((), report) = run_async_under_lab(0x32_4020, concurrent_pipeline_ordered_journey);
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+#[test]
+fn concurrent_pipeline_later_input_error_drains_parked_sibling_cleanup() {
+    for cleanup_panics in [false, true] {
+        let ((), report) = run_async_under_lab(0x32_4021, move |cx| {
+            concurrent_pipeline_failed_later_input_journey(cx, cleanup_panics)
+        });
+        assert!(report.quiescent && report.invariant_violations.is_empty());
+    }
+}
+
+#[test]
+fn concurrent_pipeline_empty_single_and_effective_serial_pools() {
+    let ((), report) = run_async_under_lab(0x32_4022, concurrent_pipeline_small_inputs_journey);
+    assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_concurrent_pipeline_preserves_order_and_sink_backpressure() {
+    native(concurrent_pipeline_ordered_journey);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_concurrent_pipeline_drains_error_and_cleanup_panic() {
+    native(|cx| concurrent_pipeline_failed_later_input_journey(cx, false));
+    native(|cx| concurrent_pipeline_failed_later_input_journey(cx, true));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_concurrent_pipeline_empty_single_and_effective_serial_pools() {
+    native(concurrent_pipeline_small_inputs_journey);
+}
