@@ -3707,7 +3707,7 @@ mod tests {
             "failed compensating rollback must leave an orphan-cleanup marker"
         );
         assert!(
-            conn.inner.needs_discard,
+            conn.needs_discard(),
             "failed compensating rollback must mark the connection discard-only"
         );
 
@@ -14109,7 +14109,7 @@ mod tests {
             "dropped transaction must mark the connection for inline rollback"
         );
         assert!(
-            conn.inner.needs_discard,
+            conn.needs_discard(),
             "dropped transaction must poison pool reuse"
         );
     }
