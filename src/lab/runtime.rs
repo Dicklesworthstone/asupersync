@@ -3773,7 +3773,9 @@ impl LabRuntime {
 
     /// Build a structured report for the current runtime state.
     ///
-    /// This does not advance execution.
+    /// This does not advance execution. Cancellation failures are retained in
+    /// the report without applying the panic policy of
+    /// [`Self::check_cancellation_protocol`] or [`Self::check_invariants`].
     #[must_use]
     pub fn report(&mut self) -> LabRunReport {
         self.report_with_steps_delta(0)
@@ -4154,8 +4156,11 @@ impl LabRuntime {
         let refinement_counterexample_prefix_len =
             refinement_firewall_event_index.map(|idx| idx + 1);
 
+        // A report must retain incomplete execution evidence, even when an
+        // explicit invariant check is configured to panic. In particular,
+        // bounded exploration can stop while cancellation cleanup is parked.
         let mut invariant_violations = self
-            .check_invariants()
+            .collect_invariants(false)
             .into_iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>();
@@ -6108,11 +6113,24 @@ impl LabRuntime {
     /// changing this method's existing exhaustive violation enum.
     #[must_use]
     pub fn check_invariants(&mut self) -> Vec<InvariantViolation> {
+        self.collect_invariants(true)
+    }
+
+    /// Collect the same failures for reports without triggering the explicit
+    /// cancellation-enforcement policy. Detection and cleanup checks are
+    /// identical in both modes; only the panic/warn side effect differs.
+    fn collect_invariants(&mut self, enforce_cancellation: bool) -> Vec<InvariantViolation> {
         let mut violations = Vec::new();
         let _ = self.state.check_obligation_conservation();
 
-        // Check cancellation protocol oracle
-        if let Err(violation) = self.check_cancellation_protocol() {
+        let cancellation = if enforce_cancellation {
+            self.check_cancellation_protocol()
+        } else if self.config.has_cancellation_oracle() {
+            self.oracles.cancellation_protocol.check()
+        } else {
+            Ok(())
+        };
+        if let Err(violation) = cancellation {
             violations.push(InvariantViolation::CancellationProtocol {
                 violation: violation.to_string(),
             });

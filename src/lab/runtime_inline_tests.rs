@@ -2555,6 +2555,74 @@ fn report_observes_unpolled_cancel_after_prior_live_events() {
 }
 
 #[test]
+fn incomplete_cancellation_report_retains_failure_without_enforcing_panic() {
+    use crate::lab::oracle::CancellationProtocolViolation;
+
+    let mut runtime = LabRuntime::new(
+        LabConfig::new(0x90)
+            .max_steps(16)
+            .with_cancellation_oracle(true)
+            .panic_on_cancellation_violation(true),
+    );
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task, handle) = runtime
+        .state
+        .create_task(
+            root,
+            Budget::INFINITE,
+            std::future::poll_fn(|_| {
+                let _ = crate::Cx::current().unwrap().checkpoint();
+                Poll::<()>::Pending
+            }),
+        )
+        .unwrap();
+    runtime.scheduler.lock().schedule(task, 0);
+    runtime.step_for_test();
+    let parked = runtime.state.task(task).expect("task reached its first poll");
+    assert_eq!(parked.total_polls, 1);
+    assert!(matches!(parked.state, TaskState::Running));
+    assert!(runtime.scheduler.lock().is_empty());
+    handle.abort();
+    runtime.run_until_idle();
+    assert!(matches!(
+        runtime.state.task(task).map(|record| &record.state),
+        Some(TaskState::Cancelling { .. })
+    ));
+    assert!(matches!(
+        runtime.oracles.cancellation_protocol.check(),
+        Err(CancellationProtocolViolation::CancelNotCompleted { task: pending, .. })
+            if pending == task
+    ));
+
+    let report = runtime.report();
+    assert!(!report.quiescent);
+    assert!(!report.lab_test_passed());
+    assert!(
+        !report
+            .oracle_report
+            .entry("cancellation_protocol")
+            .unwrap()
+            .passed
+    );
+    assert!(
+        report
+            .invariant_violations
+            .iter()
+            .any(|violation| violation == "oracle:cancellation_protocol")
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.check_cancellation_protocol()
+        }))
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.check_invariants()))
+            .is_err()
+    );
+}
+
+#[test]
 fn ordinary_cancel_ack_can_park_for_masked_cleanup_then_complete() {
     use crate::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
