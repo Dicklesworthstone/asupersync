@@ -482,6 +482,8 @@ impl CircuitBreaker {
     /// Check if call should be allowed.
     ///
     /// Returns `Ok(permit)` if the call should proceed, or `Err` if rejected.
+    /// If a state-change callback panics before the permit is returned, the panic
+    /// propagates and the unpublished half-open probe is released as ignored.
     pub fn should_allow(&self, now: Time) -> Result<Permit, CircuitBreakerError<()>> {
         let now_millis = now.as_millis();
 
@@ -512,12 +514,21 @@ impl CircuitBreaker {
                             Ordering::Acquire,
                         ) {
                             Ok(_) => {
-                                // State changed, update locked metrics and callback
+                                let permit = Permit::Probe { epoch };
+                                // The slot is owned before user code runs, but the
+                                // caller cannot release it until this method returns.
+                                // On unwind, release it neutrally without callbacks;
+                                // the guard's epoch check protects reentrant recovery.
+                                let mut unpublished = PermitGuard {
+                                    breaker: self,
+                                    permit: Some(permit),
+                                };
                                 let callback_metrics = self.update_state_metrics(state, new_state);
                                 if let Some(ref cb) = self.policy.on_state_change {
                                     cb(state, new_state, &callback_metrics);
                                 }
-                                return Ok(Permit::Probe { epoch });
+                                unpublished.permit = None;
+                                return Ok(permit);
                             }
                             Err(actual) => {
                                 current_bits = actual;
@@ -885,11 +896,24 @@ impl CircuitBreaker {
 
     /// Record a failed call, classifying `error` through the configured failure
     /// predicate to decide whether it trips the breaker.
+    ///
+    /// If the predicate panics, the panic propagates and the unclassified permit
+    /// is recorded as ignored, releasing its probe slot without reporting a
+    /// success or failure.
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {
-        // Check if this error counts as a failure.
+        // Classification runs user code. Keep ownership here after raw, guarded,
+        // or call() callers hand off the permit so a panic cannot strand a probe.
+        let mut unclassified = PermitGuard {
+            breaker: self,
+            permit: Some(permit),
+        };
         // For AllErrors predicates, skip the string inspection entirely.
         let counts_as_failure = self.policy.failure_predicate.is_all_errors()
             || self.policy.failure_predicate.is_failure(error);
+        // Outcome recording now owns the permit, including any state-change
+        // callback after publication. Such a callback panic must not also count
+        // an already recorded outcome as ignored.
+        unclassified.permit = None;
         self.record_failure_classified(permit, counts_as_failure, now);
     }
 
