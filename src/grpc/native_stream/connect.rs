@@ -44,6 +44,7 @@ pub struct NativeStreamEndpoint {
     authority: String,
     setup_timeout: Duration,
     connect_policy: ConnectPolicy,
+    dns_resolver: Option<Arc<crate::net::dns::Resolver>>,
     keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
 }
 
@@ -107,6 +108,7 @@ impl NativeStreamEndpoint {
             authority,
             setup_timeout,
             connect_policy: ConnectPolicy::default(),
+            dns_resolver: None,
             keepalive_backoff: None,
         })
     }
@@ -116,7 +118,7 @@ impl NativeStreamEndpoint {
     /// `host` is an ASCII DNS name or unbracketed IP literal, without a port.
     /// Use an IDNA-encoded name for international hostnames. HTTP authority and
     /// TLS identity remain explicit and independent of this dial destination.
-    /// Resolution uses the native offloaded system resolver, preserving its
+    /// Resolution uses the offloaded system resolver by default, preserving its
     /// hosts-file/search-domain behavior. Dropping or timing out setup discards
     /// its result; an OS lookup already running on a blocking worker can finish
     /// afterward. No socket is opened from that abandoned result.
@@ -175,6 +177,28 @@ impl NativeStreamEndpoint {
         self
     }
 
+    /// Select a resolver and shared cache for this endpoint's hostname.
+    ///
+    /// Resolution runs under the explicit call context and the original setup
+    /// deadline. Explicit nameservers let [`Resolver::lookup_ip`](crate::net::dns::Resolver::lookup_ip)
+    /// use native reactor DNS when that context forbids blocking work and has
+    /// I/O and timer drivers. Other configurations retain the resolver's usual
+    /// policy, including a refusal for system DNS under forbidden blocking.
+    ///
+    /// The connect policy, HTTP authority, and TLS name stay unchanged. Literal
+    /// or resolved addresses skip DNS. Endpoint clones share the cache.
+    #[must_use]
+    pub fn with_dns_resolver(mut self, resolver: crate::net::dns::Resolver) -> Self {
+        self.dns_resolver = Some(Arc::new(resolver));
+        self
+    }
+
+    /// Get the selected hostname resolver, including its shared cache.
+    #[must_use]
+    pub fn dns_resolver(&self) -> Option<&crate::net::dns::Resolver> {
+        self.dns_resolver.as_deref()
+    }
+
     pub(crate) fn with_keepalive_backoff(mut self, backoff: Option<Arc<KeepaliveBackoff>>) -> Self {
         self.keepalive_backoff = backoff;
         self
@@ -214,11 +238,18 @@ impl NativeStreamEndpoint {
             Destination::Address(address) => TcpStream::connect_timeout(*address, remaining)
                 .await
                 .map(DialedStream::Tcp),
-            Destination::Host(host, port) => self
-                .connect_policy
-                .connect_host(host.clone(), *port, remaining)
-                .await
-                .map(DialedStream::Tcp),
+            Destination::Host(host, port) => {
+                let stream = if let Some(resolver) = &self.dns_resolver {
+                    self.connect_policy
+                        .connect_with_resolver(resolver, host, *port, remaining)
+                        .await
+                } else {
+                    self.connect_policy
+                        .connect_host(host.clone(), *port, remaining)
+                        .await
+                };
+                stream.map(DialedStream::Tcp)
+            }
             #[cfg(unix)]
             Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
                 .await

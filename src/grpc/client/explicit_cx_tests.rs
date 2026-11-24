@@ -14,6 +14,65 @@ use std::sync::mpsc;
 use std::task::Waker;
 use std::time::Instant;
 
+const DNS_HOST: &str = "grpc-resolver.example";
+
+fn forbidden_dns_runtime() -> Runtime {
+    RuntimeBuilder::current_thread()
+        .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+        .blocking_threads(0, 1)
+        .blocking_admission_policy(crate::runtime::BlockingAdmissionPolicy::Forbidden)
+        .build()
+        .expect("native DNS with no blocking work")
+}
+
+fn dns_resolver(address: std::net::SocketAddr) -> crate::net::dns::Resolver {
+    crate::net::dns::Resolver::with_config(crate::net::dns::ResolverConfig {
+        nameservers: vec![address],
+        timeout: WATCHDOG,
+        retries: 0,
+        ..Default::default()
+    })
+}
+
+// Answers exactly one A/AAAA pair. A second dial must use the shared cache;
+// there is no system-resolvable name or blocking lookup to hide missing wiring.
+fn dns_peer() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.set_read_timeout(Some(WATCHDOG)).unwrap();
+    let address = socket.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut name = Vec::new();
+        for label in DNS_HOST.split('.') {
+            name.push(u8::try_from(label.len()).unwrap());
+            name.extend_from_slice(label.as_bytes());
+        }
+        name.push(0);
+        let mut types = Vec::new();
+        for _ in 0..2 {
+            let mut packet = [0; 512];
+            let (length, caller) = socket.recv_from(&mut packet).unwrap();
+            let question_end = 12 + name.len();
+            assert_eq!(length, question_end + 4);
+            assert_eq!(&packet[12..question_end], name.as_slice());
+            let kind = u16::from_be_bytes([packet[question_end], packet[question_end + 1]]);
+            assert!(matches!(kind, 1 | 28));
+            types.push(kind);
+            let mut reply = packet[..length].to_vec();
+            reply[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            reply[6..8].copy_from_slice(&u16::from(kind == 1).to_be_bytes());
+            if kind == 1 {
+                reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1]);
+                reply.extend_from_slice(&60u32.to_be_bytes());
+                reply.extend_from_slice(&[0, 4, 127, 0, 0, 1]);
+            }
+            socket.send_to(&reply, caller).unwrap();
+        }
+        types.sort_unstable();
+        assert_eq!(types, [1, 28]);
+    });
+    (address, peer)
+}
+
 const WATCHDOG: Duration = Duration::from_secs(10);
 const PATH: &str = "/test.ExplicitContext/Unary";
 type CallResult = Result<Response<Bytes>, Status>;
@@ -296,6 +355,204 @@ fn assert_response(response: Response<Bytes>) {
     assert!(response.get_ref().is_empty());
     assert!(matches!(response.metadata().get("x-native-receipt"),
         Some(MetadataValue::Ascii(value)) if value == "complete"));
+}
+
+#[test]
+fn custom_dns_connects_unary_and_streaming_without_blocking_and_shares_cache() {
+    for policy in [ConnectPolicy::Sequential, ConnectPolicy::HappyEyeballs] {
+        let runtime = forbidden_dns_runtime();
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let authority = format!("{DNS_HOST}:{port}");
+        let (dns_address, dns) = dns_peer();
+        let resolver = dns_resolver(dns_address);
+        let (steps, server) = peer(&listener, 3);
+        runtime.block_on(Box::pin(async {
+            let controller = Cx::current().unwrap();
+            assert!(crate::runtime::spawn_blocking::current_pool_forbids_blocking());
+            let channel = Channel::builder(format!("http://{authority}"))
+                .dns_resolver(resolver.clone())
+                .connect_policy(policy)
+                .connect_timeout(WATCHDOG)
+                .connect()
+                .await
+                .unwrap();
+            let cloned = channel.clone();
+            assert!(std::ptr::eq(
+                channel.dns_resolver().unwrap(),
+                cloned.dns_resolver().unwrap(),
+            ));
+            for (index, mut step) in steps.into_iter().enumerate() {
+                let mut client = GrpcClient::new(cloned.clone());
+                let mut call = Box::pin(async {
+                    let request = Request::new(Bytes::from_static(b"resolver-owned"));
+                    if index == 0 {
+                        return client
+                            .unary_with_cx::<Bytes, Bytes>(&owner, PATH, request)
+                            .await
+                            .map(Response::into_inner);
+                    }
+                    if index == 1 {
+                        let mut stream = client
+                            .server_streaming_with_cx::<Bytes, Bytes>(&owner, PATH, request)
+                            .await?
+                            .into_inner();
+                        let first = poll_fn(|task| {
+                            Streaming::poll_next(Pin::new(&mut stream), task)
+                        })
+                        .await
+                        .expect("one channel streaming response")?;
+                        assert!(
+                            poll_fn(|task| Streaming::poll_next(Pin::new(&mut stream), task))
+                                .await
+                                .is_none(),
+                            "terminal OK was consumed"
+                        );
+                        return Ok(first);
+                    }
+                    let endpoint = NativeStreamEndpoint::from_host(
+                        DNS_HOST,
+                        port,
+                        &authority,
+                        WATCHDOG,
+                    )?
+                    .with_dns_resolver(resolver.clone())
+                    .with_connect_policy(policy);
+                    let mut stream = endpoint
+                        .connect_tcp(
+                            &owner,
+                            PATH,
+                            request,
+                            IdentityCodec,
+                            NativeStreamConfig::default(),
+                        )
+                        .await?;
+                    let first = stream.message().await?.expect("one native response");
+                    assert!(stream.message().await?.is_none(), "terminal OK was consumed");
+                    Ok::<_, Status>(first)
+                });
+                let observed = {
+                    let mut seen = std::pin::pin!(step.observed.recv(&controller));
+                    within(
+                        &controller,
+                        poll_fn(|task| {
+                            assert!(
+                                call.as_mut().poll(task).is_pending(),
+                                "peer withheld its reply"
+                            );
+                            seen.as_mut().poll(task)
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                };
+                assert_request(&observed, b"resolver-owned");
+                assert!(
+                    observed.headers.iter().any(|header| {
+                        header.name == ":authority" && header.value == authority
+                    }),
+                    "custom DNS must not replace the logical HTTP authority"
+                );
+                step.reply.send(Reply::Success).unwrap();
+                assert!(within(&controller, call.as_mut()).await.unwrap().is_empty());
+                drop(call);
+                drop(client);
+                within(&controller, step.closed.recv(&controller))
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                resolver.cache_stats().hits > 0,
+                "subsequent connections reused DNS cache"
+            );
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        }));
+        dns.join().expect("custom DNS questions and answers");
+        server.join().expect("native RPCs retired their transports");
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+    }
+}
+
+#[test]
+fn custom_dns_observes_cancellation_and_the_original_setup_deadline_before_dialing() {
+    for cancel in [true, false] {
+        let runtime = forbidden_dns_runtime();
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // Keep the UDP socket alive but send no answers, so the pending state
+        // is actual DNS I/O, not a refused destination or a timing guess.
+        let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns.set_nonblocking(true).unwrap();
+        runtime.block_on(Box::pin(async {
+            let controller = Cx::current().unwrap();
+            let channel = Channel::builder(format!(
+                "http://{DNS_HOST}:{}",
+                listener.local_addr().unwrap().port(),
+            ))
+            .dns_resolver(dns_resolver(dns.local_addr().unwrap()))
+            .connect_timeout(if cancel {
+                WATCHDOG
+            } else {
+                Duration::from_secs(1)
+            })
+            .connect()
+            .await
+            .unwrap();
+            let mut client = GrpcClient::new(channel);
+            let mut call = Box::pin(client.unary_with_cx::<Bytes, Bytes>(
+                &owner,
+                PATH,
+                Request::new(Bytes::new()),
+            ));
+            within(
+                &controller,
+                poll_fn(|task| {
+                    assert!(
+                        call.as_mut().poll(task).is_pending(),
+                        "DNS answer is withheld"
+                    );
+                    let mut packet = [0; 512];
+                    match dns.recv_from(&mut packet) {
+                        Ok((length, _)) => {
+                            assert!(length > 12, "DNS query reached the selected nameserver");
+                            Poll::Ready(())
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            task.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                        Err(error) => panic!("DNS witness: {error}"),
+                    }
+                }),
+            )
+            .await;
+            if cancel {
+                owner.cancel_with(CancelKind::User, Some("cancel parked DNS"));
+            }
+            let status = crate::time::timeout(
+                controller.now(),
+                Duration::from_secs(3),
+                call.as_mut(),
+            )
+            .await
+            .expect("caller cancellation or connect timeout precedes the DNS timeout")
+            .unwrap_err();
+            assert_eq!(
+                status.code(),
+                if cancel { Code::Cancelled } else { Code::Unavailable }
+            );
+            drop(call);
+            assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert!(!controller.is_cancel_requested());
+        }));
+        assert!(runtime.shutdown_timeout(WATCHDOG));
+    }
 }
 
 #[test]

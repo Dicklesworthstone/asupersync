@@ -273,6 +273,56 @@ impl ConnectPolicy {
             }
         }
     }
+
+    /// Resolve through the caller-selected resolver, then reuse the ordinary
+    /// dial policy. The surrounding RPC setup owns the absolute deadline,
+    /// including DNS, so resolving does not grant a new setup budget.
+    ///
+    /// Erase only this opt-in path's future: embedding the native DNS state
+    /// machine in every RPC caller can overflow downstream `Send` proofs.
+    pub(crate) fn connect_with_resolver<'a>(
+        self,
+        resolver: &'a crate::net::dns::Resolver,
+        host: &'a str,
+        port: u16,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send + 'a>> {
+        Box::pin(async move {
+            let lookup = resolver.lookup_ip(host).await.map_err(|error| {
+                use crate::net::dns::DnsError;
+                let kind = match &error {
+                    DnsError::Timeout => io::ErrorKind::TimedOut,
+                    DnsError::Cancelled => io::ErrorKind::Interrupted,
+                    DnsError::InvalidHost(_) => io::ErrorKind::InvalidInput,
+                    DnsError::NoRecords(_) => io::ErrorKind::NotFound,
+                    _ => io::ErrorKind::Other,
+                };
+                io::Error::new(kind, error)
+            })?;
+            let addresses: Vec<_> = lookup
+                .addresses()
+                .iter()
+                .map(|address| SocketAddr::new(*address, port))
+                .collect();
+            if addresses.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "gRPC hostname resolved to no addresses",
+                ));
+            }
+            match self {
+                Self::Sequential => TcpStream::connect_resolved_timeout(addresses, timeout).await,
+                Self::HappyEyeballs => {
+                    let config = crate::net::happy_eyeballs::HappyEyeballsConfig {
+                        connect_timeout: timeout,
+                        overall_timeout: timeout,
+                        ..Default::default()
+                    };
+                    crate::net::happy_eyeballs::connect(&addresses, &config).await
+                }
+            }
+        })
+    }
 }
 
 /// gRPC channel configuration.
@@ -341,6 +391,9 @@ pub struct ChannelBuilder {
     /// Policy for native hostname connection attempts.
     #[cfg(not(target_arch = "wasm32"))]
     connect_policy: ConnectPolicy,
+    /// Optional caller-owned DNS policy and shared cache for direct TCP calls.
+    #[cfg(not(target_arch = "wasm32"))]
+    dns_resolver: Option<Arc<crate::net::dns::Resolver>>,
     /// Idle unary connections to keep for reuse; 0 keeps none.
     #[cfg(not(target_arch = "wasm32"))]
     reuse_connections: usize,
@@ -378,6 +431,8 @@ impl ChannelBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             connect_policy: ConnectPolicy::default(),
             #[cfg(not(target_arch = "wasm32"))]
+            dns_resolver: None,
+            #[cfg(not(target_arch = "wasm32"))]
             reuse_connections: 0,
             #[cfg(not(target_arch = "wasm32"))]
             unary_admission: None,
@@ -408,6 +463,29 @@ impl ChannelBuilder {
     #[must_use]
     pub fn connect_policy(mut self, policy: ConnectPolicy) -> Self {
         self.connect_policy = policy;
+        self
+    }
+
+    /// Select DNS servers, caching, and lookup policy for direct hostname calls.
+    ///
+    /// Resolution stays lazy and runs under the RPC caller's I/O authority,
+    /// cancellation, and existing setup deadline. With explicit nameservers,
+    /// a native I/O/timer context, and a blocking pool configured as
+    /// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden),
+    /// the resolver uses its reactor path without a blocking lookup or thread.
+    /// Otherwise it retains [`Resolver::lookup_ip`](crate::net::dns::Resolver::lookup_ip)
+    /// semantics, including system NSS resolution when no nameservers are set.
+    /// A forbidden system lookup remains an error; there is no fallback to it.
+    ///
+    /// Cloned channels share this resolver's cache. [`Self::connect_policy`]
+    /// still selects sequential or Happy Eyeballs dialing. IP literals and
+    /// explicit dial addresses skip DNS; HTTP authority and TLS identity are
+    /// unchanged. HTTP CONNECT routes use the proxy's separately configured
+    /// HTTP client for proxy-side DNS and leave origin resolution to the proxy.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn dns_resolver(mut self, resolver: crate::net::dns::Resolver) -> Self {
+        self.dns_resolver = Some(Arc::new(resolver));
         self
     }
 
@@ -685,6 +763,7 @@ impl ChannelBuilder {
                 channel.http_connect_proxy = Some(proxy);
             }
             channel.connect_policy = self.connect_policy;
+            channel.dns_resolver = self.dns_resolver;
             channel.progress_aware_keepalive = self.progress_aware_keepalive;
             channel.unary_admission = self
                 .unary_admission
@@ -713,6 +792,8 @@ impl ChannelBuilder {
 /// resolver under the caller's I/O capability and connection deadline. Resolved
 /// addresses are tried in order by default. `ChannelBuilder::happy_eyeballs`
 /// opts native hostname calls into staggered connection attempts.
+/// `ChannelBuilder::dns_resolver` selects a shared resolver and can use native
+/// reactor DNS when blocking work is forbidden.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -731,6 +812,9 @@ pub struct Channel {
     /// Policy for native hostname connection attempts.
     #[cfg(not(target_arch = "wasm32"))]
     connect_policy: ConnectPolicy,
+    /// Resolver policy and cache shared by channel clones and fresh calls.
+    #[cfg(not(target_arch = "wasm32"))]
+    dns_resolver: Option<Arc<crate::net::dns::Resolver>>,
     /// Idle unary connections kept for reuse, shared by clones
     /// ([`ChannelBuilder::reuse_connections`]).
     #[cfg(not(target_arch = "wasm32"))]
@@ -826,6 +910,8 @@ impl Channel {
             dial_addr,
             #[cfg(not(target_arch = "wasm32"))]
             connect_policy: ConnectPolicy::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            dns_resolver: None,
             #[cfg(not(target_arch = "wasm32"))]
             unary_pool: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -954,6 +1040,13 @@ impl Channel {
     #[must_use]
     pub fn connect_policy(&self) -> ConnectPolicy {
         self.connect_policy
+    }
+
+    /// Get the configured direct-hostname resolver, including its shared cache.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn dns_resolver(&self) -> Option<&crate::net::dns::Resolver> {
+        self.dns_resolver.as_deref()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2081,6 +2174,7 @@ struct NativeH2Target {
     scheme: &'static str,
     use_tls: bool,
     connect_policy: ConnectPolicy,
+    dns_resolver: Option<Arc<crate::net::dns::Resolver>>,
     http_connect_proxy: Option<Arc<HttpConnectProxy>>,
 }
 
@@ -2114,6 +2208,7 @@ impl NativeH2Target {
             channel.dial_addr(),
         )?;
         target.connect_policy = channel.connect_policy();
+        target.dns_resolver.clone_from(&channel.dns_resolver);
         target
             .http_connect_proxy
             .clone_from(&channel.http_connect_proxy);
@@ -2162,6 +2257,7 @@ impl NativeH2Target {
             scheme: if use_tls { "https" } else { "http" },
             use_tls,
             connect_policy: ConnectPolicy::default(),
+            dns_resolver: None,
             http_connect_proxy: None,
         })
     }
@@ -2182,6 +2278,7 @@ impl NativeH2Target {
                 scheme: "http",
                 use_tls: false,
                 connect_policy: ConnectPolicy::default(),
+                dns_resolver: None,
                 http_connect_proxy: None,
             })
         }
@@ -2212,18 +2309,24 @@ impl NativeH2Target {
                 .await
                 .map(NativeChannelDial::Tunnel);
         }
-        // Share the same offloaded, cancellation-aware system resolver used by
-        // NativeStreamEndpoint. The caller's outer setup timeout also covers
-        // resolution and TLS, so neither can restart the connection budget.
+        // Both entry points use the same resolver and dial-policy helper. The
+        // outer setup timeout covers DNS and TLS as well as socket connection.
         match &self.destination {
             NativeH2Destination::Address(address) => TcpStream::connect_timeout(*address, timeout)
                 .await
                 .map(DialedStream::Tcp),
-            NativeH2Destination::Host(host, port) => self
-                .connect_policy
-                .connect_host(host.clone(), *port, timeout)
-                .await
-                .map(DialedStream::Tcp),
+            NativeH2Destination::Host(host, port) => {
+                let stream = if let Some(resolver) = &self.dns_resolver {
+                    self.connect_policy
+                        .connect_with_resolver(resolver, host, *port, timeout)
+                        .await
+                } else {
+                    self.connect_policy
+                        .connect_host(host.clone(), *port, timeout)
+                        .await
+                };
+                stream.map(DialedStream::Tcp)
+            }
             #[cfg(unix)]
             NativeH2Destination::Unix(path) => crate::net::unix::UnixStream::connect(path)
                 .await

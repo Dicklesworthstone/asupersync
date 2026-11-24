@@ -454,14 +454,44 @@ impl TcpStream {
         Self::connect_timeout_with_time_getter(addr, timeout_duration, timeout_now).await
     }
 
+    /// Dial already-resolved addresses in order under one shared time budget.
+    /// This never sends a numeric address list back through a blocking resolver.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        feature = "full-runtime",
+        any(not(feature = "slim-runtime-profile"), feature = "service-protocols")
+    ))]
+    pub(crate) async fn connect_resolved_timeout(
+        addrs: Vec<SocketAddr>,
+        timeout_duration: Duration,
+    ) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::TcpStream::connect")?;
+        Self::connect_resolved_timeout_with_time_getter(addrs, timeout_duration, timeout_now)
+            .await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn connect_timeout_with_time_getter<A: ToSocketAddrs + Send + 'static>(
         addr: A,
         timeout_duration: Duration,
         time_getter: fn() -> Time,
     ) -> io::Result<Self> {
-        connect_resolved_addrs_with_timeout(
+        Self::connect_resolved_timeout_with_time_getter(
             lookup_all(addr).await?,
+            timeout_duration,
+            time_getter,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn connect_resolved_timeout_with_time_getter(
+        addrs: Vec<SocketAddr>,
+        timeout_duration: Duration,
+        time_getter: fn() -> Time,
+    ) -> io::Result<Self> {
+        connect_resolved_addrs_with_timeout(
+            addrs,
             timeout_duration,
             time_getter,
             |addr| async move {
