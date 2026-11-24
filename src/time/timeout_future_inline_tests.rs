@@ -548,6 +548,35 @@ fn poll_with_time_elapsed_deadline_clears_registered_timer() {
 }
 
 #[test]
+fn explicit_timeout_rearms_at_wheel_horizon() {
+    let clock = Arc::new(VirtualClock::new());
+    let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let horizon = Time::ZERO + driver.max_timer_duration();
+    let deadline = horizon + Duration::from_secs(1);
+    let mut timeout = TimeoutFuture {
+        future: pending::<()>(),
+        sleep: Sleep::with_timer_driver(deadline, driver.clone()),
+        completed: false,
+        timed_out: false,
+    };
+    let mut task = Context::from_waker(Waker::noop());
+
+    assert!(timeout.poll_with_time(&mut task, Time::ZERO).is_pending());
+    clock.set(horizon);
+    assert_eq!(driver.process_timers(), 1);
+    assert!(timeout.poll_with_time(&mut task, horizon).is_pending());
+    assert_eq!(driver.pending_count(), 1);
+
+    clock.set(deadline);
+    assert_eq!(driver.process_timers(), 1);
+    assert!(matches!(
+        timeout.poll_with_time(&mut task, deadline),
+        Poll::Ready(Err(elapsed)) if elapsed.deadline() == deadline
+    ));
+    assert_eq!(driver.pending_count(), 0);
+}
+
+#[test]
 fn poll_with_time_returns_elapsed_after_success_completion() {
     let mut t = TimeoutFuture::new(ready(42), Time::from_secs(10));
     let waker = noop_waker();

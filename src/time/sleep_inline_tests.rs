@@ -963,6 +963,10 @@ fn sleep_beyond_max_horizon_re_registers_and_does_not_fire_early() {
     clock.set(Time::from_secs(HORIZON_SECS));
     let fired = timer.process_timers();
     crate::assert_with_log!(fired == 1, "clamped timer fires at horizon", 1, fired);
+    assert!(
+        sleep.poll_with_time(timer.now()).is_pending(),
+        "an explicit time check must also reject a wheel-horizon wake"
+    );
     let early = Pin::new(&mut sleep).poll(&mut task_cx);
     crate::assert_with_log!(
         early.is_pending(),

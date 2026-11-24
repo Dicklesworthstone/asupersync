@@ -742,8 +742,8 @@ impl Sleep {
             .store(true, crate::sync::atomic::Ordering::Relaxed);
         // Ordinary sleeps preserve an authoritative timer fire across driver
         // migration. A custom clock still owns its deadline: a runtime wake
-        // only asks us to check that clock again. Clamped-wheel early fires are
-        // intercepted by `poll_inner` before reaching this check.
+        // only asks us to check that clock again. A clamped registration is
+        // also only a wake to recheck the deadline.
         if self.take_elapsed_wake(now) || now >= self.deadline {
             self.completed
                 .store(true, crate::sync::atomic::Ordering::Release);
@@ -780,15 +780,20 @@ impl Sleep {
 }
 
 impl Sleep {
-    /// Consume a driver wake without allowing its clock to complete a custom
-    /// deadline. Retire a spent registration so the next poll can re-arm it.
+    /// Classify the latched wake exactly once for all polling paths. A wheel
+    /// horizon or custom-clock wake may require another registration before
+    /// the logical deadline. An ordinary, full registration remains
+    /// authoritative even if polling migrates to an earlier clock.
     fn take_elapsed_wake(&self, now: Time) -> bool {
         if !self.ready.swap(false, Ordering::AcqRel) {
             return false;
         }
-        if self.time_getter.is_some() && now < self.deadline {
-            self.cancel_active_registration();
-            return false;
+        if now < self.deadline {
+            let partial = self.state.lock().registered_partial;
+            if partial || self.time_getter.is_some() {
+                self.cancel_active_registration();
+                return false;
+            }
         }
         true
     }
@@ -889,33 +894,6 @@ impl Sleep {
                 .as_ref()
                 .map_or_else(|| self.current_time(), TimerDriverHandle::now)
         };
-
-        // Intercept a CLAMPED-wheel early fire before poll_with_time. When the
-        // true deadline exceeds the driver horizon, the wheel fires the readiness
-        // latch early at the horizon purely as a re-arm signal (wheel.rs
-        // `register`); `registered_partial` records that the current registration
-        // was clamped. Only then do we consume the latch and drop the spent
-        // handle so the Pending path below re-registers for the remaining
-        // duration. For ordinary sleeps, a NON-partial latched fire remains
-        // authoritative across driver migration or fallback→driver transitions.
-        // Custom clocks are rechecked by poll_with_time even after that wake
-        // (br-asupersync-sleep-horizon-early-youlxs).
-        if now < self.deadline {
-            let mut state = self.state.lock();
-            if state.registered_partial && self.ready.swap(false, Ordering::AcqRel) {
-                if let Some(handle) = state.timer_handle.take() {
-                    let driver = state.timer_driver.clone().or_else(|| timer_driver.clone());
-                    if let Some(driver) = driver {
-                        if let Some(trace) = trace.as_ref() {
-                            trace.record_event(|seq| {
-                                TraceEvent::timer_cancelled(seq, driver.now(), handle.id())
-                            });
-                        }
-                        let _ = driver.cancel(&handle);
-                    }
-                }
-            }
-        }
 
         match self.poll_with_time(now) {
             Poll::Ready(()) => Poll::Ready(()),
