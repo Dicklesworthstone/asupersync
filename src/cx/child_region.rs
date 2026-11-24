@@ -198,8 +198,7 @@ impl<Caps> ChildRegionOpening<Caps> {
         slot: Arc<AdmittedRegionSlot>,
         liveness: Weak<()>,
         parent_mask: crate::cx::cap::CapMask,
-        #[cfg(feature = "full-runtime")]
-        parent_remote: Option<Arc<crate::remote::RemoteCap>>,
+        #[cfg(feature = "full-runtime")] parent_remote: Option<Arc<crate::remote::RemoteCap>>,
         parent_blocking_pool: Option<crate::runtime::BlockingPoolHandle>,
     ) -> Self {
         Self {
@@ -253,17 +252,13 @@ impl<Caps> Future for ChildRegionOpening<Caps> {
                     // silently replaced with the runtime's default pool.
                     #[cfg(feature = "full-runtime")]
                     {
-                        admitted.cx = admitted.cx.with_remote_cap_handle(this.parent_remote.take());
+                        admitted.cx = admitted
+                            .cx
+                            .with_remote_cap_handle(this.parent_remote.take());
                     }
                     admitted.cx = admitted
                         .cx
                         .with_blocking_pool_handle(this.parent_blocking_pool.take());
-                    #[cfg(not(feature = "full-runtime"))]
-                    {
-                        admitted.cx = admitted
-                            .cx
-                            .with_blocking_pool_handle(this.parent_blocking_pool.take());
-                    }
                     Ok(ChildRegion::from_admitted(admitted))
                 }
                 Err(error) => Err(ChildRegionError::Create(error)),

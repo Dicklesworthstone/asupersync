@@ -75,6 +75,194 @@ fn a_restricted_opener_keeps_its_capability_set_in_the_child() {
     });
 }
 
+fn child_region_pool_runtime(workers: usize) -> crate::runtime::Runtime {
+    if workers == 1 {
+        RuntimeBuilder::current_thread().build().unwrap()
+    } else {
+        RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap()
+    }
+}
+
+#[test]
+fn child_region_blocking_pool_dispatch_preserves_the_explicit_pool() {
+    use crate::runtime::{BlockingPool, BlockingPoolOptions, RootDrainOutcome};
+
+    for workers in [1, 2] {
+        let pool = BlockingPool::with_config(
+            1,
+            1,
+            BlockingPoolOptions {
+                thread_name_prefix: "child-region-explicit".to_owned(),
+                ..BlockingPoolOptions::default()
+            },
+        );
+        let runtime = child_region_pool_runtime(workers);
+        let parent = runtime
+            .request_cx_with_budget(deadline_budget_in(600))
+            .with_blocking_pool_handle(Some(pool.handle()));
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            for cx in [child.cx(), grandchild.cx()] {
+                assert!(cx.blocking_pool_handle().is_some());
+                let mut ordinary = cx
+                    .spawn_blocking(|task_cx| {
+                        assert!(task_cx.blocking_pool_handle().is_some());
+                        std::thread::current().name().unwrap().to_owned()
+                    })
+                    .unwrap();
+                let thread_name = ordinary.join(cx).await.unwrap();
+                assert!(
+                    thread_name.starts_with("child-region-explicit-blocking-"),
+                    "child blocking work escaped its explicit pool: {thread_name}"
+                );
+                let mut drained = cx
+                    .spawn_blocking_drained(|task_cx| {
+                        assert!(task_cx.blocking_pool_handle().is_some());
+                        std::thread::current().name().unwrap().to_owned()
+                    })
+                    .unwrap();
+                let thread_name = drained.join().await.unwrap();
+                assert!(
+                    thread_name.starts_with("child-region-explicit-blocking-"),
+                    "child drained work escaped its explicit pool: {thread_name}"
+                );
+            }
+            grandchild.close().await.unwrap();
+            child.close().await.unwrap();
+        });
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.is_quiescent());
+        assert!(pool.shutdown_and_wait(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn child_region_blocking_pool_preserves_forbidden_admission() {
+    use crate::runtime::{
+        BlockingAdmissionPolicy, BlockingPool, BlockingPoolOptions, BlockingQueuePolicy,
+        RootDrainOutcome, SpawnError,
+    };
+
+    for workers in [1, 2] {
+        let pool = BlockingPool::with_config_and_policies(
+            0,
+            1,
+            BlockingPoolOptions::default(),
+            BlockingQueuePolicy::Fifo,
+            BlockingAdmissionPolicy::Forbidden,
+        );
+        let runtime = child_region_pool_runtime(workers);
+        let parent = runtime
+            .request_cx_with_budget(deadline_budget_in(600))
+            .with_blocking_pool_handle(Some(pool.handle()));
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            for cx in [child.cx(), grandchild.cx()] {
+                // Losing the handle would run this work inline instead of
+                // enforcing the caller-owned pool's admission policy.
+                assert!(matches!(
+                    cx.spawn_blocking(|_| 7_u32),
+                    Err(SpawnError::RuntimeUnavailable)
+                ));
+            }
+            grandchild.close().await.unwrap();
+            child.close().await.unwrap();
+        });
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+        assert!(runtime.is_quiescent());
+        assert!(pool.shutdown_and_wait(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn child_region_blocking_pool_preserves_absence_and_runtime_restriction() {
+    use crate::cx::cap::{CapMask, CapSet, CapSetRuntimeMask};
+    use crate::runtime::{RootDrainOutcome, SpawnError};
+
+    let spawn_only = CapSet::<true, false, false, false, false>::MASK;
+    for workers in [1, 2] {
+        for attached in [false, true] {
+            for mask in [CapMask::all(), spawn_only] {
+                let runtime = child_region_pool_runtime(workers);
+                let parent = runtime.request_cx_with_budget(deadline_budget_in(600));
+                let pool = parent.blocking_pool_handle_for_inheritance();
+                assert!(pool.is_some());
+                let inherited_pool = if attached { pool } else { None };
+                let mut opener = parent.clone().with_blocking_pool_handle(inherited_pool);
+                opener.runtime_mask = mask;
+                runtime.block_on_with_cx(parent, async move {
+                    let child = opener
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    let grandchild = child
+                        .cx()
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    for cx in [child.cx(), grandchild.cx()] {
+                        assert_eq!(
+                            cx.blocking_pool_handle_for_inheritance().is_some(),
+                            attached
+                        );
+                        assert_eq!(cx.blocking_pool_handle().is_some(), attached);
+                        assert_eq!(cx.runtime_mask, mask);
+                        if !attached {
+                            assert!(matches!(
+                                cx.spawn_blocking_drained(|_| 7_u32),
+                                Err(SpawnError::RuntimeUnavailable)
+                            ));
+                        }
+                        let mut denied = (*cx).clone();
+                        denied.runtime_mask = CapMask::none();
+                        assert!(denied.blocking_pool_handle().is_none());
+                        assert!(matches!(
+                            denied.spawn_blocking_drained(|_| 7_u32),
+                            Err(SpawnError::RuntimeUnavailable)
+                        ));
+                        assert!(matches!(
+                            denied.open_child_region(ChildRegionSpec::inherit()).await,
+                            Err(ChildRegionError::RuntimeUnavailable)
+                        ));
+                    }
+                    grandchild.close().await.unwrap();
+                    child.close().await.unwrap();
+                });
+                assert_eq!(
+                    runtime.drain_root_region(Duration::from_secs(5)),
+                    RootDrainOutcome::Quiescent
+                );
+                assert!(runtime.is_quiescent());
+            }
+        }
+    }
+}
+
 /// Yields until the scheduler has published the slot's mint outcome.
 async fn await_publication(slot: &AdmittedRegionSlot) {
     for _ in 0..10_000 {
