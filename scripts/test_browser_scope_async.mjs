@@ -592,3 +592,34 @@ test("runTask retains a refused publication and retries only its ledger release"
   assert.equal(snapshot().tasks.total, 0);
   unwrap(await scope.closeAsync());
 });
+
+test("runtime close joins an operation still cleaning up after synchronous child closure", async t => {
+  const release = deferred(), started = deferred(), cleaning = deferred();
+  let runtimeClosed = false;
+  const { runtime } = await fixture(t, {
+    beforeCleanup: () => release.resolve(), runtimeAlreadyClosed: () => runtimeClosed,
+  });
+  const parent = unwrap(runtime.enterScope("parent"));
+  const child = unwrap(parent.enterScope("child"));
+  const task = unwrap(child.runTask(async signal => {
+    started.resolve();
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    cleaning.resolve();
+    await release.promise;
+  }));
+  await bounded(started.promise);
+  unwrap(child.close());
+  await bounded(cleaning.promise);
+
+  let observedClose = false;
+  const closing = runtime.closeAsync().then(result => {
+    observedClose = true;
+    runtimeClosed = result.outcome === "ok";
+    return result;
+  });
+  await nextTurn();
+  assert.equal(observedClose, false, "ancestor released before the child's callback settled");
+  release.resolve();
+  unwrap(await bounded(closing));
+  assert.equal((await bounded(task.completed)).outcome, "cancelled");
+});
