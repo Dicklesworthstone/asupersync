@@ -7,6 +7,10 @@
 **Unblocks**: T9.2 (domain-specific migration cookbooks), T8.9 (replacement-readiness gate)
 **Purpose**: Self-contained migration packs for users moving from Tokio-ecosystem database and messaging crates to Asupersync equivalents.
 
+**Transaction API update**: The explicit-state examples below describe the
+unreleased API after `v0.7.0`. See Section 4.2 for compatibility and borrowing
+boundaries; the original minimum-version note does not cover these additions.
+
 ---
 
 ## 1. Prerequisites
@@ -32,7 +36,7 @@ Before migrating, ensure:
 All Asupersync async operations differ from Tokio-ecosystem crates in two ways:
 
 1. **Cancellation context (`&Cx`)**: Every async call takes a `&Cx` parameter for structured cancellation
-2. **Return type (`Outcome<T, E>`)**: Three-state result: `Ok(T)`, `Err(E)`, or cancelled
+2. **Return type (`Outcome<T, E>`)**: Four outcomes: `Ok(T)`, `Err(E)`, `Cancelled(reason)`, and `Panicked(payload)`
 
 ```rust
 // Tokio pattern:
@@ -119,16 +123,26 @@ tx.commit().await?;
 
 **After**:
 ```rust
-use asupersync::database::with_pg_transaction;
+use asupersync::database::transaction::{
+    ScopedTransactionFuture, with_pg_transaction_with_state,
+};
 
-with_pg_transaction(&mut conn, &cx, |tx, cx| async move {
-    tx.execute(cx, "INSERT INTO ...").await?;
-    Ok(())
-}).await?;
-// Auto-commit on Ok, auto-rollback on Err or cancellation
+let sql = String::from("UPDATE accounts SET balance = balance + 100 WHERE id = $1");
+let account_id = 2_i64;
+let mut state = (sql.as_str(), &account_id);
+let outcome = with_pg_transaction_with_state(&mut conn, &cx, &mut state, |tx, cx, state| {
+    ScopedTransactionFuture::new(async move {
+        tx.execute_params(cx, state.0, &[state.1]).await
+    })
+}).await;
+// outcome is Outcome<u64, PgError>; SQL and the parameter remain caller-owned.
 ```
 
-> **Caveat**: Asupersync transactions enforce RAII — the `with_pg_transaction` helper guarantees commit/rollback. Manual `begin`/`commit` is also available but the helper is preferred for correctness.
+The helper owns finalization: a successful body is committed only while its
+context is active and the transaction remains committable. An error,
+cancellation, or `Outcome::Panicked` runs the rollback path before propagating
+the body's outcome. Hard dropping the helper or unwinding a Rust panic has a
+different cleanup boundary; see Section 4.2.
 
 #### Transaction Retry on Serialization Failure
 
@@ -146,15 +160,28 @@ loop {
 
 **After**:
 ```rust
-use asupersync::database::with_pg_transaction_retry;
-use asupersync::combinator::RetryPolicy;
+use asupersync::database::transaction::{
+    RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+    with_pg_transaction_retry_with_state,
+};
 
 let policy = RetryPolicy::default_retry(); // 3 retries, 50ms base, 2s cap
-with_pg_transaction_retry(&mut conn, &cx, &policy, |tx, cx| async move {
-    do_work(tx, cx).await
-}).await?;
-// Automatic retry on SQLSTATE 40001 with exponential backoff
+let sql = String::from("UPDATE accounts SET balance = balance + 100 WHERE id = $1");
+let account_id = 2_i64;
+let mut state = (sql.as_str(), &account_id);
+let outcome = with_pg_transaction_retry_with_state(
+    &mut conn, &cx, &policy, TransactionReplaySafety::ReplaySafe, &mut state,
+    |tx, cx, state| ScopedTransactionFuture::new(async move {
+        tx.execute_params(cx, state.0, &[state.1]).await
+    }),
+).await;
 ```
+
+`ReplaySafe` is appropriate here only because the callback's effect is confined
+to its database transaction. SQLSTATE `40001` can cause the entire callback to
+run again, including after a commit-time conflict. Use `ReplayUnsafe` when
+replaying caller-side effects would be unsafe; it still allows transient
+begin-time failures to retry before the body starts.
 
 #### Error Classification
 
@@ -354,7 +381,10 @@ let affected = conn.execute(&cx, "INSERT INTO users (name) VALUES ('alice')").aw
 let affected = conn.execute(&cx, "UPDATE users SET name = 'bob' WHERE id = 1").await?;
 ```
 
-> **Caveat**: mysql_async uses prepared statements by default with tuple parameter binding. Asupersync uses text protocol queries. For parameterized queries, use SQL string formatting with proper escaping (parameterized queries via extended protocol are planned for a future release).
+Asupersync exposes `prepare`, `execute_prepared`, and `query_prepared`
+explicitly. Bind user-supplied values through these methods instead of
+interpolating them into SQL; the literal statements above contain only
+application-authored constants.
 
 #### Transactions
 
@@ -367,13 +397,20 @@ tx.commit().await?;
 
 **After**:
 ```rust
-use asupersync::database::with_mysql_transaction;
+use asupersync::database::transaction::{
+    ScopedTransactionFuture, with_mysql_transaction_with_state,
+};
 
-with_mysql_transaction(&mut conn, &cx, |tx, cx| async move {
-    tx.execute(cx, "INSERT INTO ...").await?;
-    Ok(())
-}).await?;
+let sql = String::from("UPDATE counters SET n = n + 1 WHERE id = 1");
+let mut state = sql.as_str();
+let outcome = with_mysql_transaction_with_state(&mut conn, &cx, &mut state, |tx, cx, sql| {
+    ScopedTransactionFuture::new(async move { tx.execute_static_sql(cx, *sql).await })
+}).await;
 ```
+
+This SQL contains only application-authored constants. For user-supplied
+values, pass borrowed parameters in the state and use the transaction's
+`prepare` and `execute_prepared` methods instead of interpolating them into SQL.
 
 #### Error Classification
 
@@ -399,13 +436,21 @@ loop {
 
 **After**:
 ```rust
-use asupersync::database::with_mysql_transaction_retry;
-use asupersync::combinator::RetryPolicy;
+use asupersync::database::transaction::{
+    RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+    with_mysql_transaction_retry_with_state,
+};
 
-with_mysql_transaction_retry(&mut conn, &cx, &RetryPolicy::default_retry(),
-    |tx, cx| async move { do_work(tx, cx).await }
-).await?;
-// Automatic retry on deadlock (1213/1205) with exponential backoff
+let sql = String::from("UPDATE counters SET n = n + 1 WHERE id = 1");
+let mut state = sql.as_str();
+let outcome = with_mysql_transaction_retry_with_state(
+    &mut conn, &cx, &RetryPolicy::default_retry(),
+    TransactionReplaySafety::ReplaySafe, &mut state,
+    |tx, cx, sql| ScopedTransactionFuture::new(async move {
+        tx.execute_static_sql(cx, *sql).await
+    }),
+).await;
+// Retryable deadlock/lock-wait errors (1213/1205) use exponential backoff.
 ```
 
 ### 3.2 From `sqlx` (MySQL)
@@ -515,20 +560,23 @@ tx.commit()?;
 
 **After**:
 ```rust
-use asupersync::database::with_sqlite_transaction;
+use asupersync::database::SqliteValue;
+use asupersync::database::transaction::{
+    ScopedTransactionFuture, with_sqlite_transaction_with_state,
+};
 
-with_sqlite_transaction(&mut conn, &cx, |tx, cx| async move {
-    tx.execute(cx, "INSERT INTO users (name) VALUES (?1)", &["alice"]).await?;
-    Ok(())
-}).await?;
-
-// Or with immediate write lock:
-use asupersync::database::with_sqlite_transaction_immediate;
-with_sqlite_transaction_immediate(&mut conn, &cx, |tx, cx| async move {
-    tx.execute(cx, "UPDATE counters SET n = n + 1", &[]).await?;
-    Ok(())
-}).await?;
+let sql = String::from("INSERT INTO users (name) VALUES (?1)");
+let parameters = [SqliteValue::Text(String::from("alice"))];
+let mut state = (sql.as_str(), parameters.as_slice());
+let outcome = with_sqlite_transaction_with_state(&conn, &cx, &mut state, |tx, cx, state| {
+    ScopedTransactionFuture::new(async move { tx.execute(cx, state.0, state.1).await })
+}).await;
 ```
+
+Use `with_sqlite_transaction_immediate_with_state` with the same arguments
+when the operation should acquire its write reservation at `BEGIN IMMEDIATE`.
+The ordinary helper starts a deferred transaction. Both borrow `&SqliteConnection`
+and lend `&SqliteTransaction` to the callback, matching SQLite's existing API.
 
 #### Transaction Retry on BUSY/LOCKED
 
@@ -540,15 +588,22 @@ conn.busy_timeout(Duration::from_secs(5))?;
 
 **After**:
 ```rust
-use asupersync::database::with_sqlite_transaction_retry;
+use asupersync::database::transaction::{
+    RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+    with_sqlite_transaction_retry_with_state,
+};
 
 // Busy timeout is also available:
 conn.set_busy_timeout(&cx, Duration::from_secs(5)).await?;
 
-// Or structured retry:
-with_sqlite_transaction_retry(&mut conn, &cx, &RetryPolicy::default_retry(),
-    |tx, cx| async move { do_work(tx, cx).await }
-).await?;
+// Or structured retry, using the borrowed SQL and parameters from above:
+let outcome = with_sqlite_transaction_retry_with_state(
+    &conn, &cx, &RetryPolicy::default_retry(),
+    TransactionReplaySafety::ReplaySafe, &mut state,
+    |tx, cx, state| ScopedTransactionFuture::new(async move {
+        tx.execute(cx, state.0, state.1).await
+    }),
+).await;
 // Retries on SQLITE_BUSY and SQLITE_LOCKED
 ```
 
@@ -557,14 +612,105 @@ with_sqlite_transaction_retry(&mut conn, &cx, &RetryPolicy::default_retry(),
 All three backends (PostgreSQL, MySQL, SQLite) support savepoints for nested transactions:
 
 ```rust
-use asupersync::database::PgSavepoint; // or SqliteSavepoint, MySqlSavepoint
+use asupersync::database::transaction::PgSavepoint;
 
-let tx = conn.begin(&cx).await?;
-let sp = PgSavepoint::new(&tx, &cx, "my_savepoint").await?;
+let mut tx = conn.begin(&cx).await?;
+let sp = PgSavepoint::new(&mut tx, &cx, "my_savepoint").await?;
 // Do nested work...
 sp.release(&cx).await?; // or sp.rollback(&cx).await?
 tx.commit(&cx).await?;
 ```
+
+### 4.2 Transaction Callbacks and Caller-Owned State
+
+For work that borrows both the transaction and caller data across `.await`,
+use the explicit-state helpers. Put the references in a tuple or an application
+struct, pass `&mut state`, and return `ScopedTransactionFuture::new(async move { ... })`.
+Each invocation borrows its transaction, `Cx`, and state for the same lifetime.
+The retry helpers reborrow that state for each successive attempt.
+
+| Backend | One attempt | Retry | Callback transaction |
+|---------|-------------|-------|----------------------|
+| PostgreSQL | `with_pg_transaction_with_state` | `with_pg_transaction_retry_with_state` | `&mut PgTransaction<'_>` |
+| MySQL | `with_mysql_transaction_with_state` | `with_mysql_transaction_retry_with_state` | `&mut MySqlTransaction<'_>` |
+| SQLite, deferred | `with_sqlite_transaction_with_state` | `with_sqlite_transaction_retry_with_state` | `&SqliteTransaction<'_>` |
+| SQLite, immediate | `with_sqlite_transaction_immediate_with_state` | No dedicated immediate-retry helper | `&SqliteTransaction<'_>` |
+
+All these functions are in `asupersync::database::transaction`. The callback's
+public return type has one lifetime:
+
+```rust
+ScopedTransactionFuture<'borrow, T, E>
+```
+
+This is a type alias for `TransactionFuture<'borrow, 'borrow, T, E>`, so existing
+explicit-state callers returning that type keep working without a conversion.
+The legacy two-lifetime type and the existing `with_*_transaction`,
+`with_*_transaction_retry`, and PostgreSQL/MySQL `*_borrowed` functions retain
+their signatures. Callers of the original SQLite helpers may continue to
+return `Box::pin(...)`.
+
+**Moving an independently captured reference into explicit state:**
+
+```rust
+// `sql` and `attempts` belong to the surrounding caller.
+let sql = String::from("UPDATE counters SET n = n + 1 WHERE id = 1");
+let mut attempts = 0_usize;
+let outcome = {
+    let mut state = (sql.as_str(), &mut attempts);
+    with_mysql_transaction_with_state(&mut conn, &cx, &mut state, |tx, cx, state| {
+        ScopedTransactionFuture::new(async move {
+            let outcome = tx.execute_static_sql(cx, state.0).await;
+            *state.1 += 1; // Mutable caller data remains available after await.
+            outcome
+        })
+    }).await
+};
+// The helper has released its borrow; the caller can inspect attempts and sql.
+```
+
+The state bound is `S: Send + ?Sized`; there is no blanket `S: Sync`, `Clone`,
+or `'static` requirement. A struct containing a mutable reference to non-`Sync`
+but `Send` data is supported, as are borrowed slices. Shared references inside
+the state still obey Rust's ordinary `Send`/`Sync` rules. The callback and its
+future are `Send`, and no caller-side clone is required by this API.
+
+The fixed output type `T` may contain a pre-existing caller-owned reference
+whose lifetime is independent of the invocation borrow. It cannot borrow
+the transaction, or a fresh reference into the temporary `&mut S` reborrow:
+those borrows must end before finalization and before another retry can start.
+To return a newly computed value, return it by value or store it in caller state
+and inspect that state after the helper completes.
+
+**Retry and cleanup boundaries:**
+
+- `ReplayUnsafe` permits retry only before the callback starts. `ReplaySafe`
+  also permits retry after a retryable body or commit error. It is the caller's
+  assertion that repeating the whole callback is safe; the library cannot
+  infer this from `FnMut` or from the state type.
+- Mutations to caller state survive database rollback. Attempts may increment
+  a counter, consume input, or append output more than once. Make those effects
+  replay-safe or stage them until successful completion. Cancellation during
+  backoff prevents another attempt and is attributed to the supplied `Cx`.
+- Helpers run their rollback handling before returning a body `Err`,
+  `Cancelled`, or `Panicked`, and refuse commit after precommit cancellation
+  or a poisoned savepoint. Cleanup uses the backend's bounded masking and
+  connection recovery/discard rules. A failed rollback remains a cleanup
+  failure; preserving the original body outcome does not mean rollback
+  succeeded.
+- Returning `Outcome::Panicked` is an explicit value and follows the awaited
+  rollback path. An actual Rust panic unwinds, and hard dropping an unfinished
+  helper also destroys its future. Neither operation can asynchronously await
+  cleanup in `Drop`; the low-level transaction's poisoning, recovery, and
+  discard behavior applies. Continue driving cooperative cancellation when
+  the caller requires the helper to finish its cleanup path.
+
+The original PostgreSQL/MySQL `FnOnce(...) -> Fut` helpers retain useful
+callbacks whose futures do not borrow their arguments. The `*_borrowed`
+variants also support futures borrowing the supplied transaction and context.
+An independently captured non-static reference does not acquire the required
+higher-ranked lifetime merely by wrapping it in `TransactionFuture::new`;
+use the explicit-state form for that case.
 
 ---
 
@@ -1069,7 +1215,10 @@ loop {
 
 **After**:
 ```rust
-use asupersync::combinator::{RetryPolicy, calculate_delay};
+use asupersync::database::transaction::{
+    RetryPolicy, ScopedTransactionFuture, TransactionReplaySafety,
+    with_pg_transaction_retry_with_state,
+};
 
 // Pre-built policies:
 let policy = RetryPolicy::default_retry();  // 3 retries, 50ms base, 2s cap
@@ -1082,14 +1231,21 @@ let policy = RetryPolicy {
     max_delay: Duration::from_secs(10),
 };
 
-// Used with pool:
-let conn = pool.get_with_retry(&policy)?;
-
-// Used with transactions:
-with_pg_transaction_retry(&mut conn, &cx, &policy, |tx, cx| async move {
-    do_work(tx, cx).await
-}).await?;
+// Used with a transaction that borrows caller-owned SQL:
+let sql = String::from("UPDATE counters SET n = n + 1 WHERE id = $1");
+let id = 1_i64;
+let mut state = (sql.as_str(), &id);
+let outcome = with_pg_transaction_retry_with_state(
+    &mut conn, &cx, &policy, TransactionReplaySafety::ReplaySafe, &mut state,
+    |tx, cx, state| ScopedTransactionFuture::new(async move {
+        tx.execute_params(cx, state.0, &[state.1]).await
+    }),
+).await;
 ```
+
+The transaction policy above is `database::transaction::RetryPolicy`.
+`DbPool::get_with_retry` uses the separate `combinator::RetryPolicy` type;
+the two policies are not interchangeable.
 
 ---
 
@@ -1101,7 +1257,9 @@ All Asupersync operations honour structured cancellation via `&Cx`. When a `Cx` 
 
 - Active queries will be interrupted and return `Err` (or `Outcome::Cancelled`)
 - Pool acquisitions waiting in queue will be cancelled
-- Transaction helpers automatically rollback on cancellation
+- Transaction helpers drive their rollback path for cooperative cancellation;
+  hard drop, panic unwind, and rollback failure retain the backend cleanup
+  boundaries described in Section 4.2
 - JetStream unacked messages will be redelivered by the server
 
 **Action**: Ensure your error handling distinguishes between operational errors and cancellation. Use `match outcome { Outcome::Cancelled => ..., ... }` where needed.

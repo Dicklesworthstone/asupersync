@@ -9,19 +9,22 @@ use asupersync::Cx;
 use asupersync::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
 use asupersync::database::postgres::{PgConnection, PgError, PgTransaction};
 use asupersync::database::transaction::{
-    RetryPolicy, TransactionFuture, TransactionReplaySafety, with_mysql_transaction_borrowed,
-    with_mysql_transaction_retry_borrowed, with_mysql_transaction_retry_with_state,
-    with_mysql_transaction_with_state, with_pg_transaction_borrowed,
-    with_pg_transaction_retry_borrowed, with_pg_transaction_retry_with_state,
-    with_pg_transaction_with_state,
+    RetryPolicy, ScopedTransactionFuture, TransactionFuture, TransactionReplaySafety,
+    with_mysql_transaction_borrowed, with_mysql_transaction_retry_borrowed,
+    with_mysql_transaction_retry_with_state, with_mysql_transaction_with_state,
+    with_pg_transaction_borrowed, with_pg_transaction_retry_borrowed,
+    with_pg_transaction_retry_with_state, with_pg_transaction_with_state,
 };
-use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+use asupersync::runtime::{JoinHandle, RootDrainOutcome, RootDrainReport, Runtime, RuntimeBuilder};
 use asupersync::time::{TimerDriverHandle, VirtualClock};
-use asupersync::types::{Budget, CancelReason, Outcome, Time};
+use asupersync::types::{Budget, CancelReason, Outcome, PanicPayload, Time};
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, mpsc};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,33 +32,193 @@ const SQL: &str = "UPDATE accounts SET balance = balance + 1";
 const REUSE_SQL: &str = "UPDATE accounts SET balance = balance + 0";
 const DEADLINE: Duration = Duration::from_secs(10);
 
+struct CompletionSignal(mpsc::Sender<()>);
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        // A panic or drop-before-first-poll must also release the host wait.
+        let _ = self.0.send(());
+    }
+}
+
+struct NativeTask {
+    join: JoinHandle<()>,
+    completed: mpsc::Receiver<()>,
+}
+
+fn spawn_native(
+    runtime: &Runtime,
+    future: impl Future<Output = ()> + Send + 'static,
+) -> NativeTask {
+    let (completed_tx, completed) = mpsc::channel();
+    let completion = CompletionSignal(completed_tx);
+    let join = runtime.handle().spawn(async move {
+        let _completion = completion;
+        future.await;
+    });
+    NativeTask { join, completed }
+}
+
+struct NativeResult {
+    completed: Result<(), mpsc::RecvTimeoutError>,
+    outcome: thread::Result<Poll<()>>,
+    drain: RootDrainReport,
+    stopped: bool,
+}
+
+fn finish_native(runtime: Runtime, task: NativeTask, on_timeout: impl FnOnce()) -> NativeResult {
+    // This deadline is independent of reactor wakes and the virtual clock.
+    let completed = task.completed.recv_timeout(DEADLINE);
+    if completed.is_err() {
+        on_timeout();
+    }
+    // Keep the timeout result even if recovery or shutdown unblocks the task.
+    // Both bounded cleanup phases run before any assertion or panic resumes.
+    let drain = runtime.shutdown_drained(DEADLINE);
+    let stopped = runtime.shutdown_timeout(DEADLINE);
+    let mut join = std::pin::pin!(task.join);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        join.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    }));
+    NativeResult {
+        completed,
+        outcome,
+        drain,
+        stopped,
+    }
+}
+
+impl NativeResult {
+    fn assert_success(self) {
+        assert!(
+            self.completed.is_ok(),
+            "native scenario did not finish within {DEADLINE:?}: {:?}; drain: {:?}",
+            self.completed,
+            self.drain
+        );
+        assert_eq!(
+            self.drain.outcome,
+            RootDrainOutcome::Quiescent,
+            "{:?}",
+            self.drain
+        );
+        assert_eq!(self.drain.live_tasks, 0, "{:?}", self.drain);
+        assert_eq!(self.drain.pending_spawns, 0, "{:?}", self.drain);
+        assert_eq!(self.drain.pending_obligations, 0, "{:?}", self.drain);
+        assert_eq!(self.drain.queued_finalizers, 0, "{:?}", self.drain);
+        assert!(self.stopped, "native workers must retire");
+        match self.outcome {
+            Ok(Poll::Ready(())) => {}
+            Ok(Poll::Pending) => panic!("scenario join must be ready after native workers retire"),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+struct HostThread<T> {
+    label: &'static str,
+    completed: mpsc::Receiver<thread::Result<T>>,
+}
+
+struct HostResult<T> {
+    label: &'static str,
+    outcome: Result<thread::Result<T>, mpsc::RecvTimeoutError>,
+}
+
+fn spawn_host<T: Send + 'static>(
+    label: &'static str,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> HostThread<T> {
+    let (completed_tx, completed) = mpsc::channel();
+    // The result channel is the bounded completion handle. Protocol resources
+    // are released when job returns or unwinds, before its result is sent.
+    let _thread = thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(job));
+        let _ = completed_tx.send(result);
+    });
+    HostThread { label, completed }
+}
+
+impl<T> HostThread<T> {
+    fn wait(self) -> HostResult<T> {
+        HostResult {
+            label: self.label,
+            outcome: self.completed.recv_timeout(DEADLINE),
+        }
+    }
+}
+
+impl<T> HostResult<T> {
+    fn assert_success(self) -> T {
+        match self.outcome {
+            Ok(Ok(value)) => value,
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(error) => panic!("{} did not finish within {DEADLINE:?}: {error}", self.label),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case {
     Commit,
     BodyError,
+    BodyCancelled,
+    BodyPanicked,
     CancelBeforeCommit,
     ReplaySafe,
     ReplayUnsafe,
+    BeginRetryUnsafe,
+    CommitRetrySafe,
+    CommitRetryUnsafe,
+    ReplayExhausted,
 }
 
-const CASES: [Case; 5] = [
+const CASES: [Case; 11] = [
     Case::Commit,
     Case::BodyError,
+    Case::BodyCancelled,
+    Case::BodyPanicked,
     Case::CancelBeforeCommit,
     Case::ReplaySafe,
     Case::ReplayUnsafe,
+    Case::BeginRetryUnsafe,
+    Case::CommitRetrySafe,
+    Case::CommitRetryUnsafe,
+    Case::ReplayExhausted,
 ];
 
 impl Case {
     fn retries(self) -> bool {
-        matches!(self, Self::ReplaySafe | Self::ReplayUnsafe)
+        matches!(
+            self,
+            Self::ReplaySafe
+                | Self::ReplayUnsafe
+                | Self::BeginRetryUnsafe
+                | Self::CommitRetrySafe
+                | Self::CommitRetryUnsafe
+                | Self::ReplayExhausted
+        )
     }
 
     fn replay_safety(self) -> TransactionReplaySafety {
-        if self == Self::ReplaySafe {
+        if matches!(
+            self,
+            Self::ReplaySafe | Self::CommitRetrySafe | Self::ReplayExhausted
+        ) {
             TransactionReplaySafety::ReplaySafe
         } else {
             TransactionReplaySafety::ReplayUnsafe
+        }
+    }
+
+    fn body_attempts(self) -> usize {
+        if matches!(
+            self,
+            Self::ReplaySafe | Self::CommitRetrySafe | Self::ReplayExhausted
+        ) {
+            2
+        } else {
+            1
         }
     }
 }
@@ -71,18 +234,49 @@ fn script(backend: Backend, case: Case) -> Vec<(&'static str, bool)> {
         Backend::Postgres => "BEGIN",
         Backend::MySql => "START TRANSACTION",
     };
-    let mut commands = vec![(begin, false), (SQL, case.retries())];
-    commands.push((
-        if case == Case::Commit {
-            "COMMIT"
-        } else {
-            "ROLLBACK"
-        },
-        false,
-    ));
-    if case == Case::ReplaySafe {
-        commands.extend([(begin, false), (SQL, false), ("COMMIT", false)]);
-    }
+    let mut commands = match case {
+        Case::BeginRetryUnsafe => vec![
+            (begin, true),
+            (begin, false),
+            (SQL, false),
+            ("COMMIT", false),
+        ],
+        Case::CommitRetrySafe | Case::CommitRetryUnsafe => {
+            let mut commands = vec![(begin, false), (SQL, false), ("COMMIT", true)];
+            // PostgreSQL reports ReadyForQuery(I) after a commit-time
+            // serialization failure. MySQL's ERR has no status flags, so
+            // its consumed transaction is conservatively rolled back by
+            // the next connection operation before any further command.
+            if matches!(backend, Backend::MySql) {
+                commands.push(("ROLLBACK", false));
+            }
+            if case == Case::CommitRetrySafe {
+                commands.extend([(begin, false), (SQL, false), ("COMMIT", false)]);
+            }
+            commands
+        }
+        _ => {
+            let body_fails = matches!(
+                case,
+                Case::ReplaySafe | Case::ReplayUnsafe | Case::ReplayExhausted
+            );
+            let mut commands = vec![(begin, false), (SQL, body_fails)];
+            commands.push((
+                if case == Case::Commit {
+                    "COMMIT"
+                } else {
+                    "ROLLBACK"
+                },
+                false,
+            ));
+            if case == Case::ReplaySafe {
+                commands.extend([(begin, false), (SQL, false), ("COMMIT", false)]);
+            } else if case == Case::ReplayExhausted {
+                commands.extend([(begin, false), (SQL, true), ("ROLLBACK", false)]);
+            }
+            commands
+        }
+    };
     if case != Case::CancelBeforeCommit {
         commands.push((REUSE_SQL, false));
     }
@@ -198,12 +392,51 @@ fn mysql_authenticate(socket: &mut TcpStream) {
     mysql_write(socket, 2, &[0, 0, 0, 2, 0, 0, 0]);
 }
 
-fn peer(backend: Backend, case: Case) -> (SocketAddr, mpsc::Sender<()>, thread::JoinHandle<()>) {
+#[derive(Default)]
+struct RollbackGate {
+    received: AtomicBool,
+    released: AtomicBool,
+    task_waker: Mutex<Option<Waker>>,
+}
+
+async fn witnessed_rollback<F: Future>(
+    future: F,
+    gate: &RollbackGate,
+    parked: mpsc::Sender<()>,
+) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut parked = Some(parked);
+    poll_fn(|task| {
+        *gate.task_waker.lock().unwrap() = Some(task.waker().clone());
+        let result = future.as_mut().poll(task);
+        if gate.received.load(Ordering::Acquire) && !gate.released.load(Ordering::Acquire) {
+            assert!(
+                result.is_pending(),
+                "the helper returned before its ROLLBACK reply was released"
+            );
+            if let Some(parked) = parked.take() {
+                parked.send(()).unwrap();
+            }
+        }
+        result
+    })
+    .await
+}
+
+fn peer(backend: Backend, case: Case) -> (SocketAddr, mpsc::Sender<()>, HostThread<()>) {
+    peer_with_gate(backend, case, None)
+}
+
+fn peer_with_gate(
+    backend: Backend,
+    case: Case,
+    mut rollback_gate: Option<(Arc<RollbackGate>, mpsc::Receiver<()>)>,
+) -> (SocketAddr, mpsc::Sender<()>, HostThread<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let (pending, observed) = mpsc::channel();
-    let server = thread::spawn(move || {
+    let server = spawn_host("transaction peer", move || {
         let mut socket = accept(&listener);
         match backend {
             Backend::Postgres => pg_authenticate(&mut socket),
@@ -230,6 +463,21 @@ fn peer(backend: Backend, case: Case) -> (SocketAddr, mpsc::Sender<()>, thread::
                     .recv_timeout(DEADLINE)
                     .expect("query must park before reply");
             }
+            if sql == "ROLLBACK"
+                && let Some((gate, parked)) = rollback_gate.take()
+            {
+                // Wake the wrapper after the server has received ROLLBACK.
+                // The server cannot acknowledge it until the wrapper proves
+                // the public helper is Pending with that reply withheld.
+                gate.received.store(true, Ordering::Release);
+                if let Some(waker) = gate.task_waker.lock().unwrap().take() {
+                    waker.wake();
+                }
+                parked
+                    .recv_timeout(DEADLINE)
+                    .expect("helper must await the withheld ROLLBACK reply");
+                gate.released.store(true, Ordering::Release);
+            }
             match sql {
                 "BEGIN" | "START TRANSACTION" => in_transaction = true,
                 "COMMIT" | "ROLLBACK" => in_transaction = false,
@@ -239,7 +487,9 @@ fn peer(backend: Backend, case: Case) -> (SocketAddr, mpsc::Sender<()>, thread::
                 Backend::Postgres => {
                     if fail {
                         pg_write(&mut socket, b'E', b"SERROR\0C40001\0Mretry transaction\0\0");
-                        pg_write(&mut socket, b'Z', b"E");
+                        // A failed statement leaves a failed block; a
+                        // rejected BEGIN or failed COMMIT leaves no block.
+                        pg_write(&mut socket, b'Z', if sql == SQL { b"E" } else { b"I" });
                     } else {
                         let tag = if matches!(sql, SQL | REUSE_SQL) {
                             "UPDATE 1"
@@ -265,12 +515,13 @@ fn peer(backend: Backend, case: Case) -> (SocketAddr, mpsc::Sender<()>, thread::
             Backend::Postgres => assert_eq!(pg_read(&mut socket), (b'X', vec![])),
             Backend::MySql => assert_eq!(mysql_read(&mut socket), (0, vec![1])),
         }
+        assert!(rollback_gate.is_none(), "script did not reach ROLLBACK");
         assert_eq!(socket.read(&mut [0]).unwrap(), 0, "connection must close");
     });
     (address, pending, server)
 }
 
-fn runtime(workers: usize) -> asupersync::runtime::Runtime {
+fn runtime(workers: usize) -> Runtime {
     RuntimeBuilder::multi_thread()
         .worker_threads(workers)
         .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
@@ -306,6 +557,8 @@ async fn pg_body(
     };
     match case {
         Case::BodyError => Outcome::Err(PgError::Protocol("body rejected".into())),
+        Case::BodyCancelled => Outcome::Cancelled(CancelReason::user("body cancelled")),
+        Case::BodyPanicked => Outcome::Panicked(PanicPayload::new("body panicked")),
         Case::CancelBeforeCommit => {
             cx.set_cancel_reason(CancelReason::user("cancel before commit"));
             Outcome::Ok(affected + u64::try_from(sql.len()).unwrap())
@@ -328,6 +581,8 @@ async fn mysql_body(
     };
     match case {
         Case::BodyError => Outcome::Err(MySqlError::Protocol("body rejected".into())),
+        Case::BodyCancelled => Outcome::Cancelled(CancelReason::user("body cancelled")),
+        Case::BodyPanicked => Outcome::Panicked(PanicPayload::new("body panicked")),
         Case::CancelBeforeCommit => {
             cx.set_cancel_reason(CancelReason::user("cancel before commit"));
             Outcome::Ok(affected + u64::try_from(sql.len()).unwrap())
@@ -367,7 +622,7 @@ fn postgres_lending_callbacks_preserve_transaction_lifecycle() {
             let (address, pending, server) = peer(Backend::Postgres, case);
             let runtime = runtime(workers);
             let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-            let task = runtime.handle().spawn(async move {
+            let task = spawn_native(&runtime, async move {
                 assert!(Cx::current().is_some(), "native worker owns the task");
                 let mut connection = PgConnection::connect(
                     &cx,
@@ -410,33 +665,46 @@ fn postgres_lending_callbacks_preserve_transaction_lifecycle() {
                         .await
                     }
                 };
-                assert_eq!(attempts, if case == Case::ReplaySafe { 2 } else { 1 });
+                assert_eq!(attempts, case.body_attempts());
                 match case {
-                    Case::Commit | Case::ReplaySafe => {
+                    Case::Commit
+                    | Case::ReplaySafe
+                    | Case::BeginRetryUnsafe
+                    | Case::CommitRetrySafe => {
                         assert_eq!(outcome.unwrap(), 1 + u64::try_from(sql.len()).unwrap());
                     }
                     Case::BodyError => assert!(matches!(
                         outcome, Outcome::Err(PgError::Protocol(message)) if message == "body rejected"
                     )),
+                    Case::BodyCancelled => assert!(matches!(
+                        outcome, Outcome::Cancelled(reason)
+                            if reason == CancelReason::user("body cancelled")
+                    )),
+                    Case::BodyPanicked => assert!(matches!(
+                        outcome, Outcome::Panicked(payload) if payload.message() == "body panicked"
+                    )),
                     Case::CancelBeforeCommit => assert!(matches!(
                         outcome, Outcome::Cancelled(reason)
                             if reason == CancelReason::user("cancel before commit")
                     )),
-                    Case::ReplayUnsafe => assert!(matches!(
-                        outcome, Outcome::Err(error) if error.is_serialization_failure()
-                    )),
+                    Case::ReplayUnsafe | Case::CommitRetryUnsafe | Case::ReplayExhausted => {
+                        assert!(matches!(
+                            outcome, Outcome::Err(error) if error.is_serialization_failure()
+                        ))
+                    }
                 }
                 if case != Case::CancelBeforeCommit {
-                    assert_eq!(connection.execute_unchecked(&cx, REUSE_SQL).await.unwrap(), 1);
+                    assert_eq!(
+                        connection.execute_unchecked(&cx, REUSE_SQL).await.unwrap(),
+                        1
+                    );
                 }
                 connection.close().await.unwrap();
             });
-            runtime.block_on(task);
-            server.join().unwrap();
-            assert_eq!(
-                runtime.shutdown_drained(DEADLINE).outcome,
-                RootDrainOutcome::Quiescent
-            );
+            let native = finish_native(runtime, task, || {});
+            let peer = server.wait();
+            native.assert_success();
+            peer.assert_success();
         }
     }
 }
@@ -448,7 +716,7 @@ fn mysql_lending_callbacks_preserve_transaction_lifecycle() {
             let (address, pending, server) = peer(Backend::MySql, case);
             let runtime = runtime(workers);
             let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-            let task = runtime.handle().spawn(async move {
+            let task = spawn_native(&runtime, async move {
                 assert!(Cx::current().is_some(), "native worker owns the task");
                 let mut connection = MySqlConnection::connect(
                     &cx,
@@ -488,33 +756,328 @@ fn mysql_lending_callbacks_preserve_transaction_lifecycle() {
                         .await
                     }
                 };
-                assert_eq!(attempts, if case == Case::ReplaySafe { 2 } else { 1 });
+                assert_eq!(attempts, case.body_attempts());
                 match case {
-                    Case::Commit | Case::ReplaySafe => {
+                    Case::Commit
+                    | Case::ReplaySafe
+                    | Case::BeginRetryUnsafe
+                    | Case::CommitRetrySafe => {
                         assert_eq!(outcome.unwrap(), 1 + u64::try_from(sql.len()).unwrap());
                     }
                     Case::BodyError => assert!(matches!(
                         outcome, Outcome::Err(MySqlError::Protocol(message)) if message == "body rejected"
                     )),
+                    Case::BodyCancelled => assert!(matches!(
+                        outcome, Outcome::Cancelled(reason)
+                            if reason == CancelReason::user("body cancelled")
+                    )),
+                    Case::BodyPanicked => assert!(matches!(
+                        outcome, Outcome::Panicked(payload) if payload.message() == "body panicked"
+                    )),
                     Case::CancelBeforeCommit => assert!(matches!(
                         outcome, Outcome::Cancelled(reason)
                             if reason == CancelReason::user("cancel before commit")
                     )),
-                    Case::ReplayUnsafe => assert!(matches!(
-                        outcome, Outcome::Err(error) if error.is_deadlock()
-                    )),
+                    Case::ReplayUnsafe | Case::CommitRetryUnsafe | Case::ReplayExhausted => {
+                        assert!(matches!(
+                            outcome, Outcome::Err(error) if error.is_deadlock()
+                        ))
+                    }
                 }
                 if case != Case::CancelBeforeCommit {
-                    assert_eq!(connection.execute_static_sql(&cx, REUSE_SQL).await.unwrap(), 1);
+                    assert_eq!(
+                        connection.execute_static_sql(&cx, REUSE_SQL).await.unwrap(),
+                        1
+                    );
                 }
                 connection.close().await.unwrap();
             });
-            runtime.block_on(task);
-            server.join().unwrap();
-            assert_eq!(
-                runtime.shutdown_drained(DEADLINE).outcome,
-                RootDrainOutcome::Quiescent
-            );
+            let native = finish_native(runtime, task, || {});
+            let peer = server.wait();
+            native.assert_success();
+            peer.assert_success();
+        }
+    }
+}
+
+#[test]
+fn state_helpers_await_rollback_before_returning_or_replaying() {
+    for workers in [1, 2] {
+        for backend in [Backend::Postgres, Backend::MySql] {
+            for case in [Case::CancelBeforeCommit, Case::ReplaySafe] {
+                let gate = Arc::new(RollbackGate::default());
+                let (parked, parked_rx) = mpsc::channel();
+                let (address, pending, server) =
+                    peer_with_gate(backend, case, Some((Arc::clone(&gate), parked_rx)));
+                let runtime = runtime(workers);
+                let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+                let task = spawn_native(&runtime, async move {
+                    let sql = SQL.to_owned();
+                    let mut attempts = 0;
+                    let mut state = BorrowedState {
+                        sql: sql.as_str(),
+                        pending: &pending,
+                        attempts: &mut attempts,
+                    };
+                    match backend {
+                        Backend::Postgres => {
+                            let mut connection = PgConnection::connect(
+                                &cx,
+                                &format!("postgres://test@{address}/test?sslmode=disable"),
+                            )
+                            .await
+                            .unwrap();
+                            let policy = retry_policy();
+                            let helper = with_pg_transaction_retry_with_state(
+                                &mut connection,
+                                &cx,
+                                &policy,
+                                case.replay_safety(),
+                                &mut state,
+                                |tx, cx, state| {
+                                    if *state.attempts > 0 {
+                                        assert!(gate.released.load(Ordering::Acquire));
+                                    }
+                                    ScopedTransactionFuture::new(pg_state_body(tx, cx, state, case))
+                                },
+                            );
+                            let outcome = witnessed_rollback(helper, &gate, parked).await;
+                            if case == Case::ReplaySafe {
+                                assert_eq!(outcome.unwrap(), 1 + u64::try_from(sql.len()).unwrap());
+                            } else {
+                                assert!(matches!(outcome, Outcome::Cancelled(reason)
+                                    if reason == CancelReason::user("cancel before commit")));
+                            }
+                            assert!(
+                                !connection.in_transaction(),
+                                "ROLLBACK must be acknowledged"
+                            );
+                            assert!(!connection.needs_discard(), "cleanup left no orphan");
+                            if case == Case::ReplaySafe {
+                                assert_eq!(
+                                    connection.execute_unchecked(&cx, REUSE_SQL).await.unwrap(),
+                                    1
+                                );
+                            }
+                            connection.close().await.unwrap();
+                        }
+                        Backend::MySql => {
+                            let mut connection = MySqlConnection::connect(
+                                &cx,
+                                &format!("mysql://test:test@{address}/test?sslmode=disabled"),
+                            )
+                            .await
+                            .unwrap();
+                            let policy = retry_policy();
+                            let helper = with_mysql_transaction_retry_with_state(
+                                &mut connection,
+                                &cx,
+                                &policy,
+                                case.replay_safety(),
+                                &mut state,
+                                |tx, cx, state| {
+                                    if *state.attempts > 0 {
+                                        assert!(gate.released.load(Ordering::Acquire));
+                                    }
+                                    ScopedTransactionFuture::new(mysql_state_body(
+                                        tx, cx, state, case,
+                                    ))
+                                },
+                            );
+                            let outcome = witnessed_rollback(helper, &gate, parked).await;
+                            if case == Case::ReplaySafe {
+                                assert_eq!(outcome.unwrap(), 1 + u64::try_from(sql.len()).unwrap());
+                            } else {
+                                assert!(matches!(outcome, Outcome::Cancelled(reason)
+                                    if reason == CancelReason::user("cancel before commit")));
+                            }
+                            assert!(
+                                !connection.in_transaction(),
+                                "ROLLBACK must be acknowledged"
+                            );
+                            if case == Case::ReplaySafe {
+                                assert_eq!(
+                                    connection.execute_static_sql(&cx, REUSE_SQL).await.unwrap(),
+                                    1
+                                );
+                            }
+                            connection.close().await.unwrap();
+                        }
+                    }
+                    assert!(gate.received.load(Ordering::Acquire));
+                    assert!(gate.released.load(Ordering::Acquire));
+                    assert_eq!(attempts, case.body_attempts());
+                });
+                let native = finish_native(runtime, task, || {});
+                let peer = server.wait();
+                native.assert_success();
+                peer.assert_success();
+            }
+        }
+    }
+}
+
+// Intentionally neither Clone nor Copy: callback disposal must release the
+// original caller-owned state rather than an owned replacement.
+#[derive(Default)]
+struct CallbackCounter {
+    drops: usize,
+    reuses: usize,
+}
+
+struct CallbackDropGuard<'a>(&'a mut CallbackCounter);
+
+impl Drop for CallbackDropGuard<'_> {
+    fn drop(&mut self) {
+        self.0.drops += 1;
+    }
+}
+
+struct DroppedBodyState<'a> {
+    sql: &'a str,
+    pending: &'a mpsc::Sender<()>,
+    parked: &'a AtomicBool,
+    counter: &'a mut CallbackCounter,
+}
+
+async fn witness_suspended_body<F: Future>(mut helper: std::pin::Pin<&mut F>, parked: &AtomicBool) {
+    poll_fn(|task| {
+        assert!(
+            helper.as_mut().poll(task).is_pending(),
+            "the helper must remain Pending after the callback parks"
+        );
+        if parked.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+#[test]
+fn dropping_a_state_helper_releases_borrows_and_rolls_back_before_reuse() {
+    for workers in [1, 2] {
+        for backend in [Backend::Postgres, Backend::MySql] {
+            // The callback is abandoned after SQL succeeds. The connection
+            // must drain its orphaned transaction before the reuse command,
+            // which has the same wire order as the ordinary body-error case.
+            let (address, pending, server) = peer(backend, Case::BodyError);
+            let runtime = runtime(workers);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            let task = spawn_native(&runtime, async move {
+                let sql = SQL.to_owned();
+                let parked = AtomicBool::new(false);
+                let mut counter = CallbackCounter::default();
+                let mut state = DroppedBodyState {
+                    sql: sql.as_str(),
+                    pending: &pending,
+                    parked: &parked,
+                    counter: &mut counter,
+                };
+                match backend {
+                    Backend::Postgres => {
+                        let mut connection = PgConnection::connect(
+                            &cx,
+                            &format!("postgres://test@{address}/test?sslmode=disable"),
+                        )
+                        .await
+                        .unwrap();
+                        let mut helper = Box::pin(with_pg_transaction_with_state(
+                            &mut connection,
+                            &cx,
+                            &mut state,
+                            |tx, cx, state| {
+                                ScopedTransactionFuture::new(async move {
+                                    let guard = CallbackDropGuard(&mut *state.counter);
+                                    assert_eq!(
+                                        witnessed(
+                                            tx.execute_unchecked(cx, state.sql),
+                                            state.pending
+                                        )
+                                        .await
+                                        .unwrap(),
+                                        1
+                                    );
+                                    state.parked.store(true, Ordering::Release);
+                                    let result =
+                                        std::future::pending::<Outcome<(), PgError>>().await;
+                                    drop(guard);
+                                    result
+                                })
+                            },
+                        ));
+                        witness_suspended_body(helper.as_mut(), &parked).await;
+                        drop(helper);
+                        assert_eq!(state.counter.drops, 1, "callback dropped exactly once");
+                        state.counter.reuses += 1;
+                        assert!(connection.in_transaction(), "cleanup is still owed");
+                        assert!(
+                            connection.needs_discard(),
+                            "an orphan must not reach the pool"
+                        );
+                        assert_eq!(
+                            connection.execute_unchecked(&cx, REUSE_SQL).await.unwrap(),
+                            1
+                        );
+                        assert!(!connection.in_transaction());
+                        assert!(!connection.needs_discard());
+                        connection.close().await.unwrap();
+                    }
+                    Backend::MySql => {
+                        let mut connection = MySqlConnection::connect(
+                            &cx,
+                            &format!("mysql://test:test@{address}/test?sslmode=disabled"),
+                        )
+                        .await
+                        .unwrap();
+                        let mut helper = Box::pin(with_mysql_transaction_with_state(
+                            &mut connection,
+                            &cx,
+                            &mut state,
+                            |tx, cx, state| {
+                                ScopedTransactionFuture::new(async move {
+                                    let guard = CallbackDropGuard(&mut *state.counter);
+                                    assert_eq!(
+                                        witnessed(
+                                            tx.execute_static_sql(cx, state.sql),
+                                            state.pending
+                                        )
+                                        .await
+                                        .unwrap(),
+                                        1
+                                    );
+                                    state.parked.store(true, Ordering::Release);
+                                    let result =
+                                        std::future::pending::<Outcome<(), MySqlError>>().await;
+                                    drop(guard);
+                                    result
+                                })
+                            },
+                        ));
+                        witness_suspended_body(helper.as_mut(), &parked).await;
+                        drop(helper);
+                        assert_eq!(state.counter.drops, 1, "callback dropped exactly once");
+                        state.counter.reuses += 1;
+                        assert!(connection.in_transaction(), "cleanup is still owed");
+                        assert_eq!(
+                            connection.execute_static_sql(&cx, REUSE_SQL).await.unwrap(),
+                            1
+                        );
+                        assert!(!connection.in_transaction());
+                        connection.close().await.unwrap();
+                    }
+                }
+                // These accesses also verify that the exclusive borrow has
+                // ended; no clone, 'static allocation, or leaked state exists.
+                assert_eq!(counter.drops, 1);
+                assert_eq!(counter.reuses, 1);
+                assert_eq!(sql, SQL);
+            });
+            let native = finish_native(runtime, task, || {});
+            let peer = server.wait();
+            native.assert_success();
+            peer.assert_success();
         }
     }
 }
@@ -545,7 +1108,7 @@ fn existing_lending_apis_preserve_owned_callback_captures() {
                 let (address, pending, server) = peer(backend, case);
                 let runtime = runtime(workers);
                 let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-                let task = runtime.handle().spawn(async move {
+                let task = spawn_native(&runtime, async move {
                     // Existing callbacks can own their captured witness and
                     // borrow the transaction/context. The state-taking tests
                     // above additionally borrow the caller's stack data.
@@ -640,12 +1203,10 @@ fn existing_lending_apis_preserve_owned_callback_captures() {
                         }
                     }
                 });
-                runtime.block_on(task);
-                server.join().unwrap();
-                assert_eq!(
-                    runtime.shutdown_drained(DEADLINE).outcome,
-                    RootDrainOutcome::Quiescent
-                );
+                let native = finish_native(runtime, task, || {});
+                let peer = server.wait();
+                native.assert_success();
+                peer.assert_success();
             }
         }
     }
@@ -655,6 +1216,36 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(3600);
 
 fn backoff_cancellation() -> CancelReason {
     CancelReason::user("cancel parked transaction retry")
+}
+
+struct BackoffRecovery {
+    request_cx: Cx,
+    clock: Arc<VirtualClock>,
+    timer: TimerDriverHandle,
+}
+
+impl BackoffRecovery {
+    fn release(&self) {
+        // Failure recovery also covers a controller that exits before seeing
+        // the parked witness. Cancellation prevents a late new attempt;
+        // advancing the deadline releases an already parked, unfixed wait.
+        self.request_cx.cancel_with_reason(backoff_cancellation());
+        self.clock.advance_to(Time::from_secs(3600));
+        let _ = self.timer.process_timers();
+    }
+}
+
+struct RecoverBackoffOnDrop {
+    recovery: Arc<BackoffRecovery>,
+    armed: bool,
+}
+
+impl Drop for RecoverBackoffOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.recovery.release();
+        }
+    }
 }
 
 async fn witnessed_backoff<F: Future>(
@@ -698,29 +1289,42 @@ fn separate_request_cancellation_wakes_parked_transaction_backoff() {
                 .build()
                 .unwrap();
             let request_cx = runtime.request_cx_with_budget(Budget::INFINITE);
-            let cancel_cx = request_cx.clone();
+            let recovery = Arc::new(BackoffRecovery {
+                request_cx: request_cx.clone(),
+                clock: Arc::clone(&clock),
+                timer: timer.clone(),
+            });
             let (parked, parked_rx) = mpsc::channel();
             let (completed, completed_rx) = mpsc::channel();
-            let observed_timer = timer.clone();
-            let controller = thread::spawn(move || {
+            let controller_recovery = Arc::clone(&recovery);
+            let controller = spawn_host("backoff controller", move || {
+                let mut rescue = RecoverBackoffOnDrop {
+                    recovery: controller_recovery,
+                    armed: true,
+                };
                 parked_rx
                     .recv_timeout(DEADLINE)
                     .expect("parked retry backoff");
-                assert_eq!(observed_timer.now(), Time::ZERO);
-                cancel_cx.cancel_with_reason(backoff_cancellation());
+                assert_eq!(rescue.recovery.timer.now(), Time::ZERO);
+                rescue
+                    .recovery
+                    .request_cx
+                    .cancel_with_reason(backoff_cancellation());
                 let woke_without_timer = completed_rx.recv_timeout(Duration::from_secs(5)).is_ok();
                 if !woke_without_timer {
                     // Release an unfixed implementation so the regression fails
                     // with a wake assertion instead of leaving a parked task.
                     // This recovery never counts as a successful cancellation.
-                    clock.advance_to(Time::from_secs(3600));
-                    let _ = observed_timer.process_timers();
+                    rescue.recovery.release();
                     let _ = completed_rx.recv_timeout(Duration::from_secs(5));
+                } else {
+                    // Only the observed cancellation wake disarms recovery.
+                    rescue.armed = false;
                 }
                 woke_without_timer
             });
             let task_timer = timer.clone();
-            let task = runtime.handle().spawn(async move {
+            let task = spawn_native(&runtime, async move {
                 let active_cx = Cx::current().expect("native transaction worker");
                 assert_ne!(active_cx.task_id(), request_cx.task_id());
                 let policy = RetryPolicy {
@@ -810,14 +1414,12 @@ fn separate_request_cancellation_wakes_parked_transaction_backoff() {
                 assert_eq!(task_timer.pending_count(), 0, "backoff timer must retire");
                 completed.send(()).unwrap();
             });
-            runtime.block_on(task);
-            let woke_without_timer = controller.join().unwrap();
-            server.join().unwrap();
-            let shutdown = runtime.shutdown_drained(DEADLINE);
-            assert_eq!(shutdown.outcome, RootDrainOutcome::Quiescent);
-            assert_eq!(shutdown.live_tasks, 0);
-            assert_eq!(shutdown.pending_spawns, 0);
-            assert_eq!(shutdown.pending_obligations, 0);
+            let native = finish_native(runtime, task, || recovery.release());
+            let controller = controller.wait();
+            let peer = server.wait();
+            native.assert_success();
+            let woke_without_timer = controller.assert_success();
+            peer.assert_success();
             assert!(
                 woke_without_timer,
                 "{backend:?} {workers} workers: caller cancellation did not wake backoff"

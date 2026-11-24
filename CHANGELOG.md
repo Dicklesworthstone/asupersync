@@ -110,6 +110,34 @@ artifacts.
 
 ## [Unreleased]
 
+### Added
+
+- **Borrow caller-owned state in transaction callbacks across all three
+  database backends.** `with_pg_transaction_with_state` and
+  `with_mysql_transaction_with_state`, with their retry variants, lend SQL,
+  parameters, and mutable state across awaits. SQLite now has matching
+  `with_sqlite_transaction_with_state`,
+  `with_sqlite_transaction_immediate_with_state`, and
+  `with_sqlite_transaction_retry_with_state` helpers. State supports
+  `Send + ?Sized` without a blanket `Sync`, `Clone`, or `'static` bound.
+- **One-lifetime callback spelling.**
+  `ScopedTransactionFuture<'borrow, T, E>` aliases
+  `TransactionFuture<'borrow, 'borrow, T, E>`. The existing two-lifetime type
+  and all earlier transaction helper signatures remain available. Callers
+  that previously captured non-static references independently should pass
+  those references through `&mut state`; see the transaction examples and
+  migration boundaries in
+  [the database migration guide](docs/tokio_t6_migration_packs.md#42-transaction-callbacks-and-caller-owned-state).
+
+### Transaction Semantics
+
+- Retry requires explicit `TransactionReplaySafety`; caller-state mutations
+  survive database rollback and must be included in any replay-safety claim.
+  Cancellation, savepoint poisoning, rollback handling, retry classifiers,
+  and connection retirement retain the backend lifecycle rules. An explicit
+  `Outcome::Panicked` follows awaited cleanup; a Rust panic unwind or hard
+  future drop uses the transaction's drop/recovery path.
+
 ## [v0.7.0] - 2026-11-21
 
 Over 415 commits since `v0.6.2`, spanning native gRPC/HTTP/3/ATP protocol
