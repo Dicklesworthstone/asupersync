@@ -744,6 +744,9 @@ impl NativeTransferClient {
             spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
         record.require_active()?;
+        if record.receipt.is_some() {
+            confirm_terminal_journal(&lease).await?;
+        }
         Ok(record.info(lease.directory.clone()))
     }
 
@@ -765,8 +768,8 @@ impl NativeTransferClient {
         let (lease, record) =
             spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
-        if record.cancelled {
-            confirm_cancellation(&lease).await?;
+        if record.cancelled || record.receipt.is_some() {
+            confirm_terminal_journal(&lease).await?;
         }
         Ok(record.status(lease.directory.clone()))
     }
@@ -809,11 +812,8 @@ impl NativeTransferClient {
             spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, expected.remote)?;
         record.check_cancellation_snapshot(&lease.directory, expected)?;
-        if record.cancelled {
-            confirm_cancellation(&lease).await?;
-            return Ok(record.status(lease.directory.clone()));
-        }
-        if record.receipt.is_some() {
+        if record.cancelled || record.receipt.is_some() {
+            confirm_terminal_journal(&lease).await?;
             return Ok(record.status(lease.directory.clone()));
         }
         checkpoint(cx)?;
@@ -905,12 +905,12 @@ impl NativeTransferClient {
         record.check_binding(&lease.admission, remote)?;
         record.require_active()?;
         if let Some(receipt) = &record.receipt {
-            return Ok(NativeCheckpointAttempt {
-                checkpoint: record.info(lease.directory.clone()),
-                outcome: Ok(receipt.report()),
-                cached_receipt: true,
-                persistence_error: None,
-            });
+            let persisted = sync_visible_journal(&lease).await;
+            return Ok(recovered_attempt(
+                record.info(lease.directory.clone()),
+                receipt,
+                persisted,
+            ));
         }
         let next_attempt = record.next_attempt(retry)?;
         let (source, content_id) = verify_source(cx, &lease, &record).await?;
@@ -979,11 +979,29 @@ async fn persist_record(lease: &Arc<Lease>, record: &Journal, nonce: [u8; 16]) -
     spawn_blocking_io(move || write_journal(&owner.directory, &record, &nonce)).await
 }
 
-async fn confirm_cancellation(lease: &Arc<Lease>) -> Result<(), NativeCheckpointError> {
+fn recovered_attempt(
+    mut checkpoint: NativeUploadCheckpoint,
+    receipt: &StoredReceipt,
+    persisted: io::Result<()>,
+) -> NativeCheckpointAttempt {
+    let persistence_error = persisted.err();
+    if persistence_error.is_some() {
+        // The send intent was synced before networking. The terminal replacement
+        // is visible and contains a real receipt, but may not survive restart.
+        checkpoint.state = NativeCheckpointState::Sending;
+    }
+    NativeCheckpointAttempt {
+        checkpoint,
+        outcome: Ok(receipt.report()),
+        cached_receipt: true,
+        persistence_error,
+    }
+}
+
+async fn sync_visible_journal(lease: &Arc<Lease>) -> io::Result<()> {
     let owner = Arc::clone(lease);
-    // A previous cancellation may have returned a publication error after
-    // rename but before directory fsync. Reconfirm that visible tombstone's
-    // durability on inspection/repetition without replacing its inode again.
+    // A previous terminal write may have renamed successfully and then failed
+    // its directory fsync. Confirm the visible record without rewriting it.
     spawn_blocking_io(move || {
         let path = owner.directory.join("journal.json");
         regular_file(&path)?;
@@ -995,10 +1013,15 @@ async fn confirm_cancellation(lease: &Arc<Lease>) -> Result<(), NativeCheckpoint
         File::open(&owner.directory)?.sync_all()
     })
     .await
-    .map_err(|error| NativeCheckpointError::Publication {
-        directory: lease.directory.clone(),
-        error,
-    })
+}
+
+async fn confirm_terminal_journal(lease: &Arc<Lease>) -> Result<(), NativeCheckpointError> {
+    sync_visible_journal(lease)
+        .await
+        .map_err(|error| NativeCheckpointError::Publication {
+            directory: lease.directory.clone(),
+            error,
+        })
 }
 
 async fn verify_source(
