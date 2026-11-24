@@ -864,13 +864,21 @@ where
 /// A context whose pool is
 /// [`BlockingAdmissionPolicy::Forbidden`](crate::runtime::BlockingAdmissionPolicy::Forbidden)
 /// does not run the closure: the call returns an `Unsupported` error.
+/// A pool with a live-byte limit requires a charge this API cannot supply.
+/// Such a pool returns `InvalidInput` while open or a stopped-pool error after shutdown.
 pub async fn spawn_blocking_io<F, T>(f: F) -> std::io::Result<T>
 where
     F: FnOnce() -> std::io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    if current_pool_forbids_blocking() {
-        return Err(forbidden_io_error());
+    if let Some(pool) = Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance()) {
+        match pool.admission_policy() {
+            crate::runtime::BlockingAdmissionPolicy::Forbidden => return Err(forbidden_io_error()),
+            crate::runtime::BlockingAdmissionPolicy::BoundedBytes { .. } => {
+                return spawn_blocking_io_off_worker(Some(pool), f).await;
+            }
+            _ => return spawn_blocking_on_pool(pool, f).await,
+        }
     }
     spawn_blocking(f).await
 }

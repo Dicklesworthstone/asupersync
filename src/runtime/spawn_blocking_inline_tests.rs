@@ -1647,6 +1647,35 @@ fn count_bounded_pool() -> crate::runtime::BlockingPool {
     )
 }
 
+#[test]
+fn public_blocking_io_returns_byte_admission_errors_without_running_work() {
+    let pool = byte_bounded_pool(10_000);
+    let _guard = Cx::set_current(Some(
+        Cx::for_testing().with_blocking_pool_handle(Some(pool.handle())),
+    ));
+    let calls = Arc::new(AtomicU32::new(0));
+    for closed in [false, true] {
+        if closed {
+            assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        }
+        let counter = Arc::clone(&calls);
+        let error = future::block_on(spawn_blocking_io(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+        .expect_err("this submission has no byte charge");
+        if closed {
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert!(error.to_string().contains("stopped"), "{error}");
+        } else {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("uncharged"), "{error}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.charged_bytes(), 0);
+    }
+}
+
 /// An I/O operation offered to a pool that bounds live job bytes is refused because it is submitted without a byte
 /// charge, not because the pool stopped: the error says so (`InvalidInput`, as the standard streams report it), the
 /// closure never runs, and the same pool, still open, takes a valid charged job. Permitted I/O on a count-bounded
