@@ -6127,6 +6127,19 @@ fn feed_authenticated_symbol_deferred(
     }
 }
 
+fn quic_decode_join_error(
+    entry: u32,
+    block_sbn: u8,
+    error: crate::runtime::JoinError,
+) -> QuicTransportError {
+    match error {
+        crate::runtime::JoinError::Cancelled(_) => QuicTransportError::Cancelled,
+        other => QuicTransportError::Control(format!(
+            "decode task failed for entry {entry} block {block_sbn}: {other:?}"
+        )),
+    }
+}
+
 async fn drain_ready_quic_decodes(
     cx: &Cx,
     decoders: &mut [QuicEntryDecoder],
@@ -6142,12 +6155,11 @@ async fn drain_ready_quic_decodes(
             }
             let mut pending = decoder.pending_decodes.swap_remove(i);
             let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                QuicTransportError::Control(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    decoder.index, block_sbn
-                ))
-            })?;
+            let outcome = pending
+                .handle
+                .join(cx)
+                .await
+                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
             if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
                 completed = completed.saturating_add(1);
             }
@@ -6165,12 +6177,11 @@ async fn join_all_quic_decodes(
     for decoder in decoders {
         while let Some(mut pending) = decoder.pending_decodes.pop() {
             let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                QuicTransportError::Control(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    decoder.index, block_sbn
-                ))
-            })?;
+            let outcome = pending
+                .handle
+                .join(cx)
+                .await
+                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
             if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
                 completed = completed.saturating_add(1);
             }
@@ -6385,12 +6396,11 @@ async fn drain_ready_quic_decodes_with_blocks(
             }
             let mut pending = decoder.pending_decodes.swap_remove(i);
             let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                QuicTransportError::Control(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    decoder.index, block_sbn
-                ))
-            })?;
+            let outcome = pending
+                .handle
+                .join(cx)
+                .await
+                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
             if let Some(block) = finish_quic_streaming_decode_outcome(
                 cx,
                 decoder,
@@ -6419,12 +6429,11 @@ async fn join_all_quic_decodes_with_blocks(
     for decoder in decoders {
         while let Some(mut pending) = decoder.pending_decodes.pop() {
             let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                QuicTransportError::Control(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    decoder.index, block_sbn
-                ))
-            })?;
+            let outcome = pending
+                .handle
+                .join(cx)
+                .await
+                .map_err(|error| quic_decode_join_error(decoder.index, block_sbn, error))?;
             if let Some(block) = finish_quic_streaming_decode_outcome(
                 cx,
                 decoder,

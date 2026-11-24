@@ -1166,6 +1166,143 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn cancelled_native_decode_worker(cx: &Cx) -> QuicPendingDecode {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Cleanup(Arc<AtomicBool>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 128,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let mut decoder = quic_decode_width_fixture_decoder(7, 128, &config);
+        let symbol = Symbol::new(
+            SymbolId::new(decoder.object_id, 0, 0),
+            vec![7_u8; 128],
+            SymbolKind::Source,
+        );
+        let deferred = decoder
+            .pipeline
+            .as_mut()
+            .expect("fixture pipeline")
+            .feed_deferred(AuthenticatedSymbol::new_unauthenticated(symbol))
+            .expect("source symbol accepted");
+        let DeferredSymbolAcceptResult::Decode(job) = deferred else {
+            panic!("one source symbol must produce a deferred source-complete job");
+        };
+        let outcome = run_block_decode_job(job);
+        let parked = Arc::new(AtomicBool::new(false));
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let worker_parked = Arc::clone(&parked);
+        let worker_cleaned = Arc::clone(&cleaned);
+        let handle = cx
+            .spawn_in_cancellation_dominant(&cx.scope(), move |child| async move {
+                let _cleanup = Cleanup(worker_cleaned);
+                std::future::poll_fn(move |_ctx| {
+                    if child.checkpoint().is_err() {
+                        std::task::Poll::Ready(())
+                    } else {
+                        worker_parked.store(true, Ordering::SeqCst);
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                outcome
+            })
+            .expect("admit actual native decode worker");
+        for _ in 0..1024 {
+            if parked.load(Ordering::SeqCst) {
+                break;
+            }
+            crate::runtime::yield_now().await;
+        }
+        assert!(parked.load(Ordering::SeqCst), "worker must reach Pending");
+        handle.abort_with_reason(crate::types::CancelReason::user("decode cancelled"));
+        for _ in 0..1024 {
+            if handle.is_finished() {
+                break;
+            }
+            crate::runtime::yield_now().await;
+        }
+        assert!(handle.is_finished(), "cancelled worker must publish its join");
+        assert!(cleaned.load(Ordering::SeqCst), "worker resources must retire");
+        QuicPendingDecode {
+            block_sbn: 3,
+            started_at: Instant::now(),
+            handle,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn quic_decode_join_paths_preserve_native_worker_cancellation() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native coordinator");
+            let config = trusted_quic_config();
+            for path in 0..4 {
+                let pending = cancelled_native_decode_worker(&cx).await;
+                let mut decoder = QuicEntryDecoder {
+                    index: 7,
+                    object_id: ObjectId::new(7, 0),
+                    size: 0,
+                    pipeline: None,
+                    complete: false,
+                    data: Vec::new(),
+                    pending_decodes: vec![pending],
+                };
+                let mut stats = QuicDecodeStats::default();
+                let decoders = std::slice::from_mut(&mut decoder);
+                let result = match path {
+                    0 => drain_ready_quic_decodes(&cx, decoders, &mut stats)
+                        .await
+                        .map(|_| ()),
+                    1 => join_all_quic_decodes(&cx, decoders, &mut stats)
+                        .await
+                        .map(|_| ()),
+                    2 => drain_ready_quic_decodes_with_blocks(
+                        &cx, decoders, &config, &mut stats, true, 1,
+                    )
+                    .await
+                    .map(|_| ()),
+                    _ => join_all_quic_decodes_with_blocks(
+                        &cx, decoders, &config, &mut stats, 1,
+                    )
+                    .await
+                    .map(|_| ()),
+                };
+                assert!(
+                    matches!(result, Err(QuicTransportError::Cancelled)),
+                    "decode join path {path} erased cancellation: {result:?}"
+                );
+                assert!(decoder.pending_decodes.is_empty());
+                assert!(!decoder.complete);
+                assert_eq!(stats.decode_count, 0, "cancellation is not a decoded block");
+            }
+        }));
+        for _ in 0..1024 {
+            if runtime.is_quiescent() {
+                break;
+            }
+            runtime.block_on(crate::runtime::yield_now());
+        }
+        assert!(runtime.is_quiescent(), "decode workers must not outlive the test");
+        #[cfg(feature = "full-runtime")]
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    }
+
     #[test]
     fn quic_streaming_parallel_decode_returns_byte_identical_block() {
         let cx = Cx::for_testing();
