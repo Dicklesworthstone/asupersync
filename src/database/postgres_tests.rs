@@ -9,6 +9,7 @@ mod tests {
     use crate::test_complete;
     use crate::types::CancelKind;
     use crate::{Budget, Cx, RegionId, TaskId};
+    use std::time::Duration;
 
     /// A stream that never has bytes and never wakes its reader on its own:
     /// the shape of a socket waiting on `pg_sleep(30)`.
